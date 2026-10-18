@@ -120,8 +120,8 @@ QUANTITIES: Mapping[str, Quantity] = {
         # received-level map are both dB re 1 µPa and are not the same
         # reading of the same field. A LEVEL, so more of it is more.
         Quantity('peak_pressure', {'dB': 'Peak SPL (dB re 1 µPa)'}),
-        # The band-limited impulse response Field.to_time_trace returns when
-        # no source spectrum or waveform is given: sum H(f) e^{2πift} Δf, a
+        # The band-limited impulse response Field.impulse_response returns
+        # (and Field.to_time_trace with no waveform): sum H(f) e^{2πift} Δf, a
         # pressure ratio re a unit source at 1 m times hertz, so per second.
         # Its own quantity because a pressure axis would caption it Pa, and
         # a unit arrival reads about the bandwidth in value, not 1. Neither
@@ -204,7 +204,7 @@ def label(kind: str, unit: str, *, reference=None) -> str:
 COORDINATE_UNITS: Mapping[str, str] = MappingProxyType({
     'depth': 'm', 'range': 'm', 'source_depth': 'm',
     'receiver_depth': 'm', 'receiver_range': 'm',
-    'x': 'm', 'y': 'm', 'z': 'm',
+    'x': 'm', 'y': 'm', 'z': 'm', 'along': 'm',
     'frequency': 'Hz', 'time': 's',
     'angle': 'deg', 'bearing': 'deg',
     'phase_speed': 'm/s', 'wavenumber': 'rad/m',

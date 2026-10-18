@@ -24,6 +24,7 @@ from uacpy.core.exceptions import (
 from uacpy.core.receiver import Receiver
 from uacpy.core.run_settings import RunMode
 from uacpy.core.source import Source
+from uacpy.models._registry import engines_supporting
 from uacpy.models._band import _real_pulse
 
 
@@ -66,11 +67,12 @@ def warn_receiver_below_resolvable(
     :func:`check_per_range_receiver_depth`: warn — never raise — when a
     receiver lies below the depth this model resolves the field at.
     Such receivers are accepted; what comes back is per-engine:
-    Scooter, SPARC and RAM return NaN there (their solvers clamp the
+    Scooter and SPARC return NaN there (their solvers clamp the
     receiver onto the domain or stop meshing, so no field is evaluated
-    at the asked depth); Bellhop returns NaN on its TL, BROADBAND and
-    TIME_SERIES routes, an empty cell on ARRIVALS, and on RAYS /
-    EIGENRAYS labels the rays it found at the clamped depth with the
+    at the asked depth); RAM returns its PE field down to the top of its
+    absorbing layer and NaN inside it; Bellhop returns NaN on its TL,
+    BROADBAND and TIME_SERIES routes, an empty cell on ARRIVALS, and on
+    RAYS / EIGENRAYS labels the rays it found at the clamped depth with the
     requested one; Kraken and the OASES models compute a physical
     transmitted / evanescent field through the sediment they mesh. The
     range-dependent case is handled per-range by
@@ -84,9 +86,9 @@ def warn_receiver_below_resolvable(
             f"{float(receiver.depth_max):.1f} m is below the model's "
             f"resolvable depth ({resolvable_depth:.1f} m). It is "
             f"accepted; the result there reflects the model's "
-            f"below-domain behaviour (a physical transmitted / "
-            f"evanescent field from Kraken and OASES; NaN from "
-            f"Bellhop, Scooter, SPARC and RAM).",
+            f"below-domain behaviour, which docs/guide/source-receiver.md "
+            f"lists per engine (a physical transmitted / evanescent field "
+            f"or NaN).",
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
@@ -102,14 +104,15 @@ def warn_receivers_within_a_wavelength(
     forms below; a receiver far below the source at a short range is
     inside it too.
 
-    Each model sums a far-field form: the mode sum's Hankel asymptote, "for
-    ranges much greater than a wavelength" (Collins & Siegmann, *Parabolic
-    Wave Equations with Applications*, sect. 1.2.6), a ray's spreading, a
-    parabolic equation's outgoing wave. Inside one wavelength none holds,
-    whatever the units were meant to be; ranges typed in kilometres (0.5-5
-    for 0.5-5 km) land there at low frequency, so the warning says so. A
-    grid reaching past one wavelength, a genuine short-range run included,
-    is not flagged."""
+    Each model sums a far-field form: the mode sum's Hankel asymptote
+    (Jensen et al., *Computational Ocean Acoustics*, sect. 5.2.1, eq. 5.14,
+    "using the asymptotic approximation to the Hankel function"; its
+    large-argument form holds "for k_r r ≫ 1", sect. 2.4.3.3), a ray's
+    spreading, a parabolic equation's outgoing wave. Inside one wavelength
+    none holds, whatever the units were meant to be; ranges typed in
+    kilometres (0.5-5 for 0.5-5 km), or a frequency typed in kHz, land
+    there, so the warning names both units. A grid reaching past one
+    wavelength, a genuine short-range run included, is not flagged."""
     freqs = np.atleast_1d(np.asarray(frequencies, dtype=float))
     freqs = freqs[np.isfinite(freqs) & (freqs > 0.0)]
     if not freqs.size:
@@ -129,7 +132,8 @@ def warn_receivers_within_a_wavelength(
         f"{float(water.min()):g} m/s water), where the far-field sums the "
         f"models evaluate do not hold. Ranges are in metres: "
         f"ranges=np.linspace(0.5, 5, 10) is 0.5-5 m, and kilometres are "
-        f"written 1000 times larger.",
+        f"written 1000 times larger; frequencies are in Hz, and kilohertz "
+        f"are written 1000 times larger too.",
         ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
     )
 
@@ -140,11 +144,12 @@ def check_per_range_receiver_depth(
 ) -> None:
     """Report receivers below the local seafloor in a range-dependent
     bathymetry. They are accepted, not rejected; the cells come back NaN
-    from the engines that evaluate no field there (Scooter, SPARC, RAM, and
+    from the engines that evaluate no field there (Scooter, SPARC, and
     Bellhop's TL / broadband routes — its ARRIVALS cells come back empty,
-    its RAYS / EIGENRAYS carry whatever reached the clamped depth) and as a
+    its RAYS / EIGENRAYS carry whatever reached the clamped depth), as a
     physical transmitted field from the ones that mesh the sediment
-    (Kraken, OASES). The flat-bathy case is handled by
+    (Kraken, OASES), and as the PE field from RAM down to the top of its
+    absorbing layer. The flat-bathy case is handled by
     :func:`warn_receiver_below_resolvable`.
 
     A full rectangular (depth x range) grid over a sloping seafloor always
@@ -447,7 +452,8 @@ def validate_geometry(model, env, source, receiver, run_mode=None) -> None:
             and not model._supports_source_beam_pattern):
         raise ConfigurationError(
             f"{model.model_name} does not read a source beam pattern; "
-            f"drop Source(beam_pattern=...) or use Bellhop or Kraken."
+            f"drop Source(beam_pattern=...) or use one of "
+            f"{', '.join(engines_supporting('source_beam_pattern'))}."
         )
 
     # Whether a multi-depth Source is legal is a question about the

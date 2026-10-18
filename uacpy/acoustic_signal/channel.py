@@ -8,27 +8,29 @@ arrives in blocks), :func:`simulate_reception` does both for an arrival
 list; :func:`simulate_arrival_reception` places each
 arrival of an arrival list as a phase-rotated, absorbed copy of the
 transmitted waveform; the transfer-function operations
-(:func:`arrival_transfer_function`, :func:`broadband_propagation_loss`,
-:func:`gate_transfer_function`, :func:`synthesize_time_series`, …) take a
+(:func:`arrival_transfer_function`, :func:`broadband_loss`,
+:func:`truncate_response`, :func:`synthesize_time_series`, …) take a
 channel that did not come from a uacpy model.
 """
 
 from __future__ import annotations
 
 import warnings
+from collections import namedtuple
 from collections.abc import Mapping
 import numpy as np
 import scipy.fft as _sp_fft
 import scipy.linalg as _sp_linalg
 import scipy.signal as _sig
+from uacpy.acoustic_signal._results import PlottedResult
 from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from typing import Optional, Tuple
 from uacpy.core._validate import (
     normalize_axis, real_array_or_none, real_scalar_or_none,
-    require_finite_signal, require_increasing_axis,
-    require_positive_finite_scalar, steps_are_uniform,
+    require_finite_signal, require_positive_finite_scalar,
+    require_strictly_increasing, steps_are_uniform,
 )
 from uacpy.acoustic_signal._synthesis import (
     ARRIVAL_IR_MARGIN_SAMPLES, arrival_ir_margin, band_sum, record_samples,
@@ -103,28 +105,33 @@ def fractional_delay_taps(frac: float, half_len: int = _FRAC_DELAY_HALF_LEN,
     return taps / total if total else taps
 
 
-def impulse_response(amplitudes, delays_s, *, sample_rate: float,
+def impulse_response(amplitudes, delays, *, sample_rate: float,
                      n_samples: Optional[int] = None, fractional: bool = True):
     """Channel impulse response from discrete arrivals.
 
-    Places each arrival ``amplitudes[i]`` at delay ``delays_s[i]``. With
+    Places each arrival ``amplitudes[i]`` at delay ``delays[i]``. With
     ``fractional=True`` the arrival is placed with a windowed-sinc
     fractional-delay kernel; otherwise it is quantised to the nearest sample.
 
     The kernel matters because a two-tap linear split is **not** a fractional
     delay: its response ``|(1-frac) + frac*e^{-jw}|`` is a lowpass whose
     attenuation depends on ``frac``, with a full null at Nyquist for
-    ``frac = 0.5`` (-3.0 dB at ``f/fs = 0.25``, -10.2 dB at 0.40). Two
-    arrivals a propagation model reports as equal then came back differing by
-    up to 10 dB, decided by the sub-sample part of their travel times — at the
-    right time, at the wrong level. The windowed sinc is flat to ~0.01 dB
-    over the same band. Group delay was correct either way.
+    ``frac = 0.5`` (-3.0 dB at ``f/fs = 0.25``, -10.2 dB at 0.40), so two
+    arrivals a propagation model reports as equal would differ by up to
+    10 dB, decided by the sub-sample part of their travel times — at the
+    right time, at the wrong level. The windowed sinc
+    (:func:`fractional_delay_taps`) is flat to ~0.01 dB below
+    ``f/fs = 0.35`` and rolls off above it (measured, worst fractional
+    delay: -0.58 dB at 0.40, -4.1 dB at 0.45, -11 dB at 0.48); keep the
+    band below ``0.35·fs``, or build the taps with
+    :func:`arrival_impulse_response`, which holds the band up to the
+    Nyquist frequency. Group delay is correct either way.
 
     Parameters
     ----------
     amplitudes : 1-D array
         Complex (or real) arrival amplitudes.
-    delays_s : 1-D array
+    delays : 1-D array
         Arrival travel times (s), >= 0.
     sample_rate : float
         Sample rate (Hz).
@@ -147,15 +154,15 @@ def impulse_response(amplitudes, delays_s, *, sample_rate: float,
         Impulse response (complex if amplitudes are complex).
     """
     a = np.asarray(amplitudes)
-    d = np.asarray(delays_s, dtype=float)
+    d = np.asarray(delays, dtype=float)
     if a.shape != d.shape or a.ndim != 1:
         raise ConfigurationError(
-            "impulse_response: amplitudes and delays_s must be 1-D, equal "
-            f"length; got amplitudes shape {a.shape} and delays_s shape "
+            "impulse_response: amplitudes and delays must be 1-D, equal "
+            f"length; got amplitudes shape {a.shape} and delays shape "
             f"{d.shape}.")
     if np.any(d < 0):
         raise ConfigurationError(
-            f"impulse_response: delays_s must be >= 0; got "
+            f"impulse_response: delays must be >= 0; got "
             f"{int(np.count_nonzero(d < 0))} negative value(s), first at "
             f"index {int(np.argmax(d < 0))} ({d[d < 0][0]:g} s)")
     fs = require_positive_finite_scalar(
@@ -176,7 +183,7 @@ def impulse_response(amplitudes, delays_s, *, sample_rate: float,
                     f"sample_rate {fs:g} Hz implies a {n_est:.0f}-tap "
                     f"response ({n_est * 16 / 2 ** 30:.3g} GiB as "
                     f"complex128), above the {_MAX_DEFAULT_TAPS}-tap "
-                    f"default limit. Check the delay units (delays_s is "
+                    f"default limit. Check the delay units (delays is "
                     f"seconds), or pass n_samples explicitly.")
             n_samples = n_est
         else:
@@ -240,7 +247,7 @@ def impulse_response(amplitudes, delays_s, *, sample_rate: float,
     return t, h
 
 
-def simulate_reception(amplitudes, delays_s, *, source_waveform,
+def simulate_reception(amplitudes, delays, *, source_waveform,
                        sample_rate: float):
     """Received signal = ``source_waveform`` convolved with the channel IR
     of an arrival list.
@@ -265,7 +272,7 @@ def simulate_reception(amplitudes, delays_s, *, source_waveform,
     ----------
     amplitudes : array_like
         Arrival amplitudes, complex to carry a phase (see above).
-    delays_s : array_like
+    delays : array_like
         Arrival delays (s).
     source_waveform : array_like
         The transmitted waveform.
@@ -280,9 +287,9 @@ def simulate_reception(amplitudes, delays_s, *, source_waveform,
             "rotation, so the real part of the result is not the reception.",
             remediation="Pass analytic_signal(source_waveform) and take np.real of "
                         "the result, or call simulate_arrival_reception("
-                        "abs(A), delays_s, source_waveform=..., sample_rate=..., "
-                        "trace_frequency=..., phases_rad=angle(A)).")
-    _, h = impulse_response(amplitudes, delays_s, sample_rate=sample_rate)
+                        "abs(A), delays, source_waveform=..., sample_rate=..., "
+                        "trace_frequency=..., phases=angle(A)).")
+    _, h = impulse_response(amplitudes, delays, sample_rate=sample_rate)
     return _apply_impulse_response(h, source_waveform=x,
                                    sample_rate=sample_rate, t_start=0.0,
                                    axis=-1, who="simulate_reception")
@@ -295,9 +302,12 @@ def simulate_reception(amplitudes, delays_s, *, source_waveform,
 _DIRECT_CONVOLUTION_MAX_TAPS = 19
 
 #: Least transform length of the streaming overlap-add, and the multiple of
-#: the response length it grows with: Abraham sect. 4.9.4 puts the optimal
-#: FFT size several times the filter's (512 for M = 75, 1024 for M = 100,
-#: 11 operations per sample against the direct form's 100).
+#: the response length it grows with. Abraham sect. 4.9.4 gives the
+#: principle — the optimal FFT size grows with the filter's length (512 for
+#: M = 75, 1024 for M = 100, 11 operations per sample against the direct
+#: form's 100) — but neither number: 8 per tap and the 65 536 floor are
+#: uacpy guidance (no recorded measurement), and the floor is above
+#: Abraham's optimum for a short filter.
 _BLOCK_FFT_MIN = 65536
 _BLOCK_FFT_PER_TAP = 8
 
@@ -429,7 +439,9 @@ def apply_impulse_response_blocks(h, blocks, *, block_size: Optional[int] = None
     to the start of the next (overlap-and-add, Abraham, *Underwater
     Acoustic Signal Processing*, sect. 4.9.4). The optimal ``n`` grows with
     the response length ``M`` (512 for ``M = 75``, 1024 for ``M = 100``
-    there): by default ``n = next_fast_len(max(8·M, 65536))``.
+    there); the default, ``n = next_fast_len(max(8·M, 65536))``, follows
+    that growth with a factor and a floor that are uacpy guidance, not
+    Abraham's numbers.
 
     Parameters
     ----------
@@ -544,13 +556,35 @@ def apply_impulse_response_blocks(h, blocks, *, block_size: Optional[int] = None
         yield emit(overlap)
 
 
-def channel_response(h, sample_rate: float, *, nfft: Optional[int] = None):
+class ChannelResponse(PlottedResult,
+                      namedtuple("ChannelResponse", "frequencies response")):
+    """The two-sided frequency response of a baseband channel: complex
+    ``response`` at each of ``frequencies`` (Hz, centred on 0 Hz), what
+    :func:`channel_response` returns.
+
+    The tuple is the response, so ``f, H = channel_response(h, fs)`` unpacks
+    it. :meth:`plot` draws ``|H(f)|`` in dB with
+    :func:`~uacpy.plot.plot_channel_response`.
+    """
+
+    _plotter = "plot_channel_response"
+
+    def _field_units(self):
+        # The taps carry no stated unit, so neither does their transform.
+        return {"frequencies": "Hz", "response": None}
+
+
+def channel_response(h, sample_rate: Optional[float] = None, *,
+                     nfft: Optional[int] = None) -> ChannelResponse:
     """Frequency response ``H(f)`` of a baseband impulse response ``h``.
 
     Returns ``(frequencies, H)`` with ``H`` **complex** and both axes
     centred on 0 Hz: a baseband channel response is two-sided and not
     conjugate symmetric, so the negative half carries information the
     positive half does not, and ``rfft`` rejects complex input outright.
+    ``h`` may be a :class:`~uacpy.comms.ChannelTaps`, whose taps sit at
+    ``symbol_rate * sps`` samples per second; ``sample_rate`` is then
+    that rate and is not passed.
 
     This is the direction :func:`impulse_response_from_transfer_function`
     does not go, but the two are not exact inverses and composing them is
@@ -573,17 +607,35 @@ def channel_response(h, sample_rate: float, *, nfft: Optional[int] = None):
     perfect null, so whoever renders it picks the floor that sets how deep a
     null is drawn, rather than inheriting one chosen here.
 
-    Returns ``(frequencies, H)``, each of length ``nfft``.
-
     Parameters
     ----------
-    h : array_like
+    h : array_like or ChannelTaps
         Baseband impulse response (taps).
     sample_rate : float
-        Sample rate (Hz).
+        Sample rate (Hz); required for array taps.
     nfft : int, optional
         Transform length; ``None`` is ``max(1024, 2 * len(h))``.
+
+    Returns
+    -------
+    ChannelResponse
+        ``(frequencies, response)``, each of length ``nfft``; ``.plot()``
+        draws ``|H(f)|`` in dB.
     """
+    if all(hasattr(h, name) for name in ('taps', 'symbol_rate', 'sps')):
+        if sample_rate is not None:
+            raise ConfigurationError(
+                "channel_response: a ChannelTaps carries its sample rate "
+                "(symbol_rate * sps); sample_rate= would be a second one.",
+                remediation="Drop sample_rate=, or pass the taps array "
+                            "(taps.taps) with its rate.")
+        sample_rate = float(h.symbol_rate) * int(h.sps)
+        h = h.taps
+    elif sample_rate is None:
+        raise ConfigurationError(
+            "channel_response: array taps need their sample_rate (Hz).",
+            remediation="channel_response(h, sample_rate), or pass a "
+                        "ChannelTaps, which carries its rate.")
     ir = np.asarray(h, dtype=complex)
     if ir.ndim != 1:
         raise ConfigurationError(
@@ -604,7 +656,7 @@ def channel_response(h, sample_rate: float, *, nfft: Optional[int] = None):
             f"{ir.size}.")
     freqs = np.fft.fftshift(np.fft.fftfreq(n, d=1.0 / fs))
     H = np.fft.fftshift(np.fft.fft(ir, n))
-    return freqs, H
+    return ChannelResponse(freqs, H)
 
 
 def transfer_function_from_impulse_response(h, sample_rate: float, *,
@@ -652,11 +704,11 @@ def transfer_function_from_impulse_response(h, sample_rate: float, *,
     **Unscaled, because its counterpart is.**
     :func:`impulse_response_from_transfer_function` is a plain
     ``irfft`` — no ``df``, no ``fs`` — so this is a plain ``rfft`` and the
-    pair round-trips to floating point. Do not add a ``1/sample_rate``
-    here to make it a spectral density: the first draft of this function
-    did, and the round trip came back a factor of ``fs`` short with the
-    PHASE still perfect, which is the hardest kind of error to notice.
-    ``Field.to_time_trace`` and :meth:`Field.to_transfer_function` use the
+    pair round-trips to floating point. A ``1/sample_rate`` here, to make
+    it a spectral density, would put the round trip a factor of ``fs``
+    short with the PHASE still perfect, which is the hardest kind of error
+    to notice.
+    ``Field.impulse_response`` and :meth:`Field.to_transfer_function` use the
     density convention instead, and that pair round-trips too — the two
     conventions each close, and must not be mixed.
 
@@ -999,7 +1051,8 @@ def impulse_response_from_transfer_function(H, *, frequencies, sample_rate: floa
         every other axis is carried through (one response per cell).
     frequencies : array_like
         The frequency (Hz) of each sample of ``H`` along ``axis``,
-        non-negative and increasing.
+        non-negative and increasing, at least two: one line states no
+        spacing, so it has no record and no impulse response.
     sample_rate : float
         Sample rate (Hz) of the response.
     t_start : float or array_like, default 0.0
@@ -1042,10 +1095,16 @@ def impulse_response_from_transfer_function(H, *, frequencies, sample_rate: floa
             f"smallest step "
             f"{np.min(np.diff(f)) if f.size > 1 else float('nan'):g} Hz. "
             f"Sort the axis and drop duplicates before calling.")
-    require_increasing_axis(f, f"{who}: frequencies")
+    require_strictly_increasing(f, f"{who}: frequencies")
+    if f.size < 2:
+        raise ConfigurationError(
+            f"{who}: need at least 2 frequencies; got {f.size}. A single "
+            f"line has no impulse response: the record is 1/Δf long, and one "
+            f"frequency states no Δf.",
+            remediation="Pass H over a band of two or more frequencies.")
     # The shared guard rather than a bare float(): every check below divides by
-    # fs or by fs/2, so an unvalidated rate escaped as an untyped error about
-    # the wrong thing — sample_rate=0 with frequencies[0]=0 raised a bare
+    # fs or by fs/2, so an unvalidated rate would escape as an untyped error
+    # about the wrong thing — sample_rate=0 with frequencies[0]=0 a bare
     # ZeroDivisionError, NaN a "cannot convert float NaN to integer", Inf an
     # OverflowError, and a negative rate a ConfigurationError announcing "the
     # Nyquist frequency -500 Hz", a true statement about the wrong argument.
@@ -1064,47 +1123,42 @@ def impulse_response_from_transfer_function(H, *, frequencies, sample_rate: floa
             f"against H without its frequency axis, shape {rest}; pass one "
             f"number, or one start per cell.") from None
     # The response stops at fs/2, and out-of-band samples are zero (see
-    # above), so a band sitting above Nyquist contributes nothing: it came
-    # back as an all-zero h with no diagnostic. Partial overlap is
-    # legitimate but lossy — a band straddling fs/2 silently loses the half
-    # above it — so it warns.
+    # above), so a band sitting above Nyquist contributes nothing: an
+    # all-zero h, refused here. Partial overlap is legitimate but lossy — a
+    # band straddling fs/2 loses the half above it — so it warns.
     nyquist = fs / 2.0
-    if f.size and f[0] > nyquist:
+    if f[0] > nyquist:
         raise ConfigurationError(
             f"{who}: frequencies span "
             f"{f[0]:g}-{f[-1]:g} Hz, entirely above the Nyquist frequency "
             f"sample_rate/2 = {nyquist:g} Hz, so every DFT bin would be zero "
             f"and h all-zero. Raise sample_rate above {2 * f[-1]:g} Hz, or "
             f"pass a band inside [0, sample_rate/2].")
-    if f.size and f[-1] > nyquist:
+    if f[-1] > nyquist:
         warnings.warn(
             f"{who}: frequencies reach "
             f"{f[-1]:g} Hz, above the Nyquist frequency sample_rate/2 = "
             f"{nyquist:g} Hz; the part of H above it is dropped from h. Raise "
             f"sample_rate above {2 * f[-1]:g} Hz to keep the whole band.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    uniform = f.size >= 2 and steps_are_uniform(np.diff(f), np.diff(f).mean())
+    uniform = steps_are_uniform(np.diff(f), np.diff(f).mean())
     if n_samples is None:
-        if f.size < 2:
-            n_samples = 2
-        else:
-            # The grid spacing, not the bin count, is what sizes the record:
-            # the response a band-limited H describes is 1/df long however
-            # few bins the band has. The smallest spacing is used when
-            # `frequencies` is non-uniform, so no part of it is
-            # under-resolved.
-            df = float(np.min(np.diff(f)))
-            n_samples = (record_samples(fs, float(np.diff(f).mean()))
-                         if uniform else max(2, int(round(fs / df))))
-            if n_samples > _MAX_DEFAULT_IR_SAMPLES:
-                raise ConfigurationError(
-                    f"{who}: the spacing of "
-                    f"frequencies ({df:g} Hz) implies a default record of "
-                    f"{n_samples} samples at fs = {fs:g} Hz, above the "
-                    f"{_MAX_DEFAULT_IR_SAMPLES}-sample default limit. Pass "
-                    f"n_samples explicitly (its record must still hold the "
-                    f"arrivals), or coarsen frequencies."
-                )
+        # The grid spacing, not the bin count, is what sizes the record: the
+        # response a band-limited H describes is 1/df long however few bins
+        # the band has. The smallest spacing is used when `frequencies` is
+        # non-uniform, so no part of it is under-resolved.
+        df = float(np.min(np.diff(f)))
+        n_samples = (record_samples(fs, float(np.diff(f).mean()))
+                     if uniform else max(2, int(round(fs / df))))
+        if n_samples > _MAX_DEFAULT_IR_SAMPLES:
+            raise ConfigurationError(
+                f"{who}: the spacing of "
+                f"frequencies ({df:g} Hz) implies a default record of "
+                f"{n_samples} samples at fs = {fs:g} Hz, above the "
+                f"{_MAX_DEFAULT_IR_SAMPLES}-sample default limit. Pass "
+                f"n_samples explicitly (its record must still hold the "
+                f"arrivals), or coarsen frequencies."
+            )
     n_samples = int(n_samples)
     if n_samples < 1:
         raise ConfigurationError(
@@ -1126,15 +1180,14 @@ def impulse_response_from_transfer_function(H, *, frequencies, sample_rate: floa
         h = 2.0 * band_sum(G, f[kept], sample_rate=fs, t_start=row_starts,
                            n_samples=n_samples).real
     else:
-        if f.size >= 2:
-            warnings.warn(
-                f"{who}: frequencies are not "
-                f"uniformly spaced, so H is interpolated onto the "
-                f"{fs / n_samples:g} Hz grid of the response, which "
-                f"attenuates an arrival at delay tau by up to "
-                f"|cos(pi tau df)|. Pass a uniform frequencies for an exact "
-                f"transform.",
-                NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        warnings.warn(
+            f"{who}: frequencies are not "
+            f"uniformly spaced, so H is interpolated onto the "
+            f"{fs / n_samples:g} Hz grid of the response, which "
+            f"attenuates an arrival at delay tau by up to "
+            f"|cos(pi tau df)|. Pass a uniform frequencies for an exact "
+            f"transform.",
+            NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
         grid = np.fft.rfftfreq(n_samples, d=1.0 / fs)
         # The record's start is taken out of H at its own frequencies, where
         # it is exact, before H is interpolated: a bulk delay left in would
@@ -1185,8 +1238,8 @@ def _warn_nyquist_quadrature_dropped(value, H, nyquist: float) -> None:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def arrival_transfer_function(frequencies, amplitudes, delays_s, *,
-                              delays_imag_s=None, phases_rad=None,
+def arrival_transfer_function(frequencies, amplitudes, delays, *,
+                              delays_imag=None, phases=None,
                               phase_offset: float = 0.0, trace_frequency=None,
                               absorption=None):
     """``H(f)`` of a discrete multipath arrival list.
@@ -1217,23 +1270,24 @@ def arrival_transfer_function(frequencies, amplitudes, delays_s, *,
         first of ``np.fft.rfftfreq``, carries no absorption.
     amplitudes : array_like
         Arrival amplitudes, as **non-negative magnitudes**. A sign belongs
-        in ``phases_rad`` as ``pi``, not here — see below.
-    delays_s : array_like
+        in ``phases`` as ``pi``, not here — see below.
+    delays : array_like
         Real travel times (s), same length as ``amplitudes``.
-    delays_imag_s : array_like, optional
+    delays_imag : array_like, optional
         Imaginary travel times (s). ``None`` means a lossless list, i.e.
         zeros — which is what a hand-built arrival set without the field
         carries.
-    phases_rad : array_like, optional
+    phases : array_like, optional
         Per-arrival phase (radians). ``None`` means zeros.
     phase_offset : float, default 0
-        Added to every ``phases_rad``.
+        Added to every ``phases``.
     trace_frequency : float, optional
         Frequency (Hz) the arrivals were traced at, where ``Im τ`` is exact.
-    absorption : Absorption, optional
+    absorption : Absorption or AbsorptionCoefficient, optional
         The water-column law ``Im τ`` carries (the traced environment's
-        ``absorption``). With ``trace_frequency`` it sets how the absorption
-        scales across ``frequencies``.
+        ``absorption``: a law, or a measured table). With
+        ``trace_frequency`` it sets how the absorption scales across
+        ``frequencies``.
 
     Returns
     -------
@@ -1261,9 +1315,9 @@ def arrival_transfer_function(frequencies, amplitudes, delays_s, *,
     return _arrival_transfer_function(
         frequencies,
         amplitudes,
-        delays_s,
-        delays_imag_s=delays_imag_s,
-        phases_rad=phases_rad,
+        delays,
+        delays_imag=delays_imag,
+        phases=phases,
         phase_offset=phase_offset,
         trace_frequency=trace_frequency,
         absorption=absorption)
@@ -1295,19 +1349,19 @@ def _arrival_magnitudes(amplitudes, who: str) -> np.ndarray:
     if np.iscomplexobj(amplitudes):
         raise ConfigurationError(
             f"{who}: amplitudes must be real magnitudes; got a complex "
-            f"array. Pass |A| here and its argument in phases_rad.")
+            f"array. Pass |A| here and its argument in phases.")
     amp = _arrival_column(amplitudes, 'amplitudes', who)
     if np.any(amp < 0.0):
         n = int(np.count_nonzero(amp < 0.0))
         raise ConfigurationError(
             f"{who}: {n} of {amp.size} amplitudes are negative. An arrival "
             f"amplitude is a magnitude and its sign lives in the phase, so "
-            f"pass abs(A) with pi added to phases_rad for each one.")
+            f"pass abs(A) with pi added to phases for each one.")
     return amp
 
 
-def _arrival_transfer_function(frequencies, amplitudes, delays_s, *,
-                              delays_imag_s=None, phases_rad=None,
+def _arrival_transfer_function(frequencies, amplitudes, delays, *,
+                              delays_imag=None, phases=None,
                               phase_offset: float = 0.0,
                               trace_frequency=None, absorption=None,
                               who: str = "arrival_transfer_function"):
@@ -1315,20 +1369,20 @@ def _arrival_transfer_function(frequencies, amplitudes, delays_s, *,
     freqs = np.asarray(frequencies, dtype=float).ravel()
     phase_offset = _require_phase_offset(phase_offset, who)
     amp = _arrival_magnitudes(amplitudes, who)
-    delays = _arrival_column(delays_s, 'delays_s', who)
+    delays = _arrival_column(delays, 'delays', who)
     if amp.size != delays.size:
         raise ConfigurationError(
-            f"{who}: amplitudes and delays_s must have the same length; "
+            f"{who}: amplitudes and delays must have the same length; "
             f"got {amp.size} and {delays.size}.")
     if not np.all(np.isfinite(delays)):
         raise ConfigurationError(
             f"{who}: an arrival has a non-finite delay, so its phase term "
             f"is undefined at every frequency.")
-    imag = (np.zeros_like(delays) if delays_imag_s is None
-            else _arrival_column(delays_imag_s, 'delays_imag_s', who))
-    phase = (np.zeros_like(delays) if phases_rad is None
-             else _arrival_column(phases_rad, 'phases_rad', who))
-    for name, arr in (('delays_imag_s', imag), ('phases_rad', phase)):
+    imag = (np.zeros_like(delays) if delays_imag is None
+            else _arrival_column(delays_imag, 'delays_imag', who))
+    phase = (np.zeros_like(delays) if phases is None
+             else _arrival_column(phases, 'phases', who))
+    for name, arr in (('delays_imag', imag), ('phases', phase)):
         if arr.size != delays.size:
             raise ConfigurationError(
                 f"{who}: {name} must have one entry per arrival "
@@ -1441,15 +1495,15 @@ def _arrival_grid_transfer_function(frequencies, cells, *,
                 continue
             H[i, j, :] = _arrival_transfer_function(
                 freqs, cell['amplitudes'], cell['delays'],
-                delays_imag_s=cell.get('delays_imag'),
-                phases_rad=cell.get('phases'), phase_offset=phase_offset,
+                delays_imag=cell.get('delays_imag'),
+                phases=cell.get('phases'), phase_offset=phase_offset,
                 trace_frequency=trace_frequency, absorption=absorption,
                 who=who)
     return H
 
 
 
-def received_amplitudes(amplitudes, delays_imag_s, phases, frequency: float,
+def received_amplitudes(amplitudes, delays_imag, phases, frequency: float,
                         *, trace_frequency: Optional[float] = None,
                         absorption=None) -> np.ndarray:
     """Complex amplitude each ray arrival delivers at ``frequency`` (Hz):
@@ -1457,7 +1511,7 @@ def received_amplitudes(amplitudes, delays_imag_s, phases, frequency: float,
 
     ``amplitudes`` is a ray code's GEOMETRIC amplitude, which carries no
     volume absorption: Bellhop keeps that in the imaginary travel time
-    ``delays_imag_s``, and ``e`` is its exponent at ``frequency``
+    ``delays_imag``, and ``e`` is its exponent at ``frequency``
     (:func:`~uacpy.core.absorption.arrival_absorption_exponent`, scaled from
     the ``trace_frequency`` the arrivals were traced at by the
     ``absorption`` law). ``phases`` are in radians. Use this, not the
@@ -1472,7 +1526,7 @@ def received_amplitudes(amplitudes, delays_imag_s, phases, frequency: float,
         Geometric arrival amplitudes, as non-negative magnitudes (a sign
         belongs in ``phases`` as ``pi``; a negative entry is refused, as
         :func:`arrival_transfer_function` refuses it).
-    delays_imag_s : array_like
+    delays_imag : array_like
         Imaginary travel times (s).
     phases : array_like
         Arrival phases (rad).
@@ -1481,16 +1535,16 @@ def received_amplitudes(amplitudes, delays_imag_s, phases, frequency: float,
     trace_frequency : float, optional
         Frequency (Hz) the arrivals were traced at; ``None`` is
         ``frequency``.
-    absorption : Absorption, optional
-        The traced water-column law, which scales the absorption between the
-        two frequencies.
+    absorption : Absorption or AbsorptionCoefficient, optional
+        The traced water-column law (or measured table), which scales the
+        absorption between the two frequencies.
 
     Returns
     -------
     ndarray, complex, shape (n_arrivals,)
     """
     amplitude = _arrival_magnitudes(amplitudes, "received_amplitudes")
-    delays_imag = np.asarray(delays_imag_s, dtype=float).ravel()
+    delays_imag = np.asarray(delays_imag, dtype=float).ravel()
     phase = np.asarray(phases, dtype=float).ravel()
     exponent = arrival_absorption_exponent(
         delays_imag, [float(frequency)], trace_frequency=trace_frequency,
@@ -1554,7 +1608,7 @@ def remove_delay(H, frequencies, delay, *, axis: int = -1) -> np.ndarray:
     return H * np.exp(2j * np.pi * hertz * delay)
 
 
-def broadband_propagation_loss(H, weights=None, *, axis: int = -1):
+def broadband_loss(H, weights=None, *, axis: int = -1):
     """Propagation loss of a signal with bandwidth — Ainslie Eq. 11.46.
 
     .. math::
@@ -1614,12 +1668,16 @@ def broadband_propagation_loss(H, weights=None, *, axis: int = -1):
     allocation is 0.001 GiB against 0.287 GiB for the one temporary, and
     the two agree to 1e-14 dB.
     """
-    return _broadband_propagation_loss(H, weights, axis=axis)
+    return _broadband_loss(H, weights, axis=axis)
 
 
-def _broadband_propagation_loss(H, weights=None, *, axis: int = -1,
-                               who: str = "broadband_propagation_loss"):
-    """:func:`broadband_propagation_loss` reporting its refusals as ``who``."""
+def _broadband_loss(H, weights=None, *, axis: int = -1,
+                               who: str = "broadband_loss",
+                               weights_name: str = "weights"):
+    """:func:`broadband_loss` reporting its refusals as ``who``,
+    naming ``weights`` as the caller's own argument ``weights_name`` (a
+    :meth:`Field.broadband_loss` caller passed ``source_spectrum``, whose
+    squared magnitude the weights are)."""
     data = np.asarray(H)
     if data.ndim == 0:
         raise ConfigurationError(
@@ -1632,19 +1690,20 @@ def _broadband_propagation_loss(H, weights=None, *, axis: int = -1,
         w = np.asarray(weights, dtype=float)
         if w.ndim != 1:
             raise ConfigurationError(
-                f"{who}: weights must be one value per frequency; got "
-                f"shape {w.shape}. It is the source power spectrum ON "
-                f"this frequency axis.")
+                f"{who}: {weights_name} must be 1-D, one value per frequency "
+                f"of this axis; got shape {w.shape}. Flattening it would pair "
+                f"values with frequencies in an order you did not choose.")
         if w.size != n_f:
             raise ConfigurationError(
-                f"{who}: weights has {w.size} samples but the frequency "
-                f"axis has {n_f}.")
+                f"{who}: {weights_name} has {w.size} samples but the "
+                f"frequency axis has {n_f}; it is the source spectrum ON "
+                f"this frequency axis.")
         if not np.all(np.isfinite(w)):
-            raise ConfigurationError(f"{who}: weights must be finite.")
+            raise ConfigurationError(f"{who}: {weights_name} must be finite.")
         if w.sum() <= 0.0:
             raise ConfigurationError(
-                f"{who}: weights carry no energy, so the weighted average "
-                f"is undefined.")
+                f"{who}: {weights_name} holds no energy, so the weighted "
+                f"average is undefined.")
     moved = np.moveaxis(data, axis, 0)
     power = np.zeros(moved.shape[1:], dtype=float)
     for i, weight in enumerate(w):
@@ -1664,7 +1723,7 @@ def _broadband_propagation_loss(H, weights=None, *, axis: int = -1,
 
 
 def synthesize_time_series(H, *, frequencies, source_waveform, sample_rate: float,
-                           t_start, window: Optional[str] = None,
+                           t_start, window: Optional[str] = 'boxcar',
                            axis: int = -1):
     """The received pressure signal: ``source_waveform`` through ``H(f)``,
     at exactly ``sample_rate``.
@@ -1729,9 +1788,9 @@ def synthesize_time_series(H, *, frequencies, source_waveform, sample_rate: floa
         :meth:`uacpy.Field.synthesize_time_series`, which estimates one
         (``t_start=None``) or gives each range its own record
         (``'reduced'``); here either word is refused, as is an array.
-    window : {None, 'hann', 'hamming', 'blackman', 'tukey', 'boxcar'}
-        Spectral window across the band; ``None`` leaves the received
-        signal ``S·H`` unfiltered.
+    window : {'boxcar', 'hann', 'hamming', 'blackman', 'tukey'} or None
+        Spectral window across the band; ``'boxcar'`` (default; ``None``
+        takes it too) leaves the received signal ``S·H`` unfiltered.
     axis : int, default -1
         Frequency axis of ``H``.
 
@@ -1763,7 +1822,7 @@ def synthesize_time_series(H, *, frequencies, source_waveform, sample_rate: floa
     # The grid, the source spectrum and the cell synthesis are the ones
     # Field.synthesize_time_series runs.
     source_spectrum, plan = waveform_synthesis_setup(
-        freqs, wf, sample_rate, window=window, n_samples_floor=0, who=who)
+        freqs, wf, sample_rate, window=window, who=who)
     moved = np.moveaxis(data, axis, -1)
     spectra = moved.reshape(-1, freqs.size)
     warn_unsolved_bins(spectra, who=who)
@@ -1838,9 +1897,9 @@ def _warn_if_response_wraps(h, offset, record, who: str) -> None:
     total = power.sum(axis=-1)
     # The FAR HALF of the record from the window, not the whole complement.
     # Energy just outside the window is what a cut is FOR — a genuine late
-    # path being removed — and counting it made this warn on channels that
+    # path being removed — and counting it would warn on channels that
     # cannot fold at all: two equal paths 100 ms apart in a 500 ms record
-    # read 50% and were told to refine the grid.
+    # read 50 %.
     #
     # ``offset`` is the caller's own circular distance from the window
     # centre, passed in rather than re-derived. Recovering it here as
@@ -1852,11 +1911,12 @@ def _warn_if_response_wraps(h, offset, record, who: str) -> None:
                     power.sum(axis=-1, where=far)
                     / np.where(total > 0.0, total, 1.0), 0.0)
     worst = float(np.max(live)) if live.size else 0.0
-    # 0.02, from a 48-case sweep against this far-half measure: it misses
-    # 11.1 % of folds and false-alarms on none of 21 clean channels. The
-    # residual 11 % is the measure's blind spot, not a tuning failure. A
-    # threshold of 0.33, calibrated on the whole complement of the window,
-    # misses 77.8 % of folds against the far half.
+    # 0.02, uacpy guidance from a 48-case uacpy sweep against this far-half
+    # measure (no source states a threshold): it misses 11.1 % of folds and
+    # false-alarms on none of 21 clean channels. The residual 11 % is the
+    # measure's blind spot, not a tuning failure. A threshold of 0.33,
+    # calibrated on the whole complement of the window, misses 77.8 % of
+    # folds against the far half.
     if worst > 0.02:
         warnings.warn(
             f"{who}: {100.0 * worst:.0f}% of the response sits in the "
@@ -1866,7 +1926,9 @@ def _warn_if_response_wraps(h, offset, record, who: str) -> None:
             f"onto it — from H(f) alone these are the same measurement. "
             f"If the arrivals are known to fit the record, ignore this; "
             f"otherwise size the grid from them "
-            f"(Arrivals.synthesis_band).",
+            f"(Arrivals.synthesis_band). Its silence does not show the "
+            f"record holds the response: a path just past the record's end "
+            f"folds near the origin, where this does not look.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
@@ -1895,8 +1957,8 @@ def _response_peak_times(flat, record):
     return times
 
 
-def gate_transfer_function(H, *, frequencies, duration: float, origin='peak',
-                           window: Optional[str] = None, axis: int = -1):
+def truncate_response(H, *, frequencies, duration: float, origin='peak',
+                      window: Optional[str] = 'boxcar', axis: int = -1):
     """Keep only the part of a channel's impulse response within ``duration``
     of its centre, and return the ``H(f)`` of what is left.
 
@@ -1926,10 +1988,10 @@ def gate_transfer_function(H, *, frequencies, duration: float, origin='peak',
         path between samples is not outranked by a weaker one on the grid;
         a number centres every cell on that fixed time (s) from the start
         of the record, which is what comparing cells requires.
-    window : {None, 'hann'}
-        ``None`` (a rectangular gate, the package's one spelling for no
-        taper) is the separability criterion stated plainly;
-        ``'hann'`` is the same cut, tapered.
+    window : {'boxcar', 'hann'}, optional
+        ``'boxcar'`` (the default, a rectangular gate, which ``None`` also
+        selects) is the separability criterion stated plainly; ``'hann'`` is
+        the same cut, tapered.
     axis : int, default -1
         Frequency axis of ``H``.
 
@@ -1945,7 +2007,7 @@ def gate_transfer_function(H, *, frequencies, duration: float, origin='peak',
         from the window — either a genuinely late path or a fold, which
         ``H(f)`` alone cannot distinguish.
     """
-    return _gate_transfer_function(
+    return _truncate_response(
         H,
         frequencies=frequencies,
         duration=duration,
@@ -1954,11 +2016,11 @@ def gate_transfer_function(H, *, frequencies, duration: float, origin='peak',
         axis=axis)
 
 
-def _gate_transfer_function(H, *, frequencies, duration: float,
-                           origin='peak', window: Optional[str] = None,
+def _truncate_response(H, *, frequencies, duration: float,
+                           origin='peak', window: Optional[str] = 'boxcar',
                            axis: int = -1,
-                           who: str = "gate_transfer_function"):
-    """:func:`gate_transfer_function` reporting its refusals as ``who``."""
+                           who: str = "truncate_response"):
+    """:func:`truncate_response` reporting its refusals as ``who``."""
     data = np.asarray(H)
     freqs = np.asarray(frequencies, dtype=float).ravel()
     if freqs.size < 2:
@@ -1967,11 +2029,13 @@ def _gate_transfer_function(H, *, frequencies, duration: float,
             f"length; got {freqs.size}.")
     df = _uniform_frequency_step(freqs, who=who)
     record = 1.0 / df
-    if window not in (None, 'hann'):
+    if window is None:
+        window = 'boxcar'               # the gate's documented default
+    if window not in ('boxcar', 'hann'):
         raise ConfigurationError(
-            f"{who}: window must be None (the separability criterion "
-            f"stated plainly) or 'hann' (the same cut, tapered); got "
-            f"{window!r}.")
+            f"{who}: window must be 'boxcar' (the separability criterion "
+            f"stated plainly; None selects it) or 'hann' (the same cut, "
+            f"tapered); got {window!r}.")
     duration = float(duration)
     if not np.isfinite(duration) or duration <= 0.0:
         raise ConfigurationError(
@@ -2015,7 +2079,7 @@ def _gate_transfer_function(H, *, frequencies, duration: float,
     # the record edge actually sits.
     offset = np.abs(times[None, :] - centres[:, None])
     offset = np.minimum(offset, record - offset)
-    if window is None:
+    if window == 'boxcar':
         taper = (offset <= duration).astype(float)
     else:
         taper = np.where(offset <= duration,
@@ -2035,7 +2099,7 @@ def _gate_transfer_function(H, *, frequencies, duration: float,
 
 
 #: Length of the silent trace an empty arrival record returns, when no
-#: output_duration says otherwise.
+#: output_duration says otherwise: uacpy guidance, with no source.
 _EMPTY_TRACE_SECONDS = 0.1
 
 
@@ -2093,9 +2157,9 @@ def _echo_window_notice(counts: dict, t_start: float, output_duration: float,
         parts.append(
             f"the earliest echo arrives at {counts['earliest_s']:g} s")
     return (f"{who}: the [{t_start:g}, {t_start + output_duration:g}] s "
-            f"window does not hold every echo: " + "; ".join(parts) + ". "
-            f"Widen output_duration= or move t_start=, or leave both unset "
-            f"to size the window from the arrivals.")
+            "window does not hold every echo: " + "; ".join(parts) + ". "
+            "Widen output_duration= or move t_start=, or leave both unset "
+            "to size the window from the arrivals.")
 
 
 #: A reception takes the waveform's Hilbert transform on a record padded
@@ -2107,8 +2171,8 @@ _HILBERT_PAD_WAVEFORMS = 4
 
 
 #: Most samples of padding either side of a reception's waveform (~22 s at
-#: 48 kHz): past a few lengths of its slowest oscillation the padding
-#: no longer changes the result (a 5 s LFM sweep from 100 Hz: 1.3e-7 of the
+#: 48 kHz): past a few lengths of its slowest oscillation more padding
+#: does not change the result (a 5 s LFM sweep from 100 Hz: 1.3e-7 of the
 #: peak at 60 ms of padding), and a long recording is not tripled.
 _HILBERT_PAD_MAX_SAMPLES = 1 << 20
 
@@ -2206,8 +2270,8 @@ def _energy_share_words(part: float, total: float) -> str:
     return "no measurable energy"
 
 
-def arrival_impulse_response(amplitudes, delays_s, *, sample_rate: float,
-                             delays_imag_s=None, phases_rad=None,
+def arrival_impulse_response(amplitudes, delays, *, sample_rate: float,
+                             delays_imag=None, phases=None,
                              phase_offset: float = 0.0, trace_frequency=None,
                              absorption=None, t_start=None, n_samples=None,
                              band=None):
@@ -2259,12 +2323,12 @@ def arrival_impulse_response(amplitudes, delays_s, *, sample_rate: float,
 
     Parameters
     ----------
-    amplitudes, delays_s : array_like
-        Arrival magnitudes (non-negative; a sign belongs in ``phases_rad``
+    amplitudes, delays : array_like
+        Arrival magnitudes (non-negative; a sign belongs in ``phases``
         as ``pi``) and real travel times (s).
     sample_rate : float
         Rate (Hz) of the taps.
-    delays_imag_s, phases_rad, phase_offset, trace_frequency, absorption
+    delays_imag, phases, phase_offset, trace_frequency, absorption
         As :func:`arrival_transfer_function` takes them.
     t_start : float, optional
         Time (s) of ``h[0]``; ``None`` is the first arrival less the margin.
@@ -2295,8 +2359,8 @@ def arrival_impulse_response(amplitudes, delays_s, *, sample_rate: float,
         bins of the record's grid.
     """
     who = "arrival_impulse_response"
-    columns = _arrival_columns(amplitudes, delays_s, delays_imag_s,
-                               phases_rad, who)
+    columns = _arrival_columns(amplitudes, delays, delays_imag,
+                               phases, who)
     if t_start is not None:
         t_start = _require_start_time(
             t_start, who,
@@ -2668,15 +2732,15 @@ def _arrival_kernels(columns, start: float, n_samples: int, *,
     return h_c, h_s
 
 
-def simulate_arrival_reception(amplitudes, delays_s, *,
+def simulate_arrival_reception(amplitudes, delays, *,
                                source_waveform: np.ndarray,
-                               sample_rate: float, trace_frequency: float,
-                               delays_imag_s=None, phases_rad=None,
+                               sample_rate: float,
+                               trace_frequency: Optional[float] = None,
+                               delays_imag=None, phases=None,
                                output_duration: Optional[float] = None,
                                t_start: Optional[float] = None,
                                phase_offset: float = 0.0,
                                fractional: bool = True,
-                               report: Optional[dict] = None,
                                absorption=None) -> Tuple[np.ndarray, np.ndarray]:
     """
     Received waveform from a sparse arrival list, with carrier and absorption.
@@ -2715,10 +2779,10 @@ def simulate_arrival_reception(amplitudes, delays_s, *,
 
     Parameters
     ----------
-    amplitudes, delays_s : array_like
-        Arrival magnitudes (non-negative; a sign belongs in ``phases_rad``
+    amplitudes, delays : array_like
+        Arrival magnitudes (non-negative; a sign belongs in ``phases``
         as ``pi``) and real travel times (s).
-    delays_imag_s : array_like, optional
+    delays_imag : array_like, optional
         Imaginary travel times (s), carrying the volume absorption as
         ``exp(omega * Im tau)`` at ``trace_frequency``. ``None`` is a
         lossless list. Each arrival is filtered by that absorption at every
@@ -2726,19 +2790,20 @@ def simulate_arrival_reception(amplitudes, delays_s, *,
         :func:`~uacpy.core.absorption.arrival_absorption_exponent` — the
         same law :func:`arrival_transfer_function` applies, so a pulse and a
         transfer function built from one arrival list agree.
-    phases_rad : array_like, optional
+    phases : array_like, optional
         Per-arrival phase (radians) from caustics and boundary reflections.
         ``None`` is zeros.
     source_waveform : ndarray
         Source waveform (1-D), used as-is.
     sample_rate : float
         Sample rate in Hz.
-    trace_frequency : float
+    trace_frequency : float, optional
         Frequency (Hz) the arrivals were traced at, where ``Im tau`` is
-        exact (Bellhop's carrier).
-    absorption : Absorption, optional
-        The water-column law ``Im tau`` carries. A Thorp or
-        Francois-Garrison law scales the absorption as
+        exact (Bellhop's carrier). Required when ``delays_imag`` holds a
+        non-zero value (refused without it); a lossless list needs none.
+    absorption : Absorption or AbsorptionCoefficient, optional
+        The water-column law ``Im tau`` carries (or a measured table). A
+        Thorp or Francois-Garrison law scales the absorption as
         ``α(f)/α(trace_frequency)`` (exact); otherwise it scales linearly
         in ``f``.
     output_duration : float, optional
@@ -2761,14 +2826,13 @@ def simulate_arrival_reception(amplitudes, delays_s, *,
         coherently into the interference pattern. Continuous placement is
         what the formulation asks for — COA eq. 8.30 shifts the waveform by
         ``t - tau(s)``, not by a whole number of samples.
-    report : dict, optional
-        Collect, instead of warning, what the window omits or clips: the
-        counts from :func:`_echo_window_counts` are ADDED into it, so one
-        dict passed across every receiver cell of a run totals the grid and
-        the run says it once. Left ``None``, this warns itself when an echo
-        falls outside the window or straddles one of its edges — the
-        window cuts such an echo off rather than folding it, and the record
-        reads as complete.
+
+    Warns
+    -----
+    NumericsWarning
+        When an echo falls outside the window or straddles one of its edges
+        — the window cuts such an echo off rather than folding it, and the
+        record reads as complete.
 
     Returns
     -------
@@ -2780,11 +2844,9 @@ def simulate_arrival_reception(amplitudes, delays_s, *,
         in a cell of :func:`simulate_arrival_grid`.
 
     The axis comes FIRST, as it does from ``impulse_response``,
-    ``simulate_reception`` and the two transform pairs. Both are real
-    arrays of the same length, so the wrong order is silent — which is
-    why the package has one order rather than two.
-    (:func:`delayandsum` keeps its own ``(signal, time)`` and swaps on
-    the way out.)
+    ``simulate_reception``, :func:`delayandsum` and the two transform
+    pairs. Both are real arrays of the same length, so the wrong order is
+    silent — which is why the package has one order.
 
     References
     ----------
@@ -2793,38 +2855,37 @@ def simulate_arrival_reception(amplitudes, delays_s, *,
     """
     return _simulate_arrival_reception(
         amplitudes,
-        delays_s,
+        delays,
         source_waveform=source_waveform,
         sample_rate=sample_rate,
         trace_frequency=trace_frequency,
-        delays_imag_s=delays_imag_s,
-        phases_rad=phases_rad,
+        delays_imag=delays_imag,
+        phases=phases,
         output_duration=output_duration,
         t_start=t_start,
         phase_offset=phase_offset,
         fractional=fractional,
-        report=report,
         absorption=absorption)
 
 
 def _simulate_arrival_reception(
     amplitudes,
-    delays_s,
+    delays,
     *,
     source_waveform: np.ndarray,
     sample_rate: float,
-    trace_frequency: float,
-    delays_imag_s=None,
-    phases_rad=None,
+    trace_frequency: Optional[float] = None,
+    delays_imag=None,
+    phases=None,
     output_duration: Optional[float] = None,
     t_start: Optional[float] = None,
     phase_offset: float = 0.0,
     fractional: bool = True,
-    report: Optional[dict] = None,
     absorption=None,
     who: str = "simulate_arrival_reception",
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """:func:`simulate_arrival_reception` reporting its refusals as ``who``."""
+    """:func:`simulate_arrival_reception` reporting its refusals and its
+    window notice as ``who``."""
     sample_rate, fc, sts = _reception_waveform(source_waveform, sample_rate,
                                                trace_frequency, who)
     phase_offset = _require_phase_offset(phase_offset, who)
@@ -2838,8 +2899,9 @@ def _simulate_arrival_reception(
             output_duration, who, "output_duration", " s",
             why=" Pass the window's length, or None to size it from the "
                 "arrivals.")
-    columns = _arrival_columns(amplitudes, delays_s, delays_imag_s,
-                               phases_rad, who)
+    columns = _arrival_columns(amplitudes, delays, delays_imag,
+                               phases, who)
+    _refuse_absorption_without_trace_frequency([columns], fc, who)
     delays = columns[1]
     if delays.size == 0:
         if output_duration is not None:
@@ -2857,14 +2919,10 @@ def _simulate_arrival_reception(
         [columns], sts, sample_rate=sample_rate, trace_frequency=fc,
         absorption=absorption, t_start=t_start, n_samples=nrts,
         phase_offset=phase_offset, fractional=fractional, who=who)
-    if report is not None:
-        _merge_echo_counts(report, counts)
-    else:
-        notice = _echo_window_notice(counts, t_start, output_duration,
-                                     who=who)
-        if notice is not None:
-            warnings.warn(notice, NumericsWarning,
-                          skip_file_prefixes=USER_FRAME_SKIP)
+    notice = _echo_window_notice(counts, t_start, output_duration, who=who)
+    if notice is not None:
+        warnings.warn(notice, NumericsWarning,
+                      skip_file_prefixes=USER_FRAME_SKIP)
     return t_start + np.arange(nrts) * (1.0 / sample_rate), traces[0]
 
 
@@ -2895,7 +2953,8 @@ def _receptions_on_window(columns, sts: np.ndarray, *, sample_rate: float,
                     c[2], c[3]) for c in columns]
     traces = np.zeros((len(columns), n_samples))
     counts: dict = {}
-    omega_c = 2.0 * np.pi * float(trace_frequency)
+    omega_c = (0.0 if trace_frequency is None
+               else 2.0 * np.pi * float(trace_frequency))
     pad, source = _quadrature_source(sts)
     for row, (amps, delays, delays_imag, phases) in enumerate(columns):
         # The window report reads each echo's WAVEFORM extent from its
@@ -2937,12 +2996,14 @@ def _reception_waveform(source_waveform, sample_rate, trace_frequency,
                         who: str) -> Tuple[float, float, np.ndarray]:
 
     """``(sample_rate, trace_frequency, waveform)`` of a reception,
-    validated: two positive finite frequencies and a real, finite 1-D
-    waveform (float)."""
+    validated: positive finite frequencies (``trace_frequency`` may be
+    ``None``, :func:`_refuse_absorption_without_trace_frequency`) and a
+    real, finite 1-D waveform (float)."""
     sample_rate = require_positive_finite_scalar(sample_rate, who,
                                                  "sample_rate", " Hz")
-    fc = require_positive_finite_scalar(trace_frequency, who,
-                                        "trace_frequency", " Hz")
+    fc = (None if trace_frequency is None
+          else require_positive_finite_scalar(trace_frequency, who,
+                                              "trace_frequency", " Hz"))
     sts = require_finite_signal(source_waveform, who, "source_waveform")
     if sts.ndim != 1 or np.iscomplexobj(sts):
         raise ConfigurationError(
@@ -2953,28 +3014,48 @@ def _reception_waveform(source_waveform, sample_rate, trace_frequency,
     return sample_rate, fc, sts.astype(float)
 
 
-def _arrival_columns(amplitudes, delays_s, delays_imag_s, phases_rad,
+def _refuse_absorption_without_trace_frequency(columns, trace_frequency,
+                                               who: str) -> None:
+    """Refuse a reception of arrival lists (:func:`_arrival_columns`) that
+    carry volume absorption — a non-zero ``Im tau`` — with no
+    ``trace_frequency``: ``Im tau`` states the loss at the frequency the
+    arrivals were traced at, and nothing else places it on the waveform's
+    band. A lossless list needs none."""
+    if trace_frequency is not None:
+        return
+    if any(np.any(np.asarray(c[2]) != 0.0) for c in columns):
+        raise ConfigurationError(
+            f"{who}: the arrivals carry volume absorption (a non-zero "
+            f"delays_imag), which Im tau states at the frequency they were "
+            f"traced at; without trace_frequency= it cannot be placed on the "
+            f"waveform's band.",
+            remediation="Pass trace_frequency=, the frequency (Hz) the "
+                        "arrivals were traced at (Bellhop's carrier, "
+                        "Arrivals.f0).")
+
+
+def _arrival_columns(amplitudes, delays, delays_imag, phases,
                      who: str) -> Tuple[np.ndarray, ...]:
     """``(amplitudes, delays, delays_imag, phases)`` of an arrival list as
     1-D float arrays, validated: non-negative real magnitudes
     (:func:`_arrival_magnitudes`), finite amplitudes and delays, and one
     entry per arrival in every column (``None`` columns are zeros)."""
     amps = _arrival_magnitudes(amplitudes, who)
-    delays = _arrival_column(delays_s, 'delays_s', who)
+    delays = _arrival_column(delays, 'delays', who)
     if amps.size != delays.size:
         raise ConfigurationError(
-            f"{who}: amplitudes and delays_s must have "
+            f"{who}: amplitudes and delays must have "
             f"the same length; got {amps.size} and {delays.size}.")
     if not (np.all(np.isfinite(amps)) and np.all(np.isfinite(delays))):
         raise ConfigurationError(
-            f"{who}: amplitudes and delays_s must be finite; an arrival "
+            f"{who}: amplitudes and delays must be finite; an arrival "
             f"with a non-finite amplitude or delay has no place on the "
             f"record.")
-    delays_imag = (np.zeros_like(delays) if delays_imag_s is None
-                   else _arrival_column(delays_imag_s, 'delays_imag_s', who))
-    phases = (np.zeros_like(delays) if phases_rad is None
-              else _arrival_column(phases_rad, 'phases_rad', who))
-    for name, arr in (('delays_imag_s', delays_imag), ('phases_rad', phases)):
+    delays_imag = (np.zeros_like(delays) if delays_imag is None
+                   else _arrival_column(delays_imag, 'delays_imag', who))
+    phases = (np.zeros_like(delays) if phases is None
+              else _arrival_column(phases, 'phases', who))
+    for name, arr in (('delays_imag', delays_imag), ('phases', phases)):
         if arr.size != delays.size:
             raise ConfigurationError(
                 f"{who}: {name} must have one entry per "
@@ -3038,16 +3119,15 @@ def delayandsum(
     *,
     source_waveform: np.ndarray,
     sample_rate: float,
-    trace_frequency: float,
+    trace_frequency: Optional[float] = None,
     output_duration: Optional[float] = None,
     t_start: Optional[float] = None,
     phase_offset: float = 0.0,
     fractional: bool = True,
-    report: Optional[dict] = None,
     absorption=None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Convolve a source waveform with the channel a Bellhop arrival record
-    describes. ``trace_frequency`` is the frequency the arrivals were traced
+    describes: ``(time, signal)``, the axis first as from every sibling. ``trace_frequency`` is the frequency the arrivals were traced
     at and ``absorption`` the traced environment's law, which together scale
     the volume absorption across the waveform's band.
 
@@ -3072,12 +3152,20 @@ def delayandsum(
         The source waveform.
     sample_rate : float
         Sample rate (Hz).
-    trace_frequency : float
-        Frequency (Hz) the arrivals were traced at.
+    trace_frequency : float, optional
+        Frequency (Hz) the arrivals were traced at; required when the
+        record carries a non-zero ``delays_imag``.
     output_duration : float, optional
         Output duration (s); ``None`` covers the latest arrival.
-    t_start, phase_offset, fractional, report, absorption : optional
+    t_start, phase_offset, fractional, absorption : optional
         As on :func:`~uacpy.acoustic_signal.simulate_arrival_reception`.
+
+    Returns
+    -------
+    time_vector : ndarray
+        Time of each sample (s).
+    rts : ndarray
+        Received time series.
     """
     if _arrival_count(rcv_arrivals, 'delayandsum') == 0:
         amps = delays = imag = phases = np.zeros(0)
@@ -3086,16 +3174,13 @@ def delayandsum(
         delays = rcv_arrivals['delays']
         imag = rcv_arrivals.get('delays_imag')
         phases = rcv_arrivals.get('phases')
-    # This function's own contract is (signal, time); the shared one puts
-    # the axis first, as the rest of the package does.
-    times, rts = _simulate_arrival_reception(
+    return _simulate_arrival_reception(
         amps, delays, source_waveform=source_waveform,
         sample_rate=sample_rate, trace_frequency=trace_frequency,
-        delays_imag_s=imag, phases_rad=phases,
+        delays_imag=imag, phases=phases,
         output_duration=output_duration,
         t_start=t_start, phase_offset=phase_offset, fractional=fractional,
-        report=report, absorption=absorption, who='delayandsum')
-    return rts, times
+        absorption=absorption, who='delayandsum')
 
 
 
@@ -3155,9 +3240,12 @@ def _arrival_count(cell, who: str, where: str = "") -> int:
 
 
 def simulate_arrival_grid(cells, *, source_waveform: np.ndarray,
-                          sample_rate: float, trace_frequency: float,
+                          sample_rate: float,
+                          trace_frequency: Optional[float] = None,
                           output_duration: Optional[float] = None,
                           t_start: Optional[float] = None,
+                          phase_offset: float = 0.0,
+                          fractional: bool = True,
                           absorption=None) -> Tuple[np.ndarray, np.ndarray]:
     """Received waveforms over a grid of receivers, each from its own arrival
     list, on ONE clock.
@@ -3185,11 +3273,17 @@ def simulate_arrival_grid(cells, *, source_waveform: np.ndarray,
         Source waveform (1-D, real).
     sample_rate : float
         Sample rate in Hz.
-    trace_frequency : float
-        Frequency (Hz) the arrivals were traced at.
+    trace_frequency : float, optional
+        Frequency (Hz) the arrivals were traced at; required when a cell
+        carries a non-zero ``delays_imag``.
     output_duration, t_start : float, optional
         The shared window (s); see above.
-    absorption : Absorption, optional
+    phase_offset, fractional : optional
+        As on :func:`simulate_arrival_reception`, for every cell:
+        ``phase_offset`` (radians) added to every arrival's phase (a
+        Bellhop ARRIVALS result already carries the line-source phase),
+        ``fractional=False`` rounding every delay to a sample.
+    absorption : Absorption or AbsorptionCoefficient, optional
         The water-column law ``Im tau`` carries, as
         :func:`simulate_arrival_reception` takes it.
 
@@ -3210,6 +3304,8 @@ def simulate_arrival_grid(cells, *, source_waveform: np.ndarray,
         trace_frequency=trace_frequency,
         output_duration=output_duration,
         t_start=t_start,
+        phase_offset=phase_offset,
+        fractional=fractional,
         absorption=absorption)
 
 
@@ -3218,15 +3314,18 @@ def _simulate_arrival_grid(
     *,
     source_waveform: np.ndarray,
     sample_rate: float,
-    trace_frequency: float,
+    trace_frequency: Optional[float] = None,
     output_duration: Optional[float] = None,
     t_start: Optional[float] = None,
+    phase_offset: float = 0.0,
+    fractional: bool = True,
     absorption=None,
     who: str = "simulate_arrival_grid",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """:func:`simulate_arrival_grid` reporting its refusals as ``who``."""
     sample_rate, fc, sts = _reception_waveform(source_waveform, sample_rate,
                                                trace_frequency, who)
+    phase_offset = _require_phase_offset(phase_offset, who)
     if t_start is not None:
         t_start = _require_start_time(
             t_start, who,
@@ -3246,6 +3345,7 @@ def _simulate_arrival_grid(
                     cells[i][j].get('phases'), who)
                 for j in range(n_j)] for i in range(n_i)]
     filled = [c for row in columns for c in row if c is not None]
+    _refuse_absorption_without_trace_frequency(filled, fc, who)
     if filled:
         t_start, output_duration = _reception_window(
             min(float(c[1].min()) for c in filled),
@@ -3271,7 +3371,8 @@ def _simulate_arrival_grid(
         traces, clip_report = _receptions_on_window(
             [columns[i][j] for i, j in where], sts, sample_rate=sample_rate,
             trace_frequency=fc, absorption=absorption, t_start=t_start,
-            n_samples=n_t, phase_offset=0.0, fractional=True, who=who)
+            n_samples=n_t, phase_offset=phase_offset, fractional=fractional,
+            who=who)
         for (i, j), trace in zip(where, traces):
             data[i, j] = trace
 

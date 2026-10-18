@@ -1,6 +1,7 @@
 """Power-delay-profile statistics of a channel: :func:`rms_delay_spread`,
 :func:`energy_support`, the coherence bandwidth
-(:func:`coherence_bandwidth`, :func:`coherence_factor`) and the
+(:func:`coherence_bandwidth`, its ``k`` named in
+:data:`COHERENCE_BANDWIDTH_FACTORS`) and the
 :func:`channel_regime` verdict they add up to; and the frequency grid a
 synthesis of the profile needs (:func:`synthesis_band`), with what a record
 too short for it folds (:func:`_fold_notice`, the notice the synthesis
@@ -31,10 +32,11 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 # wraps each of them.
 # ──────────────────────────────────────────────────────────────────────
 
-#: ``k`` of ``1 / (k tau_rms)``. ``inverse_spread`` is the corpus's own
-#: statement (APL-UW TR 9407 sect. II.7.b p. II-32; Abraham sect. 8.8.1);
-#: the Rappaport correlation rules (2nd ed. sect. 5.4.3, eqs 5.39-5.40)
-#: come from outside the corpus, so they are options and not the default.
+#: ``k`` of ``1 / (k tau_rms)``. ``inverse_spread`` is what the underwater
+#: acoustics sources state (APL-UW TR 9407 sect. II.7.b p. II-32; Abraham
+#: sect. 8.8.1); the Rappaport correlation rules (*Wireless
+#: Communications*, 2nd ed., sect. 5.4.3, eqs 5.39-5.40, a radio-channel
+#: text) are options and not the default.
 COHERENCE_BANDWIDTH_FACTORS = {'inverse_spread': 1.0,
                                'rappaport_0.5': 5.0,
                                'rappaport_0.9': 50.0}
@@ -45,7 +47,7 @@ class ChannelRegime(FieldsRepr, CarrierExport):
     """Verdict of :func:`channel_regime` for one symbol rate.
 
     ``frequency_selective`` is
-    ``signal_bandwidth_hz > coherence_bandwidth_hz``:
+    ``signal_bandwidth > coherence_bandwidth``:
     the symbol band spans more than one fade of the channel, so the symbols
     overlap their neighbours (``isi_symbols`` of them, the rms delay spread
     in symbol periods) and a flat gain cannot describe the link.
@@ -53,10 +55,13 @@ class ChannelRegime(FieldsRepr, CarrierExport):
     On the export protocol: ``to_dict`` / ``from_dict`` through the
     constructor, ``to_xarray`` / ``to_netcdf`` with the fields as JSON.
     """
-    coherence_bandwidth_hz: float
-    signal_bandwidth_hz: float
-    rms_delay_spread_s: float
-    symbol_duration_s: float
+    _REPR_UNITS = {'coherence_bandwidth': 'Hz', 'signal_bandwidth': 'Hz',
+                   'rms_delay_spread': 's', 'symbol_duration': 's'}
+
+    coherence_bandwidth: float
+    signal_bandwidth: float
+    rms_delay_spread: float
+    symbol_duration: float
     frequency_selective: bool
     isi_symbols: float
     convention: str
@@ -65,20 +70,20 @@ class ChannelRegime(FieldsRepr, CarrierExport):
         verdict = ("frequency-selective" if self.frequency_selective
                    else "frequency-flat")
         sign = ">" if self.frequency_selective else "<="
-        return (f"{verdict}: signal {self.signal_bandwidth_hz:g} Hz {sign} "
-                f"coherence {self.coherence_bandwidth_hz:g} Hz "
+        return (f"{verdict}: signal {self.signal_bandwidth:g} Hz {sign} "
+                f"coherence {self.coherence_bandwidth:g} Hz "
                 f"[{self.convention}] (rms delay spread "
-                f"{self.rms_delay_spread_s:g} s = {self.isi_symbols:g} "
-                f"symbols of {self.symbol_duration_s:g} s)")
+                f"{self.rms_delay_spread:g} s = {self.isi_symbols:g} "
+                f"symbols of {self.symbol_duration:g} s)")
 
 
-def _profile(delays_s, powers, who):
+def _profile(delays, powers, who):
     """The two arrays every function below takes, checked once."""
-    delays = np.asarray(delays_s, dtype=float).ravel()
+    delays = np.asarray(delays, dtype=float).ravel()
     power = np.asarray(powers, dtype=float).ravel()
     if delays.size != power.size:
         raise ConfigurationError(
-            f"{who}: delays_s and powers must have the same length; got "
+            f"{who}: delays and powers must have the same length; got "
             f"{delays.size} and {power.size}.")
     if np.any(power < 0.0):
         raise ConfigurationError(
@@ -87,7 +92,7 @@ def _profile(delays_s, powers, who):
     return delays, power
 
 
-def rms_delay_spread(delays_s, powers) -> float:
+def rms_delay_spread(delays, powers) -> float:
     """Energy-weighted spread of a power delay profile, in seconds.
 
     The second central moment of the profile: delays weighted by ``powers``,
@@ -106,7 +111,7 @@ def rms_delay_spread(delays_s, powers) -> float:
 
     Parameters
     ----------
-    delays_s : array_like
+    delays : array_like
         Arrival delays (s). Order does not matter.
     powers : array_like
         Power at each delay, same length. Non-negative: pass ``|a|**2``.
@@ -125,13 +130,13 @@ def rms_delay_spread(delays_s, powers) -> float:
     decorrelates — see :func:`coherence_bandwidth`, which states the
     constant relating the two.
     """
-    return _rms_delay_spread(delays_s, powers)
+    return _rms_delay_spread(delays, powers)
 
 
-def _rms_delay_spread(delays_s, powers, *,
+def _rms_delay_spread(delays, powers, *,
                      who: str = "rms_delay_spread") -> float:
     """:func:`rms_delay_spread` reporting its refusals as ``who``."""
-    delays, power = _profile(delays_s, powers, who)
+    delays, power = _profile(delays, powers, who)
     total = float(power.sum())
     if delays.size < 2 or total <= 0.0:
         return 0.0
@@ -140,7 +145,7 @@ def _rms_delay_spread(delays_s, powers, *,
     return float(np.sqrt((weights * (delays - mean) ** 2).sum()))
 
 
-def energy_support(delays_s, powers, fraction: float = 0.999) -> float:
+def energy_support(delays, powers, fraction: float = 0.999) -> float:
     """Delay span holding ``fraction`` of a profile's energy, in seconds.
 
     Measured from the first arrival to the one by which ``fraction`` of the
@@ -152,7 +157,7 @@ def energy_support(delays_s, powers, fraction: float = 0.999) -> float:
 
     Parameters
     ----------
-    delays_s, powers : array_like
+    delays, powers : array_like
         The profile, as for :func:`rms_delay_spread`.
     fraction : float, default 0.999
         Share of the total energy the span must hold, in ``(0, 1]``. ``1.0``
@@ -165,10 +170,10 @@ def energy_support(delays_s, powers, fraction: float = 0.999) -> float:
         Seconds. ``0.0`` for a single arrival and for a profile carrying no
         energy at all; ``nan`` if a delay or power is non-finite.
     """
-    return _energy_support(delays_s, powers, fraction)
+    return _energy_support(delays, powers, fraction)
 
 
-def _energy_support(delays_s, powers, fraction: float = 0.999, *,
+def _energy_support(delays, powers, fraction: float = 0.999, *,
                    who: str = "energy_support") -> float:
     """:func:`energy_support` reporting its refusals as ``who``."""
     fraction = float(fraction)
@@ -177,7 +182,7 @@ def _energy_support(delays_s, powers, fraction: float = 0.999, *,
             f"{who}: fraction={fraction:g} is not a share of the energy. "
             f"Pass 0 < fraction <= 1 (1.0 spans every arrival, i.e. the "
             f"peak-to-peak delay).")
-    delays, power = _profile(delays_s, powers, who)
+    delays, power = _profile(delays, powers, who)
     if delays.size < 2:
         return 0.0
     if not (np.all(np.isfinite(delays)) and np.all(np.isfinite(power))):
@@ -197,11 +202,11 @@ def _energy_support(delays_s, powers, fraction: float = 0.999, *,
     return float(delays[cut] - delays[0])
 
 
-def _fold_notice(delays_s, powers, record: float, *, who: str, remediation: str,
+def _fold_notice(delays, powers, record: float, *, who: str, remediation: str,
                 first=None) -> Optional[str]:
     """What a ``record``-second synthesis record folds, as text, or ``None``.
 
-    ``delays_s`` and ``powers`` are per arrival. ``first`` is where each
+    ``delays`` and ``powers`` are per arrival. ``first`` is where each
     arrival's record starts — one value, or one per arrival when several
     receiver cells share a record and each starts at its own earliest
     arrival — and defaults to the earliest delay. An inverse FFT is
@@ -215,7 +220,7 @@ def _fold_notice(delays_s, powers, record: float, *, who: str, remediation: str,
 
     Parameters
     ----------
-    delays_s : array_like
+    delays : array_like
         Arrival delays (s).
     powers : array_like
         Arrival powers.
@@ -228,7 +233,7 @@ def _fold_notice(delays_s, powers, record: float, *, who: str, remediation: str,
     first : float or array_like, optional
         Where each record starts (s); ``None`` is the earliest delay.
     """
-    delays = np.asarray(delays_s, dtype=float).ravel()
+    delays = np.asarray(delays, dtype=float).ravel()
     power = np.asarray(powers, dtype=float).ravel()
     if delays.size < 2 or not np.all(np.isfinite(delays)):
         return None
@@ -247,7 +252,7 @@ def _fold_notice(delays_s, powers, record: float, *, who: str, remediation: str,
             f"{level} relative to the whole. {remediation}")
 
 
-def synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
+def synthesis_band(delays, powers, *, bandwidth: float, fc: float,
                    output_duration: Optional[float] = None,
                    energy_fraction: Optional[float] = None,
                    margin: float = 1.2) -> np.ndarray:
@@ -266,7 +271,7 @@ def synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
 
     Parameters
     ----------
-    delays_s, powers : array_like
+    delays, powers : array_like
         The profile, as for :func:`energy_support`, pooled over every cell
         the synthesis shares one record across.
     bandwidth : float, keyword-only
@@ -298,7 +303,7 @@ def synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
         (:func:`_fold_notice`).
     """
     return _synthesis_band(
-        delays_s,
+        delays,
         powers,
         bandwidth=bandwidth,
         fc=fc,
@@ -307,7 +312,7 @@ def synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
         margin=margin)
 
 
-def _synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
+def _synthesis_band(delays, powers, *, bandwidth: float, fc: float,
                    output_duration: Optional[float] = None,
                    energy_fraction: Optional[float] = None,
                    margin: float = 1.2,
@@ -348,7 +353,7 @@ def _synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
                 f"margin >= 1 (1.2 leaves the last arrival inside the "
                 f"window off the final sample).")
         support = _energy_support(
-            delays_s, powers,
+            delays, powers,
             0.999 if energy_fraction is None else energy_fraction, who=who)
         if not np.isfinite(support):
             raise ConfigurationError(
@@ -360,7 +365,7 @@ def _synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
         # points to define a spacing: fall back to the shortest record
         # that holds it.
         record = max(margin * support, 1.0 / bandwidth)
-    delays = np.asarray(delays_s, dtype=float).ravel()
+    delays = np.asarray(delays, dtype=float).ravel()
     if delays.size >= 2 and np.all(np.isfinite(delays)):
         span = float(delays.max() - delays.min())
         notice = _fold_notice(
@@ -377,25 +382,10 @@ def _synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
                        fc + bandwidth / 2.0, n_freq)
 
 
-def coherence_factor(convention: str = 'inverse_spread', factor=None) -> float:
+def _coherence_factor(convention, factor, *, who: str) -> float:
     """The ``k`` of ``1 / (k tau_rms)``: ``factor`` when given (any finite
-    ``k > 0``), else the named convention's — see
-    :data:`COHERENCE_BANDWIDTH_FACTORS`.
-
-    Parameters
-    ----------
-    convention : str, optional
-        A named ``k`` of :data:`COHERENCE_BANDWIDTH_FACTORS`. Default
-        ``'inverse_spread'`` (``k = 1``).
-    factor : float, optional
-        An explicit ``k > 0``, in place of ``convention``.
-    """
-    return _coherence_factor(convention, factor)
-
-
-def _coherence_factor(convention: str = 'inverse_spread', factor=None, *,
-                     who: str = "coherence_factor") -> float:
-    """:func:`coherence_factor` reporting its refusals as ``who``."""
+    ``k > 0``), else the named convention's in
+    :data:`COHERENCE_BANDWIDTH_FACTORS`; refusals name ``who``."""
     if factor is not None:
         return require_positive_finite_scalar(
             factor, who, "factor",
@@ -411,14 +401,15 @@ def _coherence_factor(convention: str = 'inverse_spread', factor=None, *,
             f"1/(k tau_rms); got {convention!r}.") from None
 
 
-def coherence_bandwidth(delays_s, powers, *,
+def coherence_bandwidth(delays, powers, *,
                         convention: str = 'inverse_spread',
                         factor=None) -> float:
     """Bandwidth over which a channel's transfer function stays correlated,
     in Hz, as ``1 / (k * tau_rms)`` with ``tau_rms`` the
     :func:`rms_delay_spread` of the profile.
 
-    The default ``k = 1`` is the convention the corpus states: "the inverse
+    The default ``k = 1`` is the convention the underwater-acoustics
+    sources state: "the inverse
     [of the elongation time] in hertz is a measure of the coherence
     bandwidth of the channel" (APL-UW TR 9407, sect. II.7.b, p. II-32) and
     ``W < 1 / sigma_t = W_c`` (Abraham, *Underwater Acoustic Signal
@@ -426,14 +417,15 @@ def coherence_bandwidth(delays_s, powers, *,
     named options ``'rappaport_0.5'`` (``k = 5``) and ``'rappaport_0.9'``
     (``k = 50``) are the 0.5- and 0.9-correlation rules of Rappaport,
     *Wireless Communications*, 2nd ed., sect. 5.4.3, eqs 5.39-5.40 — a
-    source outside the corpus, so they are options and not the default.
+    radio-channel text, so they are options and not the
+    default.
 
     Returns ``inf`` for a single arrival (no spread, a flat channel), and
     ``nan`` when the spread is.
 
     Parameters
     ----------
-    delays_s : array_like
+    delays : array_like
         Arrival delays (s).
     powers : array_like
         Arrival powers.
@@ -444,19 +436,19 @@ def coherence_bandwidth(delays_s, powers, *,
         An explicit ``k > 0``, in place of ``convention``.
     """
     return _coherence_bandwidth(
-        delays_s,
+        delays,
         powers,
         convention=convention,
         factor=factor)
 
 
-def _coherence_bandwidth(delays_s, powers, *,
+def _coherence_bandwidth(delays, powers, *,
                         convention: str = 'inverse_spread',
                         factor=None, who: str = "coherence_bandwidth"
                         ) -> float:
     """:func:`coherence_bandwidth` reporting its refusals as ``who``."""
     k = _coherence_factor(convention, factor, who=who)
-    spread = _rms_delay_spread(delays_s, powers, who=who)
+    spread = _rms_delay_spread(delays, powers, who=who)
     if not np.isfinite(spread):
         return float('nan')
     if spread <= 0.0:
@@ -464,7 +456,7 @@ def _coherence_bandwidth(delays_s, powers, *,
     return 1.0 / (k * spread)
 
 
-def channel_regime(delays_s, powers, symbol_rate: float, *,
+def channel_regime(delays, powers, symbol_rate: float, *,
                    convention: str = 'inverse_spread', factor=None,
                    rolloff: float = 0.0) -> ChannelRegime:
     """Whether a modem at ``symbol_rate`` sees this profile as flat or
@@ -481,7 +473,7 @@ def channel_regime(delays_s, powers, symbol_rate: float, *,
 
     Parameters
     ----------
-    delays_s, powers : array_like
+    delays, powers : array_like
         The profile, as for :func:`rms_delay_spread`.
     symbol_rate : float
         Symbol rate (Bd).
@@ -492,7 +484,7 @@ def channel_regime(delays_s, powers, symbol_rate: float, *,
         equal to the symbol rate.
     """
     return _channel_regime(
-        delays_s,
+        delays,
         powers,
         symbol_rate,
         convention=convention,
@@ -500,7 +492,7 @@ def channel_regime(delays_s, powers, symbol_rate: float, *,
         rolloff=rolloff)
 
 
-def _channel_regime(delays_s, powers, symbol_rate: float, *,
+def _channel_regime(delays, powers, symbol_rate: float, *,
                    convention: str = 'inverse_spread', factor=None,
                    rolloff: float = 0.0,
                    who: str = "channel_regime") -> ChannelRegime:
@@ -512,14 +504,14 @@ def _channel_regime(delays_s, powers, symbol_rate: float, *,
         raise ConfigurationError(
             f"{who}: rolloff must be in [0, 1]; got {rolloff!r}.")
     k = _coherence_factor(convention, factor, who=who)
-    coherence = _coherence_bandwidth(delays_s, powers, factor=k, who=who)
-    spread = _rms_delay_spread(delays_s, powers, who=who)
+    coherence = _coherence_bandwidth(delays, powers, factor=k, who=who)
+    spread = _rms_delay_spread(delays, powers, who=who)
     signal = (1.0 + rolloff) * symbol_rate
     return ChannelRegime(
-        coherence_bandwidth_hz=coherence,
-        signal_bandwidth_hz=signal,
-        rms_delay_spread_s=spread,
-        symbol_duration_s=1.0 / symbol_rate,
+        coherence_bandwidth=coherence,
+        signal_bandwidth=signal,
+        rms_delay_spread=spread,
+        symbol_duration=1.0 / symbol_rate,
         frequency_selective=bool(signal > coherence),
         isi_symbols=spread * symbol_rate,
         convention=(str(convention) if factor is None

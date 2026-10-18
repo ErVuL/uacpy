@@ -1,8 +1,8 @@
 """The settings record one :class:`~uacpy.models.sparc.SPARC` run
 resolves before it launches."""
 
-from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Tuple
 
 from uacpy.core.run_settings import EngineSettings
 
@@ -44,21 +44,20 @@ class SparcSettings(EngineSettings):
         The output time samples over ``[0, time_max]``: the constructor's,
         or the least count with more than eight per period at ``freq_max``
         (Jensen et al., Sect. 8.2.1.3).
-    rmax_m : float
+    rmax : float
         The deck's ``RMax`` (m); it sets the wavenumber step: the farthest
         receiver range times a pinned ``rmax_factor``, else that range plus
         ``1.2 × c_fast × time_max``, which keeps the range replica out of
         the record.
     rmax_factor : float
-        ``rmax_m`` over the farthest receiver range.
+        ``rmax`` over the farthest receiver range.
     rmax_factor_origin : str
-        Where ``rmax_m`` came from: the constructor or the default rule.
+        Where ``rmax`` came from: the constructor or the default rule.
     c_low, c_high : float
         The phase-speed bounds (m/s) the deck carries.
-    c_low_origin, c_high_origin : str or None
+    c_low_origin, c_high_origin : str
         Where each bound came from: the constructor, or the rule that
-        derived it from the environment. ``None`` on a record that does not
-        state it (one saved without these fields). Keyword-only.
+        derived it from the environment.
     n_wavenumbers : int
         The wavenumbers ``sparc.f90:116`` marches.
     n_mesh : tuple of int
@@ -94,13 +93,13 @@ class SparcSettings(EngineSettings):
     time_max: float
     time_max_origin: str
     n_time_samples: int
-    rmax_m: float
+    rmax: float
     rmax_factor: float
     rmax_factor_origin: str
     c_low: float
     c_high: float
-    c_low_origin: Optional[str] = field(default=None, kw_only=True)
-    c_high_origin: Optional[str] = field(default=None, kw_only=True)
+    c_low_origin: str
+    c_high_origin: str
     n_wavenumbers: int
     n_mesh: Tuple[int, ...]
     output_mode: str

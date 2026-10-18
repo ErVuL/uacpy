@@ -225,7 +225,7 @@ def test_the_excitation_plot_draws_both_views_against_mode_angle():
 
     # env= reads the speed at the source depth off the profile; the call
     # refuses to invent one, because the x axis IS an angle against it.
-    fig, ax = plot_mode_excitation(modes, src, env=env)
+    fig, ax = plot_mode_excitation(modes.excitation_pattern(src, env=env))
     stems = [c for c in ax.collections] + ax.get_lines()
     assert stems, "nothing drawn"
     assert 'angle' in ax.get_xlabel().lower(), ax.get_xlabel()
@@ -400,7 +400,6 @@ def test_the_excitation_plot_shows_an_upward_steered_main_lobe():
     matplotlib.use('Agg')
     from uacpy.models.kraken import Kraken
     from uacpy.tests.conftest import make_pekeris
-    from uacpy.plot import plot_mode_excitation
     env = make_pekeris(name='steered', bathymetry=100.0)
     zs = np.linspace(20.0, 60.0, 5)
     c, f = 1500.0, 200.0
@@ -409,7 +408,7 @@ def test_the_excitation_plot_shows_an_upward_steered_main_lobe():
     modes = Kraken(verbose=False).compute_modes(env, probe)
     w = np.exp(-1j * k * (zs - zs.mean()) * np.sin(np.deg2rad(-30.0)))
     src = uacpy.Source(depths=zs, frequencies=f, weights=w)
-    fig, ax = plot_mode_excitation(modes, src, sound_speed=c)
+    fig, ax = modes.excitation_pattern(src, sound_speed=c).plot()
     curve = [ln for ln in ax.get_lines() if ln.get_label().startswith('array')]
     assert curve, [ln.get_label() for ln in ax.get_lines()]
     x, y = curve[0].get_xdata(), curve[0].get_ydata()

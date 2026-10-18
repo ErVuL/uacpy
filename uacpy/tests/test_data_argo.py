@@ -153,6 +153,42 @@ def test_fetch_ssp_argo_builds_profile(monkeypatch):
     assert ssp.depths[0] < ssp.depths[-1]          # increasing depth
 
 
+# One cast 78 km (past ARGO_OFFSET_WARN_KM) and 9 days (past
+# ARGO_OFFSET_WARN_DAYS) from the request: both offset rules fire.
+_FAR_STALE_ROWS = [
+    "4900001,1,A,2024-06-04T00:00:00Z,30.7,-40.0,5,20,36,1,1,1,1\n",
+    "4900001,1,A,2024-06-04T00:00:00Z,30.7,-40.0,100,15,36.2,1,1,1,1\n",
+    "4900001,1,A,2024-06-04T00:00:00Z,30.7,-40.0,1000,5,35,1,1,1,1\n",
+]
+
+
+@pytest.mark.parametrize('fetch', [
+    'fetch_argo_profile', 'fetch_ssp_argo', 'fetch_ssp'])
+def test_a_far_and_stale_cast_gives_one_notice_naming_both(monkeypatch, fetch):
+    """One summary warning per fetch call: the distance and the date notices
+    fold into one ProvenanceWarning, named after the function the user
+    called."""
+    import warnings
+    from uacpy.core.exceptions import ProvenanceWarning
+    from uacpy.data import bathymetry, sound_speed
+    monkeypatch.setattr(argo, 'http_get',
+                        lambda url, **kw: _csv(_FAR_STALE_ROWS))
+    monkeypatch.setattr(bathymetry, '_refuse_a_dry_point', lambda *a, **k: None)
+    call = {'fetch_argo_profile': argo.fetch_argo_profile,
+            'fetch_ssp_argo': argo.fetch_ssp_argo,
+            'fetch_ssp': lambda p, **kw: sound_speed.fetch_ssp(
+                p, source='argo', **kw)}[fetch]
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        call((30.0, -40.0), date='2024-05-26')
+    notices = [str(w.message) for w in rec
+               if issubclass(w.category, ProvenanceWarning)]
+    assert len(notices) == 1, notices
+    assert notices[0].startswith(f'{fetch}: 2 note(s)')
+    assert 'km from the requested point' in notices[0]
+    assert 'the data are dated 2024-06-04, 9 days' in notices[0]
+
+
 def test_no_profile_raises(monkeypatch):
     monkeypatch.setattr(argo, 'http_get', lambda url, **kw: _csv([]))
     with pytest.raises(DataFetchError, match='No Argo profile'):

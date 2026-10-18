@@ -1,15 +1,16 @@
 """The offline cache must not execute what it reads, nor write where it is told.
 
-Two findings, both demonstrated before they were fixed:
+Two threats:
 
-* the EMODnet polygon index and the NSIDC sea-ice climatology were **pickles**,
-  so a planted cache file ran arbitrary code through ``fetch_bottom_grainsize`` and
-  ``fetch_sea_ice_concentration``. Neither file is ever downloaded — both are
-  built locally — so the vector is write access to the cache directory, which a
-  shared ``$UACPY_DATA_CACHE`` and a tarball'd working tree both hand over.
-* every install-time writer staged at a predictable ``<out>.part``, so a
-  symlink pre-placed there sent the run's output wherever the link pointed and
-  left the cache entry a symlink, redirecting every later write too.
+* a **pickled** EMODnet polygon index or NSIDC sea-ice climatology would run
+  arbitrary code through ``fetch_bottom_grainsize`` and
+  ``fetch_sea_ice_concentration`` when read. Neither file is ever downloaded —
+  both are built locally — so the vector is write access to the cache
+  directory, which a shared ``$UACPY_DATA_CACHE`` and a tarball'd working tree
+  both hand over.
+* an install-time writer staging at a predictable ``<out>.part`` would let a
+  symlink pre-placed there send the run's output wherever the link pointed and
+  leave the cache entry a symlink, redirecting every later write too.
 
 The tests below assert the *safe* behaviour — a payload does not run, a
 pre-placed link does not redirect — not merely that the happy path still works.
@@ -42,7 +43,8 @@ def _seaice_npz(path, marker=None):
     """A sea-ice climatology npz — real arrays, or an object array if payloaded."""
     if marker is None:
         arrays = {'N': np.full((12, 4, 4), 0.6, np.float32),
-                  'S': np.full((12, 4, 4), 0.6, np.float32)}
+                  'S': np.full((12, 4, 4), 0.6, np.float32),
+                  'years': np.array([2019, 2023], np.int32)}
     else:
         arrays = {h: np.array([_Payload(marker)], dtype=object) for h in 'NS'}
     np.savez_compressed(path, **arrays)
@@ -103,48 +105,42 @@ def test_the_readers_import_no_pickle():
         assert 'pickle.load' not in body, module.__name__
 
 
-# ── a leftover pickle is refused, not converted ───────────────────────────────
+# ── a pickle in the cache is never opened ─────────────────────────────────────
 
-@pytest.mark.parametrize('module, dataset, flag', [
-    (emodnet_local, 'emodnet', './install.sh --data emodnet'),
-    (seaice_local, 'seaice', './install.sh --data seaice'),
+@pytest.mark.parametrize('module, dataset, stale_name, flag', [
+    (emodnet_local, 'emodnet', 'seabed_substrate.pkl',
+     './install.sh --data emodnet'),
+    (seaice_local, 'seaice', 'seaice_climatology.pkl',
+     './install.sh --data seaice'),
 ])
-def test_a_leftover_pickle_index_is_refused_with_a_migration_error(
-        module, dataset, flag, cache, tmp_path):
-    """Converting the old file in place would have to unpickle it first, which
-    is the execution the format change removes — so it is refused. The message
-    must say *why* (a security migration, not a damaged file) and name both the
-    file to delete and the flag that rebuilds it."""
+def test_a_cache_holding_only_a_pickle_is_not_found(
+        module, dataset, stale_name, flag, cache, tmp_path):
+    """uacpy reads only the .npz it writes: a cache holding a pickled index
+    (a format no current uacpy writes) gets the ordinary not-found message
+    naming the install flag, and the pickle is never opened."""
     marker = tmp_path / 'ran.txt'
     import pickle
-    stale = cache / dataset / module.RETIRED_INDEX_FILE
-    stale.write_bytes(pickle.dumps(_Payload(marker)))
+    (cache / dataset / stale_name).write_bytes(pickle.dumps(_Payload(marker)))
 
-    with pytest.raises(ConfigurationError,
-                       match='is in the retired pickle format') as excinfo:
+    with pytest.raises(ConfigurationError, match='not found') as excinfo:
         module._build_index() if dataset == 'emodnet' else module._build_model()
 
-    text = str(excinfo.value)
-    assert not marker.exists(), 'the refusal unpickled the file it refused'
-    assert str(stale) in text                       # names the offending file
-    assert flag in text                             # names the install flag
-    assert 'security migration' in text
-    assert 'not a damaged file' in text
-    assert 'corrupt' not in text.lower()
+    assert not marker.exists(), 'the reader unpickled a file in the cache'
+    assert flag in str(excinfo.value)
 
 
-def test_a_missing_dataset_reports_not_found_without_the_migration_wording(cache):
+def test_a_missing_dataset_reports_not_found_without_the_pickle_wording(cache):
     """With no index of either format the message is the ordinary not-found
-    one; the migration wording must not leak onto a cold cache."""
+    one; the pickle refusal must not leak onto a cold cache."""
     with pytest.raises(ConfigurationError, match='not found') as excinfo:
         emodnet_local._build_index()
-    assert 'migration' not in str(excinfo.value)
+    assert 'pickle' not in str(excinfo.value)
 
 
-def test_a_present_npz_wins_over_a_leftover_pickle(cache):
-    """A rebuilt cache that still has the old file beside the new one is
-    already migrated: the refusal is for caches with *only* the pickle."""
-    (cache / 'emodnet' / emodnet_local.RETIRED_INDEX_FILE).write_bytes(b'stale')
+def test_a_present_npz_is_read_beside_a_stray_pickle(cache):
+    """A cache that has a pickle beside the .npz reads the .npz and leaves
+    the pickle unopened."""
+    (cache / 'emodnet' / 'seabed_substrate.pkl').write_bytes(b'stale')
     shapely = pytest.importorskip('shapely')
     poly = shapely.geometry.box(2.0, 54.0, 3.0, 56.0)
     _emodnet_npz(cache / 'emodnet' / emodnet_local.INDEX_FILE,
@@ -180,7 +176,7 @@ def test_the_seaice_npz_round_trips_nan_and_dtype(cache):
     grid = np.full((12, 4, 4), 0.6, np.float32)
     grid[:, 0, 0] = np.nan
     np.savez_compressed(cache / 'seaice' / seaice_local.INDEX_FILE,
-                        N=grid, S=grid)
+                        N=grid, S=grid, years=np.array([2019, 2023], np.int32))
     back = seaice_local.sea_ice_grid(3, hemi='N')
     assert back.dtype == np.float32
     assert np.array_equal(back, grid[2], equal_nan=True)

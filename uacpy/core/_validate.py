@@ -26,7 +26,6 @@ from typing import Optional
 
 import numpy as np
 
-from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
@@ -352,11 +351,13 @@ def warn_attenuation_beyond_seabeds(value, label: str) -> None:
     """``ValidityWarning`` when a seabed attenuation (dB/wavelength) is over
     :data:`SEABED_ATTENUATION_SUSPECT_DB_PER_WAVELENGTH`, naming the unit
     and the converter. A plausibility bound, so it warns and never raises;
-    :func:`require_attenuation_in_range` refuses past the solvers' ceiling."""
+    past the Acoustics-Toolbox ceiling :func:`warn_attenuation_past_at_ceiling`
+    speaks instead (one warning per value)."""
     if value is None:
         return
     alpha = float(value)
-    if alpha > SEABED_ATTENUATION_SUSPECT_DB_PER_WAVELENGTH:
+    if (SEABED_ATTENUATION_SUSPECT_DB_PER_WAVELENGTH < alpha
+            <= MAX_ATTENUATION_DB_PER_WAVELENGTH):
         warnings.warn(
             f"{label} = {alpha:g} dB/wavelength is far beyond any seabed in "
             f"JKPS Table 1.3 (0.1-1.0 dB/wavelength compressional, 0.2-2.5 "
@@ -366,12 +367,40 @@ def warn_attenuation_beyond_seabeds(value, label: str) -> None:
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
+def warn_attenuation_past_at_ceiling(value, label: str) -> None:
+    """``ValidityWarning`` on a carrier for an attenuation past the
+    Acoustics-Toolbox ceiling
+    (:data:`uacpy.core.deck_limits.MAX_ATTENUATION_DB_PER_WAVELENGTH`): the
+    carrier keeps it, because OASES and RAM take any attenuation
+    (``oaseun31.f:1522-1523`` and ``ramgeo1.5.f:199`` turn it into an
+    imaginary wavenumber), and the AT deck writers refuse it
+    (:func:`require_attenuation_in_range`)."""
+    if value is None:
+        return
+    alpha = float(value)
+    if alpha > MAX_ATTENUATION_DB_PER_WAVELENGTH:
+        warnings.warn(
+            f"{label} = {alpha:g} dB/wavelength exceeds "
+            f"{MAX_ATTENUATION_DB_PER_WAVELENGTH:.4f}, the ceiling of the "
+            f"Acoustics-Toolbox solvers (misc/AttenMod.f90's CRCI, :116): "
+            f"Kraken, Scooter, SPARC, Bounce and Bellhop refuse it at run, "
+            f"OASES and RAM take it. uacpy takes dB/wavelength, and a value "
+            f"in dB/km or dB/m typed here reads that large; "
+            f"uacpy.acoustics.convert_attenuation_units converts it.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
 def require_attenuation_in_range(value, label: str) -> None:
     """Raise ``ConfigurationError`` for an attenuation past the AT solvers' own
     ceiling — see :data:`uacpy.core.deck_limits.MAX_ATTENUATION_DB_PER_WAVELENGTH`
-    for the derivation. Above it Kraken, Scooter, OAST and Bellhop's Fortran
-    build all abort in ``CRCI``, while ``bellhopcxx``/``bellhopcuda`` return a
-    field with *less* loss than a low attenuation gives.
+    for the derivation. The Acoustics-Toolbox deck writers call it: above
+    the ceiling the Fortran solvers (Kraken, Scooter, SPARC, Bounce,
+    Bellhop's Fortran build) abort in ``CRCI``
+    (``misc/AttenMod.f90:116-120``), while ``bellhopcxx``/``bellhopcuda``
+    return a field with *less* loss than a low attenuation gives. OASES and
+    RAM have no such bound (``oaseun31.f:1522-1523`` and ``ramgeo1.5.f:199``
+    turn any attenuation into an imaginary wavenumber), and the carriers
+    only warn (:func:`warn_attenuation_past_at_ceiling`).
     """
     if value is None:
         return
@@ -441,6 +470,11 @@ def require_strictly_increasing(values: np.ndarray, label: str, *,
     only ``_require_*`` guard that rejects an empty array — the value
     predicates above also serve ``Field.coords``, where an axis sliced to
     nothing is a supported state.
+
+    The signal layer's frequency/time axes and the carriers' axes answer
+    this one question the same way. Call it *after* a local monotonicity
+    check that carries a domain-specific remediation hint: the local raise
+    then answers the case it knows about and this backstops the empty axis.
     """
     arr = np.asarray(values, dtype=float).ravel()
     if arr.size == 0:
@@ -610,6 +644,15 @@ def require_real_signal(data, who: str, *, ndim: int = 1,
     return x
 
 
+#: The most channels a 2-D record's layout guards take an axis to hold:
+#: ``read_wav`` returns ``(n_samples, n_channels)``, so a trailing axis this
+#: short (and shorter than the leading one) is channels to the estimators'
+#: time-axis guard, and ``write_wav`` reads more channels than this, and
+#: than frames, as a channel-first array. One threshold for the one layout
+#: question both ask (uacpy guidance).
+_MAX_CHANNELS_GUESSED = 64
+
+
 def normalize_axis(data, axis, who: str) -> int:
     """``axis`` as a non-negative index into the dimensions of ``data`` (an
     array). Refuses an axis that is not an integer and one the array does
@@ -675,24 +718,6 @@ def require_at_most_nyquist(frequency, sample_rate, who, what, consequence):
     """
     _nyquist_check(frequency, sample_rate, who, what, consequence,
                    "above", lambda f, nyq: f <= nyq)
-
-
-def require_increasing_axis(values, label: str):
-    """Refuse an empty or non-monotonic frequency/time axis, typed.
-
-    Delegates to ``core._validate.require_strictly_increasing``, the
-    canonical form of this predicate, so the signal layer's axes and the
-    carrier objects' axes answer the same question the same way. Its docstring
-    carries the reasoning for both halves — in particular why an empty axis is
-    refused (every consumer reads the axis positionally, so it otherwise fails
-    much later inside numpy naming no input the caller supplied) and why a
-    one-sample axis is accepted.
-
-    Call it *after* a local monotonicity check that carries a
-    domain-specific remediation hint: the local raise then answers the case it
-    knows about and this backstops the empty axis.
-    """
-    require_strictly_increasing(values, label)
 
 
 def sanitize_title(name: str) -> str:
@@ -808,24 +833,37 @@ def canonical_choice(value, choices, who: str, name: str) -> str:
 
 def refuse_two_columns(value, *, who: str, name: str, columns: str,
                        pair: str, carrier: str, remediation: str) -> None:
-    """Refuse ``value`` when it is two columns, shape ``(2, N)`` with
-    ``N != 2``, where a table carrier takes ``(N, 2)`` pairs: a pair has two
-    entries, so such an input cannot be pairs. The one rule the
-    ``ssp=``, ``bathymetry=`` and ``altimetry=`` coercers share.
+    """Refuse ``value`` when it is two columns, where a table carrier takes
+    ``(N, 2)`` pairs: shape ``(2, N)`` with ``N != 2`` (a pair has two
+    entries, so such an input cannot be pairs), or, at any length, a list /
+    tuple of two 1-D numpy arrays or a tuple of two lists — the spellings
+    of ``(ranges, depths)``; at two samples each they would otherwise read
+    as two pairs, a different table with no message. The one rule the
+    ``ssp=``, ``bathymetry=`` and ``altimetry=`` coercers share; pass the
+    caller's raw ``value``.
 
-    A ``2 x 2`` input is read as two pairs, the documented form; two
-    2-sample columns cannot be told from it and pass unrefused. A value
-    numpy cannot make a float array of is left to the caller's own check.
+    Pairs are a list of tuples ``[(r0, d0), (r1, d1)]``, a tuple of tuples,
+    a nested list ``[[r0, d0], [r1, d1]]`` or a ``2 x 2`` array, each read
+    as two pairs, the documented form. A value numpy cannot make a float
+    array of is left to the caller's own check.
     """
     try:
         shape = np.shape(np.asarray(value, dtype=float))
     except (TypeError, ValueError):
         return
-    if len(shape) == 2 and shape[0] == 2 and shape[1] != 2:
+    two_columns = (
+        isinstance(value, (list, tuple)) and len(value) == 2
+        and (all(isinstance(v, np.ndarray) and v.ndim == 1 for v in value)
+             or (isinstance(value, tuple)
+                 and all(isinstance(v, list) for v in value))))
+    if two_columns or (len(shape) == 2 and shape[0] == 2 and shape[1] != 2):
         raise ConfigurationError(
             f"{who}: {name}=({columns}) is two columns; {name}= takes "
             f"({pair}) PAIRS or {carrier}.",
-            remediation=remediation)
+            remediation=remediation + (
+                f" Two 1-D arrays, or a tuple of two lists, are read as "
+                f"columns at any length; write two ({pair}) pairs as "
+                f"[({pair}), ({pair})]." if two_columns else ""))
 
 
 def water_pairs(value, *, name: str, who: str):
@@ -855,74 +893,6 @@ def water_pairs(value, *, name: str, who: str):
     require_strictly_increasing(depths, f"{who}: the depths of the {name} "
                                 f"pairs")
     return WaterProfile(depths, table[:, 1])
-
-
-#: The hearing groups of Southall et al. (2019) whose weighting and
-#: thresholds are for sound in air, each with its in-water counterpart: their
-#: Tables 6-7 give "dB re (20 μPa)2 s in air (groups PCA and OCA only)"
-#: against "dB re 1 μPa2 s under water" (45_2_southall.md, Table 6 caption).
-_IN_AIR_GROUPS = {"PCA": "PCW", "OCA": "OCW"}
-
-#: Share of the energy a weighting TABLE may leave outside its span, where it
-#: carries no weight, before :func:`warn_table_leaves_energy_out` reports it.
-_TABLE_DROPPED_SHARE = 0.5
-
-
-def warn_in_air_group_in_water(weighting, ref, who):
-    """Warn when an in-air hearing group (``'PCA'``, ``'OCA'``) weights a
-    level referenced to the underwater pressure, 1 µPa: their thresholds
-    are re (20 µPa)²·s, so the comparison is 26 dB off, and a record under
-    water takes the group's in-water weighting."""
-    if not isinstance(weighting, str):
-        return
-    group = weighting.upper()
-    if group not in _IN_AIR_GROUPS or ref != REFERENCE_PRESSURE_WATER:
-        return
-    warnings.warn(
-        f"{who}: {weighting!r} is an in-air hearing group (Southall et al. "
-        f"2019), whose thresholds (EXPOSURE_THRESHOLDS[{group!r}]) are dB re "
-        f"(20 µPa)²·s, and this level is re (1 µPa)²·s, the underwater "
-        f"reference: the two differ by 26 dB. Under water, weight with "
-        f"{_IN_AIR_GROUPS[group]!r}; for a record made in air, pass "
-        f"ref=20e-6.",
-        ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
-
-
-def warn_table_leaves_energy_out(weighting, frequency, energy, who):
-    """Warn when a ``(frequencies_Hz, W_dB)`` weighting table leaves more
-    than half of the energy outside its span, where it carries no weight:
-    ``energy`` is the energy per bin at ``frequency`` (Hz). A table typed in
-    kHz is the usual cause, and the warning says so when the same table in
-    Hz would keep more. A hearing group or a function is not a table and is
-    never reported."""
-    if not (isinstance(weighting, (tuple, list)) and len(weighting) == 2):
-        return
-    edges = np.asarray(weighting[0], dtype=float)
-    f = np.asarray(frequency, dtype=float)
-    e = np.asarray(energy, dtype=float)
-    positive = f > 0.0
-    total = float(np.sum(e[positive]))
-    if not total > 0.0:
-        return
-
-    def outside(scale):
-        lo, hi = scale * edges[0], scale * edges[-1]
-        return float(np.sum(e[positive & ((f < lo) | (f > hi))])) / total
-
-    share = outside(1.0)
-    if share <= _TABLE_DROPPED_SHARE:
-        return
-    inside = 1.0 - share
-    kept = ("none of the energy lies inside it" if inside <= 0.0 else
-            f"only {100 * inside:.3g} % of the energy lies inside it, "
-            f"{-10 * np.log10(inside):.1f} dB below the unweighted level")
-    hint = (" If its frequencies are in kHz, multiply them by 1000: "
-            f"{100 * (1.0 - outside(1000.0)):.3g} % of the energy would lie "
-            f"inside it." if outside(1000.0) < share else "")
-    warnings.warn(
-        f"{who}: the weighting table spans {edges[0]:g}-{edges[-1]:g} Hz and "
-        f"carries no weight outside it, and {kept}.{hint}",
-        ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 def water_shape(value, *, name: str, who: str) -> tuple:

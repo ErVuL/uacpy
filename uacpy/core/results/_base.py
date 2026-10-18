@@ -140,15 +140,11 @@ _UNIVERSAL_METADATA: Dict[str, Tuple[type, str]] = {
         'run_settings, read back as result.run_settings); a result read back '
         'by from_xarray carries the line here.'
     ),
-    # Attached by the shared Field synthesis helpers (``to_time_trace`` /
+    # Attached by the shared Field synthesis helpers (``impulse_response`` /
     # ``synthesize_time_series``), so they are model-independent.
     'source_model': (
         str, 'Model that produced the H(f) the time-domain trace was '
         'synthesised from.'
-    ),
-    'source_waveform_sample_rate': (
-        float, 'Sample rate (Hz) of the source waveform passed to '
-        'Field.synthesize_time_series.'
     ),
 }
 
@@ -161,30 +157,8 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         float, 'Carrier (centre) frequency fc (Hz) used to build H(f) '
         'from a single arrivals run.'
     ),
-    ('Bellhop', 'dt'): (
-        float, 'Time-sample step (s) for TIME_SERIES results '
-        '(= 1 / sample_rate).'
-    ),
-    ('Bellhop', 'fs'): (
-        float, 'Sample rate (Hz) for TIME_SERIES results.'
-    ),
-    ('Bellhop', 'nt'): (
-        int, 'Number of samples in the TIME_SERIES time axis.'
-    ),
-    ('Bellhop', 't_start'): (
-        float, 'Start time (s) of the delay-and-sum window.'
-    ),
     # ───────── Kraken (modes + field pipeline, backend=kraken/krakenc) ─────────
     ('Kraken', 'mod_file'): (str, 'Kraken modes file (.mod).'),
-    ('Kraken', 'n_modes_requested'): (
-        int, 'User-supplied mode-count cap. Kraken itself does not cap '
-        'mode count; this records what the wrapper sliced via .first_n().'
-    ),
-    ('Kraken', 'leaky_modes'): (
-        bool, 'True when the run was configured to include leaky modes '
-        '(c_high pushed to ~1e9). The real-arithmetic backend raises on '
-        'leaky modes — they require backend=krakenc (complex k).'
-    ),
     ('Kraken', 'shd_file'): (
         str, 'Kraken pressure-field output (.shd) from the field.exe step.'
     ),
@@ -193,17 +167,6 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         "name field.prt, so it is distinct from the modes run's "
         '<base_name>.prt recorded as prt_file. Attached only when '
         'cleanup=False and the log exists.'
-    ),
-    ('Kraken', 'mode_coupling'): (
-        str, "'adiabatic', 'coupled', or 'none' (range-independent run)."
-    ),
-    ('Kraken', 'n_profiles'): (
-        int, 'Number of modal segments used for the range-dependent '
-        'field path.'
-    ),
-    ('Kraken', 'native_broadband'): (
-        bool, 'True when Kraken produced H(f) natively from a '
-        'multi-frequency .mod file (versus a Python frequency loop).'
     ),
     ('Scooter', 'grn_file'): (
         str, "Scooter Green's-function output (.grn)."
@@ -223,13 +186,6 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         "Wavenumber-branch selector the Hankel transform consumed: "
         "'positive' branch, 'negative' branch, or 'both'."
     ),
-    ('Scooter', 'fc'): (
-        float, 'Centre frequency (Hz) of the broadband sweep — picked '
-        'as the middle element of the GreensFunction frequencies.'
-    ),
-    ('Scooter', 'n_frequencies'): (
-        int, 'Number of frequencies in the broadband sweep.'
-    ),
     # ───────── SPARC (time-domain FFP) ─────────
     ('SPARC', 'grn_file'): (
         str, "SPARC Green's-function snapshot (.grn, output_mode='S')."
@@ -237,27 +193,12 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('SPARC', 'rts_file'): (
         str, "SPARC received-time-series output (.rts, output_mode='R'/'D')."
     ),
-    ('SPARC', 'n_depth_runs'): (
-        int, "Number of per-depth SPARC subprocess calls dispatched "
-        "(R-mode loops over receiver depths)."
-    ),
-    ('SPARC', 'n_range_runs'): (
-        int, "Number of per-range SPARC subprocess calls dispatched "
-        "(D-mode loops over receiver ranges)."
-    ),
-    ('SPARC', 'dt'): (float, 'Time-sample step (s) for TIME_SERIES output.'),
-    ('SPARC', 'fs'): (float, 'Sample rate (Hz) for TIME_SERIES output.'),
-    ('SPARC', 'nt'): (int, 'Number of samples in the TIME_SERIES time axis.'),
-    ('SPARC', 't_start'): (
-        float, 'Start time (s) of the SPARC TIME_SERIES window.'
-    ),
     # Snapshot-mode SPARC attaches the GreensFunction transform keys when
     # the snapshot path computes p(z, r) via time-FFT + Hankel transform.
     # The ``snapshot_*`` / ``normalize`` / ``absolute_tl_calibrated`` keys
     # come from :meth:`uacpy.core.results.GreensFunction.snapshot_to_field`,
     # which users call directly on a .grn (the SPARC wrapper itself runs the
-    # time-evolving path); stamp ``result.model = 'SPARC'`` for
-    # ``list_metadata()`` to resolve them.
+    # time-evolving path); the Field it returns carries the .grn's model.
     ('SPARC', 'transform_method'): (
         str, "Hankel-transform method used to convert the k-domain "
         "snapshot to r-domain pressure: 'hankel_per_snapshot_time' for "
@@ -322,15 +263,11 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         '(n_depths, n_ranges) of the native OAST output grid before any '
         'interpolation onto the user-supplied receiver grid.'
     ),
-    ('OAST', 'native_ranges'): (
-        'ndarray',
-        'Native OAST range axis (m) — present when the wrapper resampled '
-        'OAST onto the user receiver grid.'
-    ),
     ('OAST', 'interpolated'): (
         bool,
         'True when the returned field was resampled onto the user '
-        'receiver grid; False / absent when the native grid was kept.'
+        "receiver grid (OAST's own samples are then "
+        "``components['native']``); absent when the native grid was kept."
     ),
     ('OAST', 'plotted_frequencies'): (
         object,
@@ -355,11 +292,11 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('OASN', 'title'): (
         str, 'Title string from the OASN output file header.'
     ),
-    ('OASN', 'surface_noise_level'): (
+    ('OASN', 'surface_noise_level_dB'): (
         float, 'Surface noise level (dB re 1 µPa²/Hz) from the .xsm header '
                '(RunMode.COVARIANCE).'
     ),
-    ('OASN', 'white_noise_level'): (
+    ('OASN', 'white_noise_level_dB'): (
         float, 'White (sensor) noise level (dB re 1 µPa²/Hz) from the .xsm '
                'header; -200 when none was configured (RunMode.COVARIANCE).'
     ),
@@ -369,14 +306,6 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ),
     ('OASR', 'rco_file'): (
         str, 'Complex reflection-coefficient output (.rco).'
-    ),
-    ('OASR', 'sampling_type'): (
-        str, "How the angle/slowness axis was sampled by OASR "
-        "('angle' or 'slowness')."
-    ),
-    ('OASR', 'angle_type'): (
-        str, "How the requested angles were read ('grazing' or 'incidence'); "
-        "``theta`` on the result is always grazing."
     ),
     ('OASR', 'reflection_type'): (
         str, "Which reflection coefficient OASR returned: 'P-P' (default), "
@@ -420,15 +349,6 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('OASS', 'n_integrated_wavenumbers'): (
         int, 'Wavenumber count OASS derived from the .rhs sampling '
         '(unoass21.f:209-215), which overrides the deck value.'
-    ),
-    ('OASS', 'native_ranges'): (
-        'ndarray',
-        'Equispaced range axis (m) OASS integrated on — present when the '
-        'wrapper resampled onto a non-equispaced receiver.ranges.'
-    ),
-    ('OASS', 'interpolated'): (
-        bool, 'True when the reverberation loss was interpolated onto the '
-        'user receiver grid; False / absent when the native grid was kept.'
     ),
     ('OASS', 'n_receivers'): (
         int, 'Number of receivers (NRCV) in the OASS array.'
@@ -580,7 +500,9 @@ class Result(DeepCopyMixin, Exportable):
         :class:`Arrivals` a broadband or time-series field was synthesised
         from; ``'bounce'``, the :class:`ReflectionCoefficient` table a
         routed seabed used; ``'mean_field'``, the OASES mean field a
-        reverberation run scattered. Read back as the read-only
+        reverberation run scattered; ``'native'``, the field on the
+        engine's own grid when the result is resampled onto the receiver's
+        (OAST's FFT range grid). Read back as the read-only
         :attr:`components`; a derived result does not inherit them, except
         through :meth:`Field.replace` on the same quantity.
     """
@@ -692,7 +614,7 @@ class Result(DeepCopyMixin, Exportable):
             self._components = dict(components)
 
     #: The names :attr:`components` may carry.
-    COMPONENT_NAMES = ('arrivals', 'bounce', 'mean_field')
+    COMPONENT_NAMES = ('arrivals', 'bounce', 'mean_field', 'native')
 
     @property
     def components(self) -> Mapping[str, 'Result']:
@@ -925,8 +847,7 @@ class Result(DeepCopyMixin, Exportable):
             self._netcdf_parts(None, parts)
         finally:
             _WRITING_GROUPS.reset(token)
-        write_netcdf_groups(parts, path,
-                            who=f"{type(self).__name__}.to_netcdf", **kwargs)
+        write_netcdf_groups(parts, path, **kwargs)
 
     def _netcdf_parts(self, group, parts) -> None:
         """Append ``(group, xarray object)`` for this result and, below it,
@@ -1086,24 +1007,40 @@ class Result(DeepCopyMixin, Exportable):
         return cls.from_xarray(obj)
 
     def _export_attrs(self) -> Dict[str, Any]:
-        """The identity (:meth:`_identity_attrs`) plus every metadata
-        entry a NetCDF attribute can hold (:func:`encode_attrs`)."""
+        """The identity (:meth:`_identity_attrs`) plus the source identity
+        (:meth:`_source_identity`) and every metadata entry a NetCDF
+        attribute can hold, both written by :func:`encode_attrs` (complex
+        source weights as a real/imaginary pair)."""
         attrs = self._identity_attrs()
-        encode_attrs(self.metadata or {}, attrs, skip=self._IDENTITY_ATTRS,
+        encode_attrs({**(self.metadata or {}), **self._source_identity()},
+                     attrs, skip=self._IDENTITY_ATTRS,
                      who=f"{type(self).__name__}.to_xarray")
         return attrs
+
+    def _source_identity(self) -> Dict[str, Any]:
+        """``source_level_dB`` and ``source_weights`` by name, as the
+        exports write them beside the metadata; ``None`` when unset."""
+        return {tag: getattr(self, tag) for tag in self._SOURCE_IDENTITY}
 
     @classmethod
     def _identity_from_attrs(cls, attrs: Dict[str, Any],
                              reserved=()) -> Dict[str, Any]:
         """The identity constructor keywords from the attrs
-        :meth:`_export_attrs` wrote: ``metadata`` is every other attr outside
-        ``reserved``, the encoded entries restored (:func:`decode_attrs`),
-        with the engine recorded by id as ``metadata['model_source_id']``,
-        since the engine object does not travel through a file, and the
-        ``run_settings`` record rebuilt from its JSON."""
+        :meth:`_export_attrs` wrote: the source identity
+        (``source_level_dB``, ``source_weights``), ``metadata`` every other
+        attr outside ``reserved``, the encoded entries restored
+        (:func:`decode_attrs`), with the engine recorded by id as
+        ``metadata['model_source_id']``, since the engine object does not
+        travel through a file, and the ``run_settings`` record rebuilt from
+        its JSON."""
         metadata = decode_attrs(
             attrs, (*cls._IDENTITY_ATTRS, *cls._FILE_ATTRS, *reserved))
+        source = {tag: metadata.pop(tag, None)
+                  for tag in cls._SOURCE_IDENTITY}
+        # A one-element attribute reads back from a file as a scalar; the
+        # weights are one per source depth.
+        if source['source_weights'] is not None:
+            source['source_weights'] = np.atleast_1d(source['source_weights'])
         if 'model_source_id' in attrs:
             metadata['model_source_id'] = attrs['model_source_id']
         phase_reference = attrs.get('phase_reference')
@@ -1121,6 +1058,7 @@ class Result(DeepCopyMixin, Exportable):
             run_mode=attrs.get('run_mode'),
             frequencies=attrs.get('frequencies'),
             source_depths=attrs.get('source_depths'),
+            **source,
             metadata=metadata or None,
             run_settings=run_settings,
         )
@@ -1158,11 +1096,16 @@ class Result(DeepCopyMixin, Exportable):
                 f"Drop env=.")
 
     def plot(self, **kwargs):
-        """Plot this result via :func:`uacpy.plot.plot_result`.
+        """Plot this result via :func:`uacpy.plot.plot_result`; returns
+        ``(fig, ax)``.
 
         Dispatches on result type; concrete subclasses may override. ``kwargs``
-        are forwarded to the selected plotter. A refusal names this call
-        (``Field.plot``), the one the user made.
+        are forwarded to the selected plotter: the keywords each result type
+        takes (``value='loss'`` on a :class:`ReflectionCoefficient`,
+        ``dB=True`` on :class:`Arrivals` …) are listed per type in the
+        plotting guide (``docs/guide/plotting.md``, section 1 "Results"). A
+        refusal names this call (e.g. ``ReflectionCoefficient.plot``), the
+        one the user made.
         """
         return plotter('_draw_result')(
             f"{type(self).__name__}.plot", self, **kwargs)

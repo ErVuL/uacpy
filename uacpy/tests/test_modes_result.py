@@ -93,7 +93,8 @@ class TestTheMediaTableIsAnAttribute:
     def test_a_derived_mode_set_carries_it(self):
         modes = self._modes()
         assert modes.first_n(1).media == modes.media
-        assert modes.with_attenuation(np.zeros(11)).media == modes.media
+        assert modes.with_attenuation(np.zeros(11),
+                                      sound_speed_z=1500.0).media == modes.media
 
     def test_it_round_trips_through_the_dict(self):
         from uacpy.core.results import Modes
@@ -146,8 +147,20 @@ class TestTheModeCountSplitsAtTheSeabedSpeed:
                                     {'frequencies': None}])
     def test_without_the_seabed_speed_or_a_frequency_the_count_is_plain(
             self, kw):
-        assert ' 3 modes, ' in repr(self._modes([1500.0, 1700.0, 1850.0],
-                                                 **kw))
+        modes = self._modes([1500.0, 1700.0, 1850.0], **kw)
+        assert ' 3 modes, ' in repr(modes)
+        assert modes.trapped is None
+
+    def test_the_trapped_mask_is_the_split_the_repr_counts(self):
+        """A mode below the seabed speed is trapped, one at or above it
+        radiates into the seabed (Re k_r <= omega/c_b), as the perturbation's
+        tail term reads it; the mask is a value, read-only."""
+        modes = self._modes([1500.0, 1700.0, 1850.0])
+        np.testing.assert_array_equal(modes.trapped, [True, True, False])
+        assert not modes.trapped.flags.writeable
+        assert '(2 trapped, 1 above the 1800 m/s seabed)' in repr(modes)
+        np.testing.assert_array_equal(
+            self._modes([1500.0, 1800.0]).trapped, [True, False])
 
     @pytest.mark.parametrize('speed', [0.0, -1500.0, np.inf, np.nan])
     def test_a_speed_that_is_not_positive_and_finite_is_refused(self, speed):

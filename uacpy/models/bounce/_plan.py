@@ -44,11 +44,11 @@ _MESH_POINTS_PER_WAVELENGTH = 100
 _MIN_MESH_POINTS = 100
 
 
-def check_knobs(*, c_low, c_high, rmax_m, n_angles) -> None:
+def check_knobs(*, c_low, c_high, rmax, n_angles) -> None:
     """Refuse a constructor knob no run could use: a value that is not a
     number, a non-positive phase velocity or range, a pinned ``c_low`` at
     or above ``c_high``, fewer than two angles, and ``n_angles`` pinned
-    beside ``rmax_m`` (each sets the other).
+    beside ``rmax`` (each sets the other).
 
     Run on the knobs at construction and again by every run (the attributes
     can be reassigned in between). A ``c_low`` left ``None`` is held to
@@ -56,7 +56,7 @@ def check_knobs(*, c_low, c_high, rmax_m, n_angles) -> None:
     """
     for name, value, unit in (('c_low', c_low, 'm/s'),
                               ('c_high', c_high, 'm/s'),
-                              ('rmax_m', rmax_m, 'm')):
+                              ('rmax', rmax, 'm')):
         if value is None:
             continue
         if not is_real_number(value):
@@ -66,9 +66,9 @@ def check_knobs(*, c_low, c_high, rmax_m, n_angles) -> None:
                 + ("for the default." if name == 'c_high' else
                    "to derive it at run time."))
     check_phase_speed_window(c_low, c_high=resolve_c_high(c_high)[0])
-    if rmax_m is not None and float(rmax_m) <= 0:
+    if rmax is not None and float(rmax) <= 0:
         raise ConfigurationError(
-            f"Bounce requires rmax_m > 0 (got {rmax_m}). RMax sets the "
+            f"Bounce requires rmax > 0 (got {rmax}). RMax sets the "
             f"angular sampling density — bounce.f90:49 makes the number of "
             f"tabulated angles proportional to it, and "
             f"misc/ReadEnvironmentMod.f90:140 stops outright on a negative "
@@ -88,14 +88,14 @@ def check_knobs(*, c_low, c_high, rmax_m, n_angles) -> None:
                 f"tabulated angle divides by zero and the binary spins "
                 f"until the model timeout."
             )
-        if rmax_m is not None:
+        if rmax is not None:
             raise ConfigurationError(
-                f"Bounce(n_angles={n_angles}, rmax_m={rmax_m:g}) pins the "
+                f"Bounce(n_angles={n_angles}, rmax={rmax:g}) pins the "
                 f"table's angular sampling twice: bounce.f90:49 derives the "
                 f"count from RMax, NkTab = INT(1000 * RMax_km * (kMax - "
                 f"kMin) / 2 pi), so n_angles sets RMax and the two "
                 f"contradict each other.",
-                remediation=("Pass n_angles= for the count, or rmax_m= for "
+                remediation=("Pass n_angles= for the count, or rmax= for "
                              "the range the sampling is sized for, not "
                              "both."))
 
@@ -136,15 +136,15 @@ def check_phase_speed_window(c_low: Optional[float], *, c_high) -> None:
             )
 
 
-def refuse_unsized_table(receiver, *, rmax_m, n_angles) -> None:
+def refuse_unsized_table(receiver, *, rmax, n_angles) -> None:
     """Refuse ``receiver=None`` with nothing else to size the table:
-    ``rmax_m`` and ``n_angles`` both unset."""
-    if receiver is None and rmax_m is None and n_angles is None:
+    ``rmax`` and ``n_angles`` both unset."""
+    if receiver is None and rmax is None and n_angles is None:
         raise ConfigurationError(
             "Bounce.run(receiver=None): a Receiver is required to "
-            "auto-derive rmax_m (the range the reflection table is "
+            "auto-derive rmax (the range the reflection table is "
             "propagated to). Pass a Receiver, or pin the table with "
-            "Bounce(rmax_m=...) or Bounce(n_angles=...)."
+            "Bounce(rmax=...) or Bounce(n_angles=...)."
         )
 
 
@@ -180,7 +180,7 @@ def resolve_c_low(env: Environment, *, c_low: Optional[float]) -> float:
     illustrative example. ``min(SSP)`` reads the rule directly, and capping
     it at ``DEFAULT_C_MIN`` keeps the tabulation grid at ``c_low = 1400``
     for every column whose water never drops below 1400 m/s —
-    ``NkTab = rmax_m * f / c_low`` moves only once ``min(SSP)`` undercuts
+    ``NkTab = rmax * f / c_low`` moves only once ``min(SSP)`` undercuts
     it.
 
     ``env.ssp.sound_speed``, not :meth:`~uacpy.core.ssp.SoundSpeedProfile.to_pairs`:
@@ -244,9 +244,9 @@ def reject_c_low_above_the_water(env: Environment, c_low: float) -> None:
     )
 
 
-def resolve_rmax_m(receiver, frequency: float, c_low: float, *, n_angles,
-                   rmax_m, c_high) -> Tuple[float, str]:
-    """``(rmax_m, origin)``: the range (m) the table's angular sampling
+def resolve_rmax(receiver, frequency: float, c_low: float, *, n_angles,
+                 rmax, c_high) -> Tuple[float, str]:
+    """``(rmax, origin)``: the range (m) the table's angular sampling
     is sized for, and where it came from.
 
     A pinned ``n_angles`` is inverted through bounce.f90:49
@@ -254,7 +254,7 @@ def resolve_rmax_m(receiver, frequency: float, c_low: float, *, n_angles,
     angle above it, so the binary tabulates exactly ``n_angles``
     (:func:`tabulated_angle_count` on the deck's six-decimal km); a count
     that RMax cannot give is refused, naming the count it gives. Else the
-    pinned ``rmax_m``, then ``receiver.range_max``, and 10 km when no
+    pinned ``rmax``, then ``receiver.range_max``, and 10 km when no
     receiver range is positive. ``receiver=None`` reaches here only with
     one of the two knobs set (:func:`refuse_unsized_table`).
     """
@@ -265,7 +265,7 @@ def resolve_rmax_m(receiver, frequency: float, c_low: float, *, n_angles,
             inv_c_diff -= 1.0 / float(c_high)
         if omega * inv_c_diff <= 0:
             raise ConfigurationError(
-                f"Cannot derive rmax_m from n_angles={n_angles}: "
+                f"Cannot derive rmax from n_angles={n_angles}: "
                 f"omega·(1/cLow - 1/cHigh) is non-positive "
                 f"(omega={omega:.3g}, 1/cLow-1/cHigh={inv_c_diff:.3g})."
             )
@@ -284,11 +284,11 @@ def resolve_rmax_m(receiver, frequency: float, c_low: float, *, n_angles,
                 f"decimals, and at {frequency:.6g} Hz with c_low={c_low:g} "
                 f"and c_high={c_high:g} m/s the nearest RMax gives "
                 f"{got} angles, not {n_angles}.",
-                remediation=(f"Pass n_angles={got}, or rmax_m= for the "
+                remediation=(f"Pass n_angles={got}, or rmax= for the "
                              f"range the sampling is sized for."))
         return rmax, f'n_angles={n_angles}'
-    if rmax_m is not None:
-        return float(rmax_m), 'Bounce(rmax_m=…)'
+    if rmax is not None:
+        return float(rmax), 'Bounce(rmax=…)'
     recv_rmax = float(receiver.range_max)
     if recv_rmax > 0:
         return recv_rmax, 'receiver.range_max'
@@ -297,7 +297,7 @@ def resolve_rmax_m(receiver, frequency: float, c_low: float, *, n_angles,
             f'(no receiver range)')
 
 
-def tabulated_angle_count(rmax_m: float, frequency: float, c_low: float, *,
+def tabulated_angle_count(rmax: float, frequency: float, c_low: float, *,
                           c_high) -> int:
     """Angles BOUNCE will tabulate for this deck.
 
@@ -311,7 +311,7 @@ def tabulated_angle_count(rmax_m: float, frequency: float, c_low: float, *,
     the count has to come off the rounded value the binary will read back,
     not off the exact metres.
     """
-    rmax_km = float(f"{m_to_km(rmax_m):.6f}")
+    rmax_km = float(f"{m_to_km(rmax):.6f}")
     omega = 2.0 * np.pi * float(frequency)
     k_min = 0.0 if c_high > _KMIN_CUTOFF_CHIGH else omega / c_high
     k_max = omega / c_low
@@ -319,7 +319,7 @@ def tabulated_angle_count(rmax_m: float, frequency: float, c_low: float, *,
 
 
 def refuse_too_few_angles(n_angles: int, frequency: float, c_low: float, *,
-                          rmax_m: float, rmax_origin: str, c_high) -> None:
+                          rmax: float, rmax_origin: str, c_high) -> None:
     """Refuse a deck that tabulates fewer than two angles: none writes an
     empty table, and one divides by zero in the binary."""
     if n_angles >= 2:
@@ -334,19 +334,22 @@ def refuse_too_few_angles(n_angles: int, frequency: float, c_low: float, *,
     raise ConfigurationError(
         f"This deck asks for {n_angles} tabulated angle(s): "
         f"bounce.f90:49 derives NkTab = INT(1000 * RMax_km * "
-        f"(kMax - kMin) / 2 pi) from RMax = {rmax_m:g} m at "
+        f"(kMax - kMin) / 2 pi) from RMax = {rmax:g} m at "
         f"{frequency:.4g} Hz with c_low={c_low:g} and "
         f"c_high={c_high:g} m/s. {consequence}.",
         remediation=(
-            f"rmax_m came from {rmax_origin} — raise it (or raise "
+            f"rmax came from {rmax_origin} — raise it (or raise "
             f"n_angles), or widen the phase-speed window so more "
             f"wavenumbers fall inside it."
         ),
     )
 
 
-def resolve_n_mesh(env: Environment, frequency: float) -> list:
-    """Mesh-point count for each medium of the sediment stack.
+def resolve_n_mesh(env: Environment, frequency: float,
+                   n_mesh=None) -> list:
+    """Mesh-point count for each medium of the sediment stack: a pinned
+    ``n_mesh`` as given (one count for every medium, or one per medium),
+    else the rule below.
 
     ``write_bounce_input_file`` omits the water column, so the media are
     exactly the writable sediment layers (a bare half-space seabed carries
@@ -369,9 +372,44 @@ def resolve_n_mesh(env: Environment, frequency: float) -> list:
     "very poor", where the Fortran merely sets the acceptance floor at that
     10. This wrapper asks for the manual's 100 — see
     :data:`_MESH_POINTS_PER_WAVELENGTH`.
+
+    A pinned count is refused where BOUNCE's reader would stop on it: a
+    list whose length is not the number of media, or a positive count
+    under ``Nneeded / 2`` of its medium (``Mesh is too coarse``,
+    ``ReadEnvironmentMod.f90:105-112``, with ``Nneeded = MAX(INT(
+    thickness / (c / freq / 20)), 10)``); ``0`` is the reader's automatic
+    20 points per wavelength (``doc/bounce.htm``).
     """
+    layers = writable_layers(env.bottom.at(range=0.0))
+    if n_mesh is not None:
+        counts = ([int(n) for n in n_mesh]
+                  if isinstance(n_mesh, (list, tuple, np.ndarray))
+                  else [int(n_mesh)] * len(layers))
+        if len(counts) != len(layers):
+            raise ConfigurationError(
+                f"Bounce(n_mesh={list(counts)}) gives {len(counts)} "
+                f"count(s) for the {len(layers)} medium/media of this "
+                f"sediment stack (BOUNCE meshes the sediment layers only).",
+                remediation="Give one count per sediment layer, or one "
+                            "count for every layer.")
+        for i, (layer, count) in enumerate(zip(layers, counts)):
+            shear = float(layer.shear_speed)
+            speed = shear if shear > 0.0 else float(layer.sound_speed)
+            needed = max(int(20.0 * float(layer.thickness) * frequency
+                             / speed), 10)
+            if 0 < count < needed // 2:
+                raise ConfigurationError(
+                    f"Bounce(n_mesh=...) gives medium {i + 1} {count} mesh "
+                    f"points, under the {needed // 2} "
+                    f"misc/ReadEnvironmentMod.f90:110-112 requires at "
+                    f"{frequency:g} Hz; the run would stop with 'Mesh is too "
+                    f"coarse'.",
+                    remediation=f"Pass at least {needed // 2} for medium "
+                                f"{i + 1}, 0 for the reader's automatic "
+                                f"mesh, or n_mesh=None.")
+        return counts
     counts = []
-    for layer in writable_layers(env.bottom.at(range=0.0)):
+    for layer in layers:
         thickness = float(layer.thickness)
         shear = float(layer.shear_speed)
         speed = shear if shear > 0.0 else float(layer.sound_speed)

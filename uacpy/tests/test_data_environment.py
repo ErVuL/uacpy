@@ -98,7 +98,7 @@ def test_bottom_from_phi(stub_fetchers):
     assert env.bottom.columns[0].halfspace.grain_size_phi == 2.0
 
 
-def test_bottom_from_class_name(stub_fetchers):
+def test_a_bottom_class_name_literal(stub_fetchers):
     env = env_mod.fetch_environment((43.2, 7.5), bottom='clay')
     assert env.bottom.acoustic_type == 'half-space'
 
@@ -291,23 +291,131 @@ def test_literal_fallback_when_fetch_fails(monkeypatch):
     assert 'gebco' not in [s.source.id for s in env.data_sources]
 
 
-def test_surface_source_without_date_falls_back_to_literal():
-    # surface= is the documented fallback when the seaice fetch cannot run;
-    # a missing date= must reach that fallback, not raise past it.
+def test_a_surface_literal_does_not_stand_in_for_a_missing_date():
+    # surface= stands in for sea-ice data a dated request could not get; a
+    # missing date= is the caller's input and is refused as without it.
     ice = BoundaryProperties(acoustic_type='half-space', sound_speed=3500.0,
                              density=0.9, attenuation=0.4, shear_speed=1800.0,
                              shear_attenuation=1.0)
-    env = env_mod.fetch_environment((75.0, -10.0), bathymetry=2000.0,
-                                    ssp=1500.0, surface_sources='seaice',
-                                    surface=ice)
-    assert env.surface is not None
-    assert env.surface.nodes[0].sound_speed == 3500.0
+    with pytest.raises(ConfigurationError, match='needs date'):
+        env_mod.fetch_environment((75.0, -10.0), bathymetry=2000.0,
+                                  ssp=1500.0, surface_sources='seaice',
+                                  surface=ice)
 
 
 def test_surface_source_without_date_or_literal_raises():
     with pytest.raises(ConfigurationError, match='needs date'):
         env_mod.fetch_environment((75.0, -10.0), bathymetry=2000.0,
                                   ssp=1500.0, surface_sources='seaice')
+
+
+_ICE = dict(acoustic_type='half-space', sound_speed=3500.0, density=0.9,
+            attenuation=0.4, shear_speed=1800.0, shear_attenuation=1.0)
+
+
+@pytest.mark.parametrize('keyword, kwargs, reason', [
+    ('bathymetry', dict(bathymetry=120.0, bathymetry_sources='gebco'),
+     'service down'),
+    ('ssp', dict(ssp_sources='woa23'), 'service down'),
+    ('bottom', dict(bottom='sand', bottom_sources='crust1'), 'crust1'),
+    ('surface', dict(surface_sources='seaice', surface='ice',
+                     date='2020-03-01'), 'seaice'),
+    ('altimetry', dict(altimetry=[(0.0, 0.0), (1000.0, 0.5)],
+                       altimetry_sources='local', date='2020-03-01',
+                       transect_to=(75.5, -10.0)), 'wind'),
+])
+def test_a_literal_standing_in_for_a_failed_fetch_is_announced(
+        tmp_path, monkeypatch, keyword, kwargs, reason):
+    """At a point as on a transect, a requested source that the literal
+    replaces (a service down, no installed cache) gives a FallbackWarning
+    naming the literal and why, so a placeholder is never taken for data."""
+    from uacpy.core.exceptions import DataFetchError, FallbackWarning
+    from uacpy.data import _cache
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    _cache.invalidate_grids()
+    service_down = (lambda *a, **k: (_ for _ in ()).throw(
+        DataFetchError("service down")))
+    monkeypatch.setattr(bathy_mod, '_fetch_bathy_backend', service_down)
+    monkeypatch.setattr(ssp_mod, '_fetch_ssp_backend', service_down)
+    if kwargs.get('surface') == 'ice':
+        kwargs = dict(kwargs, surface=BoundaryProperties(**_ICE))
+    kwargs = {'bathymetry': 2000.0, 'ssp': 1500.0, **kwargs}
+    with recorded_warnings() as rec:
+        env_mod.fetch_environment((75.0, -10.0), **kwargs)
+    notes = [str(w.message) for w in rec
+             if issubclass(w.category, FallbackWarning)
+             and f'supplied {keyword}= literal' in str(w.message)]
+    assert len(notes) == 1, [str(w.message) for w in rec]
+    assert reason in notes[0]
+
+
+@pytest.mark.parametrize('kwargs, missing', [
+    (dict(ssp_sources='copernicus', ssp=1500.0), 'requires date'),
+    (dict(ssp_sources='argo', ssp=1500.0), 'requires date'),
+    (dict(surface_sources='seaice', surface='ice'), 'needs date'),
+    (dict(altimetry_sources='local', date='2020-03-01',
+          altimetry=[(0.0, 0.0), (1000.0, 0.5)]), 'requires transect_to'),
+    (dict(altimetry_sources='local', transect_to=(75.5, -10.0),
+          altimetry=[(0.0, 0.0), (1000.0, 0.5)]), 'needs date'),
+])
+def test_a_literal_does_not_stand_in_for_a_missing_prerequisite(
+        monkeypatch, kwargs, missing):
+    """A source asked for without date= / transect_to= is refused with or
+    without its literal; the literal stands in for missing data only."""
+    from uacpy.data import sea_surface
+    calls = []
+    monkeypatch.setattr(sea_surface, 'fetch_sea_surface',
+                        lambda *a, **k: calls.append(a))
+    if kwargs.get('surface') == 'ice':
+        kwargs = dict(kwargs, surface=BoundaryProperties(**_ICE))
+    kwargs = {'bathymetry': 2000.0, 'ssp': 1500.0, **kwargs}
+    with pytest.raises(ConfigurationError, match=missing):
+        env_mod.fetch_environment((75.0, -10.0), **kwargs)
+    assert calls == []
+
+
+def test_an_ssp_chain_passes_over_a_dateless_source_to_the_next(
+        stub_fetchers):
+    """The refusal ends the call only when no source answers: a chain
+    whose next source needs no date answers without one."""
+    env = env_mod.fetch_environment((43.2, 7.5), ssp=1500.0,
+                                    ssp_sources=('copernicus', 'woa23'))
+    assert 'woa23' in [s.source.id for s in env.data_sources]
+
+
+def test_the_bottom_chain_hands_each_fetcher_only_the_keywords_it_takes(
+        monkeypatch):
+    """An offline backend without ``timeout``/``verbose`` and a live one
+    with them both run from one call that supplies both, point and
+    transect alike; each receives what it takes."""
+    from uacpy.core.exceptions import DataFetchError
+    from uacpy.data.sediment import transect_fetcher
+    seen = []
+
+    def offline(point, *, roughness=0.0, max_distance_km=None):
+        seen.append(('offline', roughness))
+        raise DataFetchError('no coverage')
+
+    def live(point, *, roughness=0.0, timeout=60.0, verbose=False,
+             max_distance_km=None):
+        seen.append(('live', timeout))
+        return BoundaryProperties.from_grain_size(2.0, roughness=roughness)
+
+    monkeypatch.setitem(env_mod._BOTTOM_BY_ID, 'graw', env_mod._BottomProvider(
+        'graw', lambda: (offline, transect_fetcher(offline, 'offline'))))
+    monkeypatch.setitem(env_mod._BOTTOM_BY_ID, 'mars', env_mod._BottomProvider(
+        'mars', lambda: (live, transect_fetcher(live, 'live'))))
+    bottom, name = env_mod._fetch_bottom(
+        ('graw', 'mars'), (43.2, 7.5), transect=False, roughness=0.3,
+        timeout=5.0, verbose=False, water_sound_speed=None)
+    assert name == 'mars' and bottom.roughness == 0.3
+    assert seen == [('offline', 0.3), ('live', 5.0)]
+    seen.clear()
+    with pytest.raises(DataFetchError, match='no seabed data anywhere'):
+        env_mod._fetch_bottom(('graw',), (43.2, 7.5), (43.3, 7.5),
+                              transect=True, roughness=0.3, timeout=5.0,
+                              verbose=False, n_points=2)
+    assert seen == [('offline', 0.3)] * 2
 
 
 def test_range_dependent_ssp(monkeypatch, stub_fetchers):
@@ -361,16 +469,36 @@ def test_range_dependent_ssp_copernicus_honours_a_numpy_integer_count(
     assert seen['n_points'] == 4
 
 
-def test_range_dependent_ssp_copernicus_forwards_the_count_and_the_cap(
+def test_range_dependent_ssp_copernicus_forwards_the_count_and_the_budget(
         monkeypatch, stub_fetchers):
-    # The operational fetcher resolves 'auto' and applies the cap itself
+    # The operational fetcher resolves 'auto' against the budget itself
     # (test_data_copernicus pins that); fetch_environment passes both on.
     seen = _spy_copernicus_transect(monkeypatch)
     env_mod.fetch_environment((43.2, 7.5), transect_to=(42.8, 8.1),
                               range_dependent_ssp=True,
                               ssp_sources='copernicus', date='2026-01-01',
-                              ssp_n_points=30, max_points=10)
-    assert (seen['n_points'], seen['max_points']) == (30, 10)
+                              ssp_n_points=8, max_points=10)
+    assert (seen['n_points'], seen['max_points']) == (8, 10)
+
+
+@pytest.mark.parametrize('count', ['n_points', 'ssp_n_points',
+                                   'bottom_n_points', 'surface_n_points'])
+def test_a_transect_count_above_max_points_is_refused_before_any_fetch(
+        monkeypatch, count):
+    """An explicit count above an explicit max_points is refused naming
+    both, even where a literal could stand in for the axis, and before any
+    axis fetches; at max_points it passes."""
+    calls = []
+    monkeypatch.setattr(bathy_mod, '_fetch_bathy_transect_backend',
+                        lambda *a, **k: calls.append('bathymetry'))
+    literals = dict(bathymetry=2000.0, bathymetry_sources='gebco', ssp=1500.0,
+                    bottom='sand', surface_sources='seaice', date='2020-03-01',
+                    surface=BoundaryProperties(**_ICE))
+    with pytest.raises(ConfigurationError,
+                       match=rf'{count}=11 exceeds max_points=10'):
+        env_mod.fetch_environment((75.0, -10.0), transect_to=(76.0, -10.0),
+                                  max_points=10, **{count: 11}, **literals)
+    assert calls == []
 
 
 def test_range_dependent_ssp_copernicus_requires_date(stub_fetchers):
@@ -379,12 +507,12 @@ def test_range_dependent_ssp_copernicus_requires_date(stub_fetchers):
                                   range_dependent_ssp=True, ssp_sources='copernicus')
 
 
-def test_removed_global_keyword_rejected(stub_fetchers):
+def test_a_global_bottom_keyword_is_refused(stub_fetchers):
     # 'global' names no fetch source, so ``bottom='global'`` falls through to
-    # the sediment-class lookup and is refused there. uacpy carries no global
+    # the material-preset lookup and is refused there. uacpy carries no global
     # seabed grid to bind it to: the CC-BY-NC candidate for that role is not
     # redistributable, which is what ``pelagic`` covers instead.
-    with pytest.raises(ConfigurationError, match='unknown sediment class'):
+    with pytest.raises(ConfigurationError, match="Unknown material preset 'global'"):
         env_mod.fetch_environment((43.2, 7.5), bottom='global')
 
 
@@ -472,6 +600,68 @@ def test_with_absorption(monkeypatch, stub_fetchers):
     assert env.absorption.temperature == WaterProfile([0.0, 50.0],
                                                       [18.0, 16.0])
     assert env.absorption.salinity == WaterProfile([0.0, 50.0], [36.0, 36.1])
+
+
+def test_a_grain_size_seabed_is_converted_against_the_sites_water(
+        monkeypatch, stub_fetchers):
+    """With the site's T/S fetched, the deck carries its IES-80 water
+    density, and a ϕ seabed — a literal or a fetched source — carries the
+    published seabed/water density ratio against that water, not against
+    the package's 1.027; without it, against 1.027."""
+    from uacpy.data import sediment_db
+    monkeypatch.setattr(env_mod, '_fetch_ts_profile_backend',
+                        lambda point, **kw: _ts_record())
+    ratio = BoundaryProperties.from_grain_size(2.0).density / 1.027
+    env = env_mod.fetch_environment((43.2, 7.5), bottom=2.0,
+                                    with_absorption=True)
+    rho_w = env.water_density
+    assert abs(rho_w / 1.027 - 1.0) > 1e-4          # the site's own water
+    got = env.bottom.columns[0].halfspace.density
+    assert got == pytest.approx(ratio * rho_w, rel=1e-9)
+    seen = []
+
+    def grainsize(point, **kw):
+        seen.append(kw.get('water_density'))
+        return BoundaryProperties.from_grain_size(2.0, **{
+            k: kw[k] for k in ('water_sound_speed', 'water_density')})
+    monkeypatch.setattr(sediment_db, 'fetch_bottom_grainsize', grainsize)
+    env_mod.fetch_environment((43.2, 7.5), bottom_sources='grainsize',
+                              with_absorption=True)
+    env_mod.fetch_environment((43.2, 7.5), bottom_sources='grainsize')
+    assert seen == [pytest.approx(rho_w), None]
+
+
+@pytest.mark.parametrize('glodap, notes', [('missing', 1), ('present', 0)])
+def test_a_reference_ph_standing_in_for_the_sites_is_announced(
+        monkeypatch, stub_fetchers, glodap, notes):
+    """with_absorption=True asks for the site's pH. When no pH source
+    answers, the reference pH stands in and the call's one notice says so
+    and why; a pH that was read needs no such item."""
+    from uacpy.core.exceptions import ProvenanceWarning
+    from uacpy.data import SOURCES, DataProvenance, glodap_local
+    monkeypatch.setattr(env_mod, '_fetch_ts_profile_backend',
+                        lambda point, **kw: _ts_record())
+
+    def absent(point, **kw):
+        raise ConfigurationError("Offline glodap data not found.")
+
+    def present(point, **kw):
+        return glodap_local.PHProfile(
+            depths=np.array([0.0, 50.0]), ph=np.array([8.05, 8.0]),
+            ph_scale='total',
+            provenance=DataProvenance(source=SOURCES['glodap']))
+
+    monkeypatch.setattr(glodap_local, 'fetch_ph_profile',
+                        absent if glodap == 'missing' else present)
+    with recorded_warnings() as rec:
+        env = env_mod.fetch_environment((43.2, 7.5), with_absorption=True)
+    items = [str(w.message) for w in rec
+             if issubclass(w.category, ProvenanceWarning)
+             and 'takes the reference pH 8' in str(w.message)]
+    assert len(items) == notes
+    if notes:
+        assert 'GLODAP: Offline glodap data not found' in items[0]
+        assert env.absorption.pH == 8.0
 
 
 @pytest.mark.parametrize('resolution', ['1.00', '0.25'])
@@ -1257,7 +1447,6 @@ def test_bottom_model_selects_the_grain_size_relations_for_a_phi_literal():
     apl-uw conversion at the same water speed, and a class name (its own
     numbers) ignores it."""
     from uacpy.core.sediment import grain_size_to_geoacoustics
-    from uacpy.data import bottom_from_class
     apl = env_mod._resolve_bottom(2.0, water_sound_speed=1500.0, model='apl-uw')
     ham = env_mod._resolve_bottom(2.0, water_sound_speed=1500.0)
     expected = grain_size_to_geoacoustics(2.0, model='apl-uw',
@@ -1266,7 +1455,7 @@ def test_bottom_model_selects_the_grain_size_relations_for_a_phi_literal():
     assert apl.attenuation == pytest.approx(expected['attenuation'])
     assert apl.sound_speed != pytest.approx(ham.sound_speed)
     assert env_mod._resolve_bottom('sand', model='apl-uw') == \
-        bottom_from_class('sand', elastic=False)
+        BoundaryProperties.from_preset('sand')
 
 
 def test_an_unknown_bottom_model_is_refused_before_any_fetch(monkeypatch):
@@ -1353,15 +1542,11 @@ def test_source_names_resolve_in_any_case_on_every_route(
 
 def test_a_mixed_case_surface_source_passes_the_name_check(monkeypatch):
     """``'SeaIce'`` is the sea-ice source, so with no ``date=`` the run
-    reaches the documented literal fallback instead of an unknown-source
-    refusal."""
-    ice = BoundaryProperties(acoustic_type='half-space', sound_speed=3500.0,
-                             density=0.9, attenuation=0.4, shear_speed=1800.0,
-                             shear_attenuation=1.0)
-    env = env_mod.fetch_environment((75.0, -10.0), bathymetry=2000.0,
-                                    ssp=1500.0, surface_sources='SeaIce',
-                                    surface=ice)
-    assert env.surface.nodes[0].sound_speed == 3500.0
+    reaches the sea-ice source's own date refusal instead of an
+    unknown-source refusal."""
+    with pytest.raises(ConfigurationError, match='needs date'):
+        env_mod.fetch_environment((75.0, -10.0), bathymetry=2000.0,
+                                  ssp=1500.0, surface_sources='SeaIce')
 
 
 def test_an_unknown_source_is_refused_whatever_its_case(stub_fetchers):
@@ -1383,22 +1568,24 @@ def test_an_unknown_source_name_lists_the_presets_too(stub_fetchers, spec,
     assert ("Use 'auto', 'local' or one of" in str(err.value)) == presets_named
 
 
-def test_the_fetch_path_scales_sound_speed_in_situ_and_density_by_the_default():
-    """``fetch_environment`` hands a grain-size seabed the in-situ seafloor
-    sound speed but no water density, so its density ratio is carried
-    against DEFAULT_WATER_DENSITY_G_CM3 whatever the deck's water density.
-    The ``bottom_model`` doc says exactly that; this pins both halves."""
+def test_the_fetch_path_scales_a_grain_size_to_the_water_it_is_given():
+    """A grain-size seabed takes the in-situ seafloor sound speed and the
+    water density it is handed (the deck's), the default water without one.
+    The ``bottom_model`` doc says so; this pins both halves."""
     import warnings
     from uacpy.core.sediment import grain_size_to_geoacoustics
     from uacpy.data import environment as data_env
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        bottom = data_env._resolve_bottom(4.0, water_sound_speed=1530.0)
-        geo = grain_size_to_geoacoustics(4.0, water_sound_speed=1530.0)
-    assert bottom.sound_speed == pytest.approx(geo['sound_speed'])
-    assert bottom.density == pytest.approx(geo['density'])
+        for water_density in (None, 1.0233):
+            bottom = data_env._resolve_bottom(4.0, water_sound_speed=1530.0,
+                                              water_density=water_density)
+            geo = grain_size_to_geoacoustics(4.0, water_sound_speed=1530.0,
+                                             water_density=water_density)
+            assert bottom.sound_speed == pytest.approx(geo['sound_speed'])
+            assert bottom.density == pytest.approx(geo['density'], rel=1e-12)
     doc = ' '.join(data_env.fetch_environment.__doc__.split())
-    assert 'DENSITY ratio is carried against ``DEFAULT_WATER_DENSITY_G_CM3``' in doc
+    assert 'carry the DENSITY ratio against the water density the deck carries' in doc
 
 
 class TestFetchEnvironmentGivesOneProvenanceNotice:
@@ -1500,11 +1687,14 @@ class TestATransectGivesOneProvenanceNotice:
         from uacpy.data import graw_local
         from uacpy.data._provenance_notice import provenance_notice
 
+        from uacpy.data import SOURCES, DataProvenance
+
         def node(lat, lon, **kw):
             provenance_notice(f"fetch_seabed_density: the data come from the "
                               f"node {lat:.2f} N, 30 km away. Pass "
                               f"max_distance_km=.")
-            return 1.8
+            return DataProvenance(source=SOURCES['graw'],
+                                  requested_point=(lat, lon))
         monkeypatch.setattr(graw_local, 'graw_node', node)
         with recorded_warnings() as rec:
             graw_local.fetch_seabed_density_transect(

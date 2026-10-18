@@ -11,7 +11,8 @@ from uacpy.models.base import (
     DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
 )
 from uacpy.models._launch import (
-    BinarySearch, Launch, run_launch, run_prt_binary, warn_on_prt_warnings,
+    BinarySearch, Launch, _read_prt_if_present, run_launch, run_prt_binary,
+    warn_on_prt_warnings,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._conventions import _source_density, _source_sound_speed
@@ -34,7 +35,6 @@ from uacpy.io.oalib_writer import (
     reject_unsupported_ssp_interp,
     reject_biological_edges_under_neighbour_interp,
 )
-from uacpy.io.oalib_reader import read_prt
 from uacpy.models.kraken._settings import KrakenLaunch, KrakenSettings
 from uacpy.models.kraken._checks import (
     backend_origin,
@@ -42,6 +42,7 @@ from uacpy.models.kraken._checks import (
     drop_roughness_on_tabulated_top,
     elastic_depth_intervals,
     kraken_exe_above_seabed_notice,
+    kraken_exe_elastic_notice,
     krakenc_incoherent_sum_notice,
     mask_elastic_mode_depths,
     modes_single_profile,
@@ -77,7 +78,7 @@ from uacpy.models.kraken._grid import (
     multi_profile_n_mesh,
     reject_band_over_field_limit,
     resolve_modes_launch,
-    resolve_rmax_m,
+    resolve_rmax,
     rmax_zero_notice,
     segment_env_for_field,
     single_profile_n_mesh,
@@ -119,7 +120,8 @@ from uacpy.models.kraken._launch import (
     write_decks,
 )
 from uacpy.models._extract import (
-    attach_output_paths, finish_broadband, mask_source_axis, result_kwargs,
+    add_run_note, attach_output_paths, finish_broadband, mask_source_axis,
+    result_kwargs,
 )
 
 
@@ -197,8 +199,9 @@ class Kraken(PropagationModel):
 
     Supports range-independent and range-dependent environments via
     adiabatic or coupled mode theory (delegated to AT's field.exe); the
-    MODES path is range-independent and samples the r=0 profile of any RD
-    environment (with a warning).
+    MODES path is range-independent and reduces an RD environment to one
+    profile by the collapse methods (the package defaults, else the
+    caller's ``collapse=``), with a warning.
 
     Note
     ----
@@ -257,8 +260,8 @@ class Kraken(PropagationModel):
         onto each new segment's modes (``EvaluateCMMod.f90``), so it does
         not conserve energy and its answer moves with ``n_segments``
         rather than converging. On the shelf of docs/models/kraken.md §6.6
-        it sits 7.5 dB above a refined RAM run in the upper 100 m past
-        15 km, where the adiabatic run sits 0.13 dB below it; check either
+        it sits 7.4 dB above a refined RAM run in the upper 100 m past
+        15 km, where the adiabatic run sits 0.15 dB below it; check either
         option against :class:`~uacpy.models.RAM` on a slope.
     n_segments : int, optional
         Range segments for RD scenarios. Default ``None`` lets
@@ -285,8 +288,15 @@ class Kraken(PropagationModel):
         modes (complex eigenvalues) and for a tabulated reflection
         coefficient (``acoustic_type='file'`` / ``'precalc'``, which
         ``kraken.exe`` either refuses or silently replaces with a rigid
-        boundary), ``kraken.exe`` otherwise. Forcing ``'kraken'`` on either
-        raises ``ConfigurationError``. Forcing ``'krakenc'`` runs over a
+        boundary), ``kraken.exe`` otherwise. Forcing ``'kraken'`` on a
+        reflection table, or beside ``leaky_modes=True``, raises
+        ``ConfigurationError``; on elastic media it runs, with one
+        ``ValidityWarning`` stating what kraken.exe computes there: the
+        trapped modes only, ``c_high`` lowered to an elastic half-space's
+        shear speed (``Kraken/kraken.f90:209``, ``:221``), without the
+        elastic media's material loss in ``Im(k)`` (``:728``; ``doc/kraken.htm``:
+        "for attenuating elastic media, KRAKENC should be used"). Forcing
+        ``'krakenc'`` runs over a
         rigid or vacuum floor too: KRAKENC's boundary condition sets the
         vector it shoots for both floors
         (``Kraken/BCImpedancecMod.f90:58-66``).
@@ -300,6 +310,12 @@ class Kraken(PropagationModel):
         ``'kraken'``, or a ``c_high`` pinned above the seabed speed, gives
         one ``ValidityWarning`` saying so (``docs/models/kraken.md`` §3
         compares the two programs on measured cases).
+
+        KRAKENC's root-finder restart option (``TopOpt(5:5) = '.'``,
+        ``krakenc.f90:323-327``: up to ``max(10, N/50)`` restarts) is not
+        offered and the deck is written with it off: each restart starts
+        from ``RANDOM_NUMBER`` draws (``krakenc.f90:393-395``) and the
+        toolbox sets no seed.
     c_low : float, optional
         Lower phase speed limit (m/s). None ⇒ 0.0 when no medium carries
         shear, which makes KRAKEN compute cLow automatically — the
@@ -308,8 +324,8 @@ class Kraken(PropagationModel):
         keeps the search off the interfacial branch (``_window.c_low_for``).
         A positive c_low skips slower modes and excludes interfacial
         (Scholte / Stoneley) modes; set it to the minimum p-wave speed if KRAKEN
-        fails to converge on those. (``C_LOW_FACTOR`` × the slowest SSP speed,
-        ``core/engine_defaults.py``, is the Scooter/SPARC wavenumber-integration
+        fails to converge on those. (``default_c_low`` in
+        ``core/engine_defaults.py`` is the Scooter/SPARC wavenumber-integration
         default, not Kraken's.) Must be non-negative and
         strictly less than ``c_high``.
     c_high : float, optional
@@ -364,6 +380,23 @@ class Kraken(PropagationModel):
         :class:`Modes` result to the first ``n_modes``, matching what the
         field evaluation used; :meth:`Modes.first_n` slices an existing result
         after the fact.
+    range_offsets : sequence of float, optional
+        Receiver range offsets (m), one per receiver depth, shallowest
+        first: field.exe's ``Rro`` (``field.f90:147-152``). ``doc/field.htm``:
+        "The field is computed by stepping through the ranges, Rr(1:NR), and
+        adding in the range displacements, Rro() before computing the field
+        on the array. Nonzero values are used to tilt or distort the
+        receiving array, thereby simulating the distortion which occurs on
+        an array deployed in the ocean." The receiver at depth ``z_i`` and
+        range ``r`` reads the field at ``r + ro_i`` (``EvaluateMod.f90:47``,
+        ``:72-73``). ``None`` (default) writes zeros, a vertical array.
+        field.exe sorts the offsets ascending, as it sorts the receiver
+        depths (``misc/SourceReceiverPositions.f90:224``, ``:267-268``), so
+        it pairs the smallest offset with the shallowest depth: offsets that
+        decrease with depth are refused. Only the range-independent sum
+        reads them (``Evaluate``, ``field.f90:214-215``); a range-dependent
+        run (``EvaluateAD`` / ``EvaluateCM``) and :meth:`compute_modes` do
+        not, with a notice.
     leaky_modes : bool, optional
         If True, raise ``c_high`` to 10 x the fastest speed in each profile
         (``_window._LEAKY_C_HIGH_FACTOR``; KRAKENC's root finder fails or
@@ -399,7 +432,7 @@ class Kraken(PropagationModel):
     top_reflection_file : Path, optional
         A ``.trc`` top-reflection-coefficient table. Overrides the surface
         boundary condition to ``'F'`` and is staged next to the ``.env``.
-    rmax_m : float, optional
+    rmax : float, optional
         ``RMax`` written into the ``.env`` (m here; the writer converts to
         the km the deck expects): set it to the farthest range you will
         compute a field at — the Acoustics Toolbox manual's RMax, "the
@@ -416,7 +449,7 @@ class Kraken(PropagationModel):
         (``_grid.KRAKEN_RMAX_NO_RANGE_M``, uacpy guidance, measured: the
         manual's 0 left a 1.09 rad mode phase error at 10 km on a Pekeris
         guide). ``compute_modes`` takes no receiver, so it is that case
-        unless ``rmax_m`` is set. A set value is written as given, 0
+        unless ``rmax`` is set. A set value is written as given, 0
         included — ``doc/kraken.htm`` (8): "If you set it to zero, then no
         mesh doublings will be performed" — with a ``NumericsWarning`` that
         no mesh doubling follows; a negative one is refused.
@@ -504,11 +537,11 @@ class Kraken(PropagationModel):
             reopen = [marker for marker in _ZERO_MODE_REOPEN if marker in text]
             if reopen:
                 return (0, 0, f"'{reopen[0]}'")
-            stop = zero_mode_stop(read_prt(work_dir / f'{base_name}.prt'))
+            stop = zero_mode_stop(_read_prt_if_present(work_dir / f'{base_name}.prt'))
             if stop is None:
                 raise
             return stop + (f"'{_NO_MODES_ERROUT}'",)
-        stop = zero_mode_stop(read_prt(work_dir / f'{base_name}.prt'))
+        stop = zero_mode_stop(_read_prt_if_present(work_dir / f'{base_name}.prt'))
         return None if stop is None else stop + (f"'{_NO_MODES_ERROUT}'",)
 
     #: The record's ``mode_coupling`` is ``'none'`` on a range-independent
@@ -522,22 +555,69 @@ class Kraken(PropagationModel):
         (default).")."""
         return 'adiabatic' if self.mode_coupling is None else self.mode_coupling
 
-    def _unused_coupling_notice(self, env, mode) -> Optional[Notice]:
-        """``(note, warning)`` when the caller set ``mode_coupling`` and the
-        run sums no range-dependent field: a ``MODES`` run, or one profile,
-        which field.exe evaluates with ``Evaluate`` whatever the option
-        (``field.f90:214-215``)."""
-        if not self._caller_set('mode_coupling') or (
-                mode != RunMode.MODES and env.is_range_dependent):
-            return None
-        why = ("a MODES run sums no field" if mode == RunMode.MODES else
-               "a range-independent run has one profile, which field.exe "
-               "evaluates with Evaluate whatever the option "
-               "(field.f90:214-215)")
-        return Notice(
-            "mode_coupling not used",
-            f"{self.model_name}: mode_coupling={self.mode_coupling!r} is not "
-            f"used: {why}.", FallbackWarning)
+    def _unused_knob_notices(self, env, mode, receiver) -> list:
+        """One notice per knob the caller set that this run does not use:
+        ``mode_coupling`` when the run sums no range-dependent field (a
+        ``MODES`` run, or one profile, which field.exe evaluates with
+        ``Evaluate`` whatever the option, ``field.f90:214-215``);
+        ``n_segments``, read only to segment a range-dependent field run
+        (:func:`_segments.segment_env_for_field`); ``mode_depths``, read
+        only by a ``MODES`` run with no receiver
+        (:func:`_grid.dense_mode_depths`); ``mode_points_per_meter``, not
+        read by a ``MODES`` run whose modes are tabulated on the receiver
+        depths or on a pinned ``mode_depths``; ``range_offsets``, read only
+        by the one-profile ``Evaluate`` of a field run (``field.f90:214-221``)."""
+        modes = mode == RunMode.MODES
+        unused = []
+        if self._caller_set('mode_coupling') and (
+                modes or not env.is_range_dependent):
+            unused.append((
+                'mode_coupling',
+                "a MODES run sums no field" if modes else
+                "a range-independent run has one profile, which field.exe "
+                "evaluates with Evaluate whatever the option "
+                "(field.f90:214-215)"))
+        if self._caller_set('n_segments') and (
+                modes or not env.is_range_dependent):
+            unused.append((
+                'n_segments',
+                "a MODES run solves one profile" if modes else
+                "a range-independent run has one profile to segment"))
+        if self._caller_set('mode_depths') and not (
+                modes and receiver is None):
+            unused.append((
+                'mode_depths',
+                "a MODES run with a receiver tabulates the modes on the "
+                "receiver depths" if modes else
+                "a field run tabulates the modes on its own grid, at "
+                "mode_points_per_meter, with the receiver depths"))
+        if self._caller_set('mode_points_per_meter') and modes and (
+                receiver is not None or self.mode_depths is not None):
+            unused.append((
+                'mode_points_per_meter',
+                "a MODES run with a receiver tabulates the modes on the "
+                "receiver depths" if receiver is not None else
+                "the pinned mode_depths are the tabulation grid"))
+        if self._caller_set('range_offsets') and (
+                modes or env.is_range_dependent):
+            unused.append((
+                'range_offsets',
+                "a MODES run sums no field" if modes else
+                "a range-dependent run is summed by EvaluateAD / "
+                "EvaluateCM, which take no offsets; only the one-profile "
+                "Evaluate reads Rro (field.f90:214-221)"))
+        return [Notice(
+            f"{name} not used",
+            f"{self.model_name}: {name}={self._knob_text(name)} is not "
+            f"used: {why}.", FallbackWarning) for name, why in unused]
+
+    def _knob_text(self, name) -> str:
+        """``repr`` of knob ``name``, an array summarised."""
+        value = getattr(self, name)
+        if isinstance(value, np.ndarray):
+            what = 'offsets' if name == 'range_offsets' else 'depths'
+            return f"<{value.size} {what}>"
+        return repr(value)
 
     def _caller_set(self, name) -> bool:
         """Whether the caller set knob ``name``: given, and not a value a
@@ -554,7 +634,7 @@ class Kraken(PropagationModel):
 
     @classmethod
     def _per_launch_knob_values(cls, engine):
-        """``c_low``, ``c_high``, ``n_mesh`` and ``rmax_m`` over the
+        """``c_low``, ``c_high``, ``n_mesh`` and ``rmax`` over the
         launches (``c_high`` one per profile of each; none with
         ``leaky_modes``, which sets it)."""
         launches = engine.launches
@@ -563,7 +643,7 @@ class Kraken(PropagationModel):
             'c_high': [value for launch in launches
                        for value in launch.c_high],
             'n_mesh': [launch.n_mesh for launch in launches],
-            'rmax_m': [launch.rmax_m for launch in launches],
+            'rmax': [launch.rmax for launch in launches],
         }
         if engine.knobs.get('leaky_modes'):
             # leaky_modes sets c_high; the two are refused together, so
@@ -579,7 +659,8 @@ class Kraken(PropagationModel):
     # each segment carries ``env.bottom.at(range=r)`` with its layers. A
     # range-dependent *surface* still collapses. Honours layered + elastic
     # bottom. The MODES path reduces each range-dependent quantity by the
-    # caller's collapse method, else at r = 0 (``_checks.modes_single_profile``).
+    # caller's collapse method, else the package default
+    # (``_checks.modes_single_profile``).
     #
     # No ``'ssp'`` or ``'bottom_range'`` entry: the only readers of those keys
     # are ``_project_environment``'s range-dependent branches, guarded by the
@@ -685,10 +766,11 @@ class Kraken(PropagationModel):
         c_high: Optional[float] = None,
         n_mesh: Optional[Union[int, Sequence[int]]] = None,
         n_modes: Optional[int] = None,
+        range_offsets: Optional[Sequence[float]] = None,
         interp_ssp: Optional[str] = None,
         leaky_modes: bool = False,
         top_reflection_file: Optional[Path] = None,
-        rmax_m: Optional[float] = None,
+        rmax: Optional[float] = None,
         mode_depths: Optional[np.ndarray] = None,
         mode_points_per_meter: Optional[float] = None,
         mode_coupling: Optional[str] = None,
@@ -711,13 +793,17 @@ class Kraken(PropagationModel):
         self.c_high = c_high
         self.n_mesh = n_mesh
         self.n_modes = n_modes
+        self.range_offsets = (
+            np.atleast_1d(np.asarray(range_offsets, dtype=float))
+            if range_offsets is not None else None
+        )
         self.leaky_modes = leaky_modes
         self.top_reflection_file = (
             Path(top_reflection_file) if top_reflection_file is not None else None
         )
-        # rmax_m scales the mode solver's mesh-convergence tolerance;
+        # rmax scales the mode solver's mesh-convergence tolerance;
         # None → derive at run() from receiver.range_max.
-        self.rmax_m = rmax_m
+        self.rmax = rmax
         # mode_depths overrides compute_modes's dense grid; None → density.
         self.mode_depths = (
             np.asarray(mode_depths, dtype=float)
@@ -731,7 +817,7 @@ class Kraken(PropagationModel):
         self.n_segments = n_segments
         self._check_knobs()
         self.n_modes = None if n_modes is None else int(n_modes)
-        self.rmax_m = float(rmax_m) if rmax_m is not None else None
+        self.rmax = float(rmax) if rmax is not None else None
 
         # The resolved kraken.exe path lives in ``self._exe``;
         # a run on krakenc looks krakenc.exe up (``_modes_exe``).
@@ -796,9 +882,9 @@ class Kraken(PropagationModel):
             For a ``'precalc'`` sea surface — no Kraken-family binary reads
             a top ``.irc`` table.
         ConfigurationError
-            When ``backend='kraken'`` is forced on an environment
-            kraken.exe cannot answer (elastic media / leaky modes, or a
-            tabulated reflection coefficient).
+            When ``backend='kraken'`` is forced beside ``leaky_modes=True``,
+            or on a tabulated reflection coefficient kraken.exe cannot
+            read.
         """
         reject_precalc_surface(env, model_name=self.model_name)
         complex_modes = (
@@ -809,15 +895,18 @@ class Kraken(PropagationModel):
         reflection_tables = reflection_table_boundaries(
             env, top_reflection_file=self.top_reflection_file)
         forced = getattr(self, 'backend', None)
-        if forced == 'kraken' and complex_modes:
+        if forced == 'kraken' and getattr(self, 'leaky_modes', False):
             raise ConfigurationError(
-                "Kraken(backend='kraken') answers incorrectly on elastic media "
-                "/ leaky modes: kraken.exe clamps c_high to the half-space "
-                "shear speed (kraken.f90:209), dropping every faster mode, and "
-                "its absorption perturbation runs over the acoustic media "
-                "only (kraken.f90:728), returning Im(k)=0 for an elastic one. "
-                "Use backend='krakenc', or backend=None for automatic "
-                "dispatch."
+                "Kraken(backend='kraken', leaky_modes=True): the two settings "
+                "contradict. Leaky modes need complex eigenvalues, which only "
+                "krakenc.exe computes (kraken.htm: 'KRAKENC will attempt to "
+                "compute leaky modes if CHIGH exceeds the phase velocity of "
+                "either the S-wave or P-wave speed in the half-space'); "
+                "kraken.exe computes trapped modes only ('KRAKEN will (if "
+                "necessary) reduce CHIGH so that only trapped (non-leaky) "
+                "modes are computed').",
+                remediation="Drop backend='kraken' (leaky_modes=True runs "
+                            "krakenc.exe), or drop leaky_modes=True."
             )
         if forced == 'kraken' and reflection_tables:
             raise ConfigurationError(
@@ -889,7 +978,8 @@ class Kraken(PropagationModel):
         an integer of at least 1, an ``n_mesh`` that is not an integer of at
         least 0 (0 is KRAKEN's automatic mesh), a non-positive or non-finite
         ``mode_points_per_meter``, an ``n_segments`` that is not an integer
-        of at least 2, a non-positive ``rmax_m``, ``leaky_modes=True`` beside
+        of at least 2, a negative ``rmax``, ``range_offsets`` that are
+        not finite or decrease with depth, ``leaky_modes=True`` beside
         a pinned ``c_high``, a pinned phase-speed pair out of order, an
         unknown ``backend`` or ``mode_coupling``.
 
@@ -921,13 +1011,15 @@ class Kraken(PropagationModel):
         # (_segments.segment_environment_by_range refuses fewer).
         if self.n_segments is not None:
             whole_count('Kraken: n_segments', self.n_segments, 2)
-        # rmax_m scales the mode solver's mesh-convergence tolerance;
-        # None → derive at run() from receiver.range_max. Zero or negative
-        # short-circuits that test: ``kraken.f90:80`` leaves the refinement
-        # loop as soon as ``Error*1000*RMax < 1`` and ``Error`` starts at
-        # 1e10, so RMax <= 0 makes it true on the first, coarsest mesh — no
-        # Richardson extrapolation, measured 2.37 dB max |ΔTL| against the
-        # default, at exit 0. Bounce rejects the same value.
+        # rmax scales the mode solver's mesh-convergence tolerance;
+        # None → derive at run() from receiver.range_max. ``kraken.f90:80``
+        # leaves the refinement loop as soon as ``Error*1000*RMax < 1`` and
+        # ``Error`` starts at 1e10, so RMax <= 0 makes it true on the first,
+        # coarsest mesh — no Richardson extrapolation, measured 2.37 dB max
+        # |ΔTL| against the default, at exit 0. A set 0 is the manual's
+        # documented "no mesh doublings" (``doc/kraken.htm`` (8)) and is
+        # written as given with a notice (``rmax_zero_notice``); a negative
+        # one is refused below, since no range is negative.
         # The pinned mode-depth grid is the deck's receiver-depth line, held
         # to what a Receiver's depths are held to.
         if self.mode_depths is not None:
@@ -940,10 +1032,37 @@ class Kraken(PropagationModel):
                                  hint="metres, positive down from surface")
             require_strictly_increasing(grid, "Kraken.mode_depths",
                                         min_step=DECK_DEPTH_RESOLUTION_M)
-        rmax_m = self.rmax_m
-        if rmax_m is not None and float(rmax_m) < 0.0:
+        # field.exe's Rro: finite metres, in the order its ReadVector leaves
+        # them — sorted ascending, as the receiver depths are
+        # (misc/SourceReceiverPositions.f90:224, :267-268), so a vector that
+        # decreases with depth would reach the wrong receivers.
+        if self.range_offsets is not None:
+            offsets = np.asarray(self.range_offsets)
+            if (offsets.ndim != 1 or offsets.size < 1
+                    or not np.all(np.isfinite(offsets))):
+                raise ConfigurationError(
+                    f"Kraken(range_offsets={self._knob_text('range_offsets')})"
+                    f" must be a 1-D sequence of finite offsets (m), one per "
+                    f"receiver depth.")
+            if np.any(np.diff(offsets) < 0.0):
+                k = int(np.argmax(np.diff(offsets) < 0.0))
+                raise ConfigurationError(
+                    f"Kraken(range_offsets=...) decreases with depth: offset "
+                    f"{k + 2} ({offsets[k + 1]:g} m) is below offset {k + 1} "
+                    f"({offsets[k]:g} m). field.exe reads the offsets with "
+                    f"ReadVector, which sorts them ascending "
+                    f"(misc/SourceReceiverPositions.f90:267-268) as it sorts "
+                    f"the receiver depths (:224), so it pairs the smallest "
+                    f"offset with the shallowest depth and these offsets "
+                    f"would reach other receivers than the ones given.",
+                    remediation="Give offsets that do not decrease with "
+                                "depth (shallowest receiver first); "
+                                "field.exe cannot place a deeper receiver "
+                                "at a shorter range than a shallower one.")
+        rmax = self.rmax
+        if rmax is not None and float(rmax) < 0.0:
             raise ConfigurationError(
-                f"Kraken(rmax_m={rmax_m}) is negative: RMax is the largest "
+                f"Kraken(rmax={rmax}) is negative: RMax is the largest "
                 f"range for which a field calculation will be desired "
                 f"(doc/kraken.htm (8)), and no range is negative.",
                 remediation="Pass the farthest range of the field (m), 0 "
@@ -979,11 +1098,12 @@ class Kraken(PropagationModel):
     def _normalise_env(self, env, mode):
         """Stage 1 of a MODES call reduces a range-dependent environment to
         one profile (:func:`_checks.modes_single_profile`: the caller's
-        ``collapse`` methods, else r = 0) before the shared projection:
+        ``collapse`` methods, else the package defaults) before the shared
+        projection:
         normal modes are range-independent, while every field mode segments
         the environment itself."""
         if mode == RunMode.MODES:
-            return modes_single_profile(env, user_collapse=self._user_collapse,
+            return modes_single_profile(env, collapse=self._collapse,
                                         model_name=self.model_name)
         return env
 
@@ -1044,9 +1164,11 @@ class Kraken(PropagationModel):
         mode = settings.mode
         backend = self.select_backend(env)
         notices = [rmax_zero_notice(
-            self.rmax_m if self._caller_set('rmax_m') else None,
+            self.rmax if self._caller_set('rmax') else None,
             model_name=self.model_name),
-            self._unused_coupling_notice(env, mode)]
+            kraken_exe_elastic_notice(env, backend=backend,
+                                      model_name=self.model_name),
+            *self._unused_knob_notices(env, mode, receiver)]
         if mode == RunMode.MODES:
             n_modes = self.n_modes
             if receiver is None:
@@ -1069,7 +1191,7 @@ class Kraken(PropagationModel):
                                      pinned_c_high=self.c_high,
                                      pinned_c_low=self.c_low,
                                      pinned_n_mesh=self.n_mesh,
-                                     pinned_rmax_m=self.rmax_m)
+                                     pinned_rmax=self.rmax)
             notices.append(kraken_exe_above_seabed_notice(
                 env, mode, backend=backend, c_highs=launch.c_high,
                 chosen=self._chose_backend_or_window(),
@@ -1112,6 +1234,16 @@ class Kraken(PropagationModel):
              for span in elastic_depth_intervals(env, col)]
             if env.bottom.is_layered else []
         )
+        if self.range_offsets is not None and \
+                self.range_offsets.size != receiver.depths.size:
+            raise ConfigurationError(
+                f"Kraken(range_offsets=...) holds {self.range_offsets.size} "
+                f"offset(s) for {receiver.depths.size} receiver depth(s); "
+                f"field.exe stops unless there is one offset per depth "
+                f"('Number of range offsets, NRro, not equal to number of "
+                f"depths, NRz', field.f90:149-152).",
+                remediation="Give one offset (m) per receiver depth, "
+                            "shallowest first.")
         rcv, keep, partition_notice = partition_elastic_subbottom(
             env, receiver, elastic_spans, model_name=self.model_name)
         notices.append(partition_notice)
@@ -1222,12 +1354,12 @@ class Kraken(PropagationModel):
         """
         freqs = marched_frequencies if marched_frequencies is not None else source.frequencies
         if env.is_range_dependent:
-            segments, n_profiles, profile_ranges_m, max_total_depth = \
+            segments, n_profiles, profile_ranges, max_total_depth = \
                 segment_env_for_field(env, freq=freqs, log=self._log,
                                       mode_coupling=self._coupling,
                                       n_segments=self.n_segments)
         else:
-            segments, profile_ranges_m = None, None
+            segments, profile_ranges = None, None
             max_total_depth = total_media_depth(env)
 
         ppm, ppm_notice = mode_points_per_meter(
@@ -1246,8 +1378,8 @@ class Kraken(PropagationModel):
         freq0 = float(np.atleast_1d(
             np.asarray(source.frequencies, dtype=float))[0])
         if segments is not None:
-            rmax_m, rmax_origin = resolve_rmax_m(receiver,
-                                                 pinned_rmax_m=self.rmax_m)
+            rmax, rmax_origin = resolve_rmax(receiver,
+                                             pinned_rmax=self.rmax)
             n_mesh = multi_profile_n_mesh(
                 segments, float(source.frequencies[0]),
                 pinned_n_mesh=self.n_mesh)
@@ -1256,8 +1388,8 @@ class Kraken(PropagationModel):
             # A pinned n_mesh is checked at the deck's freq0 (see
             # :func:`_grid.resolve_modes_launch`).
             n_mesh = single_profile_n_mesh(env, self.n_mesh, freq0)
-            rmax_m, rmax_origin = resolve_rmax_m(
-                receiver, pinned_rmax_m=self.rmax_m)
+            rmax, rmax_origin = resolve_rmax(
+                receiver, pinned_rmax=self.rmax)
             if marched_frequencies is not None:
                 lowest = float(np.min(marched_frequencies))
                 band_counts = band_n_mesh(env, deck_frequency=freq0,
@@ -1283,10 +1415,10 @@ class Kraken(PropagationModel):
             deck_frequency=freq0,
             marched_frequencies=None if marched_frequencies is None else np.asarray(marched_frequencies, dtype=float),
             tabulation_depths=mode_depths,
-            profile_ranges_m=profile_ranges_m,
+            profile_ranges=profile_ranges,
             c_low=c_low,
             c_high=c_highs,
-            rmax_m=rmax_m,
+            rmax=rmax,
             n_mesh=n_mesh,
             field_option=build_field_option(
                 env.is_range_dependent, source, run_mode,
@@ -1368,7 +1500,7 @@ class Kraken(PropagationModel):
         exe = self._modes_exe(inputs.settings.engine.backend)
         if outcome.profile > 0:
             return profile_without_modes_refusal(
-                outcome.profile, inputs.env, launch.profile_ranges_m, exe,
+                outcome.profile, inputs.env, launch.profile_ranges, exe,
                 outcome.frequency, outcome.reason, model_name=self.model_name)
         at = (f"at {outcome.frequency:g} Hz" if band is None else
               f"at any requested frequency ({band[0]:g}-{band[-1]:g} Hz)")
@@ -1415,7 +1547,7 @@ class Kraken(PropagationModel):
         stops = sorted(i for i in unsummed if unsummed[i].profile > 0)
         if stops:
             first = unsummed[stops[0]]
-            ranges = inputs.settings.engine.launches[stops[0]].profile_ranges_m
+            ranges = inputs.settings.engine.launches[stops[0]].profile_ranges
             r, depth = profile_location(inputs.env, ranges, first.profile)
             remedy = end_track_or_ram(inputs.env, ranges, first.profile)
             warnings.warn(
@@ -1609,8 +1741,8 @@ class Kraken(PropagationModel):
         deck). Reading a record walks the file from its first frequency,
         which on a 340-bin band took twice the band's solve; a printed
         table saves it."""
-        tables = printed_mode_tables(read_prt(base.with_suffix('.prt')),
-                                     len(frequencies))
+        tables = printed_mode_tables(
+            _read_prt_if_present(base.with_suffix('.prt')), len(frequencies))
         empty = [i for i, table in enumerate(tables)
                  if table is not None and not table[1].size]
         if empty:
@@ -1679,8 +1811,8 @@ class Kraken(PropagationModel):
             if record is not None:
                 self._note_leaky(
                     inputs, frequency, record, profile=profile,
-                    range_m=(0.0 if launch.profile_ranges_m is None
-                             else launch.profile_ranges_m[profile]))
+                    range_m=(0.0 if launch.profile_ranges is None
+                             else launch.profile_ranges[profile]))
         self._run_field_exe(inputs.work_dir, deck.stem, launch.field_option)
         return None
 
@@ -1709,7 +1841,7 @@ class Kraken(PropagationModel):
         vg = read_group_speeds_from_prt(
             work_dir, base, modes.n_modes,
             fills_vg=(exe.stem.lower() == 'krakenc'))
-        return {'modes': modes, 'group_velocity': vg}
+        return {'modes': modes, 'group_speeds': vg}
 
     def _read_field(self, inputs, deck: Path):
         """Route step (field): the narrowband ``.shd`` as
@@ -1765,9 +1897,8 @@ class Kraken(PropagationModel):
                                  model_name=self.model_name)
         result = build_modes_field(
             modes, engine.n_modes, inputs.source, backend_exe=exe,
-            group_velocity=raw[0]['group_velocity'],
-            water_density=inputs.env.water_density,
-            leaky_modes=self.leaky_modes, model_exe=self._exe,
+            group_speeds=raw[0]['group_speeds'],
+            water_density=inputs.env.water_density, model_exe=self._exe,
             model_name=self.model_name, provenance=self.provenance
         )
         attach_output_paths(
@@ -1812,7 +1943,7 @@ class Kraken(PropagationModel):
         tf = self._on_band_grid(inputs, tf, frequencies, band.kept)
         solved = np.zeros(frequencies.size, dtype=bool)
         solved[band.kept] = True
-        tf, solved, outcomes = self._resolve_failed_bins(
+        tf, solved, outcomes, note = self._resolve_failed_bins(
             inputs, tf, exe, frequencies, solved)
         tf = self._mark_unsummed_bins(
             inputs, tf, frequencies,
@@ -1820,7 +1951,10 @@ class Kraken(PropagationModel):
                 float(frequencies[i]), 0,
                 band.dropped.get(int(i), _EMPTY_TABLE)))
              for i in np.flatnonzero(~solved)})
-        return self._finish_band(inputs, tf)
+        result = self._finish_band(inputs, tf)
+        if note is not None:
+            add_run_note(result, note)
+        return result
 
     def _on_band_grid(self, inputs, tf, frequencies, kept):
         """``tf``, the field of the deck's bins ``kept`` (indices into
@@ -1850,13 +1984,15 @@ class Kraken(PropagationModel):
         return tf.replace(no_mode_bins=tuple(no_mode)) if no_mode else tf
 
     def _resolve_failed_bins(self, inputs, tf, exe, frequencies, solved):
-        """``(tf, solved, outcomes)`` with every bin above the first
+        """``(tf, solved, outcomes, note)`` with every bin above the first
         ``solved`` one that the band deck left without a field — no level at
         any receiver (field.exe's empty sum, or NaN), or not summed — solved
         again on a deck of its own,
         in a subdirectory of the run's. ``solved`` marks the bins a solve
         summed, ``outcomes`` why each bin solved again was not
-        (:class:`_Unsummed`, by bin index).
+        (:class:`_Unsummed`, by bin index), ``note`` the line of
+        ``run_settings.notes`` naming the bins solved again (``None`` when
+        none was).
 
         The band deck solves all its frequencies in one modes run, and a bin
         can fail there that solves alone. Measured: 30 m of water over sand,
@@ -1874,7 +2010,7 @@ class Kraken(PropagationModel):
         failed = [i for i in range(first, data.shape[-1])
                   if not solved[i] or _no_level(data[..., i])]
         if not failed:
-            return tf, solved, {}
+            return tf, solved, {}, None
         data = np.array(data, copy=True)
         solved = np.array(solved, copy=True)
         raised, outcomes = {}, {}
@@ -1932,10 +2068,11 @@ class Kraken(PropagationModel):
                 f"and cleanup=False); a band whose grid avoids those "
                 f"frequencies synthesises.",
                 NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
-        self._log(f"the band deck left {len(failed)} bin(s) without a field "
-                  f"({listed(failed)} Hz); each was solved again on a deck "
-                  f"of its own.", level="info")
-        return tf.replace(data=data), solved, outcomes
+        note = (f"frequencies {listed(failed)} Hz: the band deck left them "
+                f"without a field; each was solved again on a deck of its own "
+                f"(bin_<index>/ in the work directory)")
+        self._log(note, level="info")
+        return tf.replace(data=data), solved, outcomes, note
 
     def _band_bin_result(self, inputs, deck, raw):
         """Route step (band_bin): a band of one bin."""
@@ -1987,7 +2124,6 @@ class Kraken(PropagationModel):
         d['data'] = np.asarray(d['data'])[:, :, None]
         d['coords'] = {**d['coords'], 'frequency': frequencies}
         d['frequencies'] = frequencies
-        d['metadata'] = {**d['metadata'], 'native_broadband': False}
         return Field.from_dict(d)
 
     def _stack_band_by_frequency(self, inputs, raw, exe, frequencies):
@@ -2025,9 +2161,6 @@ class Kraken(PropagationModel):
         blank = np.full_like(next(s for s in slabs if s is not None), np.nan)
         slabs = [blank if slab is None else slab for slab in slabs]
         metadata = dict(getattr(first, 'metadata', {}) or {})
-        metadata['native_broadband'] = False
-        metadata['broadband_assembly'] = ('per-frequency loop '
-                                          '(range-dependent deck)')
         tf = Field(
             data=np.stack(slabs, axis=-1),
             coords={'depth': np.asarray(first.coords['depth'], dtype=float),
@@ -2049,9 +2182,8 @@ class Kraken(PropagationModel):
         source = deck_source(inputs, launch)
         receiver = evaluated_receiver(inputs)
         env = inputs.env
-        is_rd = launch.profile_ranges_m is not None
         field = assemble_field_from_shd(
-            raw, source, receiver, is_rd, launch.n_profiles, run_mode,
+            raw, source, receiver, launch.n_profiles, run_mode,
             line_c_source=([_source_sound_speed(env, source.at_depth(i))
                             for i in range(np.atleast_1d(
                                 source.depths).size)]

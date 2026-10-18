@@ -33,12 +33,12 @@ def _open(path):
     Goes through :func:`uacpy.data._cache.memoize`, so threads racing a cold
     path open the file once between them — concurrent netCDF4 opens of one
     file segfault the interpreter, and the losers of an unguarded race would
-    also be handles ``close()`` can no longer reach.
+    also be handles ``close()`` cannot reach.
     """
     def open_dataset():
         # Typed like every other cached reader: a truncated WOA23 file
         # (1.5 GB, the second most download-interruptible in the cache)
-        # otherwise raised netCDF4's bare OSError, which the
+        # would otherwise raise netCDF4's bare OSError, which the
         # source-fallback chains do not catch.
         with _cache.reading('woa23', path):
             return open_netcdf(path)

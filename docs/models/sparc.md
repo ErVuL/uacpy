@@ -216,6 +216,15 @@ Try one of these models instead:
   • SPARC with run_mode=TIME_SERIES for its native p(t)
 ```
 
+A `.rts` read with `uacpy.io.read_rts_file` can still be projected onto one
+frequency with `uacpy.models.sparc.rts_to_pressure`. Without `pulse_type` it
+returns the amplitude of a steady tone in the record (the Hann-windowed
+`tone_phasor`); a SPARC record is a transient, so that number changes with the
+record length and the arrival time and keeps the source spectrum (one arrival
+at 0.2 s, records of 0.5 / 1 / 2 s: −24.4 / −38.8 / −56.0 dB at 50 Hz). With
+`pulse_type=` it divides the source pulse's spectrum out — closer, but still
+not a calibrated TL, for the reasons in the message above.
+
 ### The three geometries
 
 The real choice on this page is not the run mode — it is `output_mode`, which
@@ -234,7 +243,10 @@ the same `(depth, range, time)` `Field` on one shared time grid; they differ
 only in how the work is spent. `'R'` and `'D'` loop the binary in the wrapper
 and `max_launches`, when set, caps the axis they loop (the default `None` runs every element); `'S'` runs
 once and is uncapped, converting the wavenumber-domain `.grn` in-tree with one
-inverse Hankel transform per output time.
+inverse Hankel transform per output time. With a kept work directory
+(`work_dir=…, cleanup=False`), `result.metadata['rts_file']` names the first
+launch's `.rts`; launch `i` wrote `<work_dir>/<run_bases[i]>.rts`, the bases
+listed in `result.run_settings.engine.run_bases`.
 
 **The three geometries do not arrive on a common scale.** `'R'` and `'D'` are
 both range-domain outputs but normalise differently inside `sparc.f90`: `'D'`
@@ -294,7 +306,7 @@ The position-4 filter is applied **per wavenumber** at `k·c_low/2π` and
 
 | Name | Default | Meaning |
 |---|---|---|
-| `c_low`, `c_high` | `None` | Phase-speed bounds (m/s) — they set `kMin`/`kMax`. `None` ⇒ `0.90 × min(SSP)` (`scooter.f90:258`'s factor) and `c_high = 1e7`, the "no upper limit" every toolbox SPARC deck writes (`tests/iso.env:9` `1000.0 1.0E7`, `tests/head/iso.env:12`, `tests/head/head.env:12`), so `k_min = 0` as Jensen et al. (ch. 4 App. 1) recommend. Not the AT family's `1e9`: a `'B'`/`'H'` pulse is band-passed at each wavenumber up to `k·c_high/2π` (`sparc.f90:398`), and `tslib/bandpassc.f90:16` indexes that edge as `INT(f/Δf)` on the source series — at `1e9` the index passes the INTEGER range once `freq_max ×` the series duration exceeds about `2.15 × c_low`, every band-pass weight goes to zero and the source falls silent at exit 0 (a 16 s series came back 78 % rms off). A deck whose index would overflow is refused (`ConfigurationError`, naming both lines). Jensen et al. (Sect. 8.3.2) set `k_max = 2π f_max/c_min` and `k_min = 2π f_min/c_max` for the time-marched solve. |
+| `c_low`, `c_high` | `None` | Phase-speed bounds (m/s) — they set `kMin`/`kMax`. `None` ⇒ 0.90 × the slowest speed of every medium, sediment and half-space included (`scooter.f90:193-259`'s `cMin` rule; SPARC's shear is collapsed to fluid first, so the factor is 0.90 and the result differs from 0.90 × the slowest water speed only under a sediment slower than the water) and `c_high = 1e7`, the "no upper limit" every toolbox SPARC deck writes (`tests/iso.env:9` `1000.0 1.0E7`, `tests/head/iso.env:12`, `tests/head/head.env:12`), so `k_min = 0` as Jensen et al. (ch. 4 App. 1) recommend. Not the AT family's `1e9`: a `'B'`/`'H'` pulse is band-passed at each wavenumber up to `k·c_high/2π` (`sparc.f90:398`), and `tslib/bandpassc.f90:16` indexes that edge as `INT(f/Δf)` on the source series — at `1e9` the index passes the INTEGER range once `freq_max ×` the series duration exceeds about `2.15 × c_low`, every band-pass weight goes to zero and the source falls silent at exit 0 (a 16 s series came back 78 % rms off). A deck whose index would overflow is refused (`ConfigurationError`, naming both lines). Jensen et al. (Sect. 8.3.2) set `k_max = 2π f_max/c_min` and `k_min = 2π f_min/c_max` for the time-marched solve. |
 | `n_mesh` | `None` | Mesh points per medium. `None` → 20 points per wavelength at `freq_max`, per medium; a set `0` is the toolbox's automatic mesh at the deck frequency (`ReadEnvironmentMod.f90:101-106`), its storage check left to the binary. |
 | `interp_ssp` | `None` | SSP interpolation scheme; `None` auto-picks (`'linear'`, AT `'C'`, the manual's choice when unsure: `doc/EnvironmentalFile.htm`). |
 | `rmax_factor` | `None` | `RMax = receiver.ranges.max() × this`. `None` ⇒ `RMax = r + 1.2 · c_fast · time_max` (`r` the farthest receiver range, `c_fast` the fastest speed in any medium): Jensen et al.'s criterion (*Computational Ocean Acoustics*, Sect. 8.3.2: "Δk r = 2π/r max and r max is the maximum range to which the pulse will propagate before the calculation is terminated") that no range replica reach the record, applied to SPARC's mirrored fold (`sparc.f90:595`, `:622`); `1.2` is uacpy's measured margin. Their rule read literally, `RMax = c_fast · time_max`, puts the replica inside the record here (see §7). On the auto window it is `4 × r` for a uniform speed, and it lengthens with a pinned `time_max` / `output_duration`. |
@@ -308,6 +320,7 @@ The position-4 filter is applied **per wavenumber** at `k·c_low/2π` and
 | `timeout` | `600.0` | Subprocess timeout **per run** (s) — and `'R'`/`'D'` make several. uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
 | `work_dir` | `None` | Pin the scratch dir to keep `.env` / `.rts` / `.grn` / `.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
+| `use_tmpfs` | `False` | Stage scratch files in RAM. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`. |
 | `collapse` | `None` | Override the per-feature collapse methods. |
 
@@ -345,15 +358,12 @@ pinned one can sit below the source band (`run()` warns when it does).
 ### `output_mode='R'` — a horizontal array
 
 ```python
-from uacpy.core.results import Field
-
 array = uacpy.Receiver(depths=50.0, ranges=np.linspace(200.0, 1200.0, 24))
 p = SPARC(time_max=1.0, n_time_samples=2048).run(env, source, array)
 
-section = p.at(depth=50.0).to_dict()
-section['data'] = (section['data']
-                   * np.sqrt(section['coords']['range'])[:, None])
-fig, ax = Field.from_dict(section).plot(
+section = p.at(depth=50.0)
+gained = section.replace(data=section.data * np.sqrt(section.ranges)[:, None])
+fig, ax = gained.plot(
     stacked=True, figsize=TALL,
     title='SPARC — horizontal array at 50 m, gained by √r')
 ```
@@ -564,7 +574,7 @@ left unpinned, `source_waveform` / `sample_rate` are marched (staged as
 `STSFIL`, the `'FN+B'` route) and `output_duration` becomes `time_max`, the length
 of the `[0, time_max]` record. `frequencies=` sets the pulse band's edges (its
 span), with a `FallbackWarning` that the result's frequency axis is
-`source.frequencies[0]` and the band `band_hz`, since SPARC marches on its own
+`source.frequencies[0]` and the band `result.band`, since SPARC marches on its own
 time grid. A keyword that contradicts a pinned knob is refused, naming both:
 `source_waveform=` beside a canned `pulse_type` (`'P'`, `'R'`, …; the deck
 carries one pulse), `frequencies=` beside both `freq_min` and `freq_max`, and

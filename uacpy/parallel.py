@@ -369,9 +369,11 @@ class ParallelResult:
     def stack(self, coordinate_name: Optional[str] = None) -> Result:
         """Bundle the successful results along one new axis.
 
-        :class:`Field` results become one Field with a leading
-        ``coordinate_name`` axis (they must lie on one grid and hold one
-        quantity); any other results become a :class:`ResultStack`. Skips
+        :class:`Field` results become one Field with a new
+        ``coordinate_name`` axis, placed as :func:`~uacpy.stack_fields`
+        places it (last for ``frequency`` / ``time``, leading otherwise;
+        they must lie on one grid and hold one quantity); any other results
+        become a :class:`ResultStack`. Skips
         failed jobs (and their labels). Uses the job labels as the
         coordinate when every one is a real number (a bool, a complex value
         or text is not one: read as a coordinate it would be 1 or 0, its
@@ -530,11 +532,16 @@ def _check_pool_args(jobs, n_workers, start_method) -> int:
     # Typed errors for the two knobs the pool would otherwise reject with a
     # bare ValueError/TypeError from concurrent.futures / multiprocessing.
     try:
-        n_workers = int(n_workers)
+        whole = (not isinstance(n_workers, bool)
+                 and float(n_workers).is_integer())
     except (TypeError, ValueError):
+        whole = False
+    if not whole:
+        # A count is used as given: 2.7 is refused, not truncated to 2.
         raise ConfigurationError(
             f"run_parallel: n_workers must be an integer >= 1, got "
-            f"{n_workers!r}.") from None
+            f"{n_workers!r}.")
+    n_workers = int(n_workers)
     if n_workers < 1:
         raise ConfigurationError(
             f"run_parallel: n_workers must be >= 1, got {n_workers}.")

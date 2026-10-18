@@ -15,12 +15,13 @@ NBS is a U.S. Government work — **public domain**.
 
 import numpy as np
 
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.units import ms_to_knots
-from uacpy.core.geo import as_coordinate, geodesic_waypoints
+from uacpy.core.geo import as_coordinate
 from uacpy.data._chain import lower_source_spec
-from uacpy.data._geo import (AlongTrack, cell_half_diagonal_km, checked_max_distance,
-                             checked_n_points, checked_offset, require_source)
+from uacpy.data._geo import (AlongTrack, along_track_waypoints,
+                             cell_half_diagonal_km, checked_max_distance,
+                             checked_offset, require_source)
 from uacpy.data._http import (erddap_griddap_url, erddap_point,
                               http_get)
 from uacpy.core.geo import parse_date
@@ -112,14 +113,17 @@ def wind_at(point, *, date, source='nbs', timeout=60.0, verbose=False,
     ``(lat, lon)`` point: the reading :func:`fetch_wind` returns and the
     record :func:`uacpy.data.fetch_sea_surface` stamps, through the offset
     rule (a warning once the cell read is not the point's own 0.25° cell, a
-    refusal past ``max_distance_km``)."""
+    refusal past ``max_distance_km``). The record's ``data_date`` is the step
+    read (live) or the climatology's month and reference period (cached)."""
     source = lower_source_spec(source)
     _check_source(source)
     lat, lon = as_coordinate(point)
     if source == 'local':
         from uacpy.data import wind_local
         speed = wind_local.wind_speed(point, date=date)
-        node, step = wind_local.wind_cell(point), None
+        node = wind_local.wind_cell(point)
+        step = (f"month {parse_date(date).month:02d}, "
+                f"{wind_local.climatology_period()}")
     else:
         speed, node, step = _wind_speed(lat, lon, date, timeout=timeout,
                                         verbose=verbose)
@@ -178,11 +182,14 @@ def fetch_wind(point, *, date, source='nbs', timeout=60.0, verbose=False,
 
 @one_provenance_notice(subject='the samples',
                        record="the result's .provenance")
-def fetch_wind_transect(start, end, *, date, n_points=6, source='nbs',
-                        timeout=60.0, verbose=False, max_distance_km=None):
+def fetch_wind_transect(start, end, *, date, n_points=None, max_points=None,
+                        source='nbs', timeout=60.0, verbose=False,
+                        max_distance_km=None):
     """The 10 m wind speed (knots) sampled along ``start`` → ``end``, as an
-    :class:`~uacpy.data.AlongTrack` (``'wind_speed'``) with the ``'nbs'``
-    provenance and the requested date.
+    :class:`~uacpy.data.AlongTrack` (``'wind_speed'``) with one ``'nbs'``
+    record per waypoint: the cell read, its offset, the requested date and
+    the date of the data read (the live step, or the cached climatology's
+    month and reference period).
 
     Parameters
     ----------
@@ -190,8 +197,17 @@ def fetch_wind_transect(start, end, *, date, n_points=6, source='nbs',
         Transect endpoints in decimal degrees.
     date : str or datetime.date
         Calendar date.
-    n_points : int, optional
-        Waypoints along the great circle. Default 6.
+    n_points : int or 'auto', optional
+        Waypoints along the great circle, used as given; ``None`` (default)
+        is 6 (uacpy guidance), within ``max_points`` when that is set.
+        ``'auto'`` (with ``source='local'``) probes ``max_points`` waypoints
+        and keeps one per 0.25° climatology cell crossed, endpoints
+        anchored; the live NBS service answers one request per waypoint, so
+        ``'auto'`` with ``source='nbs'`` is refused.
+    max_points : int, optional
+        The waypoints ``'auto'`` probes; ``None`` (default) is 1000 (uacpy
+        guidance). An explicit ``n_points`` above an explicit
+        ``max_points`` is refused.
     source : {'nbs', 'local'}, optional
         NBS live (default) or the cached monthly climatology.
     timeout : float, optional
@@ -202,19 +218,28 @@ def fetch_wind_transect(start, end, *, date, n_points=6, source='nbs',
         Refuse a waypoint whose cell stands farther than this (km) from it;
         ``None`` (default) sets no limit beyond the per-waypoint warning.
     """
-    n_points = checked_n_points(n_points, 'fetch_wind_transect')
-    limit = checked_max_distance(max_distance_km, 'fetch_wind_transect')
+    who = 'fetch_wind_transect'
+    limit = checked_max_distance(max_distance_km, who)
     source = lower_source_spec(source)
     _check_source(source)
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
-    speeds = np.array([
-        wind_at((la, lo), date=date, source=source, timeout=timeout,
-                verbose=verbose, max_distance_km=limit,
-                who='fetch_wind_transect')[0]
-        for la, lo in zip(lats, lons)])
-    return AlongTrack(ranges=np.asarray(ranges_m), lats=np.asarray(lats),
-                      lons=np.asarray(lons), data=speeds, unit='kn',
-                      quantity='wind_speed',
-                      provenance=DataProvenance(
-                          source=SOURCES['nbs'],
-                          requested_date=parse_date(date).isoformat()))
+    if isinstance(n_points, str) and n_points == 'auto' and source != 'local':
+        raise ConfigurationError(
+            f"{who}: n_points='auto' probes the cells of the cached "
+            f"climatology (source='local'); the live NBS service answers one "
+            f"request per waypoint, so it has no cells to probe.",
+            remediation="Pass source='local', or an integer n_points.")
+
+    def cell_of(lat, lon):
+        from uacpy.data import wind_local
+        return wind_local.wind_cell((lat, lon))
+
+    lats, lons, ranges = along_track_waypoints(
+        start, end, n_points, max_points, who=who, cell_of=cell_of)
+    readings = [wind_at((la, lo), date=date, source=source, timeout=timeout,
+                        verbose=verbose, max_distance_km=limit, who=who)
+                for la, lo in zip(lats, lons)]
+    return AlongTrack(ranges=np.asarray(ranges), lats=np.asarray(lats),
+                      lons=np.asarray(lons),
+                      data=np.array([speed for speed, _prov in readings]),
+                      unit='kn', quantity='wind_speed',
+                      provenance=tuple(prov for _speed, prov in readings))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 import functools
+import inspect
 import warnings
 import numpy as np
 from typing import Tuple
@@ -15,6 +16,7 @@ from uacpy.core.results import Field
 from uacpy.core.results.quantities import (label as quantity_label,
                                            is_loss)
 from uacpy.core.units import m_to_km
+from uacpy.core.acoustics.levels import no_energy_mask
 from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
     RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE,
@@ -53,7 +55,10 @@ def typed_plot_error(plotter=None, *, who=None):
     a clear ``ConfigurationError`` while letting an already-typed
     ``ConfigurationError`` pass through unchanged. ``TypeError`` is
     deliberately not caught — a genuine wrong-type call should surface as
-    itself, not be relabelled an input error.
+    itself, not be relabelled an input error. A call a plotter named by
+    ``who`` does not admit (``rc.plot(value='dB')``) stays a ``TypeError``,
+    but names ``who`` and lists the keywords the view takes, instead of the
+    private function Python's own message names.
 
     Several plotters build their figure before the operation that can raise, so
     any figure opened during a failed call is closed before the exception
@@ -67,9 +72,24 @@ def typed_plot_error(plotter=None, *, who=None):
             return plotter.__name__
         return who(*args, **kwargs) if callable(who) else who
 
+    signature = inspect.signature(plotter)
+    # The keywords a view takes, as its refusal lists them: every named
+    # parameter after the drawn object, but the internal ``who``.
+    taken = ', '.join(
+        f'{name}=' for name, param in list(signature.parameters.items())[1:]
+        if name != 'who' and param.kind in (param.POSITIONAL_OR_KEYWORD,
+                                            param.KEYWORD_ONLY))
+
     @functools.wraps(plotter)
     def wrapper(*args, **kwargs):
         import matplotlib.pyplot as plt
+        if who is not None:
+            try:
+                signature.bind(*args, **kwargs)
+            except TypeError as exc:
+                # ``bind`` words the problem without a function name.
+                raise TypeError(f"{_name(args, kwargs)}() {exc}; it takes "
+                                f"{taken}.") from None
         before = set(plt.get_fignums())
         try:
             return plotter(*args, **kwargs)
@@ -104,7 +124,7 @@ def typed_plot_error(plotter=None, *, who=None):
 
 
 def _carrier_or_arrays(first, others, *, count, who, fields,
-                       carrier=None):
+                       carrier=None, slots=None):
     """The carrier's leading field values when one was passed for the arrays.
 
     Every result uacpy returns is a named carrier that knows how to draw
@@ -126,14 +146,23 @@ def _carrier_or_arrays(first, others, *, count, who, fields,
     ``count`` is how many leading fields the plotter draws, which is not
     always the carrier's width: :class:`~uacpy.acoustic_signal.ComplexCepstrum`
     carries its ``delay`` as a second field that the plot does not use.
+
+    A carrier followed by a matplotlib Axes in an array slot —
+    ``plot_spectrogram(result, ax)`` — is refused, naming ``ax=``: the
+    carrier fills every array, so the Axes can only be meant for ``ax``,
+    and read as an array it would fail on its shape. ``slots`` names the
+    positional parameters ``others`` fill, ``fields[1:]`` when omitted.
     """
+    if isinstance(first, tuple) and hasattr(first, '_fields'):
+        _refuse_axes_after_carrier(
+            who, first, zip(fields[1:] if slots is None else slots, others))
     if others and any(other is not None for other in others):
         return None
     # A *named* tuple, not any tuple. Every carrier here is one, and the
     # distinction is load-bearing: ``plot_cepstrum(tuple_of_64_floats)`` is a
-    # legitimate array call with nothing else to disambiguate it, and reading
-    # it as a carrier silently drew its first element as a 1-point line
-    # instead of refusing or drawing 64.
+    # legitimate array call with nothing else to disambiguate it, and read as
+    # a carrier it would draw its first element as a 1-point line instead of
+    # refusing or drawing 64.
     if not (isinstance(first, tuple) and hasattr(first, '_fields')):
         return None
     if len(first) < count:
@@ -158,8 +187,8 @@ def _carrier_or_arrays(first, others, *, count, who, fields,
         # linear axis, and linear bins get a log axis whose first bin is
         # 0 Hz. Fields alone cannot see that.
         # Searched along the MRO, not on the exact class: a user's subclass
-        # of a carrier is still that carrier, and an exact-name test refused
-        # it from its own plotter. The two carriers this has to separate —
+        # of a carrier is still that carrier, which an exact-name test would
+        # refuse from its own plotter. The two carriers this has to separate —
         # SpectrogramResult and CQSpectrogramResult — appear in neither of
         # each other's MROs, so widening costs nothing it was buying.
         lineage = {klass.__name__ for klass in type(first).__mro__}
@@ -172,6 +201,23 @@ def _carrier_or_arrays(first, others, *, count, who, fields,
                 f"has a .plot() draws itself with it; otherwise pass this "
                 f"one's own arrays, or the plotter its docstring names.")
     return tuple(first[:count])
+
+
+def _refuse_axes_after_carrier(who, carrier, slots) -> None:
+    """Refuse a matplotlib Axes passed positionally after ``carrier``, a
+    result that fills every array argument of plotter ``who``:
+    ``plot_spectrogram(result, ax)`` puts the Axes in an array slot, where
+    it can only fail on its shape. ``slots`` are the ``(name, value)``
+    pairs of the array arguments after the carrier; the refusal names the
+    one the Axes landed in and ``ax=``."""
+    from matplotlib.axes import Axes
+    landed = [name for name, value in slots if isinstance(value, Axes)]
+    if landed:
+        raise ConfigurationError(
+            f"{who}: a {type(carrier).__name__} carries its own arrays, so "
+            f"the matplotlib Axes passed after it landed in the "
+            f"'{landed[0]}' argument.",
+            remediation=f"Pass the Axes by keyword: {who}(result, ax=ax).")
 
 
 def _refuse_spread_carrier(ax, who, field, also=None):
@@ -218,9 +264,9 @@ def _plot_warn(message, category) -> None:
     Attribution walks out to the first frame outside the package rather than
     counting frames, so a plotter, a helper the plotter calls, and a public
     function reached without any plotter at all (:func:`land_polygons`) all
-    name the user's own line. Counting could not cover the last of those: the
-    count that suited the decorated plotter chain overshot the direct call by
-    the two frames the chain contributes (measured)."""
+    name the user's own line. Counting cannot cover the last of those: a
+    count that suits the decorated plotter chain overshoots the direct call
+    by the two frames the chain contributes."""
     warnings.warn(message, category, skip_file_prefixes=USER_FRAME_SKIP)
 
 
@@ -356,14 +402,14 @@ def _fill_margins(ax):
             1.25 * _marker_half_width_in_data(ax, RECEIVER_MARKER_STYLE['markersize']))
 
 
-def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
+def _draw_geometry(ax, source=None, receiver=None, *, source_range=0.0,
                    max_markersize=8, source_markersize_bonus=0, env=None):
     """Draw the source and receiver markers on a (depth, range) cross-section.
 
     Shared by the environment, ray and field plotters so the geometry reads
     identically wherever it is shown. ``source`` is a :class:`Source` (or any
     object exposing ``depths``) or a bare array of source depths;
-    ``source_range_m`` is where the source sits — 0 by the package convention
+    ``source_range`` is where the source sits — 0 by the package convention
     that range is measured from it. ``receiver`` is decimated by
     :func:`_draw_receiver_grid`, which leaves out the receivers ``env``'s
     seafloor puts inside the seabed."""
@@ -380,7 +426,7 @@ def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
         if source_markersize_bonus:
             style['markersize'] = (style.get('markersize', 15)
                                    + source_markersize_bonus)
-        x = m_to_km(np.atleast_1d(source_range_m))[0]
+        x = m_to_km(np.atleast_1d(source_range))[0]
         for sd in np.atleast_1d(source_depths):
             ax.plot([x], [float(sd)], zorder=ZORDER_SOURCE, **style)
         needs.append((x, _marker_half_width_in_data(ax, style.get('markersize', 15))))
@@ -426,7 +472,7 @@ def _lattice_indices(n, cap):
     return np.unique(np.round(np.linspace(0, n - 1, k)).astype(int))
 
 
-def _draw_receiver_grid(ax, ranges_m, depths, *, max_markersize,
+def _draw_receiver_grid(ax, ranges, depths, *, max_markersize,
                         zorder=ZORDER_RECEIVERS, env=None):
     """Draw the decimated receiver lattice; return the full range axis in km.
 
@@ -435,7 +481,7 @@ def _draw_receiver_grid(ax, ranges_m, depths, *, max_markersize,
     marker there would read as a receiver in the water. Markers keep default
     clipping so a later user zoom hides out-of-view receivers instead of
     painting them across the figure."""
-    rr_km = m_to_km(np.atleast_1d(ranges_m))
+    rr_km = m_to_km(np.atleast_1d(ranges))
     rd = np.atleast_1d(depths)
     style = dict(RECEIVER_MARKER_STYLE)
     style['markersize'] = min(style.get('markersize', 8), max_markersize)
@@ -484,21 +530,34 @@ _VALUE_LABELS = {
 }
 
 
-def _axes_pair(who: str, ax, panels: str):
-    """``ax`` unpacked as the two axes of a two-panel plotter.
+def _axes_pair(who: str, ax, panels: str, layout: str):
+    """``ax`` unpacked as the two axes ``panels`` of a two-panel plotter.
 
     Every single-panel plotter takes one ``Axes``, so a single one is the
     natural thing to hand a two-panel plotter too; unpacking it fails inside
     the plotter with a ``TypeError`` that names neither the argument nor what
-    it wants. ``panels`` names the pair, e.g. ``'(ax_delay, ax_freq)'``."""
-    if (isinstance(ax, (tuple, list, np.ndarray)) and len(ax) == 2
-            and all(hasattr(a, 'plot') for a in ax)):
-        return ax[0], ax[1]
+    it wants. The test is the two-target unpack itself, so it admits exactly
+    what unpacks into two Axes and cannot narrow it: a tuple, a list, the
+    ndarray ``plt.subplots`` returns, ``axs.ravel()``, ``axs.flat``.
+    ``panels`` names the pair (``'(ax_mag, ax_phase)'``) and ``layout`` the
+    ``plt.subplots`` call the remediation hands back, one whose second
+    return value the test admits."""
+    try:
+        first, second = ax
+    except (TypeError, ValueError):
+        try:
+            given = str(len(ax))
+        except TypeError:
+            given = '1'
+    else:
+        if hasattr(first, 'plot') and hasattr(second, 'plot'):
+            return first, second
+        given = f"a {type(first).__name__} and a {type(second).__name__}"
     raise ConfigurationError(
-        f"{who}: draws two panels, so ax= takes a pair of axes "
-        f"{panels}; got {type(ax).__name__}.",
-        remediation="fig, (a, b) = plt.subplots(1, 2), then pass ax=(a, b); "
-                    "or leave ax=None for a new figure.")
+        f"{who}: draws two panels {panels}, so it needs a pair of Axes; "
+        f"got {given}.",
+        remediation=f"Pass ax=(a, b) — the second return value of {layout} "
+                    f"is one; or leave ax=None for a new figure.")
 
 
 def _checked_dynamic_range_dB(who: str, value) -> float:
@@ -531,13 +590,20 @@ def _floored_dB(x, *, power=False, dynamic_range_dB=None, who='plot'):
     ``dynamic_range_dB`` (default :data:`NULL_FLOOR_DB`) below the largest
     ``|x|``.
 
-    The one null policy of the magnitude-in-dB plotters: ``20·log10`` of a
-    null is ``-inf``, which no axis can show, so a null (and anything
-    deeper than the floor) is drawn ON the floor — not dropped from the line
-    with numpy's divide warning, and not lifted by an added epsilon that
-    biases every small value. The floor is relative to the peak, so it
-    follows the data's own scale. A NaN (a value the data does not define)
-    stays NaN and takes no part in the peak."""
+    The null policy of the magnitude-in-dB line plotters
+    (``plot_channel_response``, ``plot_subcarriers``, ``plot_convergence``,
+    ``plot_frf``, ``plot_beam_power``): ``20·log10`` of a null is ``-inf``,
+    which no axis can show, so a null (and anything deeper than the floor)
+    is drawn ON the floor — not dropped from the line with numpy's divide
+    warning, and not lifted by an added epsilon that biases every small
+    value. The floor is relative to the peak, so it follows the data's own
+    scale. A NaN (a value the data does not define) stays NaN and takes no
+    part in the peak. Three dB views keep a rule of their own:
+    ``Arrivals.plot(dB=True)`` leaves out and counts the arrivals below its
+    window; ``plot_greens_function`` draws dB re its panel's peak on a
+    ``dynamic_range_dB`` window its colour scale and y axis clip; and
+    ``plot_mode_excitation`` leaves out a mode of zero excitation and
+    stems the others from its ``dynamic_range_dB`` floor."""
     span = (NULL_FLOOR_DB if dynamic_range_dB is None
             else _checked_dynamic_range_dB(who, dynamic_range_dB))
     factor = 10.0 if power else 20.0
@@ -579,14 +645,12 @@ def _default_value(field: Field) -> str:
 def _is_multi_source_total(field) -> bool:
     """Whether ``field`` is the sum of more than one source.
 
-    ``Field.superpose`` stamps ``metadata['superposed_sources']`` with
-    the depths it added; a one-source stamp (the ``n = 1`` weight
+    ``Field.superpose`` records the depths it added as the Field's
+    ``superposed_sources``; a one-source record (the ``n = 1`` weight
     ``PropagationModel.run`` applies) is still one source and is left alone.
     """
-    stamp = (getattr(field, 'metadata', None) or {}).get('superposed_sources')
-    if not isinstance(stamp, dict):
-        return False
-    return len(stamp.get('depths', ())) > 1
+    record = getattr(field, 'superposed_sources', None)
+    return record is not None and len(record['depths']) > 1
 
 
 def _time_trace_label(field: Field) -> str:
@@ -599,12 +663,15 @@ def _time_trace_label(field: Field) -> str:
     return f'p(t) ({unit})' if unit else 'p(t)'
 
 
-def _value_label(field: Field, value: str, *, who: str = 'plot_field') -> str:
+def _value_label(field: Field, value: str, *, who: str = 'plot_field',
+                 weightings=None) -> str:
     """Axis / colorbar label for the ``value`` view of ``field``.
 
     Split from :func:`_value_array` for callers that label a panel someone else
     drew (a composite figure's shared colorbar) and so must not build the array
-    a second time to read its label."""
+    a second time to read its label. ``weightings`` is the list of distinct
+    frequency weightings of several exposure fields sharing that axis; when
+    they differ, the label names each of them rather than ``field``'s."""
     if value == 'dB':
         # ``value`` is the caller's choice of VIEW; ``field.kind`` is what the
         # data IS. They are independent — one complex field renders every
@@ -634,7 +701,12 @@ def _value_label(field: Field, value: str, *, who: str = 'plot_field') -> str:
             events = getattr(field, 'track_events', None)
             if events:
                 name = f"cumulative {name}, {events} events"
-            if getattr(field, 'weighting', None):
+            if weightings is not None and len(weightings) > 1:
+                # One axis over several weightings: name every one, never
+                # the first field's alone.
+                name = f"{name} — " + ', '.join(
+                    f"{w}-weighted" if w else 'unweighted' for w in weightings)
+            elif getattr(field, 'weighting', None):
                 name = f"{field.weighting}-weighted {name}"
             label = f"{name[0].upper()}{name[1:]}{sep}{unit}"
         return label
@@ -668,17 +740,17 @@ def _value_array(field: Field, value: str, *,
     """Return ``(array, axis_label)`` for ``value`` ∈ ``{'dB', 'level',
     'magnitude', 'phase', 'real', 'imag'}``."""
     label = _value_label(field, value, who=who)
+    # Each refusal below is one ``Field.view`` also makes; it is made here
+    # first so it names ``who``, the call the user made, where Field.view
+    # names itself, and so it carries the plot-side remedy.
     if value in ('dB', 'level') and 'time' in field.coords:
-        # Field.dB raises AttributeError here; a plot call reports a bad view
-        # as ConfigurationError, as it does for every other unusable value.
         raise ConfigurationError(
             f"{who}: value={value!r} has no meaning on a time-domain "
             f"field — a trace is linear pressure, not a level. Use "
             f"value='real' (the samples), or .extract_tone(f) for a complex "
             f"narrowband field with a dB view.")
     if value == 'dB' and not field.is_complex and field.unit != 'dB':
-        # Field.dB raises AttributeError here too: real data is a level only
-        # when its stored unit says so.
+        # Real data is a level only when its stored unit says so.
         raise ConfigurationError(
             f"{who}: value='dB' has no meaning on this field — its data "
             f"are real and in {field.unit!r}, not a level. Use value='real' "
@@ -728,10 +800,27 @@ def _coord_axis(coord: np.ndarray, name: str,
     return np.asarray(coord), _coord_label(name, field)
 
 
+def _no_energy_as_gap(levels_dB) -> np.ndarray:
+    """``levels_dB`` as floats with its no-energy marker samples
+    (:func:`~uacpy.core.acoustics.levels.no_energy_mask`, the ±600 dB of a
+    sample no energy reached) set to NaN, for a line or bar plotter.
+
+    The marker is not a level, so a line breaks there instead of plunging to
+    ±600 dB, and the sample takes no part in the fitted axis — the line
+    plots' counterpart of the grey no-energy cells of a dB heatmap. Display
+    only: the result keeps its value."""
+    levels = np.array(np.ma.filled(np.ma.asarray(levels_dB, dtype=float),
+                                   np.nan), dtype=float)
+    levels[no_energy_mask(levels)] = np.nan
+    return levels
+
+
 # Fixed TL colour scale used everywhere TL is drawn: ``vmin = 20 dB`` →
 # ``vmax = 120 dB``. A fixed scale keeps TL panels directly comparable across
-# models / frequencies / runs. No-data cells (e.g. Bellhop cells no ray
-# reached) are NaN and render as the axes background.
+# models / frequencies / runs. A real loss past it takes the end colour and
+# the colorbar an arrow at that end; a no-energy cell (the 600 dB marker, e.g.
+# a Bellhop cell no beam reached) takes ``style.NO_ENERGY_COLOR``; a NaN cell
+# (outside the modelled domain) renders as the axes background.
 _TL_LIMITS: Tuple[float, float] = (20.0, 120.0)
 
 
@@ -759,6 +848,19 @@ def _is_loss_view(field: Field, value: str) -> bool:
             and (field.is_complex or field.unit == 'dB'))
 
 
+def _cell_edges(coord, half):
+    """Cell edges for a centre-sampled coordinate axis.
+
+    Interior edges are the sample midpoints, the outer two mirror the first and
+    last interval. A length-1 axis has no interval to mirror, so it gets a band
+    of ``±half`` around its single sample."""
+    c = np.asarray(coord, dtype=float)
+    if c.size == 1:
+        return np.array([c[0] - half, c[0] + half])
+    mid = 0.5 * (c[:-1] + c[1:])
+    return np.concatenate(([2 * c[0] - mid[0]], mid, [2 * c[-1] - mid[-1]]))
+
+
 def _cell_edge_extent(x: np.ndarray, y: np.ndarray):
     """Edge-aligned ``imshow`` extent for centre-sampled ``x``/``y`` axes.
 
@@ -775,11 +877,11 @@ def _cell_edge_extent(x: np.ndarray, y: np.ndarray):
     descending axis here WITHOUT flipping the data mirrors the image.
     Assumes a uniform grid, which is ``imshow``'s own assumption anyway.
     """
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    hx = abs(x[1] - x[0]) / 2.0 if x.size > 1 else 0.5
-    hy = abs(y[1] - y[0]) / 2.0 if y.size > 1 else 0.5
-    return (x.min() - hx, x.max() + hx, y.min() - hy, y.max() + hy)
+    # The cell edges every heatmap is drawn on (:func:`_cell_edges`), a
+    # half-unit band around a single sample.
+    x_edges = _cell_edges(x, 0.5)
+    y_edges = _cell_edges(y, 0.5)
+    return (x_edges.min(), x_edges.max(), y_edges.min(), y_edges.max())
 
 
 #: Largest spread of an axis' sample spacing, as a fraction of its span, at
@@ -801,7 +903,7 @@ def _is_uniform_axis(coord) -> bool:
     return float(np.ptp(step)) <= _UNIFORM_GRID_TOLERANCE * abs(c[-1] - c[0])
 
 
-def _depth_range_heatmap(ax, ranges_m, depths, data, **kw):
+def _depth_range_heatmap(ax, ranges, depths, data, **kw):
     """Draw a ``(depth, range)`` panel at its true coordinates.
 
     ``imshow`` on an evenly spaced grid, where it is exact and one
@@ -810,12 +912,12 @@ def _depth_range_heatmap(ax, ranges_m, depths, data, **kw):
     own sample (:func:`_is_uniform_axis` says why ``imshow`` cannot). Range is
     drawn in km, depth increasing downward. ``aspect`` applies to either."""
     aspect = kw.pop('aspect', None)
-    if _is_uniform_axis(ranges_m) and _is_uniform_axis(depths):
+    if _is_uniform_axis(ranges) and _is_uniform_axis(depths):
         if aspect is not None:
             kw['aspect'] = aspect
-        return ax.imshow(data, extent=_imshow_extent(ranges_m, depths),
+        return ax.imshow(data, extent=_imshow_extent(ranges, depths),
                          origin='upper', **kw)
-    im = ax.pcolormesh(m_to_km(np.asarray(ranges_m, dtype=float)),
+    im = ax.pcolormesh(m_to_km(np.asarray(ranges, dtype=float)),
                        np.asarray(depths, dtype=float), data,
                        shading='nearest', **kw)
     invert_yaxis_once(ax)
@@ -831,10 +933,10 @@ def _flip_y(extent):
     return (left, right, top, bottom)
 
 
-def _imshow_extent(ranges_m: np.ndarray, depths: np.ndarray):
+def _imshow_extent(ranges: np.ndarray, depths: np.ndarray):
     """``imshow`` extent for a (depth, range) field: cell edges, range in km,
     depth increasing downward — :func:`_cell_edge_extent` flipped."""
-    return _flip_y(_cell_edge_extent(m_to_km(np.asarray(ranges_m, dtype=float)),
+    return _flip_y(_cell_edge_extent(m_to_km(np.asarray(ranges, dtype=float)),
                                      np.asarray(depths, dtype=float)))
 
 
@@ -866,7 +968,7 @@ def _painted_x_span(artist) -> Tuple[float, float]:
     return float(min(x0, x1)), float(max(x0, x1))
 
 
-def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray, *,
+def _overlay_seafloor(ax, env: Environment, ranges: np.ndarray, *,
                       painted=None) -> None:
     """Draw the seafloor on top of a (depth, range) heatmap.
 
@@ -874,7 +976,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray, *,
     above contour lines and TL data — matches the original AT-style
     rendering. Bathymetry is clipped to the painted span — the x-extent of
     the heatmap ``painted`` (its cell edges, :func:`_painted_x_span`) or,
-    with no heatmap, the ``ranges_m`` span — plus a marker's width past each
+    with no heatmap, the ``ranges`` span — plus a marker's width past each
     end (:func:`_fill_margins`), from the source range when the data start
     beyond it — and anchored at both ends, and the y-axis is extended
     downward when the seafloor dips below the data extent so the sediment
@@ -885,7 +987,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray, *,
     it."""
     if env is None:
         return
-    data_r_km = m_to_km(ranges_m)
+    data_r_km = m_to_km(ranges)
     if painted is not None:
         x_lo, x_hi = _painted_x_span(painted)
     elif data_r_km.size:
@@ -964,13 +1066,13 @@ def _pinned_subtitle(field: Field) -> str:
     # A reduced map pins one frequency but AVERAGED a band, and the pinned
     # value is a centroid — so a 50 Hz and a 400 Hz average about the same
     # centre would caption identically, naming the one frequency the map is
-    # not. ``band_hz`` is what the reducers record for exactly this, so
+    # not. ``band`` is what the reducers record for exactly this, so
     # the band wins over the pin when it is there.
     # An exposure or a peak integrates the band's energy, or reads its
     # loudest excursion, and is not an average over it: those maps are
     # captioned by the band they span, with the weighting an exposure was
     # taken under.
-    band = field.band_hz
+    band = field.band
     parts = []
     for name, v in field.pinned.items():
         if name == 'frequency' and band is not None and len(band) == 2:
@@ -1114,7 +1216,7 @@ def _reserve_credit_margin(fig, credit, pad_px=4.0):
     and the lowest axis label, so the footnote never runs into an x-label.
 
     Measured, not a per-line constant: a fixed ``0.06 + 0.025/line`` margin
-    left a one-line credit 7 px inside plot_overview's longitude label and a
+    puts a one-line credit 7 px inside plot_overview's longitude label and a
     two-line one 22 px inside it.
     """
     renderer = fig.canvas.get_renderer()
@@ -1132,11 +1234,11 @@ def _fit_rotated_axis_label(ax, x, candidates, colour, *, y=0.04,
 
     A label anchored inside the axes and rotated 90 degrees has its height set
     in POINTS, while the axes has its height set in inches. Raise the font and
-    the two move opposite ways -- measured on
-    :func:`plot_wavenumber_sampling`, the label grew 108 -> 240 px between
-    font 9 and font 20 while its axes shrank 236 -> 162 px, because the title
-    and x-label take more of a fixed-height figure. They cross, and the label
-    then runs off the top of the canvas. ``tight_layout`` cannot help: the
+    the two move opposite ways -- on :func:`plot_wavenumber_sampling` the
+    label grows 108 -> 240 px between font 9 and font 20 while its axes
+    shrinks 236 -> 162 px, because the title and x-label take more of a
+    fixed-height figure. They cross, and the label then runs off the top of
+    the canvas. ``tight_layout`` cannot help: the
     figure height is fixed and the text is anchored inside the axes.
 
     So the text is chosen to fit rather than assumed to: longest candidate
@@ -1148,8 +1250,8 @@ def _fit_rotated_axis_label(ax, x, candidates, colour, *, y=0.04,
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     # The text is anchored at ``y`` and grows upward, so the room it has is
-    # what lies ABOVE that anchor -- not the whole axes. Measuring against the
-    # full height let a label end just past the top and print through the
+    # what lies ABOVE that anchor -- not the whole axes; measured against the
+    # full height, a label can end just past the top and print through the
     # title.
     available = ax.get_window_extent(renderer).height * (headroom - y)
     text = ax.text(x, y, candidates[0], color=colour, fontsize=fontsize,
@@ -1174,11 +1276,11 @@ def _fit_subplot_margins(fig, axes, *, pad_px=4.0, right_limit=1.0):
 
     Measured, like :func:`_reserve_credit_margin`, and for the same reason: a
     margin given as a *fraction* cannot hold a label whose width is set in
-    *points*. Measured on ``compare_models``' own two-field figure under a
-    fixed ``subplots_adjust(left=0.05, right=0.88)`` alone, the depth label of
-    a one-column comparison started 11 px outside the canvas at the default
+    *points*. On ``compare_models``' own two-field figure under a fixed
+    ``subplots_adjust(left=0.05, right=0.88)`` alone, the depth label of a
+    one-column comparison starts 11 px outside the canvas at the default
     font size and 57 px outside it at 20 pt, and at two columns the range
-    labels dropped 7 px below it.
+    labels drop 7 px below it.
 
     ``right_limit`` is the fraction of the width the panels may occupy, so a
     caller can keep a strip free for a colorbar it has not drawn yet.
@@ -1208,7 +1310,7 @@ def _fit_colorbar_strip(fig, cbar_ax, pad_px=4.0):
 
     The colorbar's own tick labels and axis label sit *outside* its axes, so a
     hard ``fig.add_axes((0.905, ...))`` clips them as soon as the font grows:
-    measured at 20 pt, ``TL (dB)`` ended 34 px past the canvas edge.
+    at 20 pt, ``TL (dB)`` ends 34 px past the canvas edge.
     """
     fig.canvas.draw()
     box = cbar_ax.get_tightbbox(fig.canvas.get_renderer())
@@ -1230,7 +1332,7 @@ def _draw_result_credit(fig, result, *, env=None, show_data_credit=True, **draw_
     produced it (always, when known) plus any data sources from ``env``.
 
     The single call every result plotter makes — keeps data + model credit
-    rendering identical across :func:`plot_field`, `_plot_rays`, … ."""
+    rendering identical across :func:`plot_field`, `plot_rays`, … ."""
     data = _credit_attributions(show_data_credit, carrier=env)
     _draw_credit(fig, data, model=_model_attribution(result), **draw_kw)
 

@@ -26,7 +26,7 @@ variants (:func:`passive_signal_excess_field`,
 :func:`active_signal_excess_field`) build one and evaluate it over a model TL
 :class:`~uacpy.core.results.Field`, so performance maps over
 ``(depth, range)`` come straight from a propagation run.
-:func:`transition_probability_field` and :func:`detection_ranges_by_depth`
+:func:`transition_probability_field` and :func:`detection_ranges_field`
 are the Field forms of :func:`transition_probability` and
 :func:`detection_ranges`.
 """
@@ -39,14 +39,13 @@ from typing import Optional, Union
 
 import numpy as np
 
-from uacpy.core.acoustics.levels import no_energy_mask
+from uacpy.core.acoustics.levels import no_energy_mask, sum_levels_dB
 from uacpy.core.constants import NO_ENERGY_DB
 from uacpy.core._repr import FieldsRepr
 from uacpy.core.exceptions import (
     ConfigurationError, NumericsWarning, ValidityWarning,
 )
 from uacpy.core._validate import require_positive_finite_scalar
-from uacpy.sonar.reverberation import total_reverberation
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.results import Field
 from uacpy.core.results.quantities import is_loss
@@ -64,8 +63,9 @@ def echo_level(source_level_dB, tl_dB, target_strength_dB):
     target_strength_dB : float or array_like
         Target strength (dB).
     """
-    return np.asarray(source_level_dB, float) - 2.0 * np.asarray(tl_dB, float) \
+    el = np.asarray(source_level_dB, float) - 2.0 * np.asarray(tl_dB, float) \
         + np.asarray(target_strength_dB, float)
+    return _keep_no_energy_marker(el, tl_dB)
 
 
 def noise_background(noise_level_dB, directivity_index_dB=None, *, array_gain_dB=None):
@@ -162,7 +162,7 @@ def passive_signal_excess(
     """
     _reject_field(tl_dB, 'passive_signal_excess', 'tl_dB',
                   'passive_signal_excess_field')
-    return (
+    se = (
         np.asarray(source_level_dB, float)
         - np.asarray(tl_dB, float)
         - noise_background(noise_level_dB, directivity_index_dB,
@@ -170,6 +170,7 @@ def passive_signal_excess(
         - np.asarray(detection_threshold_dB, float)
         - np.asarray(processing_loss_dB, float)
     )
+    return _keep_no_energy_marker(se, tl_dB)
 
 
 def active_signal_excess(
@@ -196,7 +197,7 @@ def active_signal_excess(
     ``directivity_index_dB`` / ``array_gain_dB`` is **not** applied against
     ``RL`` (Urick Ch. 8): a beamformed receiver offers no gain against
     in-beam reverberation, whose level is already beam-limited through
-    the scattering-cell size (``horizontal_beamwidth_rad`` in
+    the scattering-cell size (``horizontal_beamwidth`` in
     :func:`uacpy.sonar.reverberation.boundary_reverberation`).
     ``array_gain_dB`` replaces ``directivity_index_dB`` for non-isotropic
     noise; ``processing_loss_dB`` is the implementation loss
@@ -231,6 +232,16 @@ def active_signal_excess(
         raise ConfigurationError(
             "active_signal_excess: provide noise_level_dB and/or reverberation_level_dB."
         )
+    # A zero-length background broadcasts every other term of the budget
+    # away: the result would be an empty array, silently.
+    for name, level in (('noise_level_dB', noise_level_dB),
+                        ('reverberation_level_dB', reverberation_level_dB)):
+        if level is not None and np.size(level) == 0:
+            raise ConfigurationError(
+                f"active_signal_excess: received a zero-length {name} array; "
+                f"every term of the budget must carry at least one sample.",
+                remediation=f"Pass {name} as a scalar or an array matching "
+                            f"the other terms, or leave it None.")
     el = echo_level(source_level_dB, tl_dB, target_strength_dB)
     backgrounds = []
     if noise_level_dB is not None:
@@ -238,11 +249,12 @@ def active_signal_excess(
                                             array_gain_dB=array_gain_dB))
     if reverberation_level_dB is not None:
         backgrounds.append(np.asarray(reverberation_level_dB, float))
-    # The incoherent dB sum of the backgrounds is total_reverberation's, and
-    # so is its refusal of an empty budget (no noise and no reverberation).
-    background = total_reverberation(*backgrounds)
-    return (el - background - np.asarray(detection_threshold_dB, float)
-            - np.asarray(processing_loss_dB, float))
+    # The backgrounds add incoherently; an empty budget (no noise and no
+    # reverberation) is refused above.
+    background = sum_levels_dB(*backgrounds)
+    se = (el - background - np.asarray(detection_threshold_dB, float)
+          - np.asarray(processing_loss_dB, float))
+    return _keep_no_energy_marker(se, tl_dB)
 
 
 def figure_of_merit(
@@ -418,8 +430,10 @@ def _keep_no_energy_marker(se, tl_dB):
     cell at a finite excess hundreds of dB down that the mask no longer
     recognises (the rule :func:`~uacpy.core.acoustics.levels.received_level_dB`
     applies to ``SL - TL``). The mask reads the one-way TL, so a two-way
-    budget does not turn a genuine deep null past 300 dB into the marker."""
-    return np.where(no_energy_mask(tl_dB), -NO_ENERGY_DB, se)
+    budget does not turn a genuine deep null past 300 dB into the marker.
+    Every array function of the budget applies it, so scalar in gives a
+    scalar out."""
+    return np.where(no_energy_mask(tl_dB), -NO_ENERGY_DB, se)[()]
 
 
 def _spawn_se_field(tl_field, se: np.ndarray, budget: dict) -> Field:
@@ -441,7 +455,7 @@ def _spawn_se_field(tl_field, se: np.ndarray, budget: dict) -> Field:
         data=np.asarray(se, dtype=float),
         coords={k: v.copy() for k, v in tl_field.coords.items()},
         pinned=dict(tl_field.pinned),
-        band_hz=tl_field.band_hz,
+        band=tl_field.band,
         no_mode_bins=tl_field.no_mode_bins,
         sonar_budget=budget,
         **kwargs,
@@ -1058,7 +1072,7 @@ def transition_probability_field(se_field, *, sigma_dB) -> Field:
         data=pd,
         coords={k: v.copy() for k, v in se_field.coords.items()},
         pinned=dict(se_field.pinned),
-        band_hz=se_field.band_hz,
+        band=se_field.band,
         no_mode_bins=se_field.no_mode_bins,
         sonar_budget=se_field.sonar_budget,
         sigma_dB=sigma,
@@ -1066,102 +1080,147 @@ def transition_probability_field(se_field, *, sigma_dB) -> Field:
     )
 
 
-def detection_ranges_by_depth(se_field, *, crossing='outermost'):
-    """Per-depth detection range from a 2-D signal-excess field.
+def detection_ranges_field(se_field, *, crossing='outermost'):
+    """Detection ranges (m) of a signal-excess :class:`Field`.
 
-    The Field form of :func:`detection_ranges`: applies
-    :func:`detection_range` to each depth row of a canonical
-    ``['depth', 'range']`` signal-excess :class:`Field`.
-
-    ``crossing`` is passed to :func:`detection_range` (``'outermost'`` or
-    ``'first'``); the returned ranges below describe ``'outermost'``.
+    The Field form of :func:`detection_ranges`: the range axis and the data
+    are read from the Field, so neither has to be pulled out by hand. A
+    ``['range']`` Field (one depth, ``se.at(depth=z)``) gives one float; a
+    ``['depth', 'range']`` map gives one range per depth, on
+    ``se_field.coords['depth']``. ``crossing``, the ``inf`` / ``nan`` returns
+    and the no-data handling are :func:`detection_ranges`'.
 
     Parameters
     ----------
     se_field : Field
-        A ``['depth', 'range']`` signal-excess Field.
+        A signal-excess Field (``passive_signal_excess_field`` /
+        ``active_signal_excess_field``) with a ``range`` axis.
     crossing : {'outermost', 'first'}, optional
-        Which zero-crossing to report (:func:`detection_range`). Default
+        Which zero-crossing to report (:func:`detection_ranges`). Default
         ``'outermost'``.
 
     Returns
     -------
-    depths : ndarray, shape ``(n_depths,)``
-        The field's depth axis (m).
-    ranges : ndarray, shape ``(n_depths,)``
-        Detection range (m) at each depth — the outermost zero-crossing,
-        ``np.inf`` where SE >= 0 at the last sampled range (the crossing lies
-        beyond the grid; one warning per call names how many depths have an
-        in-grid shadow before it, and the first), and ``np.nan`` where SE < 0
-        everywhere.
+    float or ndarray
+        The detection range (m): a float for a ``['range']`` Field, one per
+        cell of the other axes otherwise.
     """
+    who = 'detection_ranges_field'
     _require_se_field(
-        se_field, 'detection_ranges_by_depth',
+        se_field, who,
         remediation="Build it with passive_signal_excess_field / "
                     "active_signal_excess_field, which tag their result "
                     "kind='signal_excess'.")
-    if list(se_field.coords) != ['depth', 'range']:
+    coords = list(se_field.coords)
+    if 'range' not in coords:
         raise ConfigurationError(
-            "detection_ranges_by_depth: requires canonical "
-            f"['depth', 'range'] coords; got {list(se_field.coords)}."
-        )
-    depths = se_field.coords['depth'].copy()
-    out = _detection_ranges(se_field.coords['range'], se_field.data, 1,
-                            crossing, who='detection_ranges_by_depth',
-                            labels=('depth', depths))
-    return depths, out
+            f"{who}: the Field has no range axis; got axes {coords}.",
+            remediation="Pass a signal-excess Field over range (and depth).")
+    others = [name for name in coords if name != 'range']
+    labels = ((others[0], se_field.coords[others[0]]) if len(others) == 1
+              else None)
+    return _detection_ranges(se_field.coords['range'],
+                             np.asarray(se_field.data, dtype=float),
+                             coords.index('range'), crossing, who=who,
+                             labels=labels)
 
 
-def detection_ranges(ranges_m, *, signal_excess_dB, axis=-1,
+def detection_ranges(ranges, *, signal_excess_dB, axis=-1,
                      crossing='outermost'):
-    """:func:`detection_range` along one axis of a signal-excess array.
+    """Detection range (m) from signal excess versus range, along one axis.
 
     Each 1-D slice of ``signal_excess_dB`` along ``axis`` is one
-    signal-excess-versus-range curve over ``ranges_m``; the result holds its
-    detection range, in the shape of ``signal_excess_dB`` without ``axis``.
-    ``crossing`` and the ``inf``/``nan`` returns are :func:`detection_range`'s,
-    one slice at a time; its warning (an ``inf`` whose curve dips below zero
-    inside the grid) is given once per call, with the count of such slices
-    and the first one's shadow.
+    signal-excess-versus-range curve over ``ranges``; the result holds its
+    detection range: a float for one curve, the shape of
+    ``signal_excess_dB`` without ``axis`` otherwise.
+
+    ``crossing='outermost'`` (default) is the largest range at which the
+    signal excess is still non-negative; ``crossing='first'`` is the range
+    of first loss of detection — the first downward crossing from the
+    nearest range, the operational convention in deep water, where a
+    convergence zone makes the outermost range say nothing about the shadow
+    before it. :func:`detection_annuli` returns every interval.
+
+    ``'outermost'`` finds the outermost zero-crossing by linear
+    interpolation, and returns ``np.nan`` if SE < 0 everywhere. Whenever that
+    crossing lies **beyond** the sampled ranges — SE >= 0 at the last sampled
+    range with data — it returns ``np.inf``: the grid holds no crossing to
+    report, and any finite number would be the grid's own edge, moving with
+    ``receiver.ranges``. ``np.isfinite`` on the result therefore separates a
+    modelled crossing from "beyond the grid". When SE >= 0 at the edge but
+    went negative inside the grid (a shadow zone before a convergence zone),
+    the ``inf`` comes with a ``NumericsWarning`` naming the in-grid shadow
+    (once per call, with the count of such curves and the first one's
+    shadow), since "beyond the grid" is then not "detected everywhere";
+    :func:`detection_annuli` and ``crossing='first'`` give that structure.
+    When the outermost positive sample and the next finite sample are
+    separated by no-data (NaN) cells, the positive sample's range is returned
+    as-is — a crossing inside a no-data hole has no modelled location to
+    interpolate.
 
     Parameters
     ----------
-    ranges_m : array_like, shape ``(n_r,)``
-        Monotonically increasing ranges (m).
+    ranges : array_like, shape ``(n_r,)``
+        Strictly increasing ranges (m); any other order is refused.
     signal_excess_dB : array_like
         Signal excess (dB) with ``n_r`` samples along ``axis``.
     axis : int
-        The range axis of ``signal_excess_dB``.
+        The range axis of ``signal_excess_dB``. Default -1.
     crossing : {'outermost', 'first'}
-        Which crossing to report, as :func:`detection_range`.
+        Which crossing to report, as above.
 
     Returns
     -------
-    ndarray
-        Detection range (m) per slice.
+    float or ndarray
+        Detection range (m) per curve.
 
     Examples
     --------
+    A convergence-zone return at 7 km: the first loss of detection is at
+    4.5 km, the outermost at 7.25 km:
+
     >>> import numpy as np
+    >>> ranges = np.linspace(0.0, 10_000.0, 11)
+    >>> se = np.array([10, 8, 6, 3, 1, -1, -2, 1, -3, -4, -5.0])
+    >>> detection_ranges(ranges, signal_excess_dB=se, crossing='first')
+    4500.0
+    >>> detection_ranges(ranges, signal_excess_dB=se)
+    7250.0
+
+    Several curves at once, one per row:
+
     >>> ranges = np.linspace(0.0, 4000.0, 5)
     >>> se = np.array([[3.0, 1.0, -1.0, -2.0, -3.0],
     ...                [5.0, 4.0, 3.0, 2.0, -2.0]])
     >>> detection_ranges(ranges, signal_excess_dB=se).tolist()
     [1500.0, 3500.0]
     """
-    return _detection_ranges(ranges_m, signal_excess_dB, axis, crossing,
+    return _detection_ranges(ranges, signal_excess_dB, axis, crossing,
                              who='detection_ranges')
 
 
-def _detection_ranges(ranges_m, signal_excess_dB, axis, crossing, *, who,
+def _require_increasing_ranges(r, who: str) -> None:
+    """Refuse a range axis that is not strictly increasing: the crossings
+    are found walking outward from the first sample, so a reversed axis
+    reports the wrong crossing (1667 m instead of inf on [3, 2, 1] m)."""
+    if r.size > 1 and not np.all(np.diff(r) > 0):
+        raise ConfigurationError(
+            f"{who}: ranges must be strictly increasing (m); got "
+            f"{r[0]:g} … {r[-1]:g} m, not in increasing order.",
+            remediation="Sort the ranges and reorder signal_excess_dB with "
+                        "them: order = np.argsort(ranges).")
+
+
+def _detection_ranges(ranges, signal_excess_dB, axis, crossing, *, who,
                       labels=None):
     """:func:`detection_ranges` reporting as ``who``; ``labels``, a
     ``(name, values)`` pair over the slices, names a slice in the warning."""
-    r = np.asarray(ranges_m, dtype=float)
+    r = np.asarray(ranges, dtype=float)
     se = np.asarray(signal_excess_dB, dtype=float)
     if r.ndim != 1:
         raise ConfigurationError(
-            f"{who}: ranges_m must be 1-D; got shape {r.shape}.")
+            f"{who}: ranges must be 1-D; got shape {r.shape}.")
+    _require_increasing_ranges(r, who)
     if se.ndim == 0:
         raise ConfigurationError(
             f"{who}: signal_excess_dB must have a range axis; got a "
@@ -1170,7 +1229,7 @@ def _detection_ranges(ranges_m, signal_excess_dB, axis, crossing, *, who,
     if moved.shape[-1] != r.size:
         raise ConfigurationError(
             f"{who}: signal_excess_dB has {moved.shape[-1]} "
-            f"samples along axis {axis}, ranges_m has {r.size}.")
+            f"samples along axis {axis}, ranges has {r.size}.")
     if crossing not in ('outermost', 'first'):
         raise ConfigurationError(
             f"{who}: crossing must be 'outermost' or 'first'; got "
@@ -1181,80 +1240,56 @@ def _detection_ranges(ranges_m, signal_excess_dB, axis, crossing, *, who,
                 if shadow is not None]
     if shadowed:
         i, (edge, start, end) = shadowed[0]
-        label = (f"{labels[0]} {labels[1][i]:g}" if labels is not None
-                 else f"slice {i}")
-        warnings.warn(
-            f"{who}: {len(shadowed)} of {len(found)} "
-            f"{'rows' if labels is not None else 'slices'} have signal "
-            f"excess >= 0 at their outermost sampled range, so their "
-            f"outermost crossing lies beyond the grid and inf is returned — "
-            f"but SE goes negative inside the grid on each, so the target is "
-            f"NOT detectable at every range (at {label}: SE >= 0 at "
-            f"{edge:.6g} m, negative first between {start:.6g} and "
-            f"{end:.6g} m). {_BEYOND_GRID_REMEDY}",
-            NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
+        if moved.ndim == 1:
+            what = (f"signal excess is >= 0 at the outermost sampled range "
+                    f"with data ({edge:.6g} m), so the outermost crossing "
+                    f"lies beyond the grid and inf is returned — but SE goes "
+                    f"negative inside the grid, first between {start:.6g} "
+                    f"and {end:.6g} m, so the target is NOT detectable at "
+                    f"every range.")
+        else:
+            label = (f"{labels[0]} {labels[1][i]:g}" if labels is not None
+                     else f"slice {i}")
+            what = (f"{len(shadowed)} of {len(found)} "
+                    f"{'rows' if labels is not None else 'slices'} have "
+                    f"signal excess >= 0 at their outermost sampled range, "
+                    f"so their outermost crossing lies beyond the grid and "
+                    f"inf is returned — but SE goes negative inside the grid "
+                    f"on each, so the target is NOT detectable at every "
+                    f"range (at {label}: SE >= 0 at {edge:.6g} m, negative "
+                    f"first between {start:.6g} and {end:.6g} m).")
+        warnings.warn(f"{who}: {what} {_BEYOND_GRID_REMEDY}",
+                      NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
     out = np.array([value for value, _ in found], dtype=float)
+    if moved.ndim == 1:
+        return float(out[0])
     return out.reshape(moved.shape[:-1])
 
 
-def detection_range_from_field(se_field, *, crossing='outermost') -> float:
-    """Detection range (m) from a 1-D signal-excess :class:`Field` over range.
-
-    The Field door to :func:`detection_range`: ``se.at(depth=z)`` of a
-    signal-excess map is a ``['range']`` Field, and this reads its range axis
-    and data so neither has to be pulled out by hand. ``crossing``, the return
-    values (``inf`` when the outermost crossing lies beyond the grid, ``nan``
-    when SE < 0 everywhere) and the no-data handling are
-    :func:`detection_range`'s. For the whole ``(depth, range)`` map use
-    :func:`detection_ranges_by_depth`.
-
-    Parameters
-    ----------
-    se_field : Field
-        A signal-excess Field over ``range`` alone.
-    crossing : {'outermost', 'first'}, optional
-        Which zero-crossing to report (:func:`detection_range`). Default
-        ``'outermost'``.
-    """
-    _require_se_field(
-        se_field, 'detection_range_from_field',
-        remediation="Build it with passive_signal_excess_field / "
-                    "active_signal_excess_field and slice one depth "
-                    "with .at(depth=...).")
-    if list(se_field.coords) != ['range']:
-        raise ConfigurationError(
-            f"detection_range_from_field: needs a 1-D ['range'] Field; got axes "
-            f"{list(se_field.coords)}.",
-            remediation="Slice one depth with se.at(depth=...), or use "
-                        "detection_ranges_by_depth for the whole map.")
-    return detection_range(se_field.coords['range'],
-                           signal_excess_dB=np.asarray(se_field.data, dtype=float), crossing=crossing)
-
-
-def detection_annuli(ranges_m, *, signal_excess_dB):
+def detection_annuli(ranges, *, signal_excess_dB):
     """Every range interval (m) over which the signal excess is >= 0.
 
     A deep-water signal excess is typically + (direct path), - (shadow),
     + (convergence zone), - …, so a detection range is a set of annuli, not
-    one number. Returns a list of ``(start_m, end_m)`` pairs, the edges
+    one number. Returns a list of ``(start, end)`` pairs (m), the edges
     placed by linear interpolation between samples (a sample's own range at a
     no-data hole or at the grid's edge). No-data (NaN) samples are skipped,
-    as :func:`detection_range` skips them.
+    as :func:`detection_ranges` skips them.
 
     Parameters
     ----------
-    ranges_m : array_like
-        Increasing ranges (m).
+    ranges : array_like
+        Strictly increasing ranges (m); any other order is refused.
     signal_excess_dB : array_like
         Signal excess (dB) at each range; NaN is no data.
     """
-    r = np.asarray(ranges_m, dtype=float)
+    r = np.asarray(ranges, dtype=float)
     se = np.asarray(signal_excess_dB, dtype=float)
     if r.shape != se.shape:
         raise ConfigurationError(
             "detection_annuli: ranges and signal_excess shape mismatch; got "
-            f"ranges_m shape {r.shape} and signal_excess_dB shape {se.shape}.")
+            f"ranges shape {r.shape} and signal_excess_dB shape {se.shape}.")
+    _require_increasing_ranges(r.ravel(), 'detection_annuli')
     known = np.isfinite(se)
     idx = np.where(known)[0]
     r, se = r[idx], se[idx]
@@ -1279,78 +1314,6 @@ def detection_annuli(ranges_m, *, signal_excess_dB):
     return annuli
 
 
-def detection_range(ranges_m, *, signal_excess_dB, crossing='outermost'):
-    """Detection range (m) from signal excess versus range.
-
-    ``crossing='outermost'`` (default) is the largest range at which the signal
-    excess is still non-negative; ``crossing='first'`` is the range of first
-    loss of detection — the first downward crossing from the nearest range,
-    the operational convention in deep water, where a convergence zone makes
-    the outermost range say nothing about the shadow before it.
-    :func:`detection_annuli` returns every interval.
-
-    ``'outermost'`` finds the outermost zero-crossing of ``signal_excess_dB``
-    versus range by linear interpolation, and returns ``np.nan`` if SE < 0
-    everywhere. Whenever that crossing lies **beyond** the sampled ranges —
-    SE >= 0 at the last sampled range with data — it returns ``np.inf``: the
-    grid holds no crossing to report, and any finite number would be the
-    grid's own edge, moving with ``receiver.ranges``. ``np.isfinite`` on the
-    result therefore separates a modelled crossing from "beyond the grid".
-    When SE >= 0 at the edge but went negative inside the grid (a shadow zone
-    before a convergence zone), the ``inf`` comes with a
-    ``NumericsWarning`` naming the in-grid shadow, since "beyond the grid"
-    is then not "detected everywhere"; :func:`detection_annuli` and
-    ``crossing='first'`` give that structure. When the outermost positive sample
-    and the next finite sample are separated by no-data (NaN) cells, the
-    positive sample's range is returned as-is — a crossing inside a no-data
-    hole has no modeled location to interpolate.
-
-    Parameters
-    ----------
-    ranges_m : array
-        Monotonically increasing ranges (m).
-    signal_excess_dB : array
-        Signal excess (dB) at each range.
-    crossing : {'outermost', 'first'}
-        Which crossing to report, as above.
-
-    Examples
-    --------
-    A convergence-zone return at 7 km: the first loss of detection is at
-    4.5 km, the outermost at 7.25 km:
-
-    >>> import numpy as np
-    >>> ranges = np.linspace(0.0, 10_000.0, 11)
-    >>> se = np.array([10, 8, 6, 3, 1, -1, -2, 1, -3, -4, -5.0])
-    >>> float(detection_range(ranges, signal_excess_dB=se, crossing='first'))
-    4500.0
-    >>> float(detection_range(ranges, signal_excess_dB=se))
-    7250.0
-    """
-    if crossing not in ('outermost', 'first'):
-        raise ConfigurationError(
-            f"detection_range: crossing must be 'outermost' or 'first'; got "
-            f"{crossing!r}.")
-    r = np.asarray(ranges_m, dtype=float)
-    se = np.asarray(signal_excess_dB, dtype=float)
-    if r.shape != se.shape:
-        raise ConfigurationError(
-            "detection_range: ranges and signal_excess shape mismatch; got "
-            f"ranges_m shape {r.shape} and signal_excess_dB shape {se.shape}.")
-    value, shadow = _detection_range(r, se, crossing)
-    if shadow is not None:
-        warnings.warn(
-            f"detection_range: signal excess is >= 0 at the outermost sampled "
-            f"range with data ({shadow[0]:.6g} m), so the outermost "
-            f"crossing lies beyond the grid and inf is returned — but SE goes "
-            f"negative inside the grid, first between {shadow[1]:.6g} and "
-            f"{shadow[2]:.6g} m, so the target is NOT detectable at every "
-            f"range. {_BEYOND_GRID_REMEDY}",
-            NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-    return value
-
-
 #: What to do about an ``inf`` detection range whose curve dips below zero
 #: inside the grid.
 _BEYOND_GRID_REMEDY = (
@@ -1360,7 +1323,7 @@ _BEYOND_GRID_REMEDY = (
 
 
 def _detection_range(r, se, crossing):
-    """``(range, shadow)``: :func:`detection_range` of validated 1-D arrays,
+    """``(range, shadow)``: the detection range of one validated 1-D curve,
     and ``(outermost range with data, shadow start, shadow end)`` when the
     range is ``inf`` although SE goes negative inside the grid (else
     ``None``), for the caller to report."""

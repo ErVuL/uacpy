@@ -14,19 +14,18 @@ lambda/2 folds a grating lobe back into the fan, and aperture sets how finely
 two arrivals can be separated.
 
 Uses: Receiver as a vertical array · acoustic_signal.steering_vectors ·
-shading_taper · beamform · Modes.grazing_angles (the angles the peaks
+shading_taper · beamform_field (BeamformedField.snr_dB) ·
+Modes.grazing_angles (the angles the peaks
 should land on) · Kraken
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal import beamform, beamform_field, shading_taper
+from uacpy.acoustic_signal import beamform_field, shading_taper
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -42,7 +41,7 @@ env = uacpy.Environment(
         attenuation=0.5)),
 )
 source = uacpy.Source(depths=25.0, frequencies=FREQ, source_level_dB=180.0)
-kraken = uacpy.Kraken(verbose=False)
+kraken = uacpy.Kraken()
 
 # 24 elements at lambda/2, centred in the duct: an 86 m aperture in 100 m.
 n_el = 24
@@ -131,12 +130,10 @@ fig.savefig(OUT / 'example_41_beam_response.png', dpi=140,
 plt.close(fig)
 
 # ── 4. the levelled answer: SNR per look angle ──────────────────────────
-# beamform() takes the same (n_phones, n_ranges) a run on this Receiver
-# returns, and folds in a source level and a per-element noise level.
-res = beamform(p, elements, angles, FREQ, source_level_dB=180.0,
-               noise_level_dB=60.0, sound_speed=C_REF)
-snr = np.asarray(res.snr).ravel()               # (n_angles,) - one range here
-look = np.asarray(res.angles).ravel()
+# The unshaded scan of panel 1, levelled with a source level and a
+# per-element noise level.
+snr = scan.snr_dB(source_level_dB=180.0, noise_level_dB=60.0)   # (n_angles,)
+look = angles
 print(f"peak beam at {look[int(np.nanargmax(snr))]:+.1f} deg, "
       f"SNR {np.nanmax(snr):.1f} dB (SL 180, NL 60 per element)")
 

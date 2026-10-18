@@ -52,8 +52,8 @@ class TestArrivalsFlatListKeys:
             "phases": np.array([0.0, 0.1]),
             "n_top_bounces": np.array([0, 1], dtype=int),
             "n_bot_bounces": np.array([1, 2], dtype=int),
-            "source_angles": np.array([0.0, 5.0]),
-            "receiver_angles": np.array([0.0, -5.0]),
+            "source_angles_deg": np.array([0.0, 5.0]),
+            "receiver_angles_deg": np.array([0.0, -5.0]),
             "n_arrivals": 2,
         }]]]
         arr = Arrivals(
@@ -87,8 +87,8 @@ class TestArrivalsFilterChain:
             "phases": np.array([0.0, 0.0, 0.0]),
             "n_top_bounces": np.array([0, 1, 1], dtype=int),
             "n_bot_bounces": np.array([0, 0, 2], dtype=int),
-            "source_angles": np.array([0.0, 5.0, 10.0]),
-            "receiver_angles": np.array([0.0, -5.0, -10.0]),
+            "source_angles_deg": np.array([0.0, 5.0, 10.0]),
+            "receiver_angles_deg": np.array([0.0, -5.0, -10.0]),
         }
         cell1 = {
             "delays": np.array([0.4]),
@@ -96,8 +96,8 @@ class TestArrivalsFilterChain:
             "phases": np.array([0.0]),
             "n_top_bounces": np.array([0], dtype=int),
             "n_bot_bounces": np.array([1], dtype=int),
-            "source_angles": np.array([2.0]),
-            "receiver_angles": np.array([-2.0]),
+            "source_angles_deg": np.array([2.0]),
+            "receiver_angles_deg": np.array([-2.0]),
         }
         return Arrivals(
             by_receiver=[[[cell0, cell1]]],
@@ -120,7 +120,7 @@ class TestArrivalsFilterChain:
             "phases": np.array([np.pi / 2]),   # radians, as the reader stores
             "n_top_bounces": np.array([0], dtype=int),
             "n_bot_bounces": np.array([0], dtype=int),
-            "source_angles": np.array([0.0]), "receiver_angles": np.array([0.0]),
+            "source_angles_deg": np.array([0.0]), "receiver_angles_deg": np.array([0.0]),
         }
         a = Arrivals(by_receiver=[[[cell]]], receiver_depths=np.array([50.0]),
                      receiver_ranges=np.array([1000.0]),
@@ -131,11 +131,11 @@ class TestArrivalsFilterChain:
         # The .arr file stores declination angles in degrees (ArrMod.f90:55-56)
         # and the accessors keep that unit; only phase is radians.
         a = self._arrivals()
-        assert a.source_angles.shape == (len(a),)
-        assert a.receiver_angles.shape == (len(a),)
+        assert a.source_angles_deg.shape == (len(a),)
+        assert a.receiver_angles_deg.shape == (len(a),)
         # Same order as every other bulk view, so columns line up elementwise.
-        assert list(a.source_angles) == pytest.approx([0.0, 5.0, 10.0, 2.0])
-        assert list(a.receiver_angles) == pytest.approx([0.0, -5.0, -10.0, -2.0])
+        assert list(a.source_angles_deg) == pytest.approx([0.0, 5.0, 10.0, 2.0])
+        assert list(a.receiver_angles_deg) == pytest.approx([0.0, -5.0, -10.0, -2.0])
 
     def test_angle_accessors_survive_filtering_alongside_delays(self):
         # A filter respawns the flat list; the angle columns must be carried
@@ -143,7 +143,7 @@ class TestArrivalsFilterChain:
         # unfiltered set.
         a = self._arrivals()
         bottom = a.filter_by_bounces(kind='bottom')
-        assert len(bottom.receiver_angles) == len(bottom) == len(bottom.delays)
+        assert len(bottom.receiver_angles_deg) == len(bottom) == len(bottom.delays)
 
     def test_angle_accessor_without_the_column_names_the_cause(self):
         from uacpy.core.results import Arrivals
@@ -158,7 +158,7 @@ class TestArrivalsFilterChain:
                      model='Test', frequencies=100.0)
         # _flatten_by_receiver defaults a missing column to zeros, so the
         # accessor works; what must NOT happen is a bare KeyError.
-        assert a.source_angles[0] == pytest.approx(0.0)
+        assert a.source_angles_deg[0] == pytest.approx(0.0)
 
     def test_filter_by_bounces_kind(self):
         a = self._arrivals()
@@ -184,6 +184,59 @@ class TestArrivalsFilterChain:
         assert len(mid) == 2
         assert all(0.15 <= x['delay'] <= 0.35 for x in mid.arrivals)
 
+    @pytest.mark.parametrize('empty', [
+        lambda a: a.filter_by_bounces(kind='both', top=(5, None)),
+        lambda a: a.window(delay=(5.0, None)),
+        lambda a: a.filter(lambda x: False),
+    ])
+    def test_a_filter_that_keeps_nothing_keeps_every_column(self, empty):
+        # No path of a kind is an answer about the channel: the emptied set
+        # still has its bounce counts, angles and phases, zero rows each.
+        a = self._arrivals()
+        none = empty(a)
+        assert len(none) == 0
+        assert none.kinds.size == 0 and none.n_top_bounces.size == 0
+        assert none.phases.size == 0 and none.source_angles_deg.size == 0
+        assert set(none.to_dataframe().columns) == set(a.to_dataframe().columns)
+
+    def test_bulk_views_are_read_only_columns_in_arrival_order(self):
+        a = self._arrivals()
+        for view in (a.delays, a.amplitudes, a.phases, a.source_angles_deg,
+                     a.receiver_angles_deg):
+            assert not view.flags.writeable
+        np.testing.assert_array_equal(
+            a.received_amplitudes,
+            [x['amplitude'] * np.exp(1j * x['phase']) for x in a.arrivals])
+
+    def test_the_table_names_one_arrival_per_row(self):
+        """A row is one arrival, so the table's columns are singular like
+        every other table's (``df.sort_values('delay')``), and it carries
+        the received amplitude the docs say to sum; the bulk accessors and
+        to_dict keep the plural names."""
+        pytest.importorskip('pandas')
+        a = self._arrivals()
+        df = a.to_dataframe()
+        assert set(df.columns) == {
+            'delay', 'delay_imag', 'amplitude', 'phase', 'n_top_bounces',
+            'n_bot_bounces', 'source_angle', 'receiver_angle', 'src_idx',
+            'depth_idx', 'range_idx', 'kind', 'received_amplitude',
+            'receiver_depth', 'receiver_range'}
+        assert list(df.sort_values('delay')['delay']) == [0.1, 0.2, 0.3, 0.4]
+        np.testing.assert_array_equal(df['received_amplitude'],
+                                      a.received_amplitudes)
+        assert list(df['kind']) == list(a.kinds)
+        assert 'delays' in a.to_dict() and 'kinds' in a.to_dict()
+
+    def test_a_numpy_integer_bounce_count_filters_as_an_int(self):
+        # The bounce columns are int32, so their own max() is a numpy
+        # integer; a float or a non-pair is refused, typed.
+        a = self._arrivals()
+        top = a.n_top_bounces.max()
+        assert len(a.filter_by_bounces(top=top)) == \
+            len(a.filter_by_bounces(top=int(top))) == 2
+        with pytest.raises(ConfigurationError, match="integer or a"):
+            a.filter_by_bounces(top=1.0)
+
     @staticmethod
     def _two_arrivals(*, delays, amplitudes):
         from uacpy.core.results import Arrivals
@@ -193,8 +246,8 @@ class TestArrivalsFilterChain:
             "phases": np.zeros(len(delays)),
             "n_top_bounces": np.zeros(len(delays), dtype=int),
             "n_bot_bounces": np.zeros(len(delays), dtype=int),
-            "source_angles": np.zeros(len(delays)),
-            "receiver_angles": np.zeros(len(delays)),
+            "source_angles_deg": np.zeros(len(delays)),
+            "receiver_angles_deg": np.zeros(len(delays)),
         }
         return Arrivals(by_receiver=[[[cell]]],
                         receiver_depths=np.array([50.0]),
@@ -212,7 +265,7 @@ class TestArrivalsFilterChain:
             "phases": np.asarray(phases, dtype=float),
             "n_top_bounces": np.zeros(2, dtype=int),
             "n_bot_bounces": np.zeros(2, dtype=int),
-            "source_angles": np.zeros(2), "receiver_angles": np.zeros(2),
+            "source_angles_deg": np.zeros(2), "receiver_angles_deg": np.zeros(2),
             "delays_imag": np.array(
                 [0.0, -np.log(10 ** (loss_dB / 20.0)) / (2 * np.pi * 100.0)]),
         }
@@ -245,7 +298,7 @@ class TestArrivalsFilterChain:
             "phases": np.zeros(2),
             "n_top_bounces": np.zeros(2, dtype=int),
             "n_bot_bounces": np.zeros(2, dtype=int),
-            "source_angles": np.zeros(2), "receiver_angles": np.zeros(2),
+            "source_angles_deg": np.zeros(2), "receiver_angles_deg": np.zeros(2),
             # ... and loses 40 dB to absorption, so it arrives 20 dB quieter.
             "delays_imag": np.array([0.0, -np.log(10 ** (40 / 20.0))
                                      / (2 * np.pi * 100.0)]),
@@ -272,7 +325,7 @@ class TestArrivalsFilterChain:
             "delays": np.array([0.10]), "amplitudes": np.array([2.0]),
             "n_top_bounces": np.zeros(1, dtype=int),
             "n_bot_bounces": np.zeros(1, dtype=int),
-            "source_angles": np.zeros(1), "receiver_angles": np.zeros(1),
+            "source_angles_deg": np.zeros(1), "receiver_angles_deg": np.zeros(1),
         }
         a = Arrivals(by_receiver=[[[cell]]],
                      receiver_depths=np.array([50.0]),
@@ -301,7 +354,7 @@ class TestArrivalsFilterChain:
             "phases": np.zeros(2),
             "n_top_bounces": np.zeros(2, dtype=int),
             "n_bot_bounces": np.zeros(2, dtype=int),
-            "source_angles": np.zeros(2), "receiver_angles": np.zeros(2),
+            "source_angles_deg": np.zeros(2), "receiver_angles_deg": np.zeros(2),
             # the late arrival loses ~40 dB to absorption on its longer path
             "delays_imag": np.array([0.0, -np.log(10 ** (40 / 20.0))
                                      / (2 * np.pi * 100.0)]),
@@ -440,7 +493,7 @@ class TestArrivalsFilterChain:
             "phases": np.zeros(2),
             "n_top_bounces": np.array([0, 2]),
             "n_bot_bounces": np.array([0, 3]),
-            "source_angles": np.zeros(2), "receiver_angles": np.zeros(2),
+            "source_angles_deg": np.zeros(2), "receiver_angles_deg": np.zeros(2),
             "delays_imag": np.array([dimag(1.0), dimag(6.0)]),
         }
         a = Arrivals(by_receiver=[[[cell]]],
@@ -485,7 +538,7 @@ class TestArrivalsFilterChain:
             "phases": np.zeros(3),
             "n_top_bounces": np.zeros(3, dtype=int),
             "n_bot_bounces": np.zeros(3, dtype=int),
-            "source_angles": np.zeros(3), "receiver_angles": np.zeros(3),
+            "source_angles_deg": np.zeros(3), "receiver_angles_deg": np.zeros(3),
             # the last arrival loses 80 dB to absorption on its longer path
             "delays_imag": np.array(
                 [0.0, 0.0, -np.log(10 ** (80 / 20.0)) / (2 * np.pi * 100.0)]),
@@ -586,8 +639,8 @@ class TestSpawnedArrivalCellsMatchTheReadersRecord:
         "phases": np.array([0.0, 30.0], dtype='float64'),
         "delays": np.array([0.1, 0.2], dtype='float64'),
         "delays_imag": np.array([0.0, 0.0], dtype='float64'),
-        "source_angles": np.array([0.0, 5.0], dtype='float64'),
-        "receiver_angles": np.array([0.0, -5.0], dtype='float64'),
+        "source_angles_deg": np.array([0.0, 5.0], dtype='float64'),
+        "receiver_angles_deg": np.array([0.0, -5.0], dtype='float64'),
         "n_top_bounces": np.array([0, 1], dtype='int32'),
         "n_bot_bounces": np.array([1, 2], dtype='int32'),
         "n_arrivals": 2,
@@ -635,11 +688,11 @@ class TestSpawnedArrivalCellsMatchTheReadersRecord:
     def test_delayandsum_accepts_a_spawned_cell(self):
         from uacpy.acoustic_signal import delayandsum
         source = np.ones(8)
-        fresh, _ = delayandsum(dict(self.READER_CELL), source_waveform=source,
+        _, fresh = delayandsum(dict(self.READER_CELL), source_waveform=source,
                                sample_rate=10000.0, trace_frequency=1000.0)
         spawned_cell = self._arrivals().filter(
             lambda a: True).by_receiver[0][0][0]
-        rebuilt, _ = delayandsum(spawned_cell, source_waveform=source,
+        _, rebuilt = delayandsum(spawned_cell, source_waveform=source,
                                  sample_rate=10000.0, trace_frequency=1000.0)
         assert rebuilt.shape == fresh.shape
         assert np.allclose(rebuilt, fresh)
@@ -715,12 +768,12 @@ class TestRaysFilterAndSortHelpers:
 
     def test_filter_by_miss_distance_keeps_and_annotates(self):
         kept = self._fan().filter_by_miss_distance(
-            5.0, target_range_m=1000.0, target_depth_m=50.0)
+            5.0, target_range=1000.0, target_depth=50.0)
         assert [r['launch_angle'] for r in kept.rays] == [1.0]
-        assert kept.rays[0]['miss_distance_m'] == pytest.approx(3.0,
+        assert kept.rays[0]['miss_distance'] == pytest.approx(3.0,
                                                                 abs=1e-12)
         # The parent's ray dicts are not annotated in place.
-        assert 'miss_distance_m' not in self._fan().rays[0]
+        assert 'miss_distance' not in self._fan().rays[0]
 
     def test_miss_distance_measures_segments_not_vertices(self):
         """A ray passing exactly through the target misses it by zero, however
@@ -736,10 +789,10 @@ class TestRaysFilterAndSortHelpers:
                    'z': np.array([50.0, 50.0, 50.0]),
                    'launch_angle': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0}
         fan = Rays(rays=[through], model='Bellhop', frequencies=100.0)
-        kept = fan.filter_by_miss_distance(1e-9, target_range_m=1000.0,
-                                           target_depth_m=50.0)
+        kept = fan.filter_by_miss_distance(1e-9, target_range=1000.0,
+                                           target_depth=50.0)
         assert len(kept.rays) == 1
-        assert kept.rays[0]['miss_distance_m'] == pytest.approx(0.0, abs=1e-12)
+        assert kept.rays[0]['miss_distance'] == pytest.approx(0.0, abs=1e-12)
 
     def test_miss_distance_clips_to_the_segment_not_its_infinite_line(self):
         """A target beyond the end of a ray measures to the END POINT.
@@ -771,16 +824,32 @@ class TestRaysFilterAndSortHelpers:
         fan = self._fan()
         # Shuffle so the sort has work to do.
         fan.rays.reverse()
-        ordered = fan.sorted_by_miss(target_range_m=1000.0,
-                                     target_depth_m=50.0)
+        ordered = fan.sorted_by_miss(target_range=1000.0,
+                                     target_depth=50.0)
         assert [r['launch_angle'] for r in ordered.rays] == [1.0, 2.0, 3.0]
         # alpha 1: the perpendicular foot lands past the segment end, so the
         # clip puts the closest approach ON the end point and the answer is
         # the 3 m vertex offset exactly. alpha 2 and 3 slant past the target,
         # so their segments pass closer than their end vertices do.
         np.testing.assert_allclose(
-            [r['miss_distance_m'] for r in ordered.rays],
+            [r['miss_distance'] for r in ordered.rays],
             [3.0, 9.98204845465779, 29.851115706299673], rtol=1e-9)
+
+    def test_the_miss_distance_has_one_name_in_every_export(self):
+        """The ray records, ``to_dict``'s columns, the xarray export (unit
+        m) and ``to_dataframe`` spell the quantity ``miss_distance``."""
+        ordered = self._fan().sorted_by_miss(target_range=1000.0,
+                                             target_depth=50.0)
+        columns = ordered.to_dict()['columns']
+        expected = [3.0, 9.98204845465779, 29.851115706299673]
+        np.testing.assert_allclose(columns['miss_distance'], expected,
+                                   rtol=1e-9)
+        ds = ordered.to_xarray()
+        np.testing.assert_allclose(ds['miss_distance'].values, expected,
+                                   rtol=1e-9)
+        assert ds['miss_distance'].attrs['units'] == 'm'
+        np.testing.assert_allclose(
+            ordered.to_dataframe()['miss_distance'], expected, rtol=1e-9)
 
     def test_sorted_by_miss_defaults_to_single_point_receiver_context(self):
         fan = self._fan(receiver_depths=np.array([50.0]),
@@ -789,7 +858,7 @@ class TestRaysFilterAndSortHelpers:
         assert [r['launch_angle'] for r in ordered.rays] == [1.0, 2.0, 3.0]
 
     def test_miss_helpers_without_target_or_context_raise(self):
-        with pytest.raises(ConfigurationError, match='target_range_m'):
+        with pytest.raises(ConfigurationError, match='target_range'):
             self._fan().sorted_by_miss()
 
     def test_filter_nfirst_keeps_the_first_n_in_order(self):
@@ -798,7 +867,7 @@ class TestRaysFilterAndSortHelpers:
         assert isinstance(first_two, type(self._fan()))
         # Composes with the sorters: the 2 closest rays.
         closest_two = self._fan().sorted_by_miss(
-            target_range_m=1000.0, target_depth_m=50.0).first_n(2)
+            target_range=1000.0, target_depth=50.0).first_n(2)
         assert [r['launch_angle'] for r in closest_two.rays] == [1.0, 2.0]
 
     def test_arrivals_sorted_by_amplitude_both_directions(self):
@@ -905,7 +974,7 @@ class TestArrivalDictPhaseUnit:
     def _arrivals(self):
         cell = {'delays': [0.1], 'amplitudes': [1.0], 'phases': [np.pi],
                 'n_top_bounces': [0], 'n_bot_bounces': [0],
-                'source_angles': [0.0], 'receiver_angles': [0.0]}
+                'source_angles_deg': [0.0], 'receiver_angles_deg': [0.0]}
         return Arrivals(by_receiver=[[[cell]]], receiver_depths=[10.0],
                         receiver_ranges=[100.0], model='Test',
                         frequencies=100.0)
@@ -953,8 +1022,8 @@ class TestArrivalsChannelView:
         expect = comms.multipath_channel(
             rotated, arr.delays - arr.delays.min(), sample_rate=1000.0)
         assert np.array_equal(ct.taps, expect)
-        assert ct.first_arrival_s == 0.4
-        assert np.allclose(ct.delays_s, np.arange(4) / 1000.0)
+        assert ct.first_arrival == 0.4
+        assert np.allclose(ct.delays, np.arange(4) / 1000.0)
 
     def test_the_surface_bounce_tap_is_minus_the_carrier_rotation(self):
         arr = self._two_path()
@@ -978,7 +1047,7 @@ class TestArrivalsChannelView:
         expect[3 * sps:] += -0.6 * g
         assert ct.taps.shape == expect.shape
         assert np.allclose(ct.taps, expect, atol=1e-12)
-        assert ct.delays_s[0] == pytest.approx(-span / 2 / 1000.0)
+        assert ct.delays[0] == pytest.approx(-span / 2 / 1000.0)
 
     def test_unit_energy_normalisation(self):
         arr = self._two_path()
@@ -1043,7 +1112,7 @@ class TestArrivalsChannelView:
         assert arr.coherence_bandwidth(factor=k) == pytest.approx(expect)
         regime = arr.channel_regime(expect + 1.0, factor=k)
         assert regime.frequency_selective
-        assert regime.coherence_bandwidth_hz == pytest.approx(expect)
+        assert regime.coherence_bandwidth == pytest.approx(expect)
         assert regime.convention == f"factor={k:g}"
         assert f"[factor={k:g}]" in str(regime)
         below = arr.channel_regime(expect - 1.0, factor=k)
@@ -1081,8 +1150,8 @@ class TestArrivalsChannelView:
         assert arr.channel_regime(850.0, rolloff=0.25).frequency_selective
         assert not arr.channel_regime(750.0, rolloff=0.25).frequency_selective
         assert selective.isi_symbols == pytest.approx(1.001)
-        assert selective.symbol_duration_s == pytest.approx(1 / 1001.0)
-        assert selective.coherence_bandwidth_hz == pytest.approx(1000.0)
+        assert selective.symbol_duration == pytest.approx(1 / 1001.0)
+        assert selective.coherence_bandwidth == pytest.approx(1000.0)
         text = str(selective)
         assert text.startswith("frequency-selective") and "1001" in text
         assert "[inverse_spread]" in text
@@ -1117,14 +1186,14 @@ class TestArrivalsChannelView:
     def test_a_grid_of_cells_needs_a_receiver_choice(self):
         arr = TestArrivalsFilterChain()._arrivals()      # 1 depth x 2 ranges
         with pytest.raises(ConfigurationError,
-                           match=r"receiver=\(depth_m, range_m\)"):
+                           match=r"receiver=\(depth, range\)"):
             arr.channel_taps(1000.0, fc=100.0)
         one = arr.channel_taps(1000.0, fc=100.0, receiver=(50.0, 2000.0),
                                pulse='nearest')
-        assert one.taps.size == 1 and one.first_arrival_s == 0.4
+        assert one.taps.size == 1 and one.first_arrival == 0.4
         three = arr.channel_taps(1000.0, fc=100.0,
                                  receiver=(50.0, 1000.0), pulse='nearest')
-        assert three.first_arrival_s == 0.1
+        assert three.first_arrival == 0.1
         with pytest.raises(ConfigurationError, match="range axis"):
             arr.channel_taps(1000.0, fc=100.0, receiver=(50.0, 1500.0))
         with pytest.raises(ConfigurationError,
@@ -1133,7 +1202,7 @@ class TestArrivalsChannelView:
                 1000.0, fc=100.0, receiver=(50.0, 2000.0))
         # A single-cell subset of the same grid needs no receiver=.
         sub = arr.filter(lambda a: a['range_idx'] == 1)
-        assert sub.channel_taps(1000.0, fc=100.0).first_arrival_s == 0.4
+        assert sub.channel_taps(1000.0, fc=100.0).first_arrival == 0.4
 
     @staticmethod
     def _decimated_reference(arr, fc, rolloff, span, sps=16):
@@ -1174,8 +1243,8 @@ class TestArrivalsChannelView:
                               rolloff=rolloff, span=span)
         rrc = arr.channel_taps(1000.0, fc=fc, sps=1, pulse='rrc',
                                rolloff=rolloff, span=span)
-        nmse_rc = self._nmse(rc.taps, rc.delays_s * 1000.0, ref, ref_t)
-        nmse_rrc = self._nmse(rrc.taps, rrc.delays_s * 1000.0, ref, ref_t)
+        nmse_rc = self._nmse(rc.taps, rc.delays * 1000.0, ref, ref_t)
+        nmse_rrc = self._nmse(rrc.taps, rrc.delays * 1000.0, ref, ref_t)
         assert nmse_rc < 1e-3
         assert nmse_rrc > 1e-2
 
@@ -1198,9 +1267,9 @@ class TestArrivalsChannelView:
         arr = self._two_path(gap_symbols=3)
         rc = arr.channel_taps(1000.0, fc=1000.0, pulse='rc', span=8)
         near = arr.channel_taps(1000.0, fc=1000.0, pulse='nearest')
-        in_symbols = rc.delays_s * 1000.0
+        in_symbols = rc.delays * 1000.0
         assert np.allclose(in_symbols, np.round(in_symbols), atol=1e-9)
-        lead = int(np.argmin(np.abs(rc.delays_s)))
+        lead = int(np.argmin(np.abs(rc.delays)))
         assert np.allclose(rc.taps[lead:lead + near.taps.size], near.taps,
                            atol=1e-12)
         rest = np.delete(rc.taps, range(lead, lead + near.taps.size))
@@ -1208,7 +1277,7 @@ class TestArrivalsChannelView:
         off = self._two_path(gap_symbols=3.5)
         rc_off = off.channel_taps(1000.0, fc=1000.0, pulse='rc', span=8)
         near_off = off.channel_taps(1000.0, fc=1000.0, pulse='nearest')
-        lead = int(np.argmin(np.abs(rc_off.delays_s)))
+        lead = int(np.argmin(np.abs(rc_off.delays)))
         assert not np.allclose(rc_off.taps[lead:lead + near_off.taps.size],
                                near_off.taps, atol=1e-3)
 
@@ -1222,7 +1291,7 @@ def test_the_rays_target_point_cannot_be_passed_by_position(method):
     with no error. Keyword-only targets make the swap impossible."""
     from uacpy.core.results import Rays
     params = inspect.signature(getattr(Rays, method)).parameters
-    for name in ('target_range_m', 'target_depth_m'):
+    for name in ('target_range', 'target_depth'):
         assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, name
 
 
@@ -1240,8 +1309,8 @@ class TestArrivalsRoundTripThroughDictAndNpSavez:
                 'phases': np.array([0.0, np.pi]),
                 'n_top_bounces': np.array([0, 1], dtype='int32'),
                 'n_bot_bounces': np.array([0, 1], dtype='int32'),
-                'source_angles': np.array([-2.0, 5.0]),
-                'receiver_angles': np.array([2.0, -5.0]),
+                'source_angles_deg': np.array([-2.0, 5.0]),
+                'receiver_angles_deg': np.array([2.0, -5.0]),
                 'n_arrivals': 2}
         return uacpy.Arrivals(
             by_receiver=[[[cell]]], receiver_depths=[50.0],
@@ -1307,8 +1376,8 @@ class TestArrivalsSynthesiseEveryCell:
                     phases=np.zeros_like(delays),
                     n_top_bounces=np.zeros(delays.size, int),
                     n_bot_bounces=np.zeros(delays.size, int),
-                    source_angles=np.zeros_like(delays),
-                    receiver_angles=np.zeros_like(delays))
+                    source_angles_deg=np.zeros_like(delays),
+                    receiver_angles_deg=np.zeros_like(delays))
 
     def _arrivals(self, by_receiver, depths, ranges):
         return Arrivals(by_receiver=by_receiver, receiver_depths=depths,
@@ -1331,7 +1400,7 @@ class TestArrivalsSynthesiseEveryCell:
         np.testing.assert_array_equal(
             H.data[0, 1], arrival_transfer_function(
                 self.FREQS, cell['amplitudes'], cell['delays'],
-                delays_imag_s=cell['delays_imag'], phases_rad=cell['phases'],
+                delays_imag=cell['delays_imag'], phases=cell['phases'],
                 trace_frequency=1000.0))
         assert (H.data[1, 0] == 0).all()
         assert not np.isnan(H.data).any()
@@ -1391,7 +1460,8 @@ class TestArrivalsSynthesiseEveryCell:
         f = arr.synthesis_band(bandwidth=400.0, fc=1000.0, margin=8.0)
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter('always')
-            trace = arr.transfer_function(f).to_time_trace(window=None)
+            trace = arr.transfer_function(f).to_time_trace(
+                sample_rate=8000.0)
         t = np.asarray(trace.coords['time'])
         peak = t[np.argmax(np.abs(np.ravel(trace.data)))]
         assert peak == pytest.approx(delays[0], abs=2.0 * (t[1] - t[0]))
@@ -1485,7 +1555,7 @@ class TestArrivalsImpulseResponse:
             start = ir.times[0] + r / ir.reduction_speed
             _, taps = arrival_impulse_response(
                 cell['amplitudes'], cell['delays'], sample_rate=self.FS,
-                delays_imag_s=cell['delays_imag'], phases_rad=cell['phases'],
+                delays_imag=cell['delays_imag'], phases=cell['phases'],
                 trace_frequency=self.FC, absorption=arr.absorption,
                 t_start=start, n_samples=n)
             np.testing.assert_allclose(
@@ -1501,7 +1571,7 @@ class TestArrivalsImpulseResponse:
         cell = arr.by_receiver[0][0][1]
         _, lossless = arrival_impulse_response(
             cell['amplitudes'], cell['delays'], sample_rate=self.FS,
-            phases_rad=cell['phases'],
+            phases=cell['phases'],
             t_start=ir.times[0] + 3000.0 / ir.reduction_speed,
             n_samples=ir.times.size)
         received = np.ravel(ir.data) / self.FS
@@ -1534,7 +1604,7 @@ class TestArrivalsImpulseResponse:
         f = np.fft.rfftfreq(L, 1.0 / self.FS)
         H = arrival_transfer_function(
             f, cell['amplitudes'], np.asarray(cell['delays']) - rx.times[0],
-            delays_imag_s=cell['delays_imag'], phases_rad=cell['phases'],
+            delays_imag=cell['delays_imag'], phases=cell['phases'],
             trace_frequency=self.FC, absorption=arr.absorption)
         H[0], H[-1] = H[0].real, H[-1].real
         exact = np.fft.irfft(np.fft.rfft(x, L) * H, L)[:y.size]
@@ -1656,8 +1726,8 @@ class TestArrivalsImpulseResponse:
             cell = arr.by_receiver[0][0][j]
             _, first_only = arrival_impulse_response(
                 cell['amplitudes'][:1], cell['delays'][:1],
-                sample_rate=self.FS, delays_imag_s=cell['delays_imag'][:1],
-                phases_rad=cell['phases'][:1], trace_frequency=self.FC,
+                sample_rate=self.FS, delays_imag=cell['delays_imag'][:1],
+                phases=cell['phases'][:1], trace_frequency=self.FC,
                 absorption=arr.absorption,
                 t_start=ir.times[0] + r / ir.reduction_speed,
                 n_samples=ir.times.size)

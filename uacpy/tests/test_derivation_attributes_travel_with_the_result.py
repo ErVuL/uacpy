@@ -1,5 +1,5 @@
 """What a reader acts on travels as a typed attribute of the result:
-the Field's derivation record (band_hz, synthesis_window, no_mode_bins,
+the Field's derivation record (band, synthesis_window, no_mode_bins,
 sonar_budget, sigma_dB, reduction_speed), Arrivals.absorption and
 ReflectionCoefficient.reflection_type. Each is carried to a derived result,
 round-trips through to_dict and the xarray export, and is refused as a
@@ -19,7 +19,7 @@ BUDGET = {'mode': 'passive', 'source_level_dB': 140.0,
 
 #: tag -> (value, its metadata spelling)
 DERIVATION = {
-    'band_hz': ((100.0, 300.0), 'band_hz'),
+    'band': ((100.0, 300.0), 'band'),
     'synthesis_window': ('hann', 'window'),
     'no_mode_bins': ((0, 2), 'no_mode_bins'),
     'sonar_budget': (BUDGET, 'sonar_budget'),
@@ -126,8 +126,8 @@ def test_no_mode_bins_round_trip_through_netcdf(tmp_path):
 
 
 def test_a_band_that_is_not_a_pair_is_refused():
-    with pytest.raises(ConfigurationError, match='band_hz'):
-        _field(band_hz=(100.0, 200.0, 300.0))
+    with pytest.raises(ConfigurationError, match='band'):
+        _field(band=(100.0, 200.0, 300.0))
 
 
 def test_the_budget_property_is_a_copy():
@@ -180,6 +180,27 @@ class TestArrivalsAbsorption:
         assert back.absorption.to_dict() == LAW.to_dict()
         assert 'absorption' not in back.metadata
 
+    def test_a_measured_table_round_trips_as_the_table(self):
+        # A traced environment's measured table is what the arrivals hold
+        # (env.absorption as it is), and what both exports bring back.
+        from uacpy.core.absorption import AbsorptionCoefficient
+        from uacpy.tests.conftest import measured_absorption_table
+        table = measured_absorption_table()
+        arrivals = _arrivals(absorption=table)
+        backs = [Arrivals.from_dict(arrivals.to_dict())]
+        try:
+            import xarray  # noqa: F401
+            backs.append(Arrivals.from_xarray(arrivals.to_xarray()))
+        except ImportError:
+            pass
+        for back in backs:
+            assert type(back.absorption) is AbsorptionCoefficient
+            np.testing.assert_array_equal(back.absorption.data, table.data)
+            np.testing.assert_array_equal(back.absorption.depths,
+                                          table.depths)
+            np.testing.assert_array_equal(
+                back.received_amplitudes, arrivals.received_amplitudes)
+
     def test_a_saved_dict_keeping_it_in_metadata_is_refused(self):
         d = _arrivals().to_dict()
         d['metadata'] = {'absorption': LAW}
@@ -192,7 +213,7 @@ class TestArrivalsAbsorption:
 
 
 def _table(**kw):
-    return ReflectionCoefficient(angles=[10.0, 20.0, 30.0],
+    return ReflectionCoefficient(angles_deg=[10.0, 20.0, 30.0],
                                  magnitude=[0.9, 1.1, 0.8],
                                  phase=[0.0, 0.1, 0.2], **kw)
 

@@ -18,10 +18,8 @@ compare_models(ncols=, contours=)
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -32,22 +30,20 @@ OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
 OUT.mkdir(parents=True, exist_ok=True)
 
 # A thermal front: warm shelf water inshore, cooler water offshore, stratified
-# exponentially with depth. c(T, z) is Medwin's equation kept to its linear
-# terms — a smooth stand-in for a frontal profile, not a calibrated seawater
-# equation (those are uacpy.acoustics.sound_speed_mackenzie / _unesco / _teos10, or
-# SoundSpeedProfile.from_temperature_salinity for one column).
+# exponentially with depth; Mackenzie's equation turns T(z, r) into c(z, r).
 depths = np.linspace(0, 200, 21)
-ranges_m = np.array([0.0, 2000.0, 4000.0, 6000.0, 8000.0])
-t_surface = 18 - (ranges_m / 1000.0) * 0.3          # 18 °C → 15.6 °C at 8 km
-t_deep = 8 - (ranges_m / 1000.0) * 0.1
+ranges = np.array([0.0, 2000.0, 4000.0, 6000.0, 8000.0])
+t_surface = 18 - (ranges / 1000.0) * 0.3          # 18 °C → 15.6 °C at 8 km
+t_deep = 8 - (ranges / 1000.0) * 0.1
 temperature = t_deep + (t_surface - t_deep) * np.exp(-depths[:, None] / 40)
-ssp_matrix = 1449 + 4.6 * temperature + 0.016 * depths[:, None]
+ssp_matrix = uacpy.acoustics.sound_speed_mackenzie(
+    temperature, 35.0, depth=np.repeat(depths[:, None], ranges.size, axis=1))
 
 bathymetry = np.array([[0, 100], [2000, 110], [4000, 130],
                        [6000, 150], [8000, 170]])
 env = uacpy.Environment(
     name="Continental margin — frontal zone",
-    ssp=uacpy.SoundSpeedProfile.from_2d(depths=depths, ranges=ranges_m,
+    ssp=uacpy.SoundSpeedProfile.from_2d(depths=depths, ranges=ranges,
                                         matrix=ssp_matrix),
     bathymetry=bathymetry,
     bottom=uacpy.Bottom.from_halfspaces(
@@ -55,7 +51,6 @@ env = uacpy.Environment(
         sound_speed=np.array([1550, 1600, 1640, 1680, 1720]),
         density=np.array([1.4, 1.55, 1.7, 1.85, 2.0]),
         attenuation=np.array([1.0, 0.8, 0.6, 0.5, 0.4]),
-        shear_speed=np.zeros(5),
         acoustic_type='half-space'),
     absorption=uacpy.Thorp(),
 )
@@ -65,7 +60,7 @@ print(f"  SSP {ssp_matrix.min():.1f}-{ssp_matrix.max():.1f} m/s, "
 
 source = uacpy.Source(depths=50.0, frequencies=100.0)
 # Ranges start at 700 m: closer in, the deepest receivers see direct and
-# surface-reflected paths steeper than Kraken's mode window keeps (19.7°).
+# surface-reflected paths steeper than Kraken's mode window keeps (21.4°).
 receiver = uacpy.Receiver(depths=np.linspace(5, 165, 30),
                           ranges=np.linspace(700, 8000, 37))
 
@@ -93,8 +88,9 @@ for warning in caught:
     else:
         warnings.showwarning(warning.message, warning.category,
                              warning.filename, warning.lineno)
-# The receivers reach below the sloping seafloor. RAM and Bellhop return NaN
-# there; Kraken's deck carries the sediment down to the deepest receiver, and
+# The receivers reach below the sloping seafloor. Bellhop returns NaN there;
+# RAM returns its PE field down to its absorbing layer, Kraken's deck carries
+# the sediment down to the deepest receiver, and
 # Scooter and OAST run on the guide flattened to 170 m, so each returns values
 # below it. Every field is cut at env's seafloor, so the numbers below compare
 # water with water.
@@ -114,7 +110,7 @@ fig.savefig(OUT / 'example_07_comparison.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 fig, _ = uacpy.plot.compare_models(fields, env=env, ncols=3, vmin=50, vmax=110,
-                              contours=[70, 90],
-                              title='All models — TL with 70/90 dB contours')
+                              contours=[70, 85],
+                              title='All models — TL with 70/85 dB contours')
 fig.savefig(OUT / 'example_07_models.png', dpi=150)
 plt.close(fig)

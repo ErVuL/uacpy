@@ -10,10 +10,11 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._launch import _tail, prt_launch, run_launch
 from uacpy.core.run_settings import RunMode
 from uacpy.core.exceptions import (
-    ConfigurationError, IOWarning, ModelExecutionError,
+    ConfigurationError, FallbackWarning, IOWarning, ModelExecutionError,
     UnsupportedFeatureError,
 )
 from uacpy.models.oases._common import _oases_subprocess_env
+from uacpy.io.oases_writer import refuse_boundaries_without_deck_spelling
 from uacpy.models._extract import stamp_result
 
 
@@ -21,9 +22,9 @@ class OASES(PropagationModel):
     """Public base + factory for the OASES sub-models
     (OAST/OASN/OASR/OASP/OASS/OASSP).
 
-    Each sub-model wraps one OASES binary and differs only in its per-binary
-    ``FORnnn`` unit-number map (``_FOR_FILES``) and its run modes; all share the
-    one ``_execute`` below. They subclass ``OASES``, so ``isinstance(model,
+    Each sub-model wraps one OASES binary with its own deck writer, output
+    reader, knobs, run modes and ``FORnnn`` unit-number map
+    (``_FOR_FILES``); all share the one ``_execute`` below. They subclass ``OASES``, so ``isinstance(model,
     OASES)`` is True for any of them. ``OASES`` itself is abstract — instantiate
     a sub-model directly, or use :meth:`OASES.for_mode` to pick one by
     ``RunMode``."""
@@ -63,7 +64,8 @@ class OASES(PropagationModel):
         ``reverberation=True``, which returns the scattered field rather than
         the coherent one); ``REVERBERATION`` → ``OASS``, which needs no flag
         because nothing else emits it. ``**kwargs`` forward to the chosen
-        sub-model (a kwarg it doesn't accept raises ``TypeError``).
+        sub-model (a kwarg it doesn't accept raises ``TypeError``). A flag
+        the run mode does not read gives a ``FallbackWarning``.
 
         Parameters
         ----------
@@ -96,7 +98,29 @@ class OASES(PropagationModel):
                 alternatives=[str(m) for m in dispatch],
                 alternatives_label='run modes',
             )
+        unused = [name for name, value, modes in (
+            ('broadband', broadband, {RunMode.COHERENT_TL}),
+            ('reverberation', reverberation,
+             {RunMode.COVARIANCE, RunMode.BROADBAND, RunMode.TIME_SERIES,
+              RunMode.REVERBERATION}))
+            if value and run_mode not in modes]
+        if unused:
+            warnings.warn(
+                f"OASES.for_mode: {', '.join(f'{u}=True' for u in unused)} "
+                f"is not read for run_mode={run_mode.name}; the call returns "
+                f"{target.__name__}.",
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
         return target(**kwargs)
+
+    def _validate_engine(self, env, source, receiver, run_mode, *,
+                         request=None) -> None:
+        """Stage 2: refuse a sea surface or seabed half-space the OAS* decks
+        cannot spell — a rigid or tabulated boundary
+        (:func:`~uacpy.io.oases_writer.refuse_boundaries_without_deck_spelling`)
+        — so ``run_settings()`` and ``validate_inputs()`` refuse what
+        ``run()`` refuses. A sub-model with refusals of its own calls this
+        first."""
+        refuse_boundaries_without_deck_spelling(env)
 
     def _stamp_file_result(self, result, source, *, backend: str,
                            frequencies='file', components=None, **extra):

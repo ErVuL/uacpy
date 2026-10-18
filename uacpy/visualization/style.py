@@ -19,9 +19,26 @@ DB_VIEW_COLORMAPS = {
     'ambiguity': 'turbo',
 }
 
-# The signed linear views (real, imaginary part) of any quantity. The
-# unsigned modulus takes its dB view's ordered map instead (plots/fields.py).
+# The signed linear views (real, imaginary part) of any quantity, and a
+# time-domain wavefield. The unsigned modulus takes its dB view's ordered map
+# instead (plots/fields.py).
 LINEAR_VIEW_COLORMAP = 'seismic'
+
+# A phase is cyclic: -π and +π are one phase, so its map wraps onto itself and
+# the roll-over reads as no edge in the field.
+PHASE_COLORMAP = 'twilight'
+
+# The mode-shape heatmap (``plot_modes_heatmap``): ψ_m(z) is signed, drawn on a
+# diverging map centred on zero.
+MODE_SHAPE_COLORMAP = 'RdBu_r'
+
+# Unsigned magnitudes drawn as a map outside the Field views: the broadband
+# reflection coefficient |R(θ, f)|, the depth-separated Green's function
+# |G(k_r, z)| and a covariance |C|.
+MAGNITUDE_COLORMAP = 'viridis'
+
+# A replica bank's |R| over the candidate (depth, range) grid.
+REPLICA_COLORMAP = 'magma'
 
 # A probability is bounded [0, 1] and unsigned, so the signed diverging map
 # above cannot describe it: half of that map is unreachable and its neutral
@@ -30,6 +47,13 @@ LINEAR_VIEW_COLORMAP = 'seismic'
 # the same through the dedicated plotter and through ``Field.plot``.
 PROBABILITY_COLORMAP = 'RdYlGn'
 PROBABILITY_LIMITS = (0.0, 1.0)
+
+# A cell the model reported no energy for (the 600 dB no-energy marker,
+# ``uacpy.core.acoustics.levels.no_energy_mask``) on a dB heatmap. It is not a
+# level, so it takes no colour of the value scale: a flat grey that none of the
+# maps above contains, distinct from a level past the window (the window's end
+# colour) and from a cell with no data (NaN, the axes background).
+NO_ENERGY_COLOR = '0.6'
 
 
 # ── Sediment colour — single source of truth ─────────────────────────────
@@ -153,16 +177,17 @@ def cmap_for_field(kind: str, *, dB: bool) -> str:
     kind : str
         The field's ``kind`` — what quantity it carries.
     dB : bool
-        Whether the dB view is being rendered. The signed linear views share
-        one colormap regardless of quantity, so only the dB view varies:
+        Whether the dB view is being rendered. A Field's signed linear views
+        share one colormap regardless of quantity, so only the dB view varies:
         transmission loss wants the Acoustic-Toolbox reversed jet, signal
         excess a diverging map centred on its detection boundary.
 
     Returns
     -------
     cmap : str
-        Colormap name (``'viridis'`` for a quantity with no registered map).
+        Colormap name (``MAGNITUDE_COLORMAP`` for a quantity with no
+        registered map).
     """
     if not dB:
         return LINEAR_VIEW_COLORMAP
-    return DB_VIEW_COLORMAPS.get(kind, 'viridis')
+    return DB_VIEW_COLORMAPS.get(kind, MAGNITUDE_COLORMAP)

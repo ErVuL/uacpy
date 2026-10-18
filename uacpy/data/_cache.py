@@ -29,7 +29,7 @@ from uacpy._log import log_message
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 
 __all__ = ['cache_root', 'dataset_root', 'prepare_download', 'require',
-           'require_npz', 'cached_grid',
+           'cached_grid',
            'cached_grid_at', 'register_cache', 'invalidate_grids', 'atomic_write',
            'staging_path', 'reading', 'memoize', 'memo_lock', 'per_root_memo',
            'DATASETS',
@@ -217,35 +217,6 @@ def is_installed(name: str, *relative: str) -> bool:
     return True
 
 
-def require_npz(name: str, filename: str, superseding: str) -> Path:
-    """Resolve a cached ``.npz`` index, refusing the pickle it replaced.
-
-    The EMODnet polygon index and the NSIDC sea-ice climatology are cached as
-    ``.npz`` and loaded with ``allow_pickle=False``, so writing the cache
-    directory cannot run code in a later reader.
-
-    A cache holding the pickled ``superseding`` file is refused rather than
-    converted: converting it would have to unpickle it first, which is exactly
-    the execution this format change removes. The error names the file to
-    delete and the flag that rebuilds the dataset.
-    """
-    root = dataset_root(name)
-    stale = root / superseding
-    if not (root / filename).exists() and stale.exists():
-        raise ConfigurationError(
-            f"Offline {name} data at {stale} is in the retired pickle format. "
-            f"This is a security migration, not a damaged file: the cache used "
-            f"to be unpickled on every read, which runs whatever code the file "
-            f"contains, so the index is now a data-only .npz ({filename}) and "
-            f"the pickle is refused instead of converted — converting it would "
-            f"have to unpickle it.",
-            remediation=f"Delete {stale} and run "
-                        f"`{DATASETS[name].install_flag}` to rebuild it as "
-                        f"{filename}.",
-        )
-    return require(name, filename)
-
-
 # mkstemp creates its file 0600, but the cached datasets are public reference
 # grids and $UACPY_DATA_CACHE may point at a directory a group shares, so the
 # staging file is widened to what a plain create would have produced. The umask
@@ -340,7 +311,7 @@ def reading(name: str, path):
     """Re-raise whatever a cached file's parser throws as a typed error.
 
     A file the cache accepts can still be unreadable — truncated by an
-    interrupted install predating :func:`atomic_write`, or damaged on disk —
+    interrupted write outside :func:`atomic_write`, or damaged on disk —
     and each reader then fails with its own parser's exception
     (``OSError``, ``ValueError``, ``UnicodeDecodeError``). The source-fallback
     chains in :mod:`uacpy.data.environment` catch ``DataFetchError`` and
@@ -354,9 +325,9 @@ def reading(name: str, path):
         raise
     except Exception as exc:
         # The remediation names the install flag when `name` is a known
-        # dataset. Looking it up unguarded put a KeyError on the error path
-        # itself — an untyped failure raised from the helper whose whole
-        # purpose is to stop untyped failures escaping.
+        # dataset. The lookup is guarded (.get) because an unknown name must
+        # not raise an untyped KeyError from the helper whose whole purpose is
+        # to stop untyped failures escaping.
         entry = DATASETS.get(name)
         remedy = (f"Delete {path} and re-run `{entry.install_flag}`."
                   if entry is not None else

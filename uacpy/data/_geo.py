@@ -4,40 +4,42 @@ The coordinate, great-circle and date helpers every layer shares are in
 :mod:`uacpy.core.geo`.
 """
 
-import warnings
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
 from uacpy.core._export import ExportRecord
+from uacpy.core._provenance import coerce_data_sources
 from uacpy.data.sources import DataProvenance
-from uacpy.core.provenance import point_in_words
+from uacpy.core.provenance import _point_in_words
 
 from uacpy.core.exceptions import (
-    ConfigurationError, DataFetchError, FallbackWarning,
+    ConfigurationError, DataFetchError,
 )
-from uacpy.core.geo import great_circle_km
-from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.geo import geodesic_waypoints, great_circle_km
 from uacpy.data._provenance_notice import provenance_notice
 
 __all__ = [
     'lon_linspace', 'nearest_indices', 'ring_offsets', 'run_representative_indices',
     'run_boundary_indices',
     'DEFAULT_MAX_TRANSECT_POINTS', 'checked_max_points',
-    'checked_n_points', 'capped_n_points', 'require_source', 'require_month',
+    'checked_n_points', 'auto_budget', 'default_n_points',
+    'checked_explicit_n_points', 'DEFAULT_ALONG_TRACK_POINTS',
+    'along_track_waypoints',
+    'require_source', 'require_month',
     'checked_max_days', 'cut_at_first_invalid', 'mid_depth',
     'value_at_depth',
     'depth_from_elevation',
     'checked_max_distance', 'cell_half_diagonal_km', 'checked_offset',
 ]
 
-#: Default ceiling on the number of points sampled along a transect *before*
-#: the ``'auto'`` reduction step — i.e. the fetch budget. The reduced grid is
-#: never larger than this (and usually much smaller after collapsing
-#: duplicates). At OpenTopoData's ≤100 locations/request this is ≤10 requests
-#: for a full-native bathy transect. Override via ``max_points=`` on the
-#: fetchers / fetch_environment.
+#: The waypoint budget of an ``n_points='auto'`` transect when ``max_points``
+#: is unset: the points probed *before* the ``'auto'`` reduction step, i.e.
+#: the fetch budget. The reduced grid is never larger than this (and usually
+#: much smaller after collapsing duplicates). At OpenTopoData's ≤100
+#: locations/request this is ≤10 requests for a full-native bathy transect.
+#: uacpy guidance. An explicit ``n_points`` is not bounded by it.
 DEFAULT_MAX_TRANSECT_POINTS = 1000
 
 
@@ -63,17 +65,20 @@ def depth_from_elevation(elev, lat, lon, *, dataset: str) -> float:
     return -elev
 
 
-def checked_max_points(max_points, who: str) -> int:
-    """Validate a transect fetch budget: an integer of at least 2.
+def checked_max_points(max_points, who: str) -> Optional[int]:
+    """Validate a transect fetch budget: ``None`` (unset, returned as is) or
+    an integer of at least 2.
 
-    ``n_points`` is guarded at >= 2 wherever it is accepted, but the cap it is
-    reduced against was not, and ``'auto'`` resolves straight to the cap:
-    ``max_points=1`` produced a one-waypoint "transect" with
-    ``ranges_m=[0.0]``, ``max_points=0`` an empty one, and a negative value an
+    ``n_points`` is guarded at >= 2 wherever it is accepted, and the budget
+    needs the same guard because ``'auto'`` resolves straight to it: without
+    it ``max_points=1`` would give a one-waypoint "transect" with
+    ``ranges=[0.0]``, ``max_points=0`` an empty one, and a negative value an
     untyped ``ValueError`` out of ``np.linspace``. Two points are the fewest
     that define a path. A fraction (``2.7``) is refused, not truncated, as
     :func:`checked_n_points` refuses it.
     """
+    if max_points is None:
+        return None
     try:
         value = int(max_points)
     except (TypeError, ValueError):
@@ -192,21 +197,74 @@ def checked_n_points(n_points, label: str, *, allow_auto: bool = False,
     return value
 
 
-def capped_n_points(n_points: int, max_points, label: str) -> int:
-    """``n_points`` clamped to ``max_points`` (``None``: no cap), with a
-    ``FallbackWarning`` naming both when the clamp bites.
+def auto_budget(max_points: Optional[int]) -> int:
+    """The waypoint budget of an ``n_points='auto'`` transect: the caller's
+    validated ``max_points``, or :data:`DEFAULT_MAX_TRANSECT_POINTS` when it
+    is unset."""
+    return DEFAULT_MAX_TRANSECT_POINTS if max_points is None else max_points
 
-    The transect fetchers share this one cap rule for an explicit count;
-    their ``'auto'`` branches resolve a probe count against ``max_points``
-    themselves and never come here.
+
+def default_n_points(default: int, max_points: Optional[int]) -> int:
+    """The count of a transect whose ``n_points`` is unset (``None``): the
+    fetcher's ``default`` (uacpy guidance), within the caller's
+    ``max_points`` when one is set."""
+    return default if max_points is None else min(default, max_points)
+
+
+def checked_explicit_n_points(n_points: int, max_points: Optional[int],
+                              label: str, *, name: str = 'n_points') -> int:
+    """An explicit transect count, used as given; refused when the caller
+    also set a smaller ``max_points``.
+
+    The two settings then contradict each other, and neither is changed to
+    fit the other. An unset ``max_points`` (``None``) bounds no explicit
+    count; the transect fetchers resolve ``'auto'`` against
+    :func:`auto_budget` and an unset count with :func:`default_n_points`,
+    and never come here for either. ``name`` is the count's argument name in
+    the message (``'ssp_n_points'`` …).
     """
     if max_points is None or n_points <= max_points:
         return n_points
-    warnings.warn(
-        f"{label}: n_points={n_points} exceeds max_points={max_points}; "
-        f"sampling {max_points}.",
-        FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    return int(max_points)
+    raise ConfigurationError(
+        f"{label}: {name}={n_points} exceeds max_points={max_points}; the "
+        f"two settings contradict each other.",
+        remediation=f"Drop max_points= (an explicit {name} is used as "
+                    f"given), or pass {name} <= max_points.")
+
+
+#: Waypoints of a scalar transect (:class:`AlongTrack`) whose ``n_points``
+#: is unset. uacpy guidance.
+DEFAULT_ALONG_TRACK_POINTS = 6
+
+
+def along_track_waypoints(start, end, n_points, max_points, *, who, cell_of):
+    """``(lats, lons, ranges)`` a scalar transect samples.
+
+    An integer ``n_points`` gives that many evenly spaced waypoints (refused
+    above an explicit ``max_points``); ``None`` gives
+    :data:`DEFAULT_ALONG_TRACK_POINTS` within ``max_points``; ``'auto'``
+    probes :func:`auto_budget` waypoints and keeps one per run of consecutive
+    waypoints in one grid cell, endpoints anchored
+    (:func:`run_representative_indices`) — the reduction
+    :func:`uacpy.data.ssp_transect_sampling` applies to the WOA23 grid.
+    ``cell_of(lat, lon)`` is the grid cell a waypoint reads (any
+    ``==``-comparable identity, computed without reading a value); ``who``
+    names the caller in the refusals.
+    """
+    max_points = checked_max_points(max_points, who)
+    if n_points is None:
+        return geodesic_waypoints(
+            start, end, default_n_points(DEFAULT_ALONG_TRACK_POINTS,
+                                         max_points))
+    n_points = checked_n_points(n_points, who, allow_auto=True)
+    if n_points != 'auto':
+        return geodesic_waypoints(
+            start, end, checked_explicit_n_points(n_points, max_points, who))
+    lats, lons, ranges = geodesic_waypoints(start, end,
+                                            auto_budget(max_points))
+    keep = np.asarray(run_representative_indices(
+        [cell_of(la, lo) for la, lo in zip(lats, lons)]), dtype=int)
+    return lats[keep], lons[keep], ranges[keep]
 
 
 def lon_linspace(lon0: float, lon1: float, n: int) -> np.ndarray:
@@ -223,8 +281,8 @@ def lon_linspace(lon0: float, lon1: float, n: int) -> np.ndarray:
         lon1 += 360.0
     raw = np.linspace(lon0, lon1, int(n))
     wrapped = ((raw + 180.0) % 360.0) - 180.0
-    # Keep a node that lies exactly on +180 as +180: wrapping it to -180 made
-    # a full-globe axis non-monotonic with a duplicated first column. Exact
+    # Keep a node that lies exactly on +180 as +180: wrapping it to -180 would
+    # make a full-globe axis non-monotonic with a duplicated first column. Exact
     # equality is the right test — only an exact +180 wraps to exactly -180,
     # while other multiples of 360 offset from it (-180, 540) stay -180.
     wrapped[raw == 180.0] = 180.0
@@ -357,7 +415,8 @@ def run_boundary_indices(keys) -> 'list[int]':
 @dataclass(frozen=True, eq=False)
 class AlongTrack(ExportRecord):
     """One quantity sampled at the waypoints of a ``start`` → ``end``
-    transect, as the scalar transect fetchers return it.
+    transect, as the scalar transect fetchers return it, with one source
+    record per waypoint.
 
     Attributes
     ----------
@@ -372,10 +431,12 @@ class AlongTrack(ExportRecord):
     quantity : str
         What ``data`` is (``'sediment_thickness'``, ``'seabed_density'``,
         ``'sea_ice_concentration'``, ``'wind_speed'``).
-    provenance : DataProvenance or None
-        The source the values were read from, which the transect fetchers
-        always set. ``None`` is user-supplied data: no catalogue source, so
-        no credit is drawn.
+    provenance : tuple of DataProvenance
+        One record per waypoint, in waypoint order: the source, the node or
+        cell each value was read from (``offset_km`` its distance from the
+        waypoint) and the date of the data, as the SSP and bottom transects
+        record their columns. The transect fetchers always set it; ``()``
+        (default) is user-supplied data, which draws no credit.
     """
 
     ranges: np.ndarray
@@ -384,12 +445,31 @@ class AlongTrack(ExportRecord):
     data: np.ndarray
     unit: str
     quantity: str
-    provenance: Optional[DataProvenance] = None
+    provenance: Tuple[DataProvenance, ...] = ()
 
     _ARRAY_FIELDS = ('ranges', 'lats', 'lons', 'data')
     _TABLE_FIELDS = ('ranges', 'lats', 'lons', 'data')
     _XARRAY_FIELDS = {'data': 'data', 'range': 'ranges', 'lat': 'lats',
                       'lon': 'lons'}
+
+    def __post_init__(self):
+        if isinstance(self.provenance, DataProvenance):
+            raise ConfigurationError(
+                "AlongTrack: provenance is a tuple of per-waypoint records, "
+                "not one record.",
+                remediation="Pass one DataProvenance per waypoint, e.g. "
+                            "provenance=(record,) * len(ranges), or () for "
+                            "data of your own.")
+        records = coerce_data_sources(self.provenance, 'AlongTrack')
+        n = np.size(self.ranges)
+        if len(records) not in (0, n):
+            raise ConfigurationError(
+                f"AlongTrack: {len(records)} provenance records for {n} "
+                f"waypoints; there is one record per waypoint.",
+                remediation="Pass one DataProvenance per waypoint, or () "
+                            "for data of your own.")
+        object.__setattr__(self, 'provenance', records)
+        super().__post_init__()
 
     def _payload(self):
         return {'data': (self.data, ('range',), self.unit)}
@@ -458,7 +538,7 @@ def checked_offset(prov: DataProvenance, *, who: str, warn_km: float,
     where = (f"{prov.source.name}: the data come from "
              f"{'the ' if prov.point_kind else ''}"
              f"{prov.describe_point()}, {offset:.1f} km from the requested "
-             f"point ({point_in_words(*prov.requested_point)})")
+             f"point ({_point_in_words(*prov.requested_point)})")
     if max_distance_km is not None and offset > max_distance_km:
         raise DataFetchError(
             f"{who}: {where}, past max_distance_km={max_distance_km:g}.",

@@ -10,6 +10,8 @@ generating command (`how`) and the 64 packet bits janus-tx printed for it.
 - `cmre_a_noisy.wav`: `cmre_a_clean.wav` plus `numpy.random.default_rng(124)` white noise at 0 dB SNR over the
   4160 Hz band (signal power over the 176-chip frame), written as 16-bit PCM without normalisation.
 
-The `uacpy_to_cmre` entries record the other direction. janus-rx decoded uacpy's `janus_modulate` output for
-packets A and B (0.95 full scale, rounded to int16) back to the same bits with a valid CRC, and each entry keeps that
-int16 waveform's SHA-256, so the test can pin that the waveform janus-rx decoded is still the one uacpy emits.
+The `uacpy_to_cmre` entries record the other direction. janus-rx decoded uacpy's `janus_modulate(...,
+window='tukey')` output for packets A and B (0.95 full scale, rounded to int16) back to the same bits with a valid
+CRC, and each entry keeps that int16 waveform's SHA-256, so the test can pin that the waveform janus-rx decoded is
+still the one uacpy emits with Tukey chips. The square-chip default (`window=None`, the standard's nominal envelope)
+has not been through janus-rx.

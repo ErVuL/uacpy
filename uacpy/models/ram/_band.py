@@ -34,11 +34,14 @@ def resolve_broadband_grid(source: Source, *,
     ``DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` is the FULL fractional width
     (``fc·(1 ± bw/2)``).
 
-    A multi-element ``frequencies`` array defines the band itself:
-    ``fc`` is an array bin near its centre and ``Q`` / ``T`` are derived
-    from its half-width and spacing (:func:`array_sweep`), so the marched
-    sweep contains every requested bin and the result is trimmed back to
-    exactly them (the derivation is logged, not warned). A pinned ``Q``
+    A multi-element ``frequencies`` array defines the band itself, in any
+    order (as on the :class:`~uacpy.core.source.Source`, which refuses a
+    repeated bin): ``fc`` is a bin near the centre of the sorted array and
+    ``Q`` / ``T`` are derived from its half-width and spacing
+    (:func:`array_sweep`), so the marched sweep contains every requested
+    bin and the result is trimmed back to exactly them, in the order given
+    (:func:`requested_broadband_bins`; the derivation is logged, not
+    warned). A pinned ``Q``
     and/or ``T`` beside the array is a second description of the same
     band: when the sweep it gives around the array's ``fc`` marches the
     array's own bins the pinned values are used, otherwise the two
@@ -93,17 +96,8 @@ def resolve_broadband_grid(source: Source, *,
             )
         return fc, Q, T
 
+    freqs = np.sort(freqs)
     freq_min, freq_max = float(freqs[0]), float(freqs[-1])
-    steps = np.diff(freqs)
-    if not np.all(steps > 0.0):
-        i = int(np.flatnonzero(steps <= 0.0)[0])
-        raise ConfigurationError(
-            f"RAM BROADBAND: the frequency array must be strictly "
-            f"increasing; frequencies[{i}]={float(freqs[i]):g} Hz is "
-            f"followed by {float(freqs[i + 1]):g} Hz.",
-            remediation="Pass the bins sorted in increasing order, each "
-                        "once (np.unique sorts and de-duplicates).",
-        )
     pinned = [f"{name}={getattr(knobs, name):g}"
               for name in ('q_factor', 'record_duration')
               if getattr(knobs, name) is not None]
@@ -287,8 +281,8 @@ def requested_broadband_bins(source: Source, *, knobs):
     can only march ``2·nf1 + 1`` bins, so it is a superset of a
     caller-supplied frequency array whenever the two differ (one extra
     bin past ``freq_max`` for an even count). The broadband runners trim
-    their output onto this
-    grid so ``H(f)`` round-trips the request bin for bin — a pinned ``Q``
+    their output onto this grid, in the caller's order, so ``H(f)``
+    round-trips the request bin for bin — a pinned ``Q``
     / ``T`` beside an array describes the array's own sweep
     (:func:`resolve_broadband_grid` refuses one that does not). ``None``
     — keep the full sweep — for a single frequency together with a

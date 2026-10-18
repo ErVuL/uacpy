@@ -136,8 +136,9 @@ class TestRangeDependentBroadbandRunsPerFrequency:
         assert looped.phase_reference == native.phase_reference
         assert (looped.run_settings.waveguide.c_max
                 == native.run_settings.waveguide.c_max)
-        # and it says which path built it
-        assert looped.metadata['native_broadband'] is False
+        # and its record says which path built it
+        assert looped.run_settings.engine.route == 'band_by_frequency'
+        assert native.run_settings.engine.route == 'band'
 
     def test_it_names_the_engine_and_source_a_native_band_names(self):
         """The looped band carries the native band's identity: field.exe as
@@ -149,7 +150,7 @@ class TestRangeDependentBroadbandRunsPerFrequency:
         rcv = uacpy.Receiver(depths=[100.0], ranges=[3000.0])
         model = uacpy.Kraken(verbose=False)
         looped = model.run(self._env(), src, rcv, run_mode=RunMode.BROADBAND)
-        assert looped.metadata['native_broadband'] is False
+        assert looped.run_settings.engine.route == 'band_by_frequency'
         assert looped.model == 'Kraken'
         assert looped.backend == 'kraken'
         assert looped.model_source is model.provenance
@@ -219,11 +220,11 @@ class TestKrakenBackendSelection:
         assert self._launched(Kraken(verbose=False, leaky_modes=True),
                               self._fluid()) == 'krakenc.exe'
 
-    def test_force_kraken_on_elastic_raises(self):
-        from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError, match="elastic media"):
-            self._launched(Kraken(verbose=False, backend='kraken'),
-                           self._elastic())
+    def test_force_kraken_on_elastic_runs_kraken_exe(self):
+        """kraken.exe has elastic branches (kraken.f90:177-195); a forced
+        backend runs it, with the notice of what it computes there."""
+        assert self._launched(Kraken(verbose=False, backend='kraken'),
+                              self._elastic()) == 'kraken.exe'
 
     def test_unknown_backend_raises(self):
         from uacpy.core.exceptions import ConfigurationError
@@ -384,6 +385,32 @@ class TestABandBinTheDeckLeftNaNIsSolvedOnItsOwnDeck:
         assert np.all(np.isfinite(band.data))
         np.testing.assert_allclose(band.data[..., 1], alone.data,
                                    rtol=1e-12, atol=0.0)
+
+    def test_the_record_names_the_bins_solved_on_their_own_deck(self):
+        """``run_settings.notes`` of the result says which bins came from a
+        deck of their own; the preview, resolved before any launch, cannot,
+        and a band whose deck solves every bin says nothing."""
+        env, receiver, freqs = self._case()
+        model = Kraken(verbose=False, leaky_modes=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            band = model.run(env, Source(depths=15.0, frequencies=freqs),
+                             receiver, run_mode=RunMode.BROADBAND,
+                             frequencies=freqs)
+            preview = model.run_settings(
+                env, Source(depths=15.0, frequencies=freqs), receiver,
+                run_mode=RunMode.BROADBAND, frequencies=freqs)
+            clean = Kraken(verbose=False).run(
+                _pekeris(depth=100.0), Source(depths=50.0, frequencies=freqs),
+                Receiver(depths=[50.0], ranges=[1000.0]),
+                run_mode=RunMode.BROADBAND, frequencies=freqs)
+        said = [n for n in band.run_settings.notes if 'deck of its own' in n]
+        assert said == ['frequencies 35 Hz: the band deck left them without '
+                        'a field; each was solved again on a deck of its own '
+                        '(bin_<index>/ in the work directory)']
+        assert not [n for n in preview.notes if 'deck of its own' in n]
+        assert not [n for n in clean.run_settings.notes
+                    if 'deck of its own' in n]
 
     def test_a_bin_nan_on_its_own_deck_too_is_named(self, monkeypatch):
         env, receiver, freqs = self._case()
@@ -1436,21 +1463,25 @@ class TestFortranFatalErrorExitsZero:
                                          ranges=[1000.0, 2000.0]))
 
     @classmethod
-    def _env_that_fatals_in_crci(cls, depth, c):
+    def _env_that_fatals_in_crci(cls, depth, c, monkeypatch):
         """An environment whose bottom attenuation trips ``AttenMod : CRCI``.
 
-        ``BoundaryProperties`` refuses an attenuation past
-        ``MAX_ATTENUATION_DB_PER_WAVELENGTH`` (54.575 dB/wavelength, derived from
-        the same ``CRCI`` abort), at construction and on assignment, so the
-        value is stored past the carrier's checks with ``object.__setattr__``,
-        standing in for a carrier gap. That is
-        the point of these two tests: the carrier guard is the first line of
-        defence and the ``.prt``/stderr scan is the second, for a fatal that
-        arrives some other way — a hand-edited deck, a future carrier gap, or a
-        different AT fatal entirely."""
+        The Acoustics-Toolbox deck writers refuse an attenuation past
+        ``MAX_ATTENUATION_DB_PER_WAVELENGTH`` (54.575 dB/wavelength, derived
+        from the same ``CRCI`` abort), so the guard is switched off here,
+        standing in for a writer gap. That is the point of these two tests:
+        the writer guard is the first line of defence and the ``.prt``/stderr
+        scan is the second, for a fatal that arrives some other way — a
+        hand-edited deck, a future writer gap, or a different AT fatal
+        entirely. The carrier keeps the value with a warning (OASES and RAM
+        take it)."""
+        import uacpy.io.oalib_writer as writer
+        monkeypatch.setattr(writer, '_refuse_attenuation_past_at_ceiling',
+                            lambda env, who: None)
         env = cls._env(depth, c)
-        object.__setattr__(env.bottom.columns[0].halfspace, 'attenuation',
-                           100.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            env.bottom.columns[0].halfspace.attenuation = 100.0
         return env
 
     @pytest.mark.parametrize('banner', [
@@ -1490,7 +1521,7 @@ class TestFortranFatalErrorExitsZero:
             tmp_path, 'nonexistent',
             benign=model._traits.benign_fortran_fatals)
 
-    def test_fatal_error_is_raised_not_swallowed(self, tmp_path):
+    def test_fatal_error_is_raised_not_swallowed(self, tmp_path, monkeypatch):
         """A 100 dB/wavelength half-space trips 'The complex sound speed has an
         imaginary part > real part' in AttenMod : CRCI. The binary exits 0, so
         only a .prt/stderr scan catches it."""
@@ -1499,12 +1530,13 @@ class TestFortranFatalErrorExitsZero:
                 ModelExecutionError,
                 match='STOP Fatal Error: Check the print file') as ei:
             Kraken(work_dir=str(tmp_path / 'w'), timeout=300).run(
-                self._env_that_fatals_in_crci(1000.0, 1480.0),
+                self._env_that_fatals_in_crci(1000.0, 1480.0, monkeypatch),
                 self._SRC(), self._RCV())
         assert 'FATAL ERROR' in str(ei.value) or 'Fatal Error' in str(ei.value), (
             f"the Fortran diagnostic never reached the user: {ei.value}")
 
-    def test_stale_output_is_not_returned_as_this_runs_answer(self, tmp_path):
+    def test_stale_output_is_not_returned_as_this_runs_answer(self, tmp_path,
+                                                              monkeypatch):
         """The dangerous case: run 1 succeeds, run 2 fatals on a *different*
         environment, and the stale .mod/.shd yield run 1's field."""
         from uacpy.core.exceptions import ModelExecutionError
@@ -1516,7 +1548,7 @@ class TestFortranFatalErrorExitsZero:
         with pytest.raises(ModelExecutionError,
                            match='STOP Fatal Error: Check the print file'):
             Kraken(work_dir=wd, timeout=300).run(
-                self._env_that_fatals_in_crci(1000.0, 1480.0),
+                self._env_that_fatals_in_crci(1000.0, 1480.0, monkeypatch),
                 self._SRC(), self._RCV())
 
 
@@ -1947,8 +1979,8 @@ class TestCoupledModeGridReachesTheDeclaredBottom:
                         work_dir=str(work), cleanup=False).run(
             self._env(), self._SRC(), self._RCV(),
             run_mode=RunMode.COHERENT_TL)
-        assert result.metadata['mode_coupling'] == 'coupled'
-        assert result.metadata['n_profiles'] == n_segments
+        assert result.run_settings.engine.mode_coupling == 'coupled'
+        assert result.run_settings.engine.launches[0].n_profiles == n_segments
         tl = np.asarray(result.dB)
         finite = tl[np.isfinite(tl)]
         assert finite.size, "no finite TL returned"
@@ -2109,7 +2141,7 @@ class TestKrakenClassBody:
 
 class TestResolvedPhaseSpeedBoundsAreRunSettings:
     """Every Kraken result that ran the solver states the resolved ``c_low``
-    / ``c_high`` / ``rmax_m`` the deck was written with — usually
+    / ``c_high`` / ``rmax`` the deck was written with — usually
     auto-derived, not supplied — in its run settings
     (``run_settings.engine.launches``), once: they are not copied into the
     metadata (decision 4)."""
@@ -2142,7 +2174,7 @@ class TestResolvedPhaseSpeedBoundsAreRunSettings:
         assert max(launch.c_high) >= 1600.0
         # RMax scales the mesh-convergence tolerance (kraken.f90:80), so it
         # reaches the longest range the modes are propagated to.
-        assert launch.rmax_m >= rmax_floor
+        assert launch.rmax >= rmax_floor
 
     @pytest.mark.parametrize('run_mode', [
         RunMode.MODES, RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
@@ -2160,7 +2192,7 @@ class TestResolvedPhaseSpeedBoundsAreRunSettings:
         result = Kraken(verbose=False).run(
             self._env(), source, receiver, run_mode=RunMode.BROADBAND,
             frequencies=np.linspace(80.0, 120.0, 5))
-        assert result.metadata['native_broadband'] is True
+        assert result.run_settings.engine.route == 'band'
         self._assert_sane(result, rmax_floor=float(receiver.ranges.max()))
 
     @pytest.mark.slow
@@ -2223,17 +2255,17 @@ class TestResolvedPhaseSpeedBoundsAreRunSettings:
         source, receiver = self._geometry()
         result = Kraken(verbose=False, n_segments=3).run(
             env, source, receiver, run_mode=RunMode.COHERENT_TL)
-        assert result.metadata['n_profiles'] == 3
+        assert result.run_settings.engine.launches[0].n_profiles == 3
         self._assert_sane(result, rmax_floor=float(receiver.ranges.max()))
 
     def test_pinned_bounds_are_reported_verbatim(self):
         source, receiver = self._geometry()
         result = Kraken(verbose=False, c_low=1400.0, c_high=1700.0,
-                        rmax_m=9000.0).run(
+                        rmax=9000.0).run(
             self._env(), source, receiver, run_mode=RunMode.COHERENT_TL)
         assert result.run_settings.engine.launches[0].c_low == 1400.0
         assert max(result.run_settings.engine.launches[0].c_high) == 1700.0
-        assert result.run_settings.engine.launches[0].rmax_m == 9000.0
+        assert result.run_settings.engine.launches[0].rmax == 9000.0
 
     def test_list_metadata_holds_no_copy_of_the_bounds(self):
         """The bounds are described where they live, in the settings
@@ -2293,14 +2325,17 @@ def test_zero_receiver_range_is_no_data(recwarn):
     assert np.all(np.isfinite(tl[:, 1:]))
 
 
-def test_mode_depths_spans_the_column_the_deck_carries():
-    """``compute_modes`` writes the r = 0 column's stack into the MODES deck
-    (``_bottom_collapse_for(MODES) == 'r0'``) and KRAKEN clamps any receiver
+@pytest.mark.parametrize('collapse, deepest', [
+    (None, 180.0), ({'bottom_range': 'r0'}, 120.0)])
+def test_mode_depths_spans_the_column_the_deck_carries(collapse, deepest):
+    """``compute_modes`` writes the column its collapse reduces the seabed
+    to into the MODES deck — the track median, for a layered bottom its
+    middle column (``Bottom.collapse_range``); the source's with
+    ``collapse={'bottom_range': 'r0'}`` — and KRAKEN clamps any receiver
     below that deck onto it (``misc/SourceReceiverPositions.f90:136-139``),
-    so the depth grid spans the water column plus THAT column's sediment —
-    keyed on ``bottom.at(range=0.0)``, not on storage order and not on the
-    thickest column along the track. Here the r = 0 column is 20 m against
-    80 m at 5 km, so the grid reaches 100 + 20 = 120 m."""
+    so the depth grid spans the water column plus THAT column's sediment.
+    Here the r = 0 column is 20 m against 80 m at 5 km (the middle of two),
+    so the grid reaches 100 + 80 = 180 m, or 100 + 20 = 120 m at r0."""
     from uacpy.core.boundary import SedimentLayer
     from uacpy.core.bottom import Bottom, SeabedColumn
 
@@ -2318,12 +2353,12 @@ def test_mode_depths_spans_the_column_the_deck_carries():
                       ranges=[0.0, 5000.0]))
 
     with warnings.catch_warnings():
-        warnings.simplefilter('ignore')     # the r = 0 reduction is announced
-        depths = Kraken(verbose=False).run_settings(
+        warnings.simplefilter('ignore')     # the reduction is announced
+        depths = Kraken(verbose=False, collapse=collapse).run_settings(
             env, Source(depths=50.0, frequencies=100.0), None,
             run_mode=RunMode.MODES).engine.launches[0].tabulation_depths
 
-    assert depths[-1] == pytest.approx(120.0)
+    assert depths[-1] == pytest.approx(deepest)
 
 
 # ── deck contract: what the vendored reader actually consumes ────────────
@@ -2373,7 +2408,7 @@ class TestRMaxPrecision:
             "RMax reached the deck as 0.0 km — kraken.f90:80 then skips every "
             "mesh doubling")
 
-        pinned = Kraken(rmax_m=1000.0, work_dir=tmp_path / 'pin', cleanup=False)
+        pinned = Kraken(rmax=1000.0, work_dir=tmp_path / 'pin', cleanup=False)
         tl_pinned = np.asarray(pinned.compute_field(
             self._env(), self._SRC(), self._RCV()).dB)
         assert np.nanmax(np.abs(tl_auto - tl_pinned)) < 0.05, (
@@ -3175,13 +3210,16 @@ class TestModesErrorMessageReadsTheRealPrtStrings:
             ' Failure to converge in RootFinderSecant\n')
         assert 'RootFinderSecant' in msg
         assert 'c_low' in msg
+        assert "backend='krakenc'" in msg      # kraken.exe ran: a remedy
 
     def test_krakenc_banner_is_recognised_too(self, tmp_path):
+        """A krakenc run is not told to try krakenc."""
         msg = self._message(
             tmp_path,
             ' Warning in KRAKENC - RootFinderSecant : '
             'Failure to converge in RootFinderSecant\n')
-        assert 'RootFinderSecant' in msg
+        assert 'RootFinderSecant' in msg and 'c_low' in msg
+        assert 'krakenc' not in msg.replace('KRAKENC', ''), msg
 
     def test_a_fluid_half_space_is_not_diagnosed_as_elastic(self, tmp_path):
         """``misc/ReadEnvironmentMod.f90:260-266`` echoes 'ACOUSTO-ELASTIC
@@ -3538,7 +3576,7 @@ class TestModeGridTracksFrequency:
 
 class TestModesPathKeepsTheFullEnvContext:
     """``_checks.modes_single_profile`` reduces a range-dependent env to
-    its r=0 profile for the modes solve. The rebuilt env must carry the
+    one profile for the modes solve. The rebuilt env must carry the
     original's altimetry (so ``_project_environment`` still discloses
     dropping it),
     plus the geolocation / transect / date / provenance fields — a reduced
@@ -3564,7 +3602,7 @@ class TestModesPathKeepsTheFullEnvContext:
             warnings.simplefilter('ignore')
             model = Kraken(verbose=False)
             reduced = _checks.modes_single_profile(
-                env, user_collapse=model._user_collapse,
+                env, collapse=model._collapse,
                 model_name=model.model_name)
         assert reduced.altimetry is not env.altimetry
         assert np.array_equal(reduced.altimetry.heights,
@@ -3574,8 +3612,8 @@ class TestModesPathKeepsTheFullEnvContext:
         assert reduced.data_sources == env.data_sources
         assert not reduced.is_range_dependent or reduced.altimetry is not None
 
-    def test_the_r0_reduction_is_said_before_the_dropped_keywords(self):
-        """Stage 1 of MODES reduces the environment to its r = 0 profile
+    def test_the_reduction_is_said_before_the_dropped_keywords(self):
+        """Stage 1 of MODES reduces the environment to one profile
         before stage 2 drops the TIME_SERIES keywords MODES does not read, so
         the reduction's notice comes first."""
         env = self._rd_env()
@@ -3593,9 +3631,10 @@ class TestModesPathKeepsTheFullEnvContext:
         assert len(reduced) == 1 and len(dropped) == 1, said
         assert reduced[0] < dropped[0], said
 
-    def test_the_modes_settings_read_the_r0_profile(self):
-        """Stage 1 of a MODES call reduces the environment to its r = 0
-        profile before anything else reads it, so the waveguide speeds the
+    def test_the_modes_settings_read_the_r0_ssp(self):
+        """Stage 1 of a MODES call reduces the environment to one profile,
+        the SSP at r = 0 (the package default), before anything else reads
+        it, so the waveguide speeds the
         settings record are the r = 0 column's (1500-1520 m/s; a rigid floor
         adds none), not the fastest speed along the track (1560 m/s at
         5 km), which a field mode on the same environment records."""
@@ -3646,9 +3685,10 @@ class TestModesPathKeepsTheFullEnvContext:
 
 class TestModesPathHonoursTheCollapseTheCallerSet:
     """``_checks.modes_single_profile`` reduces each range-dependent quantity
-    by the ``collapse`` method the caller set, else at r = 0, the source's
-    column; the warning names what each was reduced by. A method from the
-    defaults is not the caller's and is not applied."""
+    by the model's ``collapse`` method: the caller's, else the package
+    defaults every engine reduces by (seabed: track median; bathymetry:
+    deepest point; SSP and surface: r = 0); the warning names what each was
+    reduced by."""
 
     @staticmethod
     def _rd_ssp():
@@ -3672,7 +3712,7 @@ class TestModesPathHonoursTheCollapseTheCallerSet:
     def _reduce(model, env):
         with recorded_warnings() as caught:
             reduced = _checks.modes_single_profile(
-                env, user_collapse=model._user_collapse,
+                env, collapse=model._collapse,
                 model_name=model.model_name)
         return reduced, ' '.join(str(w.message) for w in caught)
 
@@ -3702,14 +3742,14 @@ class TestModesPathHonoursTheCollapseTheCallerSet:
             Kraken(verbose=False, collapse={'ssp': 'mean'}), env)
         np.testing.assert_allclose(reduced.ssp.sound_speed,
                                    env.ssp.collapse_range('mean').sound_speed)
-        assert "ssp by 'mean' (collapse=)" in message, message
+        assert "ssp by 'mean'" in message, message
 
-    def test_unset_the_ssp_is_the_r0_column_with_no_noise(self):
+    def test_unset_the_ssp_is_the_r0_column(self):
         env = self._env()
         reduced, message = self._reduce(Kraken(verbose=False), env)
         np.testing.assert_allclose(reduced.ssp.sound_speed,
                                    env.ssp.collapse_range('r0').sound_speed)
-        assert 'r=0 profile' in message and ' by ' not in message, message
+        assert "ssp by 'r0'" in message, message
 
     @staticmethod
     def _rd_seabed():
@@ -3724,37 +3764,39 @@ class TestModesPathHonoursTheCollapseTheCallerSet:
                 attenuation=np.array([0.5, 0.5, 0.5]),
                 shear_speed=np.zeros(3), acoustic_type='half-space'))
 
-    @pytest.mark.parametrize('collapse, speed', [
-        (None, 1500.0), ({'bottom_range': 'median'}, 1600.0)])
-    def test_the_bottom_is_the_callers_method_else_r0(self, collapse, speed):
+    @pytest.mark.parametrize('collapse, speed, method', [
+        (None, 1600.0, 'median'), ({'bottom_range': 'r0'}, 1500.0, 'r0')])
+    def test_the_bottom_is_the_callers_method_else_the_track_median(
+            self, collapse, speed, method):
+        """Ruling 30: the seabed by its track median on every engine, the
+        source's column on request."""
         reduced, message = self._reduce(Kraken(verbose=False,
                                                collapse=collapse),
                                          self._rd_seabed())
         assert not reduced.bottom.is_range_dependent
         assert float(reduced.bottom.halfspace_at(range=0.0).sound_speed) == \
             pytest.approx(speed)
-        assert ("bottom_range by 'median'" in message) == (
-            collapse is not None), message
+        assert f"bottom_range by {method!r}" in message, message
 
     @pytest.mark.parametrize('collapse, depth', [
-        (None, 100.0), ({'bathymetry': 'max'}, 120.0),
+        (None, 120.0), ({'bathymetry': 'r0'}, 100.0),
         ({'bathymetry': 'mean'}, 110.0)])
-    def test_the_bathymetry_is_the_callers_method_else_r0(self, collapse,
-                                                          depth):
-        """The defaults' 'max' is not the caller's: unset, the depth is the
-        source's, 100 m."""
+    def test_the_bathymetry_is_the_callers_method_else_the_deepest(
+            self, collapse, depth):
+        """Unset, the package default 'max', the deepest seafloor, 120 m;
+        'r0' the source's, 100 m."""
         reduced, message = self._reduce(Kraken(verbose=False,
                                                collapse=collapse),
                                          self._env(rd_bathymetry=True))
         assert float(reduced.depth) == pytest.approx(depth)
-        assert ('bathymetry by' in message) == (collapse is not None), message
+        assert 'bathymetry by' in message, message
 
     def test_a_mixed_reduction_names_both(self):
         _reduced, message = self._reduce(
             Kraken(verbose=False, collapse={'ssp': 'median'}),
             self._env(rd_bathymetry=True))
-        assert ("reduced to one profile: ssp by 'median' (collapse=), "
-                "bathymetry at r = 0.") in message, message
+        assert ("reduced to one profile: ssp by 'median', bathymetry by "
+                "'max' (collapse=;") in message, message
 
     def test_a_range_independent_env_is_not_reduced_or_announced(self):
         env = Environment(
@@ -3771,9 +3813,9 @@ class TestModesPathHonoursTheCollapseTheCallerSet:
         source = Source(depths=50.0, frequencies=100.0)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            at_r0 = Kraken(verbose=False).compute_modes(env, source)
-            deepest = Kraken(verbose=False, collapse={'bathymetry': 'max'}
-                             ).compute_modes(env, source)
+            at_r0 = Kraken(verbose=False, collapse={'bathymetry': 'r0'}
+                           ).compute_modes(env, source)
+            deepest = Kraken(verbose=False).compute_modes(env, source)
         assert float(np.max(at_r0.depths)) == pytest.approx(100.0)
         assert float(np.max(deepest.depths)) == pytest.approx(120.0)
         assert deepest.n_modes > at_r0.n_modes
@@ -3994,7 +4036,7 @@ def test_range_dependent_broadband_never_writes_a_broadband_deck(tmp_path,
 
 class TestRMaxAutoDefaults:
     """kraken.md §5 "the farthest receiver range, narrowband or band":
-    ``rmax_m=None`` resolves to the farthest receiver range, narrowband
+    ``rmax=None`` resolves to the farthest receiver range, narrowband
     or band — doc/kraken.htm (8): "the largest range for which a field
     calculation will be desired" — and to 100 km with no positive range
     (uacpy guidance, measured). Pinned on the resolved settings
@@ -4006,15 +4048,15 @@ class TestRMaxAutoDefaults:
                                          ranges=np.array([1000.0, 4000.0])))
 
     def test_the_farthest_range_or_100_km(self):
-        assert _grid.compute_rmax_m(self._RCV()) == 4000.0
-        assert _grid.compute_rmax_m(None) == 100_000.0
-        assert _grid.compute_rmax_m(Receiver(depths=[50.0],
-                                             ranges=[0.0])) == 100_000.0
+        assert _grid.compute_rmax(self._RCV()) == 4000.0
+        assert _grid.compute_rmax(None) == 100_000.0
+        assert _grid.compute_rmax(Receiver(depths=[50.0],
+                                           ranges=[0.0])) == 100_000.0
 
     def _rmax(self, model, **run_kw):
         settings = model.run_settings(_pekeris(), self._SRC(), self._RCV(),
                                       **run_kw)
-        return settings.engine.launches[0].rmax_m
+        return settings.engine.launches[0].rmax
 
     @pytest.mark.parametrize('run_kw', [
         {}, {'run_mode': RunMode.BROADBAND,
@@ -4027,12 +4069,12 @@ class TestRMaxAutoDefaults:
     def test_modes_without_a_receiver_get_100_km(self):
         settings = Kraken(verbose=False).run_settings(
             _pekeris(), self._SRC(), None, run_mode=RunMode.MODES)
-        assert settings.engine.launches[0].rmax_m == 100_000.0
+        assert settings.engine.launches[0].rmax == 100_000.0
         assert settings.engine.rmax_origin.startswith('100 km')
 
     def test_pinned_rmax_wins_everywhere(self):
         assert self._rmax(
-            Kraken(verbose=False, rmax_m=9000.0), run_mode=RunMode.BROADBAND,
+            Kraken(verbose=False, rmax=9000.0), run_mode=RunMode.BROADBAND,
             frequencies=np.linspace(80.0, 120.0, 5)) == 9000.0
 
 
@@ -4146,11 +4188,12 @@ def _rd_layered_bottom(shear_at_r0, shear_elsewhere):
 
 
 class TestElasticGuardTestsTheColumnTheDeckCarries:
-    """``_checks.modes_single_profile`` samples the r = 0 profile of every
-    range-dependent quantity, while the field paths segment the bottom and
-    write every column into its own profile block. So MODES tests the r = 0
-    column alone, and a field run tests every column: an elastic-over-fluid
-    column anywhere reaches a profile block and would hang krakenc.exe."""
+    """``_checks.modes_single_profile`` reduces the seabed to one column —
+    the track median by default, the middle column of a layered bottom —
+    while the field paths segment the bottom and write every column into
+    its own profile block. So MODES tests that one column, and a field run
+    tests every column: an elastic-over-fluid column anywhere reaches a
+    profile block and would hang krakenc.exe."""
 
     _SRC = staticmethod(lambda: Source(depths=[50.0], frequencies=[100.0]))
 
@@ -4162,10 +4205,10 @@ class TestElasticGuardTestsTheColumnTheDeckCarries:
     @pytest.mark.parametrize('field_mode', [
         RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.BROADBAND,
         RunMode.TIME_SERIES])
-    def test_an_elastic_column_at_r0_is_refused_everywhere(self, field_mode):
+    def test_an_elastic_median_column_is_refused_everywhere(self, field_mode):
         from uacpy.core.exceptions import UnsupportedFeatureError
-        env = self._env(_rd_layered_bottom(shear_at_r0=400.0,
-                                           shear_elsewhere=0.0))
+        env = self._env(_rd_layered_bottom(shear_at_r0=0.0,
+                                           shear_elsewhere=400.0))
         model = Kraken(verbose=False)
         with pytest.raises(
                 UnsupportedFeatureError,
@@ -4178,12 +4221,13 @@ class TestElasticGuardTestsTheColumnTheDeckCarries:
             _checks.reject_acoustic_below_elastic(env, field_mode,
                                                   model_name=model.model_name)
 
-    def test_an_elastic_column_past_r0_is_refused_on_the_field_path_only(self):
+    def test_an_elastic_column_off_the_median_is_refused_on_the_field_path_only(
+            self):
         from uacpy.core.exceptions import UnsupportedFeatureError
-        env = self._env(_rd_layered_bottom(shear_at_r0=0.0,
-                                           shear_elsewhere=400.0))
+        env = self._env(_rd_layered_bottom(shear_at_r0=400.0,
+                                           shear_elsewhere=0.0))
         model = Kraken(verbose=False)
-        # MODES never writes the r > 0 columns.
+        # MODES writes the middle (median) column only.
         _checks.reject_acoustic_below_elastic(env, RunMode.MODES,
                                               model_name=model.model_name)
         with pytest.raises(
@@ -4192,7 +4236,7 @@ class TestElasticGuardTestsTheColumnTheDeckCarries:
             _checks.reject_acoustic_below_elastic(env, RunMode.COHERENT_TL,
                                                   model_name=model.model_name)
 
-    def test_the_deck_columns_are_r0_for_modes_and_all_for_a_field_run(self):
+    def test_the_deck_columns_are_one_for_modes_and_all_for_a_field_run(self):
         env = self._env(_rd_layered_bottom(shear_at_r0=0.0,
                                            shear_elsewhere=0.0))
         assert len(_checks.deck_bottom_columns(env, RunMode.MODES)) == 1
@@ -4224,7 +4268,7 @@ def test_incoherent_tl_on_krakenc_is_quiet_for_a_multi_profile_run():
             Receiver(depths=np.array([50.0]),
                      ranges=np.array([1000.0, 2000.0])),
             run_mode=RunMode.INCOHERENT_TL)
-    assert field.metadata['n_profiles'] > 1
+    assert field.run_settings.engine.launches[0].n_profiles > 1
     assert not [w for w in caught
                 if 'strict incoherent sum' in str(w.message)]
 
@@ -4403,16 +4447,23 @@ class TestNonTrappedModes:
                                      log=model._log)
         assert 'non-trapped' not in capsys.readouterr().out
 
-    def test_an_elastic_half_space_traps_on_its_shear_speed_instead(
+    def test_an_elastic_half_space_bounds_the_spectrum_at_its_cp(
             self, capsys):
-        """``kraken.f90:209`` clamps cHigh to cS there, so the compressional
-        speed is the wrong threshold and this check stands down."""
+        """One rule on both routes (:func:`_modes.trapped_phase_speeds`):
+        above an elastic half-space's compressional speed a root lies in the
+        continuous spectrum (Computational Ocean Acoustics §4.10.1); one
+        between its shear and compressional speeds is discrete (it leaks
+        shear) and is not counted. kraken.exe's window stops at the shear
+        speed (``kraken.f90:209``), so only krakenc returns roots above
+        c_p."""
         model = Kraken(verbose='info')
         env = _duct(5.0, shear_speed=800.0, shear_attenuation=0.5)
-        _modes.log_non_trapped_modes(_k_for([1500.0, 1710.0], 150.0), env,
-                                     150.0, leaky_modes=model.leaky_modes,
-                                     log=model._log)
-        assert 'non-trapped' not in capsys.readouterr().out
+        _modes.log_non_trapped_modes(
+            _k_for([1500.0, 1650.0, 1710.0], 150.0), env, 150.0,
+            leaky_modes=model.leaky_modes, log=model._log)
+        out = capsys.readouterr().out
+        assert '1 of 3 modes are non-trapped' in out
+        assert 'continuous spectrum' in out
 
 
 class TestTheDispatchPremiseMatchesTheVendoredSource:
@@ -4460,7 +4511,8 @@ class TestKrakenBroadbandStampsThePhysicalCMax:
         assert result.run_settings.waveguide.c_max == pytest.approx(3000.0)
         assert 'c_max' not in result.metadata
 
-        trace = result.to_time_trace(depth=50.0, range=2000.0)
+        trace = result.to_time_trace(depth=50.0, range=2000.0,
+                                     sample_rate=1000.0)
         t = np.asarray(trace.coords['time'], dtype=float)
         assert t[0] == pytest.approx(2000.0 / 3000.0 - 0.05, abs=0.02)
 
@@ -4573,7 +4625,7 @@ class TestKrakenRoughElasticInterface:
 
 class TestKrakenConstructorBounds:
     """``kraken.f90:80`` leaves the mesh-refinement loop once
-    ``Error*1000*RMax < 1``, so ``rmax_m = 0`` stops on the first mesh: no
+    ``Error*1000*RMax < 1``, so ``rmax = 0`` stops on the first mesh: no
     mesh doubling, which doc/kraken.htm (8) allows ("even if you set it to
     zero the results will usually be reasonable"); it runs, with a notice. A
     negative RMax is no range and is refused. ``c_high`` was only ever
@@ -4581,16 +4633,16 @@ class TestKrakenConstructorBounds:
     constructed and died in the Fortran."""
 
     def test_a_negative_rmax_is_refused(self):
-        with pytest.raises(ConfigurationError, match='rmax_m') as info:
-            Kraken(rmax_m=-50.0)
+        with pytest.raises(ConfigurationError, match='rmax') as info:
+            Kraken(rmax=-50.0)
         assert info.value.remediation.endswith('.')
 
     @pytest.mark.parametrize('rmax', [0.0, 1000.0])
     def test_zero_or_a_positive_rmax_is_written(self, rmax):
-        settings = Kraken(rmax_m=rmax).run_settings(
+        settings = Kraken(rmax=rmax).run_settings(
             _pekeris(), Source(depths=50.0, frequencies=100.0),
             Receiver(depths=[50.0], ranges=[2000.0]))
-        assert settings.engine.launches[0].rmax_m == rmax
+        assert settings.engine.launches[0].rmax == rmax
         said = [n.message for n in settings.engine.notices
                 if 'no mesh doubling' in (n.note or '')
                 or 'RMax 0' in (n.note or '')]
@@ -5033,20 +5085,26 @@ class TestSegmentationSeesTheProfileNotJustTheSeafloor:
 
 @pytest.mark.requires_binary
 class TestTheModeGridSpansTheProfileKrakenSolves:
-    """compute_modes solves the r = 0 profile. Sizing its depth grid from the
-    deepest point of a range-dependent bathymetry asked KRAKEN for receivers
-    below that profile, which it clamped — and the wrapper then warned about
-    a grid it had built itself."""
+    """compute_modes solves the one profile its collapse reduces the track
+    to (the deepest seafloor by default). Sizing its depth grid from any
+    other depth asked KRAKEN for receivers below that profile, which it
+    clamped — and the wrapper then warned about a grid it had built
+    itself."""
 
-    def test_a_deepening_bathymetry_gives_a_grid_of_the_first_column(self):
+    @pytest.mark.parametrize('collapse, deepest', [
+        (None, 200.0), ({'bathymetry': 'r0'}, 100.0)])
+    def test_a_deepening_bathymetry_gives_the_grid_of_the_profile_solved(
+            self, collapse, deepest):
         from uacpy.core.source import Source
         from uacpy.models.kraken import Kraken
         env = uacpy.Environment(name='rd', ssp=1500.0,
                                 bathymetry=[(0.0, 100.0), (5000.0, 200.0)])
         source = Source(depths=50.0, frequencies=100.0)
         with recorded_warnings() as rec:
-            modes = Kraken(verbose=False).compute_modes(env, source)
-        assert float(np.max(np.asarray(modes.depths))) == pytest.approx(100.0)
+            modes = Kraken(verbose=False, collapse=collapse).compute_modes(
+                env, source)
+        assert float(np.max(np.asarray(modes.depths))) == pytest.approx(
+            deepest)
         spurious = [str(w.message) for w in rec
                     if 'resolvable depth' in str(w.message)
                     or 'moved up' in str(w.message)]
@@ -5236,12 +5294,37 @@ def test_field_exe_non_fatal_warnings_are_surfaced(tmp_path, monkeypatch):
         model._run_field_exe(fm.work_dir, 'model', 'RC C')
 
 
-def test_the_mode_grid_is_sized_on_the_column_the_modes_are_solved_on():
-    """``compute_modes`` solves the r = 0 profile, so its default depth grid
-    spans that column's water plus THAT column's sediment stack — not the
-    thickest stack anywhere along the track, which would ask KRAKEN for
-    depths below the deck it wrote and draw its 'moved up' warning on a grid
-    the wrapper built itself."""
+def test_an_inverse_iteration_warning_names_its_mode(tmp_path):
+    """KRAKENC writes ``'mode = ', mode`` on the line before its
+    inverse-iteration warning (``krakenc.f90:709-710``) and then zeroes that
+    mode's eigenvector (:711): the forwarded warning keeps the binary's mode
+    number and says what the source does next."""
+    from uacpy.models._launch import warn_on_prt_warnings
+    msg = 'Inverse iteration failed to converge'
+    (tmp_path / 'model.prt').write_text(
+        f" mode =            3\n"
+        f" Warning in KRAKENC - InverseIteration : {msg}\n"
+        f" mode =           11\n"
+        f" Warning in KRAKENC - InverseIteration : {msg}\n")
+    with recorded_warnings() as rec:
+        warn_on_prt_warnings('Kraken', tmp_path, 'model')
+    said = [str(w.message) for w in rec if msg in str(w.message)]
+    assert len(said) == 1
+    assert f"{msg} (mode = 3)" in said[0]
+    assert f"{msg} (mode = 11)" in said[0]
+    assert said[0].count("zeroes this mode's shape") == 2
+
+
+@pytest.mark.parametrize('collapse, deepest', [
+    (None, 80.0), ({'bottom_range': 'r0'}, 55.0)])
+def test_the_mode_grid_is_sized_on_the_column_the_modes_are_solved_on(
+        collapse, deepest):
+    """``compute_modes`` solves one column — the middle of a layered
+    track by default, the source's with ``collapse={'bottom_range': 'r0'}``
+    — so its default depth grid spans that column's water plus THAT
+    column's sediment stack, not the thickest stack anywhere along the track,
+    which would ask KRAKEN for depths below the deck it wrote and draw its
+    'moved up' warning on a grid the wrapper built itself."""
     near = SeabedColumn(
         layers=[SedimentLayer(5, sound_speed=1650, density=1.8, attenuation=0.3)],
         halfspace=BoundaryProperties(acoustic_type='half-space',
@@ -5256,13 +5339,13 @@ def test_the_mode_grid_is_sized_on_the_column_the_modes_are_solved_on():
                       bottom=Bottom.from_columns([near, far],
                                                  ranges=np.array([0.0, 5000.0])))
     with recorded_warnings() as rec:
-        modes = Kraken(verbose=False).compute_modes(
+        modes = Kraken(verbose=False, collapse=collapse).compute_modes(
             env, Source(depths=25.0, frequencies=100.0))
     said = [str(w.message) for w in rec
             if 'resolvable depth' in str(w.message)
             or 'moved up' in str(w.message)]
     assert said == [], said
-    assert float(np.max(modes.depths)) <= 55.0 + 1e-9
+    assert float(np.max(modes.depths)) == pytest.approx(deepest)
 
 
 @pytest.mark.requires_binary
@@ -5358,7 +5441,7 @@ class TestSingleRunGroupVelocity:
 
     ``krakenc.f90:819`` assigns ``VG = 1/Slow``; the same assignment is
     commented out at ``kraken.f90:815-819``, so kraken prints the column
-    unassigned. ``Modes.group_velocity`` must reflect that difference rather
+    unassigned. ``Modes.group_speeds`` must reflect that difference rather
     than hand back a plausible-looking array of zeros.
     """
 
@@ -5370,11 +5453,11 @@ class TestSingleRunGroupVelocity:
     def test_kraken_reports_none_rather_than_the_unfilled_zero_column(self):
         m = self._modes('kraken')
         assert m.n_modes > 0
-        assert m.group_velocity is None
+        assert m.group_speeds is None
 
     def test_krakenc_reports_a_group_speed_per_mode(self):
         m = self._modes('krakenc')
-        gv = m.group_velocity
+        gv = m.group_speeds
         assert gv is not None
         assert gv.shape == m.k.shape
         assert np.all(np.isfinite(gv))
@@ -5385,7 +5468,7 @@ class TestSingleRunGroupVelocity:
         # the parsed column is the group speed and not the phase-speed column
         # one position to its left.
         m = self._modes('krakenc')
-        assert np.all(m.group_velocity < m.phase_speeds)
+        assert np.all(m.group_speeds < m.phase_speeds)
 
     def test_single_run_agrees_with_the_two_run_finite_difference_when_trapped(self):
         # The independent route. They are different computations -- one is
@@ -5397,11 +5480,11 @@ class TestSingleRunGroupVelocity:
             env, Source(depths=50.0, frequencies=200.0))
         m1 = Kraken(backend='krakenc').compute_modes(
             env, Source(depths=50.0, frequencies=200.5))
-        fd = m0.group_velocity_between(m1)
+        fd = m0.group_speeds_between(m1)
         trapped = m0.phase_speeds[:len(fd)] < 1600.0
         assert trapped.sum() >= 5
         assert np.nanmax(
-            np.abs(m0.group_velocity[:len(fd)][trapped] - fd[trapped])) < 1.0
+            np.abs(m0.group_speeds[:len(fd)][trapped] - fd[trapped])) < 1.0
 
     def test_the_two_routes_part_company_on_the_leaky_modes(self):
         # kraken.f90:772 states the caveat outright: the group speed "still
@@ -5414,9 +5497,9 @@ class TestSingleRunGroupVelocity:
             env, Source(depths=50.0, frequencies=200.0))
         m1 = Kraken(backend='krakenc').compute_modes(
             env, Source(depths=50.0, frequencies=200.5))
-        fd = m0.group_velocity_between(m1)
+        fd = m0.group_speeds_between(m1)
         cp = m0.phase_speeds[:len(fd)]
-        diff = np.abs(m0.group_velocity[:len(fd)] - fd)
+        diff = np.abs(m0.group_speeds[:len(fd)] - fd)
         leaky = cp >= 1600.0
         assert leaky.any(), 'default c_high should admit some leaky modes'
         # Trapped: the two agree closely. Leaky: they need not, and here do not.
@@ -5429,7 +5512,7 @@ class TestSingleRunGroupVelocity:
         # printed mode INDEX, not by row position, or they would be assigned
         # to modes 1..30 and be wrong for every one past the first.
         m = self._modes('krakenc', freq=1500.0)
-        gv = m.group_velocity
+        gv = m.group_speeds
         assert m.n_modes > 30
         reported = np.flatnonzero(np.isfinite(gv))
         assert 0 < reported.size < m.n_modes        # genuinely strided
@@ -5443,14 +5526,14 @@ class TestSingleRunGroupVelocity:
     def test_first_n_slices_the_group_speed_alongside_the_modes(self):
         m = self._modes('krakenc')
         five = m.first_n(5)
-        assert five.group_velocity.shape == (5,)
-        assert np.allclose(five.group_velocity, m.group_velocity[:5])
+        assert five.group_speeds.shape == (5,)
+        assert np.allclose(five.group_speeds, m.group_speeds[:5])
 
     def test_shape_mismatch_is_rejected(self):
         m = self._modes('krakenc')
-        with pytest.raises(ConfigurationError, match='group_velocity'):
+        with pytest.raises(ConfigurationError, match='group_speeds'):
             Modes(k=m.k, phi=m.phi, depths=m.depths,
-                  group_velocity=np.ones(len(m.k) + 1), **m.id_kwargs())
+                  group_speeds=np.ones(len(m.k) + 1), **m.id_kwargs())
 
 
 
@@ -5760,8 +5843,10 @@ class TestTheThreeEntryPointsRefuseAlike:
     Kraken calls, with the same error, before any binary is launched."""
 
     CASES = [
-        ('kraken on an elastic seabed', dict(backend='kraken'),
-         _hard_elastic, {}, ConfigurationError, 'elastic media'),
+        ('kraken beside leaky modes', dict(backend='kraken',
+                                            leaky_modes=True),
+         lambda: _pekeris(depth=100.0), {}, ConfigurationError,
+         'the two settings contradict'),
         ('coupled incoherent on a range-dependent deck',
          dict(mode_coupling='coupled'),
          lambda: Environment(name='rd', bathymetry=[(0.0, 100.0),
@@ -5788,6 +5873,40 @@ class TestTheThreeEntryPointsRefuseAlike:
         for entry in ('run', 'run_settings', 'validate_inputs'):
             with pytest.raises(exc, match=match):
                 getattr(model, entry)(env(), _SRC_30(), _RCV_FAR(), **kw)
+
+    @pytest.mark.requires_binary
+    def test_kraken_exe_forced_on_an_elastic_seabed_runs_and_says_what_it_computes(
+            self):
+        """kraken.exe runs elastic media (kraken.f90:177-195, :205-209);
+        the run states the manual's two limits in one ValidityWarning. A
+        granite-like half-space (cs 3000 m/s) leaves kraken.exe the window
+        up to its shear speed; under a shear speed below the water's
+        (``_hard_elastic``, cs 1400) that window is empty and the run stops
+        with no modes."""
+        granite = Environment(name='granite', bathymetry=100.0, ssp=1500.0,
+                              bottom=BoundaryProperties(
+                                  acoustic_type='half-space',
+                                  sound_speed=5250.0, shear_speed=3000.0,
+                                  density=2.65, attenuation=0.1,
+                                  shear_attenuation=0.2))
+        model = Kraken(verbose=False, backend='kraken')
+        settings = model.run_settings(granite, _SRC_30(), _RCV_FAR())
+        assert settings.engine.backend == 'kraken'
+        said = [n for n in settings.engine.notices
+                if 'kraken.exe over elastic media' in n.message]
+        assert len(said) == 1 and said[0].category is ValidityWarning
+        assert 'kraken.f90:209' in said[0].message
+        assert 'KRAKENC should be used' in said[0].message
+        with pytest.warns(ValidityWarning, match='over elastic media'):
+            field = model.run(granite, _SRC_30(), _RCV_FAR())
+        assert np.isfinite(np.asarray(field.data)).all()
+        assert not [n for n in Kraken(verbose=False).run_settings(
+            granite, _SRC_30(), _RCV_FAR()).engine.notices
+            if 'kraken.exe over elastic media' in n.message]
+        with pytest.raises(ConfigurationError, match='found no mode'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                model.run(_hard_elastic(), _SRC_30(), _RCV_FAR())
 
     def test_krakenc_over_a_rigid_floor_under_an_elastic_top_is_accepted(self):
         """An environment that needs KRAKENC anyway (an ice canopy) keeps it
@@ -6038,9 +6157,9 @@ class TestTheSettingsRecordTheDeck:
         assert [0.0, launch.c_high[0]] in [
             [float(v) for v in line.split()] for line in deck
             if len(line.split()) == 2 and line.split()[0] == '0.0']
-        assert f"{launch.rmax_m / 1000.0:.6f}" in deck
+        assert f"{launch.rmax / 1000.0:.6f}" in deck
         assert result.run_settings.engine == settings.engine
-        assert result.run_settings.engine.launches[0].rmax_m == launch.rmax_m
+        assert result.run_settings.engine.launches[0].rmax == launch.rmax
 
     def test_no_deck_asks_for_krakencs_random_restarts(self, tmp_path):
         """TopOpt(5:5) '.' makes KRAKENC restart its root finder from an
@@ -6273,7 +6392,7 @@ def test_the_run_and_the_modes_divide_by_one_density_rule():
     its top, the half-space below the stack, an interface depth in the upper
     medium."""
     from uacpy.models._conventions import _source_density
-    from uacpy.core.bottom import medium_density_at
+    from uacpy.acoustics import medium_density_at
     env = Environment(
         name='stack', bathymetry=100.0, ssp=1500.0, water_density=1.0,
         bottom=SeabedColumn(
@@ -6333,7 +6452,7 @@ class TestKraken:
             env=simple_env, source=source)
         assert len(uncapped.k) > 3
         assert len(capped.k) == 3
-        assert capped.metadata.get('n_modes_requested') == 3
+        assert capped.run_settings.engine.n_modes == 3
 
     def test_kraken_modes_have_wavenumbers(self, simple_env, source):
         """Test that computed modes have valid wavenumbers."""
@@ -6478,14 +6597,15 @@ def test_krakens_steep_path_notice_points_to_the_docs():
     assert 'against Scooter' not in message and ' dB' not in message
 
 
-def test_the_kraken_exe_refusal_on_elastic_media_cites_the_source():
+def test_the_kraken_exe_notice_on_elastic_media_cites_the_source():
     """kraken.exe clamps c_high to the shear speed (``kraken.f90:209``) and
     perturbs the absorption over the acoustic media only
-    (``kraken.f90:728``): the refusal says where."""
-    with pytest.raises(ConfigurationError,
-                       match=r'kraken\.f90:209.*kraken\.f90:728'):
-        Kraken(verbose=False, backend='kraken').run_settings(
-            _hard_elastic(), _SRC_30(), _RCV_FAR())
+    (``kraken.f90:728``): the notice says where."""
+    (said,) = [n.message for n in Kraken(
+        verbose=False, backend='kraken').run_settings(
+            _hard_elastic(), _SRC_30(), _RCV_FAR()).engine.notices
+        if 'over elastic media' in n.message]
+    assert re.search(r'kraken\.f90:209.*\(:728\)', said), said
 
 
 def test_the_steep_path_notice_cuts_at_the_fastest_water():
@@ -6680,7 +6800,8 @@ class TestWithAttenuationReadsTheRecordedHalfSpace:
                            ).compute_modes(env, Source(depths=36.0,
                                                        frequencies=50.0))
             given = modes.with_attenuation(0.02, bottom=env.bottom,
-                                           seafloor_depth=100.0)
+                                           seafloor_depth=100.0,
+                                           sound_speed_z=1500.0)
         return modes, given
 
     @pytest.mark.parametrize('leaky_modes', [False, True])
@@ -6692,7 +6813,7 @@ class TestWithAttenuationReadsTheRecordedHalfSpace:
         modes, given = self._modes(attenuation, leaky_modes)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            recorded = modes.with_attenuation(0.02)
+            recorded = modes.with_attenuation(0.02, sound_speed_z=1500.0)
         assert not any('UPPER BOUND' in str(w.message) for w in caught)
         assert leaky_modes or not caught
         np.testing.assert_allclose(recorded.k, given.k, rtol=1e-6)
@@ -6706,7 +6827,7 @@ class TestWithAttenuationReadsTheRecordedHalfSpace:
                          modes.media, halfspace_sound_speed=None,
                          halfspace_attenuation=None))
         with pytest.warns(NumericsWarning, match='UPPER BOUND'):
-            water_only = bare.with_attenuation(0.02)
+            water_only = bare.with_attenuation(0.02, sound_speed_z=1500.0)
         np.testing.assert_allclose(water_only.k.imag / given.k.imag,
                                    [1.007, 1.024, 1.052, 1.177], atol=1e-3)
 
@@ -7042,6 +7163,57 @@ class TestKrakenKnobsUnsetAreDerivedSetAreUsed:
         assert not [n for n in settings.engine.notices
                     if 'is not used' in n.message]
 
+    _DEPTHS = np.linspace(0.0, 200.0, 41)
+
+    @pytest.mark.parametrize('label, env, run_mode, knobs, named', [
+        ('n_segments, one profile', 'flat', RunMode.COHERENT_TL,
+         dict(n_segments=5), 'n_segments'),
+        ('n_segments, MODES', 'track', RunMode.MODES,
+         dict(n_segments=5), 'n_segments'),
+        ('mode_depths, field run', 'flat', RunMode.COHERENT_TL,
+         dict(mode_depths=_DEPTHS), 'mode_depths'),
+        ('mode_depths, MODES with a receiver', 'flat', RunMode.MODES,
+         dict(mode_depths=_DEPTHS), 'mode_depths'),
+        ('mode_points_per_meter, MODES with a receiver', 'flat',
+         RunMode.MODES, dict(mode_points_per_meter=3.0),
+         'mode_points_per_meter'),
+        ('range_offsets, MODES', 'flat', RunMode.MODES,
+         dict(range_offsets=[5.0]), 'range_offsets'),
+        ('range_offsets, a track summed by EvaluateAD', 'track',
+         RunMode.COHERENT_TL, dict(range_offsets=[5.0]), 'range_offsets')])
+    def test_a_set_knob_the_run_does_not_use_is_named(self, label, env,
+                                                      run_mode, knobs, named):
+        """Ruling 23a: a knob the caller set and the run does not read is
+        said, never dropped silently."""
+        env = self._track() if env == 'track' else _pekeris()
+        said = [n.message for n in self._settings(
+            env, run_mode=run_mode, **knobs).engine.notices
+            if 'is not used' in n.message]
+        assert len(said) == 1 and said[0].startswith(
+            f"Kraken: {named}="), said
+
+    @pytest.mark.parametrize('label, env, knobs', [
+        ('n_segments on a track', 'track', dict(n_segments=5)),
+        ('mode_points_per_meter on a field run', 'flat',
+         dict(mode_points_per_meter=3.0)),
+        ('range_offsets on a one-profile field run', 'flat',
+         dict(range_offsets=[5.0]))])
+    def test_a_set_knob_the_run_uses_is_not_named(self, label, env, knobs):
+        env = self._track() if env == 'track' else _pekeris()
+        assert not [n for n in self._settings(env, **knobs).engine.notices
+                    if 'is not used' in n.message]
+
+    def test_mode_depths_on_compute_modes_is_used_and_not_named(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            settings = Kraken(verbose=False,
+                              mode_depths=self._DEPTHS).run_settings(
+                _pekeris(), self._SRC, None, run_mode=RunMode.MODES)
+        assert not [n for n in settings.engine.notices
+                    if 'is not used' in n.message]
+        np.testing.assert_array_equal(
+            settings.engine.launches[0].tabulation_depths, self._DEPTHS)
+
     @pytest.mark.parametrize('frequencies', [np.array([7.4, 30.0]),
                                              np.array([7.5, 30.0])])
     def test_a_band_record_rebuilds_the_same_deck(self, frequencies):
@@ -7057,3 +7229,85 @@ class TestKrakenKnobsUnsetAreDerivedSetAreUsed:
                 frequencies=frequencies)
         assert again.engine.launches[0].n_mesh == first.engine.launches[0].n_mesh
         assert again.engine.notices == first.engine.notices
+
+
+class TestRangeOffsetsTiltTheArray:
+    """``Kraken(range_offsets=)``: field.exe's ``Rro``, one offset (m) per
+    receiver depth; ``EvaluateMod.f90:47``, ``:72-73`` evaluate the receiver
+    at depth ``z_i`` at range ``r + ro_i`` (``doc/field.htm``: "Nonzero values
+    are used to tilt or distort the receiving array")."""
+
+    _SRC = Source(depths=50.0, frequencies=100.0)
+
+    @staticmethod
+    def _field(receiver, **knobs):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return np.asarray(Kraken(verbose=False, rmax=5000.0,
+                                     **knobs).run(
+                _pekeris(), TestRangeOffsetsTiltTheArray._SRC,
+                receiver).data)
+
+    @pytest.mark.requires_binary
+    def test_a_tilted_receiver_reads_the_field_at_its_offset_range(self):
+        """The 60 m receiver offset by 250 m returns, at 1 and 2 km, the
+        vertical array's field at 1.25 and 2.25 km; the 40 m one, offset by
+        0, its own."""
+        tilted = self._field(Receiver(depths=[40.0, 60.0],
+                                      ranges=[1000.0, 2000.0]),
+                             range_offsets=[0.0, 250.0])
+        plain = self._field(Receiver(depths=[40.0, 60.0],
+                                     ranges=[1000.0, 1250.0, 2000.0, 2250.0]))
+        np.testing.assert_allclose(tilted[0], plain[0, [0, 2]], rtol=1e-4)
+        np.testing.assert_allclose(tilted[1], plain[1, [1, 3]], rtol=1e-4)
+        assert np.max(np.abs(tilted[1] - plain[1, [0, 2]])) > 0.1 * np.max(
+            np.abs(plain[1, [0, 2]]))
+
+    def test_offsets_that_decrease_with_depth_are_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match=r'offset 2 \(-5 m\) is below offset 1 '
+                                 r'\(0 m\).*SourceReceiverPositions'):
+            Kraken(range_offsets=[0.0, -5.0])
+        Kraken(range_offsets=[0.0, 0.0, 5.0])
+
+    def test_a_non_finite_offset_is_refused(self):
+        with pytest.raises(ConfigurationError, match='finite offsets'):
+            Kraken(range_offsets=[0.0, np.nan])
+
+    def test_one_offset_per_receiver_depth(self):
+        with pytest.raises(ConfigurationError,
+                           match=r'holds 2 offset\(s\) for 3 receiver'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                Kraken(range_offsets=[0.0, 5.0]).run_settings(
+                    _pekeris(), self._SRC,
+                    Receiver(depths=[20.0, 40.0, 60.0], ranges=[1000.0]))
+
+    def test_the_deck_carries_the_offsets_of_the_evaluated_depths(
+            self, tmp_path):
+        """The ``.flp`` holds the given offsets; a depth in an elastic
+        sub-bottom, which field.exe cannot evaluate, takes its offset out
+        with it."""
+        from uacpy.io.oalib_reader import read_flp
+        from uacpy.models.base import StageInputs
+        from uacpy.models.kraken._launch import write_decks
+        elastic = make_pekeris(bottom=SeabedColumn(
+            layers=[SedimentLayer(thickness=10.0, sound_speed=1700.0,
+                                  density=1.8, attenuation=0.2,
+                                  shear_speed=400.0, shear_attenuation=0.5)],
+            halfspace=BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1900.0,
+                density=2.0, attenuation=0.3, shear_speed=800.0,
+                shear_attenuation=0.5)), bathymetry=100.0)
+        receiver = Receiver(depths=[20.0, 60.0, 105.0], ranges=[1000.0])
+        model = Kraken(verbose=False, range_offsets=[0.0, 2.5, 4.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            settings = model.run_settings(elastic, self._SRC, receiver)
+        launch = settings.engine.launches[0]
+        write_decks(StageInputs(work_dir=tmp_path, env=elastic,
+                                source=self._SRC, receiver=receiver,
+                                settings=settings),
+                    launch, interp_ssp='linear', log=lambda *_: None)
+        flp = read_flp(next(tmp_path.glob('*.flp')))
+        np.testing.assert_array_equal(flp.receiver_range_offsets, [0.0, 2.5])

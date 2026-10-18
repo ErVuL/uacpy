@@ -102,10 +102,11 @@ nonsense.
 - you want the **modes**, not just the field: eigenvalues, mode shapes,
   phase and group speeds, a modal basis for matched-field work. No other
   uacpy model produces them. Group speeds come from
-  `modes.group_velocity_between(other)` on a second solve at a nearby
-  frequency; `modes.group_velocity` holds the solver's own only on the
-  `krakenc` backend (`leaky_modes=True`) and is `None` on the default
-  `kraken`, which leaves that column unfilled (`kraken.f90:815-819`);
+  `modes.group_speeds_between(other)` on a second solve at a nearby
+  frequency; `modes.group_speeds` holds the solver's own only on the
+  `krakenc` backend (`Kraken(backend='krakenc')`, no `leaky_modes` needed:
+  `krakenc.f90:819`) and is `None` on the default `kraken`, which leaves
+  that column unfilled (`kraken.f90:815-819`);
 - the environment is range-independent, or range-dependent gently enough for
   adiabatic mode theory;
 - you want **broadband** cheaply: one multi-frequency `.mod` file covers the
@@ -129,12 +130,12 @@ nonsense.
 | Feature | Native? | Note |
 |---|:--:|---|
 | Range-dependent bathymetry | ✅ | segmented into per-range profiles |
-| Range-dependent SSP | ✅ | as above; the `MODES` path takes `r = 0` unless `collapse=` sets `'ssp'` |
+| Range-dependent SSP | ✅ | as above; the `MODES` path takes `r = 0` (the package default) unless `collapse=` sets `'ssp'` |
 | Layered bottom | ✅ | meshed as extra media — modes continue into the sediment |
 | Elastic media (shear) | ✅ | requires `backend='krakenc'`, auto-selected |
 | Rough surface / bottom (`sigma`) | ✅ | |
 | Source beam pattern | ✅ | staged as an `.sbp` |
-| Range-dependent bottom | ✅ | each profile block carries the seabed column at its own range, layers included (every block is a full environment, `kraken.f90:42-46`); the `MODES` path takes `r = 0` unless `collapse=` sets `'bottom_range'` |
+| Range-dependent bottom | ✅ | each profile block carries the seabed column at its own range, layers included (every block is a full environment, `kraken.f90:42-46`); the `MODES` path takes the track median (the package default, as every engine) unless `collapse=` sets `'bottom_range'` |
 | Sea-surface altimetry | ❌ | dropped; flat surface |
 | Multiple source depths | ✅ (TL modes) | `field.exe` sums every depth of the `.flp` from the one `.mod` — the mode solve reads no source depth — so `COHERENT_TL` / `INCOHERENT_TL` launch once and the `.shd` reader puts the `NSz` axis on the Field's `source_depth` axis (measured 4.4× at eight depths). `BROADBAND` / `TIME_SERIES` loop through `run()`, one deck per depth; `MODES` returns one `Modes` whose `source_depths` lists every depth. Each depth's plane equals that depth's stand-alone run exactly: the receiver depths sit on the mode-tabulation grid and are written to the `.flp` in full, so no source depth can reach another depth's answer |
 
@@ -143,8 +144,9 @@ mechanism, and the `collapse=` dict that overrides it, is in the
 [environment guide](../guide/environment.md). Kraken declares no per-model
 collapse default: bathymetry, SSP and bottom are all segmented on the field
 path, and `compute_modes` reduces each range-dependent quantity by the
-`collapse=` method you set for it, else at `r = 0`, the source's column (the
-global defaults are not applied there). Each segment's seafloor is the
+`collapse=` method you set for it, else by the package defaults every engine
+uses — the seabed by its track median, the bathymetry by its deepest point,
+the SSP and the surface at `r = 0`. Each segment's seafloor is the
 bathymetry's depth at its range as the deck writes every depth, to 1e-6 m.
 `Bottom.at` takes
 the nearest column, so a profile carries whichever column lies closest to its
@@ -161,26 +163,33 @@ them:
 |---|---|---|
 | `'kraken'` | `kraken.exe` | real eigenvalues; attenuation added by perturbation |
 | `'krakenc'` | `krakenc.exe` | complex eigenvalues: shear, leaky modes |
-| `None` (default) | auto | `krakenc.exe` when the environment carries shear or `leaky_modes=True`, `kraken.exe` otherwise |
+| `None` (default) | auto | `krakenc.exe` when the environment carries shear, `leaky_modes=True`, or a tabulated reflection coefficient (a `'file'` / `'precalc'` boundary or `top_reflection_file=`); `kraken.exe` otherwise |
 
 Real-arithmetic `kraken.exe` will *run* an elastic bottom — it has first-class
-elastic branches — but it returns a **wrong** answer rather than merely an
-incomplete one, for two reasons:
+elastic branches — but it computes the trapped, shear-lossless part of the
+answer only, for two reasons the manual states:
 
 - It clamps the upper phase-speed bound to the half-space **shear** speed
-  (`kraken.f90:209`, `cHigh = MIN(cHigh, HSBot%cS)`), silently discarding every
-  mode above it. Over the `granite` preset that cap is its 3000 m/s shear
-  speed, well below its 5750 m/s compressional speed, and `krakenc.exe`'s
-  window keeps the modes in between.
+  (`kraken.f90:209`, `cHigh = MIN(cHigh, HSBot%cS)`; `kraken.htm`: "KRAKEN will
+  (if necessary) reduce CHIGH so that only trapped (non-leaky) modes are
+  computed"), discarding every mode above it. Over the `granite` preset that
+  cap is its 3000 m/s shear speed, well below its 5750 m/s compressional
+  speed, and `krakenc.exe`'s window keeps the modes in between.
 - Its absorption perturbation loops only over **acoustic** media
-  (`kraken.f90:728`), so an elastic layer's loss is never accumulated and every
-  mode comes back with `Im(k) = 0` — lossless, despite the sediment's
-  attenuation.
+  (`kraken.f90:728`), so an elastic medium's material loss is left out of
+  `Im(k)` (`kraken.htm`: "KRAKEN does not at allow for losses in elastic media
+  due to material attenuation. Thus, for attenuating elastic media, KRAKENC
+  should be used"); the loss of the acoustic layers and of the water still
+  enters.
 
-`krakenc.exe`'s complex eigenvalues carry that loss correctly, so the default
+`krakenc.exe`'s complex eigenvalues carry that loss, so the default
 `backend=None` detects shear and dispatches there for you. Forcing
-`backend='kraken'` on an elastic environment raises `ConfigurationError` rather
-than returning the wrong field:
+`backend='kraken'` on an elastic environment runs kraken.exe, with one
+`ValidityWarning` quoting both sentences; under a half-space whose shear speed
+is below the water's, the window up to that shear speed holds no mode and the
+run stops with kraken.exe's "No modes for given phase speed interval"
+(measured: 100 m of water over cp 3000 / cs 1400 m/s at 50 Hz).
+`backend='kraken'` beside `leaky_modes=True` is refused, naming both.
 
 ```python
 env = uacpy.Environment(
@@ -193,6 +202,11 @@ Kraken().select_backend(env)      # 'krakenc'
 ```
 
 `select_backend(env)` reports the dispatch without running anything.
+
+KRAKENC's root-finder restart option (`TopOpt(5:5) = '.'`,
+`krakenc.f90:323-327`, up to `max(10, N/50)` restarts) is not offered: each
+restart starts from `RANDOM_NUMBER` draws (`krakenc.f90:393-395`) and the
+toolbox sets no seed, so uacpy writes the deck with it off.
 
 Note the `elastic=True` above: `from_presets` fluid-approximates its presets by
 default, so `halfspace='granite'` on its own gives you granite's compressional
@@ -246,14 +260,16 @@ adiabatic sum keeps only the modes of the poorest one (one mode on example
 *Illustration (measured, not a rule):* on the published range-dependent
 benchmarks kraken.exe is the closer of the two on three of the four. PE
 Workshop case 4c (coupled): krakenc keeps the shelf within 6 dB RMS of the reference,
-where kraken.exe reads 21.7 dB loud. The ASA wedge (coupled and adiabatic):
+where kraken.exe reads 21.8 dB loud. The ASA wedge (coupled and adiabatic):
 krakenc finds no mode at 25 Hz in profile 13 of 15 (seafloor 28.7 m) and the
 run is refused, where kraken.exe's rigid-bottom roots carry the track within
-the methods' error. The corrugated seafloor (coupled): the mean TL offset
-beyond the corrugation from COUPLE07's two-way solution is −7.04 dB on krakenc
-against +1.20 dB on kraken.exe, where COUPLE07's own one-way run lands at +1.13
-dB. PE Workshop case 3b: a 90th-percentile `|ΔTL|` of 1.637 dB on krakenc against 1.07
-dB on kraken.exe.
+the methods' error. The corrugated seafloor (coupled, at the reference's water
+density 1.0): the mean TL offset beyond the corrugation from COUPLE07's two-way
+solution is −5.67 dB on krakenc against +2.83 dB on kraken.exe at its automatic
+decomposition (+4.02 dB with `n_segments=209`, the count the quarter-wavelength
+criterion asks for), where COUPLE07's own one-way run lands at +1.13 dB. PE
+Workshop case 3b (at the reference's water density 1.0): a 90th-percentile
+`|ΔTL|` of 1.274 dB on krakenc against 0.555 dB on kraken.exe.
 
 ---
 
@@ -273,6 +289,18 @@ from uacpy.models import Kraken, RunMode
 
 Default is `COHERENT_TL`, or `BROADBAND` when `frequencies=` has more than one
 element.
+
+**A line source is normalised per frequency.** With
+`Source(source_type='line')` each bin of `H(f)` is scaled to unit amplitude at
+1 m in free space by its own `√k0`, `k0 = 2πf/c(z_s)` (JKPS §5.2.2's
+`p/p0(r = 1)`, applied to field.exe's `Σ ψψ e^{ikx}/k_x`,
+`EvaluateMod.f90:36`), so a `TIME_SERIES` pulse is the one whose 1 m
+free-field spectrum is the `source_waveform`'s — the convention Bellhop's
+frequency-independent line factor and Scooter follow too. JKPS warns that this
+"scale factor is frequency dependent and if it is not removed during the
+frequency synthesis, the pulse will be distorted": compared with a pulse
+synthesised from the un-normalised line field, it is tilted by `√k0`,
+3.01 dB per octave on pressure.
 
 **`INCOHERENT_TL` on one profile with krakenc is not a strict energy sum.**
 field.exe's single-profile evaluator computes `SQRT(SUM(z**2))` over the modes'
@@ -312,10 +340,12 @@ trim an existing `Modes` result instead, use `modes.first_n(N)`.
 
 The `Modes` result is documented with the other result types in the
 [results guide](../guide/results.md). Beyond `k`, `phi` and `depths` it carries
-`phase_speeds`, `group_velocity_between(other)` (from a second solve
-at a nearby frequency), `first_n(n)`, `with_attenuation(...)` for a first-order
-perturbation (the mode normalisation has to run into the half-space, and
-the seabed's own loss comes from it; without them the returned attenuation is
+`phase_speeds`, `group_speeds_between(other)` (from a second solve
+at a nearby frequency), `first_n(n)`, `with_attenuation(alpha_dB_per_m,
+sound_speed_z=…)` for a first-order perturbation (the water's `c(z)` on
+`modes.depths` is required, as a `Modes` records none; the mode normalisation
+has to run into the half-space, and the seabed's own loss comes from it;
+without them the returned attenuation is
 the water-column term alone, with no seabed loss: over a fluid half-space
 directly under the water column it uses the speed, density and attenuation
 the `.mod` records, and for any other seabed pass `bottom=`), and
@@ -336,23 +366,24 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | `c_high` | `None` | Upper bound (m/s). `None` → `1.05 ×` the fastest speed among the SSP and the seabed; `10 ×` the fastest water speed over a `'file'` / `'precalc'` reflection-table seabed (`_TABLE_BOTTOM_C_HIGH_FACTOR`) and over a rigid or vacuum floor on krakenc; unbounded (`1e9`) over a rigid or vacuum floor on kraken.exe; `10 ×` the fastest speed in the profile with `leaky_modes=True`. `run_settings(...).engine` records the window and the rule that set it. The manual leaves CHIGH to "a matter of experience" — in the far field "one may set CHIGH to the sound speed at the ocean bottom", in the near field higher (`doc/kraken.htm`, phase speed limits); `1e9` is the toolbox's "no upper limit" (`doc/bounce.htm`: "CMax to 1.0E9"); the `1.05 ×` and `10 ×` factors are uacpy guidance, measured (`kraken/_window.py`, §6.4). |
 | `leaky_modes` | `False` | Raise `c_high` to `10 ×` the fastest speed in each profile so the solver attempts leaky modes (§6.5). Forces `backend='krakenc'`. The `10 ×` is uacpy guidance, measured: an unbounded `1e9` made KRAKENC's secant search fail (`kraken/_window.py`); the toolbox's own leaky test deck runs 20000 m/s over a 1600 m/s seabed (`tests/MunkLeaky/MunkKleaky.env`). |
 | `n_modes` | `None` | Cap on the modes `field.exe` sums (`MLimit` in the `.flp`); a `MODES` run's `Modes` is cut to the same first `N`. `None` sums every mode the solver kept (§7, *`n_modes` truncates*), as `doc/field.htm` does with a large count: "If the number of modes specified exceeds the number computed then the program uses all the computed modes." |
-| `n_mesh` | `None` | Finite-difference points **per medium** — a total count, not a per-wavelength density, and the *initial* mesh that `rmax_m` then doubles. `0` lets Kraken size it: 20 points per wavelength, taken from the medium's **shear** speed wherever one is set (`ReadEnvironmentMod.f90:101-104`), which is far finer than the compressional wavelength would ask for. A value below half of what it would have chosen is not silently accepted — it aborts with *Mesh is too coarse*. `0` is the manual's automatic mesh (`doc/EnvironmentalFile.htm`: "If you type 0 for the number of mesh points, the code will calculate NMESH automatically"). A count is the mesh at the deck's frequency line, `source.frequencies[0]`; a band deck (`TopOpt(6)='B'`) solves each frequency f on that count × f / freq0 (`kraken.f90:75`, `krakenc.f90:77`). With `0`, a band-deck medium whose own count would leave fewer than AT's 10 points at the band's lowest frequency is written with the least count that leaves 10 there, and every other medium is left to the binary (§7, *A band deck's mesh at its lowest frequency*; `run_settings(...).engine.launches[0].n_mesh` shows the counts). `None` is that rule: `0`, with the band-deck counts. A set value is written as given — one count for every medium, or one per medium, water first, on a range-independent run (a track's deck takes one count for every medium) — and a set `0` on a band deck that leaves a medium under 10 points at its lowest frequency gives a `NumericsWarning`. |
+| `range_offsets` | `None` | Receiver range offsets (m), one per receiver depth, shallowest first (`Rro` in the `.flp`, `field.f90:147-152`). `doc/field.htm`: "The field is computed by stepping through the ranges, Rr(1:NR), and adding in the range displacements, Rro() before computing the field on the array. Nonzero values are used to tilt or distort the receiving array, thereby simulating the distortion which occurs on an array deployed in the ocean." The receiver at depth `z_i` and range `r` reads the field at `r + ro_i` (`EvaluateMod.f90:47`, `:72-73`). `None` writes zeros, a vertical array. `field.exe` sorts the offsets ascending as it sorts the depths (`misc/SourceReceiverPositions.f90:224`, `:267-268`), so offsets that decrease with depth — an array leaning toward the source as it deepens — are refused: the binary would pair them with other receivers. Only the range-independent sum reads them (`Evaluate`, `field.f90:214-215`); a range-dependent run and `compute_modes` give a notice that they are not used. |
+| `n_mesh` | `None` | Finite-difference points **per medium** — a total count, not a per-wavelength density, and the *initial* mesh that `rmax` then doubles. `0` lets Kraken size it: 20 points per wavelength, taken from the medium's **shear** speed wherever one is set (`ReadEnvironmentMod.f90:101-104`), which is far finer than the compressional wavelength would ask for. A value below half of what it would have chosen is not silently accepted — it aborts with *Mesh is too coarse*. `0` is the manual's automatic mesh (`doc/EnvironmentalFile.htm`: "If you type 0 for the number of mesh points, the code will calculate NMESH automatically"). A count is the mesh at the deck's frequency line, `source.frequencies[0]`; a band deck (`TopOpt(6)='B'`) solves each frequency f on that count × f / freq0 (`kraken.f90:75`, `krakenc.f90:77`). With `0`, a band-deck medium whose own count would leave fewer than AT's 10 points at the band's lowest frequency is written with the least count that leaves 10 there, and every other medium is left to the binary (§7, *A band deck's mesh at its lowest frequency*; `run_settings(...).engine.launches[0].n_mesh` shows the counts). `None` is that rule: `0`, with the band-deck counts. A set value is written as given — one count for every medium, or one per medium, water first, on a range-independent run (a track's deck takes one count for every medium) — and a set `0` on a band deck that leaves a medium under 10 points at its lowest frequency gives a `NumericsWarning`. |
 | `interp_ssp` | `None` | SSP connection scheme: `'linear'` (the default), `'n2linear'`, `'pchip'`, `'spline'` (cubic spline). `'quad'` (Bellhop-only) is refused with `UnsupportedFeatureError` — a capability limit, not a bad argument — and `'analytic'` (the Acoustics-Toolbox hard-coded Munk curve, which would ignore `env.ssp`) and any other name with `ConfigurationError`, when the run writes its deck. `'linear'` (AT `'C'`) is the manual's choice when unsure (`doc/EnvironmentalFile.htm`: "If your not sure which option to take, I'd suggest you use 'C'."). |
-| `rmax_m` | `None` | `RMax` written into the deck (m, converted to km) — the range at which the eigenvalues must be accurate. Kraken solves on successively doubled meshes (multipliers 1, 2, 4, 8, 16), Richardson-extrapolates, and stops once `Error × RMax < 1` (`kraken.f90:80`). `None` → the farthest receiver range, narrowband or band, the manual's value: "the largest range for which a field calculation will be desired" (`doc/kraken.htm` (8)); 100 km when no receiver range is positive (`compute_modes`), uacpy guidance, measured: the manual's 0 ("If you set it to zero, then no mesh doublings will be performed") gave 0.27 dB median and 3.7 dB max \|ΔTL\| to 10 km on a 100 m Pekeris guide at 100 Hz, and a 1.09 rad mode phase error at 10 km, against a converged run. A set value is written as given; 0 runs with a `NumericsWarning` that no mesh doubling follows, and a negative value is refused. |
+| `rmax` | `None` | `RMax` written into the deck (m, converted to km) — the range at which the eigenvalues must be accurate. Kraken solves on successively doubled meshes (multipliers 1, 2, 4, 8, 16), Richardson-extrapolates, and stops once `Error × RMax < 1` (`kraken.f90:80`). `None` → the farthest receiver range, narrowband or band, the manual's value: "the largest range for which a field calculation will be desired" (`doc/kraken.htm` (8)); 100 km when no receiver range is positive (`compute_modes`), uacpy guidance, measured: the manual's 0 ("If you set it to zero, then no mesh doublings will be performed") gave 0.27 dB median and 3.7 dB max \|ΔTL\| to 10 km on a 100 m Pekeris guide at 100 Hz, and a 1.09 rad mode phase error at 10 km, against a converged run. A set value is written as given; 0 runs with a `NumericsWarning` that no mesh doubling follows, and a negative value is refused. |
 
 **How the modes are sampled**
 
 | Name | Default | Meaning |
 |---|---|---|
-| `mode_points_per_meter` | `None` (derived: 10 pts/wavelength, floor 1.5) | Density of the depth grid `ψ_m(z)` is returned on, spanning water plus sediment. The caller's receiver depths join that grid, so a range-independent or adiabatic **field** no longer interpolates between tabulated points and this knob does not move it (measured 2.9e-7 relative between 2 and 20 pts/m). It still sets the accuracy of `compute_modes`' own output, and of a **coupled** run, whose coupling integrals `EvaluateCMMod` forms from the tabulated shapes (2.6e-2 dB across the same pair). The 10 points per wavelength are the manual's coupled-mode sampling (`doc/kraken.htm`: "Fine sampling (about 10 points/wavelength) is needed to calculate the coupling integrals accurately"; `doc/field.htm`); the 1.5 points/m floor is uacpy guidance (unmeasured). |
-| `mode_depths` | `None` | Pin that grid explicitly instead. |
+| `mode_points_per_meter` | `None` (derived: 10 pts/wavelength, floor 1.5) | Density of the depth grid `ψ_m(z)` is returned on, spanning water plus sediment. The caller's receiver depths join that grid, so a range-independent or adiabatic **field** does not interpolate between tabulated points and this knob does not move it (measured 2.9e-7 relative between 2 and 20 pts/m). It sets the accuracy of `compute_modes`' own output, and of a **coupled** run, whose coupling integrals `EvaluateCMMod` forms from the tabulated shapes (2.6e-2 dB across the same pair). The 10 points per wavelength are the manual's coupled-mode sampling (`doc/kraken.htm`: "Fine sampling (about 10 points/wavelength) is needed to calculate the coupling integrals accurately"; `doc/field.htm`); the 1.5 points/m floor is uacpy guidance (unmeasured). A `MODES` run with a receiver (tabulated on the receiver depths) or a pinned `mode_depths` does not use it, and says so. |
+| `mode_depths` | `None` | Pin the grid of a `MODES` run with no receiver (`compute_modes`) explicitly instead. Any other run does not use it, and says so. |
 
 **Range dependence**
 
 | Name | Default | Meaning |
 |---|---|---|
 | `mode_coupling` | `None` | `'adiabatic'` or `'coupled'` — see §6.6. `None` is `'adiabatic'`, `field.exe`'s own default (`doc/field.htm`: "'A' Adiabatic mode theory (default)."). A range-independent run has one profile, which `field.exe` evaluates whatever the option (`field.f90:214-215`; the deck writes `'A'`), and a `MODES` run sums no field: a value set there is not used, and the run says so in a `FallbackWarning`. |
-| `n_segments` | `None` | `None` puts segment edges at the bathymetry / SSP / bottom change points and inserts intermediates so that no segment exceeds 2 km, spans a seafloor depth change of more than a quarter of the shortest water wavelength, or (on a range-dependent SSP) a sound-speed change of more than `0.5·c/f`, both at the run's highest frequency. The automatic count is capped at 200 profiles, thinned evenly with a `NumericsWarning` naming the depth step reached when the criteria ask for more. An int (at least 2) forces a uniform split. uacpy guidance (the manuals name no segment spacing): the quarter-wavelength and `0.5·c/f` criteria are measured (`kraken/_segments.py`); the 2 km spacing and the 200-profile cap are unmeasured choices. |
+| `n_segments` | `None` | `None` puts segment edges at the bathymetry / SSP / bottom change points and inserts intermediates so that no segment exceeds 2 km, spans a seafloor depth change of more than a quarter of the shortest water wavelength, or (on a range-dependent SSP) a sound-speed change of more than `0.5·c/f`, both at the run's highest frequency. The automatic count is capped at 200 profiles, thinned evenly with a `NumericsWarning` naming the depth step reached when the criteria ask for more. An int (at least 2) forces a uniform split. uacpy guidance (the manuals name no segment spacing): the quarter-wavelength and `0.5·c/f` criteria are measured (`kraken/_segments.py`); the 2 km spacing and the 200-profile cap are unmeasured choices. A range-independent or `MODES` run does not use it, and says so. |
 
 **Boundaries and execution**
 
@@ -639,9 +670,9 @@ break, and in opposite directions: in the upper 100 m past 15 km the coupled
 run is the louder one, below 150 m the adiabatic one. A refined
 [RAM](ram.md) run (`dr=2`, `dz=0.1`) on the same environment says which is
 right. Averaging the power over 15–20 km, the adiabatic run sits 0.15 dB
-below RAM in the upper 100 m and 1.4 dB below it between 160 and 380 m; the
-coupled run sits **7.4 dB above** RAM in the upper 100 m and 2.5 dB below it
-in the deep band. The shallow field the coupled picture fills in is not in
+below RAM in the upper 100 m and 0.6 dB below it between 160 and 380 m
+(sediment cells included, which both models return); the coupled run sits
+**7.4 dB above** RAM in the upper 100 m and 1.7 dB below it in the deep band. The shallow field the coupled picture fills in is not in
 the reference solution. (RAM's own default grid sits 0.4 dB below the
 refined one in the upper 100 m there, so refine RAM before using it as the
 arbiter.)
@@ -695,11 +726,14 @@ When the projection behaves, what is left is the method's own error, not
 uacpy's. COUPLE07 run with the same one-way pressure matching (its `IOUT = 1`,
 300 modes) on PE Workshop Test Case 4c sits 4.1 dB below COUPLE's
 single-scatter reference on the shelf at 150 m (2.5 dB at 700 m), and 1.1 dB
-on the slope; a coupled Kraken run whose projection is well behaved lands 1.6
-to 7.7 dB below that reference on the shelf, depending on the segmentation
-(50, 100 and 400 uniform segments: 2.5, 7.7 and 1.6 dB). On Evans & Gilbert's
-corrugated seafloor the same COUPLE run is 1.13 dB above its two-way solution,
-and Kraken's coupled run 1.20 dB.
+on the slope; a coupled Kraken run whose projection is well behaved lands 2.0
+to 4.4 dB below that reference on the shelf (mean of the 5 km averages, at the
+reference's water density 1.0), depending on the segmentation (60, 200 and
+400 uniform segments: 2.95, 4.39 and 1.99 dB). On Evans & Gilbert's
+corrugated seafloor (at the reference's water density 1.0) the same COUPLE run
+is 1.13 dB above its two-way solution and Kraken's coupled run 2.83 dB at its
+automatic segmentation, 4.02 dB with `n_segments=209`: there too the answer
+moves with the segmentation.
 
 ### 6.7 Deep water
 
@@ -801,21 +835,21 @@ up to 130 dB quieter at 26 Hz.
   far below the line falls under the reader's floor: a 5 m sediment layer on a
   53 Hz line keeps 0 points at 5 Hz. With `n_mesh` unset, a medium that would
   is written with the least count that keeps 10 points at the band's lowest
-  frequency, and the others are left to the binary, whose deck is then the
-  same as before. *Illustration (measured, not a rule):* 100 m of water over
+  frequency, and the others keep `0`, the binary's own mesh.
+  *Illustration (measured, not a rule):* 100 m of water over
   1800 m/s, source frequency at the band's centre. A 5 m layer at 1600 m/s,
   5-100 Hz: both binaries ran past a 300 s timeout on the binary's own mesh
   and finish in 0.06 s (kraken.exe) and 0.13 s (krakenc) on the written one,
   0.07 and 0.06 dB from Scooter (median over the bins). 2-40 Hz: krakenc ran
   past 300 s and finishes in 0.16 s; below the first cut-off (6.8 Hz) it keeps
   no mode at some bins and leaky modes summing to effectively nothing (600 dB)
-  at others, where Scooter holds the continuous spectrum. kraken.exe ran both
-  bands before; on the 2-40 and 6.5-40 Hz bands its bins moved by at most 0.63
-  dB (at 6.5 Hz, next to the cut-off), with the same distance from Scooter
-  (0.07 dB median). krakenc's answer on the 6.5-40 Hz band moved at three bins
-  by 4-19 dB, one closer to Scooter and two further: its roots follow the mesh,
-  as the `n_mesh` ladder in §5 shows. A 50-200 Hz band, whose bins all keep
-  the floor, is unchanged.
+  at others, where Scooter holds the continuous spectrum. kraken.exe runs both
+  bands on its own mesh too; on the 2-40 and 6.5-40 Hz bands the written mesh
+  moves its bins by at most 0.63 dB (at 6.5 Hz, next to the cut-off), with the
+  same distance from Scooter (0.07 dB median). krakenc's answer on the
+  6.5-40 Hz band moves at three bins by 4-19 dB, one closer to Scooter and two
+  further: its roots follow the mesh, as the `n_mesh` ladder in §5 shows. A
+  50-200 Hz band, whose bins all keep the floor, writes the binary's own mesh.
 - *A band's bins with no mode.* A multi-frequency `.mod` holding a zero-mode
   record cannot be read by `field.exe`, so the band deck runs again without
   each bin the binary stopped on (one extra solve per such bin) and without
@@ -823,11 +857,12 @@ up to 130 dB quieter at 26 Hz.
   that the deck left without a field (no level at any receiver, or not
   summed) is solved again on a deck of its own — krakenc kept only a
   579 m/s root at 35 Hz on a 31-1999 Hz deck over sand, zeroed its
-  eigenvector (an empty sum), and solved the bin alone. Every bin the
+  eigenvector (an empty sum), and solved the bin alone;
+  `result.run_settings.notes` names the bins solved that way. Every bin the
   binary found no mode at, wherever it sits in the band, is `NaN` in H(f),
   listed in `result.no_mode_bins` and named in one `ValidityWarning`; every
-  synthesis from that H(f) — a `TIME_SERIES` run, `to_time_trace`,
-  `synthesize_time_series`, `impulse_response`, `sound_exposure_level`,
+  synthesis from that H(f) — a `TIME_SERIES` run, `impulse_response`,
+  `to_time_trace`, `synthesize_time_series`, `sound_exposure_level`,
   `peak_sound_pressure_level` — takes them as zero, the empty modal sum
   (krakenc over sand, 0.5-60 Hz: its search keeps spurious roots at 0.5
   and 1 Hz and none at 41 bins above them, all zero in a synthesis). A bin
@@ -844,7 +879,8 @@ up to 130 dB quieter at 26 Hz.
   the seabed speed at `verbose='info'`, and its repr counts the trapped ones.
 - *An empty sum.* Where inverse iteration does not converge the binary
   zeroes the eigenvector and keeps the root (`krakenc.f90:708-711`); its
-  `.prt` warning is passed on as an `IOWarning`. `field.exe`'s sum of such a
+  `.prt` warning is passed on as an `IOWarning`, with the mode number the
+  binary writes beside it and a note that the mode adds nothing. `field.exe`'s sum of such a
   mode is zero, which the field holds as written; a sum with no level above
   the no-energy floor at any receiver is warned of.
 - *A track the binary stops on.* A later profile in which the binary finds
@@ -911,8 +947,7 @@ sets only `f, g` (`Kraken/BCImpedancecMod.f90:84-86`) and leaves unset the
 five-component vector it shoots up through the elastic layers (`:124-127`).
 Over a rigid or a vacuum floor it sets that vector (`:58-66`), so an elastic
 layer there runs, as does `backend='krakenc'` or `leaky_modes=True` over a
-rigid or vacuum floor (kraken.htm: "free, rigid and homogeneous half-spaces
-at top and bottom"). *Illustration (measured, not a rule):* a 20 m layer (cp
+rigid or vacuum floor. *Illustration (measured, not a rule):* a 20 m layer (cp
 1800 / cs 400 m/s) under 100 m of water over a rigid or vacuum floor, 50 and
 200 Hz, ran 0.8-1.7 dB (median) and 4-6 dB (90th percentile) off Scooter,
 where the same layer over an elastic half-space agrees with it; KRAKENC over
@@ -977,9 +1012,11 @@ section — so a 200-bin band is a minute of work, not a free axis. Each bin
 is bit-identical to running that frequency on its own.
 
 **Receivers below the local seafloor are computed, not refused.** On a sloping
-track a fixed depth grid will dip into the seabed inshore. Kraken warns once,
-with the count of such points and the first of them, and returns the
-below-seafloor field there rather than raising. If
+track a fixed depth grid will dip into the seabed inshore. Kraken returns the
+below-seafloor field there rather than raising; a rectangular grid's cells
+under the bed are logged (`verbose='info'`, with their count and the first of
+them), and a `ValidityWarning` comes only for a paired grid's receiver below
+its seafloor or a range column whose every depth lies below it. If
 the seabed is elastic, `field.exe` has no elastic component to evaluate and
 those depths come back as `NaN`, again with a warning.
 
@@ -994,9 +1031,11 @@ depth, where `Modes.excitation(source)` reads the shapes.
 
 **`compute_modes` on a range-dependent environment solves one profile.** Modes
 are a stratified concept, so the modes path reduces each range-dependent
-quantity by the `collapse=` method you set for it, else at `r = 0` — the
-inshore profile, the source's column — and warns, naming what each was reduced
-by. Only the *field* path segments.
+quantity by the `collapse=` method you set for it, else by the package
+defaults (seabed: track median; bathymetry: deepest point; SSP and surface:
+`r = 0`), as every stratified engine does, and warns, naming what each was
+reduced by. `collapse={'bottom_range': 'r0', 'bathymetry': 'r0'}` takes the
+source's column. Only the *field* path segments.
 
 **Adiabatic mode theory is not reciprocal.** Swapping source and receiver depth
 on a range-dependent track does not give the same TL — the adiabatic sum weights

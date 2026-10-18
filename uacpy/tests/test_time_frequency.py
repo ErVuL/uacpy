@@ -69,6 +69,39 @@ class TestTimeFrequency:
         assert inst.shape == x.shape
         assert np.median(inst[50:-50]) == pytest.approx(f0, abs=2.0)
 
+    @pytest.mark.parametrize('name, call', [
+        ('analytic_signal', lambda x: analytic_signal(x)),
+        ('envelope', lambda x: envelope(x)),
+        ('instantaneous_frequency', lambda x: instantaneous_frequency(x, FS)),
+    ])
+    def test_each_refusal_names_the_function_called(self, name, call):
+        """``envelope`` and ``instantaneous_frequency`` refuse a scalar or a
+        complex record in their own name, not in ``analytic_signal``'s."""
+        from uacpy.core.exceptions import ConfigurationError
+        for bad in (np.float64(0.0), np.ones(100, complex)):
+            with pytest.raises(ConfigurationError, match=rf"^{name}: "):
+                call(bad)
+
+    @pytest.mark.parametrize('call', [
+        lambda x, **k: analytic_signal(x, **k),
+        lambda x, **k: envelope(x, **k),
+        lambda x, **k: instantaneous_frequency(x, FS, **k),
+    ])
+    def test_a_multichannel_record_is_transformed_channel_by_channel(
+            self, call):
+        """Time along ``axis``, every other axis a channel: each row is the
+        1-D answer for that row, and the layout of ``data`` is kept."""
+        t = np.arange(2000) / FS
+        x = np.stack([np.cos(2 * np.pi * 200 * t),
+                      0.5 * np.cos(2 * np.pi * 310 * t + 1.0)])
+        rows = call(x)
+        assert rows.shape == x.shape
+        for i in range(2):
+            np.testing.assert_allclose(rows[i], call(x[i]), rtol=1e-12,
+                                       atol=1e-12)
+        np.testing.assert_allclose(call(x.T, axis=0), rows.T, rtol=1e-12,
+                                   atol=1e-12)
+
     def test_wigner_ville_localises_tone(self):
         f0 = 250.0
         x = np.cos(2 * np.pi * f0 * np.arange(256) / FS)
@@ -254,11 +287,64 @@ class TestTimeFrequency:
         assert lo + np.argmax(c[lo:hi]) == pytest.approx(d, abs=1)
 
     def test_cepstrum_nfft_truncation_raises(self):
-        with pytest.raises(ConfigurationError, match=r'must be >= len\(x\)'):
+        with pytest.raises(ConfigurationError,
+                           match=r'must be >= the record length \(512\)'):
             cepstrum(np.zeros(512), nfft=256)
+
+    def test_the_cepstrum_window_defaults_to_no_taper(self):
+        """``'boxcar'`` is the default, and ``None`` selects it."""
+        x = np.random.default_rng(2).standard_normal(512)
+        plain = np.fft.irfft(np.log(np.abs(np.fft.rfft(x))))
+        np.testing.assert_allclose(cepstrum(x).cepstrum, plain, atol=1e-12)
+        np.testing.assert_array_equal(cepstrum(x, window=None).cepstrum,
+                                      cepstrum(x, window='boxcar').cepstrum)
+        assert not np.allclose(cepstrum(x, window='hann').cepstrum, plain)
+
+    def test_a_multichannel_cepstrum_puts_the_quefrencies_last(self):
+        x = np.random.default_rng(3).standard_normal((3, 512))
+        both = cepstrum(x, FS, nfft=1024, lifter=-4)
+        assert both.cepstrum.shape == (3, 1024)
+        for i in range(3):
+            np.testing.assert_allclose(
+                both.cepstrum[i],
+                cepstrum(x[i], FS, nfft=1024, lifter=-4).cepstrum,
+                rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(cepstrum(x.T, FS, axis=0).cepstrum,
+                                   cepstrum(x, FS).cepstrum, rtol=1e-12,
+                                   atol=1e-12)
+
+    def test_the_complex_cepstrum_carries_its_quefrencies(self):
+        x = np.random.default_rng(4).standard_normal(256)
+        r = complex_cepstrum(x, sample_rate=FS)
+        np.testing.assert_array_equal(r.quefrencies, np.arange(256) / FS)
+        np.testing.assert_array_equal(complex_cepstrum(x).quefrencies,
+                                      np.arange(256.0))
+        c, delay = r                         # the tuple is unchanged
+        np.testing.assert_array_equal(c, complex_cepstrum(x).cepstrum)
+        fig, ax = r.plot()
+        np.testing.assert_allclose(ax.get_lines()[0].get_xdata(),
+                                   r.quefrencies)
+        assert ax.get_xlabel() == 'Quefrency (s)'
+        plt.close(fig)
+        np.testing.assert_allclose(inverse_complex_cepstrum(r),
+                                   inverse_complex_cepstrum(
+                                       complex_cepstrum(x)))
 
 
 class TestCWT:
+    def test_a_multichannel_record_gives_one_scalogram_per_channel(self):
+        x = np.random.default_rng(5).standard_normal((2, 3, 512))
+        r = cwt(x, FS, n_frequencies=6)
+        assert r.coefficients.shape == (2, 3, 6, 512)
+        np.testing.assert_allclose(
+            r.coefficients[1, 2], cwt(x[1, 2], FS, n_frequencies=6).coefficients,
+            rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(
+            cwt(np.moveaxis(x, -1, 0), FS, n_frequencies=6,
+                axis=0).coefficients, r.coefficients, rtol=1e-12, atol=1e-12)
+        assert r.to_xarray()['coefficients'].dims == (
+            'coefficients_dim0', 'coefficients_dim1', 'frequencies', 'times')
+
     @pytest.mark.parametrize("wavelet", ["morlet", "paul", "dog"])
     def test_localizes_tone(self, wavelet):
         x = np.cos(2 * np.pi * 200 * np.arange(2048) / FS)
@@ -800,48 +886,68 @@ class TestTheTimeFrequencyResultsCarryTheirAxes:
             plot_cepstrum(cepstrum(self._chirp()), sample_rate=self.FS)
 
 
-class TestAMagnitudeSpectrogramStatesItsUnit:
-    """``mode='magnitude'`` / ``'complex'`` hold the STFT scaled by the square
-    root of the scaling's factor, with no one-sided doubling: Pa/√Hz under
-    'density', Pa under 'spectrum' (a tone of amplitude A reads A/2)."""
+class TestTheShortTimeTransformStatesItsUnit:
+    """``stft`` holds the transform scaled by the square root of the
+    scaling's factor, with no one-sided doubling: Pa/√Hz under 'density',
+    Pa under 'spectrum' (a tone of amplitude A reads A/2)."""
 
     FS, F0, N = 1000.0, 125.0, 256
 
-    def _tone_spectrogram(self, scaling, mode):
-        x = np.cos(2 * np.pi * self.F0 * np.arange(4 * self.N) / self.FS)
-        return spectrogram(x, self.FS, window="boxcar", nperseg=self.N,
-                           noverlap=0, detrend=False, scaling=scaling,
-                           mode=mode)
+    def _tone(self):
+        return np.cos(2 * np.pi * self.F0 * np.arange(4 * self.N) / self.FS)
+
+    def _stft(self, scaling):
+        from uacpy.acoustic_signal import stft
+        return stft(self._tone(), self.FS, window="boxcar", nperseg=self.N,
+                    noverlap=0, detrend=False, scaling=scaling)
 
     @pytest.mark.parametrize("scaling, unit", [("density", "Pa/√Hz"),
                                                ("spectrum", "Pa")])
-    def test_the_magnitude_field_carries_the_scalings_amplitude_unit(
+    def test_the_coefficients_carry_the_scalings_amplitude_unit(
             self, scaling, unit):
-        result = self._tone_spectrogram(scaling, "magnitude")
-        assert result._field_units()["power"] == unit
+        result = self._stft(scaling)
+        assert result.units["coefficients"] == unit
+        assert np.iscomplexobj(result.coefficients)
 
     def test_a_tone_reads_half_its_amplitude_under_spectrum_scaling(self):
-        result = self._tone_spectrogram("spectrum", "magnitude")
+        result = self._stft("spectrum")
         k = int(np.argmin(np.abs(result.frequencies - self.F0)))
-        np.testing.assert_allclose(result.power[k], 0.5, rtol=1e-12)
+        np.testing.assert_allclose(np.abs(result.coefficients[k]), 0.5,
+                                   rtol=1e-12)
 
     def test_its_square_is_half_the_one_sided_density_off_dc(self):
-        mag = self._tone_spectrogram("density", "magnitude")
-        psd = self._tone_spectrogram("density", "psd")
-        np.testing.assert_allclose(mag.power[1:-1] ** 2, psd.power[1:-1] / 2,
-                                   rtol=1e-12, atol=1e-30)
+        coefficients = self._stft("density").coefficients
+        psd = spectrogram(self._tone(), self.FS, window="boxcar",
+                          nperseg=self.N, noverlap=0, detrend=False).power
+        np.testing.assert_allclose(np.abs(coefficients[1:-1]) ** 2,
+                                   psd[1:-1] / 2, rtol=1e-12, atol=1e-30)
+
+    def test_it_runs_on_the_spectrograms_segments(self):
+        from uacpy.acoustic_signal import stft
+        x = np.random.default_rng(4).standard_normal(3000)
+        st, sp = stft(x, self.FS, nperseg=256), spectrogram(x, self.FS,
+                                                            nperseg=256)
+        np.testing.assert_array_equal(st.frequencies, sp.frequencies)
+        np.testing.assert_array_equal(st.times, sp.times)
 
     def test_the_plot_names_the_squared_panel_two_sided(self):
-        fig, ax = plot_spectrogram(self._tone_spectrogram("density",
-                                                           "magnitude"))
+        fig, ax = self._stft("density").plot()
         label = fig.axes[-1].get_ylabel()
         assert label == "Level (dB re 1 µPa²/Hz, two-sided)", label
         plt.close(fig)
 
-    def test_a_psd_panel_keeps_the_one_sided_caption(self):
-        fig, ax = plot_spectrogram(self._tone_spectrogram("density", "psd"))
+    def test_a_spectrogram_keeps_the_one_sided_caption(self):
+        fig, ax = plot_spectrogram(spectrogram(
+            self._tone(), self.FS, nperseg=self.N))
         assert fig.axes[-1].get_ylabel() == "Level (dB re 1 µPa²/Hz)"
         plt.close(fig)
+
+
+def test_a_spectrogram_window_of_none_is_its_documented_hann():
+    x = np.random.default_rng(3).standard_normal(4096)
+    np.testing.assert_array_equal(
+        spectrogram(x, 1000.0, nperseg=256, window=None).power,
+        spectrogram(x, 1000.0, nperseg=256, window='hann').power)
 
 
 @pytest.mark.parametrize('n_frequencies, refused', [(16, False), (17, True)])
@@ -873,12 +979,3 @@ def test_a_spectrogram_level_is_power_to_dB_of_its_panel(scaling):
     np.testing.assert_array_equal(res.level_dB(), power_to_dB(res.power))
     np.testing.assert_array_equal(res.level_dB(2e-5),
                                   power_to_dB(res.power, 2e-5))
-
-
-@pytest.mark.parametrize('mode', ['magnitude', 'complex', 'angle', 'phase'])
-def test_a_spectrogram_panel_that_holds_no_power_has_no_level(mode):
-    x = np.random.default_rng(5).standard_normal(4096)
-    res = spectrogram(x, 1000.0, nperseg=256, mode=mode)
-    with pytest.raises(ConfigurationError,
-                       match=rf"SpectrogramResult.level_dB: .*mode='{mode}'"):
-        res.level_dB()

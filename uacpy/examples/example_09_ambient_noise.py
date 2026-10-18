@@ -12,13 +12,11 @@ Uses: noise.WenzNoise(.as_psd) · plot_wenz ·
 acoustic_signal.synthesize_noise_from_psd · spectrogram ·
 probabilistic_welch · constant_q · probabilistic_constant_q ·
 sound_exposure (ISO 18405, decidecade bands) ·
-plot_spectrogram · plot_ppsd · plot_constant_q_ppsd · plot_sel
+plot_spectrogram · plot_ppsd · plot_constant_q_ppsd · plot_band_levels
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -34,8 +32,6 @@ OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
 OUT.mkdir(parents=True, exist_ok=True)
 
-UPA = 1e-6                     # 1 µPa, the water-acoustics dB reference
-
 # Deep water, Beaufort-6 wind, heavy shipping and rain.
 conditions = dict(wind_speed_kn=24, water_depth='deep',
                   shipping_level='high', rain_rate='heavy')
@@ -50,37 +46,30 @@ plt.close(fig)
 # nfft is the IFFT chunk size and sets the synthesis bin width
 # df = sample_rate / nfft. The Wenz target starts at 1 Hz, so the chunk has to
 # be long enough for the low-frequency shape to survive resampling onto the
-# FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz. (The library holds nfft
-# to [16, 262144]: a token value like 1 becomes the default 65536, with a
-# FallbackWarning.)
+# FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz.
 sample_rate, nfft, duration = 96000, 65536, 30.0
 frequencies = np.linspace(1.0, sample_rate / 2, 10000)   # up to Nyquist
 wenz = WenzNoise(frequencies, **conditions)
 # A seeded generator: every run draws the same realisation, so the printed
 # levels and the saved figures reproduce.
 rng = np.random.default_rng(0)
-t, pressure, fs = synthesize_noise_from_psd(
-    wenz.as_psd(), frequencies, sample_rate=sample_rate,
-    duration=duration, amplitude_factor=1.0, nfft=nfft, rng=rng)
+fs = float(sample_rate)
+t, pressure = synthesize_noise_from_psd(
+    wenz.as_psd(), frequencies, sample_rate=fs,
+    duration=duration, nfft=nfft, rng=rng)
 print(f"  synthesised {duration:.0f} s @ {fs / 1e3:.1f} kHz "
       f"({pressure.size:,} samples), df = {fs / nfft:.2f} Hz")
 
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(t[:int(0.2 * fs)] * 1e3, pressure[:int(0.2 * fs)] / UPA, lw=0.5,
-        color='C0')
-ax.set_xlabel('Time [ms]')
-ax.set_ylabel('Pressure [µPa]')
-ax.set_title(f'Synthesised Wenz noise (first 0.2 s of {duration:.0f} s)')
-ax.grid(True, alpha=0.3)
-fig.tight_layout()
+fig, _ = uacpy.plot.plot_waveform(
+    pressure[:int(0.2 * fs)], fs, time_units='ms', lw=0.5,
+    title=f'Synthesised Wenz noise (first 0.2 s of {duration:.0f} s)')
 fig.savefig(OUT / 'example_09_ssrp_timeseries.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 
 # Stationary noise: the spectrogram should look the same at every time.
 f_spec, t_spec, power = spectrogram(pressure, fs, nperseg=4096, noverlap=2048)
-fig, _ = uacpy.plot.plot_spectrogram(f_spec, t_spec, power, ref=UPA,
-                                     title=label, freq_min=10, freq_max=fs / 2,
+fig, _ = uacpy.plot.plot_spectrogram(f_spec, t_spec, power, title=label, freq_min=10, freq_max=fs / 2,
                                      vmin=20, vmax=120)
 fig.savefig(OUT / 'example_09_ssrp_spectrogram.png', dpi=150,
             bbox_inches='tight')
@@ -90,9 +79,8 @@ plt.close(fig)
 # for the curve's steep fall below 20 Hz, so the PPSD starts at 20 Hz as the
 # constant-Q one below does.
 fig, ax = uacpy.plot.plot_ppsd(
-    probabilistic_welch(pressure, fs, ref=UPA, segment_duration=1.0,
-                        segment_overlap_percent=50, level_step_dB=1.0,
-                        level_min_dB=20, level_max_dB=140, freq_min=20.0),
+    probabilistic_welch(pressure, fs, level_min_dB=20, level_max_dB=140,
+                        freq_min=20.0),
     title=label, ymin=20, ymax=120)
 # The check: the analytic curve the realisation came from, over its own PPSD.
 ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
@@ -108,7 +96,7 @@ plt.close(fig)
 # coherent tone high) out of the picture.
 cq_kw = dict(freq_min=20.0, freq_max=20000.0, bins_per_octave=24)
 cq_hist = probabilistic_constant_q(
-    pressure, fs, ref=UPA, level_min_dB=20, level_max_dB=140, **cq_kw)
+    pressure, fs, level_min_dB=20, level_max_dB=140, **cq_kw)
 cq_mean = constant_q(pressure, fs, **cq_kw)
 
 # vmax: the plotter defaults to 1/level_step_dB — the largest density a 1 dB bin
@@ -124,7 +112,7 @@ ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
 # own mean line sits below it — the single-look bias the print below measures,
 # not an error in the synthesis. Dotted because the plotter already draws that
 # mean solid black and its ±STD dashed black.
-ax.semilogx(cq_mean.frequencies, cq_mean.level_dB(ref=UPA),
+ax.semilogx(cq_mean.frequencies, cq_mean.level_dB(),
             color='k', lw=2.2, ls=':',
             label='constant_q')
 ax.legend(loc='upper right', fontsize='small', framealpha=0.85)
@@ -136,7 +124,7 @@ plt.close(fig)
 # histogram, and compare a target curve against the power mean instead.
 analytic = np.interp(cq_hist.frequencies, wenz.frequencies, wenz.total)
 print(f"  constant-Q: power mean "
-      f"{np.nanmedian(cq_mean.level_dB(ref=UPA) - analytic):+.2f}"
+      f"{np.nanmedian(cq_mean.level_dB() - analytic):+.2f}"
       f" dB against the analytic curve, per-bin dB mean "
       f"{np.nanmedian(cq_hist.mean_dB - analytic):+.2f} dB "
       f"(single-look log mean, 2.51 dB low by construction)")
@@ -146,12 +134,12 @@ print(f"  constant-Q: power mean "
 # the incoherent (energy) sum across bands.
 exposure = sound_exposure(pressure, fs, freq_min=10.0, freq_max=fs / 2.0)
 print(f"  SEL: broadband "
-      f"{10 * np.log10(exposure.power.sum() / UPA ** 2):.1f} dB "
+      f"{uacpy.acoustics.power_to_dB(exposure.power.sum()):.1f} dB "
       f"re 1 µPa²·s over {pressure.size / fs:.0f} s across "
       f"{len(exposure.bands)} decidecade bands")
 # The estimate carries its bands and its scaling, so the bars and the unit on
 # the level axis come from the estimate rather than from arguments repeated
 # here: exposure.plot() is the same figure.
-fig, _ = uacpy.plot.plot_sel(exposure, ref=UPA, title=label)
+fig, _ = uacpy.plot.plot_band_levels(exposure, title=label)
 fig.savefig(OUT / 'example_09_sel.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

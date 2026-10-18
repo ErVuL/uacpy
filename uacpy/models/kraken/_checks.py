@@ -7,7 +7,9 @@ import warnings
 import numpy as np
 from typing import Optional
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.models._projection import _max_roughness, _smooth_surface
+from uacpy.models._projection import (
+    DEFAULT_COLLAPSE, _max_roughness, _smooth_surface,
+)
 from uacpy.core.run_settings import Notice
 from uacpy.core.run_settings import RunMode
 from uacpy.core.bathymetry import Bathymetry
@@ -62,9 +64,10 @@ def deck_bottom_columns(env: Environment, run_mode) -> list:
 
     The two paths differ, and both are right for what they build.
     :func:`modes_single_profile` reduces a ``MODES`` run's environment to one
-    profile before anything reads it, so its deck carries one column — of an
-    environment not yet reduced, the r = 0 one, the column the reduction
-    takes unless the caller set ``collapse['bottom_range']``. Every field
+    profile before anything reads it, so its deck carries one column; asked
+    about an environment not yet reduced, this is the column the package
+    default ``collapse['bottom_range']`` takes (the track median; for a
+    layered bottom its middle column, ``Bottom.collapse_range``). Every field
     path segments a range-dependent bottom instead: each profile block of
     the multi-profile ``.env`` is a full environment read by its own
     ``ReadEnvironment`` call (``kraken.f90:42-46``), and
@@ -75,8 +78,11 @@ def deck_bottom_columns(env: Environment, run_mode) -> list:
     than assume one of the two.
     """
     bottom = env.bottom
-    if run_mode == RunMode.MODES or not bottom.is_range_dependent:
+    if not bottom.is_range_dependent:
         return [bottom.at(range=0.0)]
+    if run_mode == RunMode.MODES:
+        return [bottom.collapse_range(
+            DEFAULT_COLLAPSE['bottom_range']).columns[0]]
     return list(bottom.columns)
 
 
@@ -257,19 +263,21 @@ def reflection_table_boundaries(env, *, top_reflection_file) -> list:
     return sorted(set(labels))
 
 
-def modes_single_profile(env: Environment, *, user_collapse,
+def modes_single_profile(env: Environment, *, collapse,
                          model_name) -> Environment:
     """Normal modes are range-independent; reduce a range-dependent env to
     one profile (a run()-time numerical requirement — the field path
     segments RD natively, the modes solve cannot).
 
     Each range-dependent quantity — SSP, bathymetry, bottom, surface — is
-    reduced by the ``collapse`` method the caller set for it
-    (``user_collapse``, the constructor's ``collapse=``), else taken at
-    r = 0, the source's column: with no method set, the modes are those of a
-    waveguide that exists at the source. Methods the caller set may take the
-    water column and the seabed from different ranges; that is their choice.
-    The warning names what each quantity was reduced by.
+    reduced by the model's resolved ``collapse`` method for it: the
+    caller's ``collapse=``, else the package defaults every engine reduces
+    by (``_projection.DEFAULT_COLLAPSE``: the seabed by its track median,
+    the bathymetry by its deepest point, the SSP and the surface at r = 0).
+    ``collapse={'bottom_range': 'r0', 'bathymetry': 'r0'}`` takes the
+    source's column. The methods may take the water column and the seabed
+    from different ranges. The warning names what each quantity was
+    reduced by.
     """
     if not env.is_range_dependent:
         return env
@@ -280,26 +288,21 @@ def modes_single_profile(env: Environment, *, user_collapse,
          env.bottom is not None and env.bottom.is_range_dependent),
         ('surface', env.surface.is_range_dependent),
     ) if is_rd]
-    chosen = [f"{key} by {user_collapse[key]!r}" for key in varying
-              if key in user_collapse]
-    at_r0 = [key for key in varying if key not in user_collapse]
-    reduction = ("sampling the r=0 profile of the range-dependent "
-                 "environment." if not chosen else
-                 f"the range-dependent environment is reduced to one "
-                 f"profile: {', '.join(chosen)} (collapse=)"
-                 + (f", {', '.join(at_r0)} at r = 0." if at_r0 else "."))
     warnings.warn(
-        f"{model_name}: normal modes are range-independent; {reduction}",
+        f"{model_name}: normal modes are range-independent; the "
+        f"range-dependent environment is reduced to one profile: "
+        f"{', '.join(f'{key} by {collapse[key]!r}' for key in varying)} "
+        f"(collapse=; collapse={{'bottom_range': 'r0', 'bathymetry': "
+        f"'r0'}} takes the source's column).",
         FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
     )
-    ssp = (env.ssp.collapse_range(user_collapse.get('ssp', 'r0'))
+    ssp = (env.ssp.collapse_range(collapse['ssp'])
            if env.ssp.is_range_dependent else env.ssp)
     bottom = env.bottom
     if bottom is not None and bottom.is_range_dependent:
-        bottom = bottom.collapse_range(user_collapse.get('bottom_range',
-                                                         'r0'))
-    depth = (float(env.bathymetry.collapse_range(user_collapse['bathymetry']))
-             if 'bathymetry' in user_collapse
+        bottom = bottom.collapse_range(collapse['bottom_range'])
+    depth = (float(env.bathymetry.collapse_range(collapse['bathymetry']))
+             if env.bathymetry.varies_with_range
              else float(env.bathymetry.eval(range=0.0)))
     # Carry the full context of the original env: altimetry passes
     # through untouched so ``_project_environment`` still sees it and
@@ -316,8 +319,7 @@ def modes_single_profile(env: Environment, *, user_collapse,
         ssp=ssp,
         altimetry=env.altimetry,
         bottom=bottom,
-        surface=env.surface.collapse_range(user_collapse.get('surface',
-                                                             'r0')),
+        surface=env.surface.collapse_range(collapse['surface']),
         absorption=env.absorption,
         water_density=env.water_density,
         location=env.location,
@@ -532,6 +534,29 @@ def kraken_exe_above_seabed_notice(env, run_mode, *, backend, c_highs,
         f"backend='krakenc' for the leaky modes, or c_high at or below "
         f"{seabed:g} m/s for the trapped modes alone, without the steep paths "
         f"the faster modes carry.", ValidityWarning)
+
+
+def kraken_exe_elastic_notice(env, *, backend,
+                              model_name) -> Optional[Notice]:
+    """``(note, warning)`` when the run's modes binary ``backend`` is
+    kraken.exe and the environment carries an elastic medium — only a forced
+    ``backend='kraken'``, since the automatic choice there is krakenc —
+    else ``None``."""
+    if backend != 'kraken' or not (env.bottom.is_elastic
+                                   or env.surface.is_elastic):
+        return None
+    return Notice(
+        "kraken.exe on elastic media: trapped modes, no elastic material loss",
+        f"{model_name} on kraken.exe over elastic media: it lowers c_high to "
+        f"an elastic half-space's shear speed (Kraken/kraken.f90:209, :221) "
+        f"and its loss perturbation spans the acoustic media only (:728), so "
+        f"it returns the trapped modes, without the elastic media's material "
+        f"attenuation in Im(k). kraken.htm: 'KRAKEN will (if necessary) "
+        f"reduce CHIGH so that only trapped (non-leaky) modes are computed'; "
+        f"'KRAKEN does not at allow for losses in elastic media due to "
+        f"material attenuation. Thus, for attenuating elastic media, KRAKENC "
+        f"should be used.' Use backend='krakenc', or backend=None, for both.",
+        ValidityWarning)
 
 
 def backend_origin(env, *, forced_backend, leaky_modes,

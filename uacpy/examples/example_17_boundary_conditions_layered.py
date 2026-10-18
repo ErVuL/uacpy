@@ -13,9 +13,7 @@ plot.shared_colorbar
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -63,7 +61,7 @@ scenarios = {
         uacpy.Environment(
             name='rough_surface', bathymetry=100, ssp=isovelocity, bottom=sand,
             altimetry=generate_sea_surface(
-                rmax_m=10000, wind_speed_kn=30,
+                rmax=10000, wind_speed_19_5m_kn=30,
                 rng=np.random.default_rng(42))),
         uacpy.Bellhop(backend='fortran')),
     'Ice surface (Bellhop)': (

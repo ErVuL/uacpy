@@ -614,7 +614,7 @@ class TestStaleOutputsAreCleared:
 class TestOasnWhiteNoiseDefaultThroughTheModel:
     """OASES adds ``10**(WNLEVDB/10)`` to every covariance diagonal with no
     off switch (oasnun22.f:228, :1157). The OASN model therefore defaults
-    ``white_noise_level`` to ``None`` — written as -200 dB, whose 1e-20
+    ``white_noise_level_dB`` to ``None`` — written as -200 dB, whose 1e-20
     linear power is numerically nil — while an explicit 0.0 reaches the
     deck as a literal 0 dB re 1 µPa²/Hz per sensor."""
 
@@ -627,7 +627,7 @@ class TestOasnWhiteNoiseDefaultThroughTheModel:
             bottom=uacpy.BoundaryProperties(
                 acoustic_type='half-space', sound_speed=1700.0,
                 density=1.8, attenuation=0.5))
-        model = OASN(surface_noise_level=70.0, verbose=False,
+        model = OASN(surface_noise_level_dB=70.0, verbose=False,
                      work_dir=str(tmp_path), cleanup=False, **kw)
         monkeypatch.setattr(type(model), '_run_subprocess',
                             lambda self, *a, **k: _FakeProc())
@@ -644,7 +644,7 @@ class TestOasnWhiteNoiseDefaultThroughTheModel:
 
     def test_explicit_zero_reaches_the_deck_as_0_dB(self, tmp_path,
                                                     monkeypatch):
-        text = self._deck(tmp_path, monkeypatch, white_noise_level=0.0)
+        text = self._deck(tmp_path, monkeypatch, white_noise_level_dB=0.0)
         assert '70.0 0.0 0.0 0' in text
 
 
@@ -1103,6 +1103,12 @@ class TestContourOffsetIsWarnedOnBothDiscardPaths:
 # ─── OASR: the parameter letter and the transmission flag are independent ──
 
 
+def _resolve_reflection_type_of(model):
+    """The coefficient an OASR model's deck computes."""
+    from uacpy.models.oases.oasr import _resolve_reflection_type
+    return _resolve_reflection_type(model.options, model.reflection_type)
+
+
 @pytest.mark.requires_oases
 class TestReflectionTypeProvenance:
     """``unoasr21.f:349-378``: ``N``/``S``/``B`` each assign ``IPARM`` (the
@@ -1114,13 +1120,27 @@ class TestReflectionTypeProvenance:
 
     @staticmethod
     def _rt(**kw):
-        from uacpy.models.oases.oasr import _resolve_reflection_type
-        model = uacpy.OASR(**kw)
-        return _resolve_reflection_type(model.options, model.reflection_type)
+        return _resolve_reflection_type_of(uacpy.OASR(**kw))
 
-    def test_the_transmission_letter_wins_over_the_parameter_letter(self):
+    def test_the_transmission_letter_reads_the_parameters_transmission(
+            self):
+        # 't' reads trcoef(IPARM): the P-P one under 'N', the P-SV one under
+        # 'S' (oasjun21.f:80-84), so each is labelled by what it is.
         assert self._rt(options='N T t') == 'transmission'
-        assert self._rt(options='S T t') == 'transmission'
+        assert self._rt(options='T t') == 'transmission'
+        assert self._rt(options='S T t') == 'P-SV transmission'
+        assert self._rt(options='N S T t') == 'P-SV transmission'
+        assert self._rt(options='S N T t') == 'transmission'
+
+    def test_the_p_sv_transmission_is_asked_for_by_name(self, tmp_path):
+        from uacpy.io.oases_writer import write_oasr_input
+        model = uacpy.OASR(reflection_type='P-SV transmission')
+        assert _resolve_reflection_type_of(model) == 'P-SV transmission'
+        write_oasr_input(tmp_path / 'r.dat', _oast_pekeris_env(),
+                         _oast_source(), _oast_receiver(),
+                         reflection_type='P-SV transmission')
+        assert (tmp_path / 'r.dat').read_text().splitlines()[1].split() == [
+            'S', 't', 'T']
 
     def test_a_reflection_line_keeps_its_parameter(self):
         assert self._rt(options='N T') == 'P-P'
@@ -1151,7 +1171,7 @@ def test_slowness_sampling_is_refused_after_a_post_construction_mutation():
         bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
                                         sound_speed=1800.0, density=1.8,
                                         attenuation=0.3))
-    model = uacpy.OASR(angles=np.linspace(5.0, 85.0, 9))
+    model = uacpy.OASR(angles_deg=np.linspace(5.0, 85.0, 9))
     model.options = 'N p T'
     with pytest.raises(UnsupportedFeatureError, match="option 'p'"):
         model.run(env, uacpy.Source(depths=50.0, frequencies=100.0),
@@ -1176,6 +1196,32 @@ def _registered_engine(key, **kwargs):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         return entry.load()(**{**dict(entry.example_kwargs), **kwargs})
+
+
+class TestTheReplayPinsTheGridOastAndOasrRecord:
+    """OAST's ``range_min`` / ``range_max`` and OASR's ``angles_deg`` are
+    recorded under the knobs' own names, so ``from_run_settings`` pins the
+    grid the run used instead of deriving it again from the next call."""
+
+    @staticmethod
+    def _replayed(key, model_class):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            first = _registered_engine(key).run_settings(
+                *_registered_carriers(key))
+            return first, model_class.from_run_settings(first)
+
+    def test_oast_pins_its_native_range_grid(self):
+        first, again = self._replayed('oast', uacpy.OAST)
+        assert (again.range_min, again.range_max) == (0.0, 400.0)
+        assert (again.range_min, again.range_max) == (
+            first.engine.range_min, first.engine.range_max)
+
+    def test_oasr_pins_its_angle_grid(self):
+        first, again = self._replayed('oasr', uacpy.OASR)
+        assert again.angles_deg is not None and again.angles_deg.size == 181
+        np.testing.assert_array_equal(again.angles_deg,
+                                      first.engine.angles_deg)
 
 
 @pytest.mark.requires_oases
@@ -1229,7 +1275,6 @@ class TestAReassignedKnobIsCheckedByEveryRun:
 
     @pytest.mark.parametrize('key, kw, match', [
         ('oass', dict(correlation_length=0.0), 'must be a positive length'),
-        ('oass', dict(correlation_length=-5.0), 'volume-scattering switch'),
         ('oasp', dict(n_time_samples=-4), 'n_time_samples must be an integer'),
         ('oasp', dict(n_time_samples=2.5), 'n_time_samples must be an integer'),
         ('oasp', dict(n_time_samples=100),
@@ -1253,6 +1298,12 @@ class TestAReassignedKnobIsCheckedByEveryRun:
          'OASSP: realization must be an integer'),
         ('oassp', dict(n_time_samples=512.5),
          'OASSP: n_time_samples must be an integer'),
+        ('oasp', dict(integrand_plot_step=2.7),
+         'OASP: integrand_plot_step must be an integer >= 0'),
+        ('oasp', dict(integrand_plot_step=-3),
+         'OASP: integrand_plot_step must be an integer >= 0'),
+        ('oast', dict(n_wavenumbers=70000), 'exceeds OASES'),
+        ('oasp', dict(n_wavenumbers=70000), 'exceeds OASES'),
     ])
     def test_a_length_band_or_fft_size_no_run_can_use_is_refused(
             self, key, kw, match):
@@ -1261,7 +1312,18 @@ class TestAReassignedKnobIsCheckedByEveryRun:
         with pytest.raises(ConfigurationError, match=match):
             _registered_engine(key, **kw)
 
+    @pytest.mark.parametrize('key', ['oass', 'oassp'])
+    def test_a_negative_correlation_length_is_volume_scattering_refused_alike(
+            self, key):
+        """OASES reads a negative CL as the volume-scattering record
+        (oaseun31.f:76-90); OASS and OASSP refuse it with one type."""
+        with pytest.raises(UnsupportedFeatureError,
+                           match='volume scattering'):
+            _registered_engine(key, correlation_length=-5.0)
+
     @pytest.mark.parametrize('key, kw', [
+        ('oasp', dict(integrand_plot_step=0)),
+        ('oast', dict(n_wavenumbers=65536)),
         ('oass', dict(correlation_length=10.0)),
         ('oasp', dict(n_time_samples=np.int64(512))),
         ('oasp', dict(freq_min=0.0)),
@@ -1476,12 +1538,13 @@ class TestOptionSKernelFilesAreClearedBeforeLaunch:
 
 @pytest.mark.requires_oases
 class TestPhaseSpeedWindowReachesTheDeck:
-    """``CMIN``/``CMAX`` (Block VII, ``unoast31.f:213``) default to a window
-    derived from the water column alone, which silently excludes an elastic
-    seabed's shear and interface branches — their phase speeds sit *below*
-    the slowest water speed, so they fall outside the derived ``k_max`` and
-    never enter the integral. The writers take ``c_low=``/``c_high=`` to
-    widen it; a knob no constructor can set is a knob nobody can use."""
+    """``CMIN``/``CMAX`` (Block VII, ``unoast31.f:213``) default to the window
+    of :func:`~uacpy.core.engine_defaults.default_c_low`: the slowest speed
+    of every medium, shear speeds included, × 0.85 over an elastic
+    half-space and × 0.90 otherwise (``scooter.f90:193-259``), and 1E8. The
+    model's ``c_low=``/``c_high=`` pin either edge, and a pinned edge reaches
+    the deck as given; a knob no constructor can set is a knob nobody can
+    use."""
 
     @staticmethod
     def _env():
@@ -1511,9 +1574,12 @@ class TestPhaseSpeedWindowReachesTheDeck:
         return [ln.split() for ln in deck
                 if (cmax_of(ln) or 0.0) >= 1.0e7][0]
 
-    def test_the_default_window_comes_from_the_water_column(self, tmp_path):
+    def test_the_default_window_comes_from_the_slowest_medium(self, tmp_path):
+        """The 600 m/s shear speed of the elastic half-space is the slowest
+        speed of the problem, and the half-space is elastic: 0.85 x 600
+        (scooter.f90:193-259, default_c_low)."""
         cmin, cmax = self._block_vii(tmp_path)
-        assert float(cmin) == pytest.approx(1350.0)   # 0.9 * 1500
+        assert float(cmin) == pytest.approx(510.0)    # 0.85 * 600
         assert float(cmax) == pytest.approx(1.0e8)
 
     def test_both_bounds_reach_block_vii(self, tmp_path):
@@ -1736,7 +1802,7 @@ class TestOasesArrayBoundsArePreflighted:
 
     def test_more_discrete_noise_sources_than_nsmax(self, tmp_path):
         from uacpy.io.oases_writer import write_oasn_input
-        sources = [{'depth': 10.0, 'x': 0.0, 'y': 0.0, 'level': 100.0}] * 202
+        sources = [{'depth': 10.0, 'x': 0.0, 'y': 0.0, 'level_dB': 100.0}] * 202
         with pytest.raises(ConfigurationError, match='NSMAX = 201'):
             write_oasn_input(tmp_path / 'oasn_run.dat', _pekeris(),
                              uacpy.Source(depths=50.0, frequencies=100.0),
@@ -1748,7 +1814,7 @@ class TestOasesArrayBoundsArePreflighted:
 
     def test_exactly_nsmax_discrete_sources_is_accepted(self, tmp_path):
         from uacpy.io.oases_writer import write_oasn_input
-        sources = [{'depth': 10.0, 'x': 0.0, 'y': 0.0, 'level': 100.0}] * 201
+        sources = [{'depth': 10.0, 'x': 0.0, 'y': 0.0, 'level_dB': 100.0}] * 201
         out = tmp_path / 'oasn_run.dat'
         write_oasn_input(out, _pekeris(),
                          uacpy.Source(depths=50.0, frequencies=100.0),
@@ -1854,10 +1920,10 @@ class TestOasesSourceRecordHoldsOneDepth:
 
 class TestOastAndOaspTakeWavenumberBounds:
     """``CMIN``/``CMAX`` truncate the horizontal wavenumber axis at
-    ``2*pi*f/cmin`` and ``2*pi*f/cmax`` (``oast.tex:505-515``). Derived from
-    the SSP alone they bound k on the water column, so an elastic seabed's
-    shear and interface branches — phase speeds below the slowest water speed
-    — sit outside ``k_max`` and never enter the integral."""
+    ``2*pi*f/cmin`` and ``2*pi*f/cmax`` (``oast.tex:505-515``). The writers
+    write a pinned ``c_low``/``c_high`` exactly as given; unpinned, they take
+    :func:`~uacpy.core.engine_defaults.default_c_low` (the slowest speed of
+    every medium × 0.90 here, the seabed being fluid) and 1E8."""
 
     @staticmethod
     def _wavenumber_bounds(deck_text):
@@ -2052,7 +2118,8 @@ class TestCmaxReachesOasesAtFullPrecision:
         out = tmp_path / 'a.dat'
         write_oast_input(str(out), _env(), _source(), _receiver(),
                          c_high=1550.0)
-        # cmin is 0.9 * min(SSP) per oases_wavenumber_bounds.
+        # cmin is 0.9 * min(SSP) per oases_wavenumber_bounds (fluid seabed
+        # faster than the water).
         assert '\n1341.0 1550.0\n' in out.read_text()
         assert '1.6e+03' not in out.read_text()
 
@@ -2196,7 +2263,7 @@ class TestEveryDiscreteNoiseSourceReachesTheDeck:
                                       attenuation=0.5))
         # x/y in metres; the deck holds km.
         sources = [{'depth': 80.0, 'x': 1000.0 * (1 + i), 'y': 2000.0,
-                    'level': 120.0 + i}
+                    'level_dB': 120.0 + i}
                    for i in range(n_sources)]
         path = tmp_path / f'n{n_sources}.dat'
         write_oasn_input(path, env, Source(depths=50.0, frequencies=100.0),
@@ -2436,44 +2503,48 @@ class TestOastOasnOaspRefuseUnknownOptionLetters:
                 _oast_source(), _oast_receiver(), options=options)
 
 
-class TestOasnDiscreteBandHonoursItsDocumentedFloor:
-    """``oasn.tex:308`` writes the discrete-band count as ``NWSD >= 10``, and
-    nothing in ``unoasn22.f`` enforces it.
+class TestOasnDiscreteBandCount:
+    """A pinned discrete-band count is written as given: OASES sets no
+    minimum (oasnun22.f:282 runs the three-band split for any
+    ``NWS(2) > 1`` and :305-310 one equidistant band below).
 
-    The only use of ``NWS(2)`` anywhere in that file is as a DIVISOR —
-    ``OFFDB = 60*V*(SLS(3)-SLS(2))/NWS(2)`` at ``:289``, the default complex
-    contour offset. The numerator is the discrete band's slowness span, so the
-    offset scales with the band's sampling INTERVAL: at NWSD = 1 the interval
-    is the entire band and the contour sits ten times further off the real
-    axis than the manual's minimum intends, damping the modal poles the
-    discrete band exists to resolve.
+    ``NWS(2)`` divides OASN's default complex-contour offset,
+    ``OFFDB = 60*V*(SLS(3)-SLS(2))/NWS(2)`` (unoasn22.f:289), the discrete
+    band's slowness span over its count, so a count of 1 sets the offset at
+    the scale of the whole band; JKPS §4.5.5 warns against an offset chosen
+    too large. A count below 10 (uacpy guidance) is therefore noticed.
     """
 
-    def test_the_floor_matches_the_manual(self):
+    def test_the_notice_threshold_is_ten(self):
         from uacpy.io import oases_writer
-        assert oases_writer._OASN_MIN_DISCRETE_SAMPLES == 10
+        assert oases_writer._OASN_FEW_DISCRETE_SAMPLES == 10
 
-    @pytest.mark.parametrize('pinned,expected_discrete', [(1, 10), (8, 10)])
-    def test_a_small_count_is_raised_to_the_floor_with_a_warning(
-            self, pinned, expected_discrete):
+    @pytest.mark.parametrize('pinned', [1, 8, 9])
+    def test_a_small_count_is_written_as_given_with_a_notice(self, pinned):
         from uacpy.io.oases_writer import (
             _OASN_SURFACE_NOISE_SAMPLES, _noise_nw)
         with recorded_warnings() as rec:
             got = _noise_nw(pinned, _OASN_SURFACE_NOISE_SAMPLES)
-        assert int(got.split()[1]) == expected_discrete
-        hits = [w for w in rec if 'NWSD' in str(w.message)]
+        assert got.split() == [str(pinned), str(pinned),
+                               str(max(1, pinned // 4))]
+        hits = [w for w in rec
+                if 'discrete spectral band' in str(w.message)]
         assert len(hits) == 1
-        assert 'unoasn22.f:289' in str(hits[0].message)
+        message = str(hits[0].message)
+        assert 'written as given' in message
+        assert 'unoasn22.f:283-291' in message
+        assert 'uacpy guidance' in message
+        assert ('one equidistant band' in message) == (pinned == 1)
 
     @pytest.mark.parametrize('pinned', [10, 40, 400])
-    def test_a_count_at_or_above_the_floor_is_untouched_and_silent(
-            self, pinned):
+    def test_a_count_of_ten_or_more_is_written_silently(self, pinned):
         from uacpy.io.oases_writer import (
             _OASN_SURFACE_NOISE_SAMPLES, _noise_nw)
         with recorded_warnings() as rec:
             got = _noise_nw(pinned, _OASN_SURFACE_NOISE_SAMPLES)
         assert got.split()[:2] == [str(pinned), str(pinned)]
-        assert [w for w in rec if 'NWSD' in str(w.message)] == []
+        assert [w for w in rec
+                if 'discrete spectral band' in str(w.message)] == []
 
     @pytest.mark.parametrize('nw', [None, 0, -5])
     def test_an_unpinned_count_writes_the_blocks_own_default(self, nw):
@@ -2488,7 +2559,7 @@ class TestOasnDeepNoiseKeepsOasesNormalisation:
     ``SQRT(FREQ/V)`` as for plane geometry (:705): a deep-only run reads
     ``10·log10(c/f)`` dB above the same sheet computed after a negligible
     surface block. uacpy keeps OASES's level and documents it on
-    ``OASN(deep_noise_level=)``."""
+    ``OASN(deep_noise_level_dB=)``."""
 
     def test_a_deep_only_run_reads_ten_log_c_over_f_high(
             self, tmp_path, monkeypatch):
@@ -2503,8 +2574,8 @@ class TestOasnDeepNoiseKeepsOasesNormalisation:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 cov = OASN(verbose=False, work_dir=work_dir,
-                           deep_noise_level=50.0,
-                           surface_noise_level=surface_level
+                           deep_noise_level_dB=50.0,
+                           surface_noise_level_dB=surface_level
                            ).compute_covariance(
                     _oast_pekeris_env(),
                     uacpy.Source(depths=10.0, frequencies=100.0),
@@ -2598,7 +2669,7 @@ class TestOasesDeckTitleFitsTheBinarysBuffer:
 
 class TestOasesDeckTitleIsTheEnvironmentName:
     """Block I carries ``env.name`` itself. ``Environment`` coerces an
-    absent or falsy constructor name to ``'unnamed'`` (``_sanitize_title``),
+    absent or falsy constructor name to ``'unnamed'`` (``sanitize_title``),
     so every deck a constructor-built environment produces is titled by the
     environment — no writer holds a fallback title of its own."""
 
@@ -2642,14 +2713,13 @@ class TestOaspBroadbandStampsThePhysicalCMax:
         assert 'c_max' not in result.metadata
 
 
-class TestOaspTracesSpanItsTimeSampleCount:
-    """OASP states its FFT length NX as ``Field.synthesis_floor``, the
-    length the synthesis floors its grid at, so a trace synthesised from its
-    transfer function has at least NX samples: OASP's own record of NX
-    samples at DT, ``DLFREQ = 1/(DT*NX)`` (unoasp22.f:237)."""
+class TestOaspRecordsItsTimeSampleCount:
+    """OASP states its FFT length NX as ``Field.synthesis_floor``: OASP's
+    own record of NX samples at DT, ``DLFREQ = 1/(DT*NX)``
+    (unoasp22.f:237)."""
 
     @pytest.mark.requires_oases
-    def test_a_trace_has_at_least_the_stamped_sample_count(self):
+    def test_the_field_states_the_runs_fft_length(self):
         env = Environment(name='nt_floor', bathymetry=100.0, ssp=1500.0,
                           bottom=make_halfspace(1700.0, density=1.8,
                                             attenuation=0.5))
@@ -2660,9 +2730,7 @@ class TestOaspTracesSpanItsTimeSampleCount:
             warnings.simplefilter('ignore')
             tf = OASP(n_time_samples=256, verbose=False).run(
                 env, src, rcv, run_mode=RunMode.BROADBAND)
-            trace = tf.to_time_trace(depth=50.0, range=400.0)
         assert tf.synthesis_floor == 256
-        assert trace.coords['time'].size >= 256
 
 
 class TestLogSweptFrequenciesRequireAPositiveLowerBound:
@@ -3126,7 +3194,7 @@ class TestOasnSaysHowItWillRunBeforeLaunching:
 
     def test_a_noise_field_leaves_only_the_ranges_notice(self):
         settings, _ = self._call(
-            OASN(verbose=False, surface_noise_level=70.0), 'run_settings')
+            OASN(verbose=False, surface_noise_level_dB=70.0), 'run_settings')
         assert not any('no noise source' in n
                        for n in (x.message for x in settings.engine.notices))
         assert any('receiver.ranges is ignored' in n
@@ -3140,7 +3208,7 @@ class TestOasnSaysHowItWillRunBeforeLaunching:
         and is not a notice; one positive range, or two ranges of which the
         first is 0, is."""
         env = Environment(bathymetry=100.0, ssp=1500.0)
-        settings = OASN(verbose=False, surface_noise_level=70.0).run_settings(
+        settings = OASN(verbose=False, surface_noise_level_dB=70.0).run_settings(
             env, Source(depths=50.0, frequencies=100.0),
             Receiver(depths=[20.0, 40.0], ranges=ranges),
             run_mode=RunMode.COVARIANCE)
@@ -3151,3 +3219,269 @@ class TestOasnSaysHowItWillRunBeforeLaunching:
         _, said = self._call(OASN(verbose=False), 'validate_inputs')
         assert not [m for m in said if 'receiver.ranges is ignored' in m
                     or 'no noise source' in m], said
+
+
+class TestOasesAnnouncesTheInterfaceWaveItsDerivedCLowLeavesOut:
+    """Over an elastic layer on a FLUID half-space the derived c_low is
+    0.90 x the layer's shear speed (``scooter.f90:258``), above its Scholte
+    wave (~0.85 c_s, JKPS §5.10.5). OAST, OASP and OASN say so when the
+    geometry reaches within one interface wavelength of the seafloor
+    (0.85 · 300 / 20 = 12.75 m here), as Scooter does; a pinned c_low, a
+    geometry far from the bed, or an elastic HALF-SPACE (c_low 0.85 x its
+    shear speed, the wave's own) says nothing."""
+
+    @staticmethod
+    def _env():
+        from uacpy.core import SeabedColumn, SedimentLayer
+        return Environment(
+            bathymetry=50.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(20.0, sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5, shear_speed=300.0,
+                                      shear_attenuation=0.5)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1800.0,
+                    density=2.0, attenuation=0.5)))
+
+    @staticmethod
+    def _said(model, zs, zr):
+        kw = ({'run_mode': RunMode.COVARIANCE} if isinstance(model, OASN)
+              else {})
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            notices = model.run_settings(
+                TestOasesAnnouncesTheInterfaceWaveItsDerivedCLowLeavesOut._env(),
+                Source(depths=zs, frequencies=20.0),
+                Receiver(depths=zr, ranges=[200.0, 2000.0]),
+                **kw).engine.notices
+        return [n.message for n in notices if 'Scholte' in n.message]
+
+    @staticmethod
+    def _models(**kw):
+        from uacpy.models import OAST
+        return [OAST(**kw), OASP(**kw),
+                OASN(surface_noise_level_dB=60.0, **kw)]
+
+    @pytest.mark.parametrize('index', [0, 1, 2])
+    def test_a_receiver_near_the_seafloor_is_told(self, index):
+        model = self._models()[index]
+        said = self._said(model, 25.0, [10.0, 49.5])
+        assert len(said) == 1, said
+        assert said[0].startswith(type(model).__name__ + ':')
+        assert 'c_low below 255 m/s' in said[0]
+
+    @pytest.mark.parametrize('index', [0, 1, 2])
+    def test_far_from_the_bed_or_a_pinned_c_low_says_nothing(self, index):
+        assert self._said(self._models()[index], 25.0, [10.0, 30.0]) == []
+        # 1000 m/s lies above the 255 m/s interface wave, so only the pin
+        # itself silences the notice.
+        assert self._said(self._models(c_low=1000.0)[index], 25.0,
+                          [10.0, 49.5]) == []
+
+    @pytest.mark.parametrize('index', [0, 1, 2])
+    def test_an_elastic_half_space_takes_its_interface_wave_in(self, index):
+        """The cs 300 seabed as a half-space: c_low = 0.85 x 300 = 255 m/s
+        (``scooter.f90:255-256``), the wave's own speed, so a receiver
+        0.5 m above the bed hears no notice and the deck's CMIN is 255."""
+        env = Environment(
+            bathymetry=50.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5, shear_speed=300.0,
+                                      shear_attenuation=0.5))
+        model = self._models()[index]
+        kw = ({'run_mode': RunMode.COVARIANCE} if isinstance(model, OASN)
+              else {})
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            settings = model.run_settings(
+                env, Source(depths=25.0, frequencies=20.0),
+                Receiver(depths=[10.0, 49.5], ranges=[200.0, 2000.0]), **kw)
+        assert [n.message for n in settings.engine.notices
+                if 'Scholte' in n.message] == []
+        if not isinstance(model, OASN):
+            assert settings.engine.c_low == pytest.approx(0.85 * 300.0)
+            assert "shear speed" in settings.engine.c_low_origin
+
+
+class TestOasesSaysWhatARunDoesNotUse:
+    """Ruling 23a: a setting the run does not read gets a notice."""
+
+    @staticmethod
+    def _oasn_notices(model, mode):
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return [n.message for n in model.run_settings(
+                env, Source(depths=50.0, frequencies=100.0),
+                Receiver(depths=[20.0, 40.0], ranges=[0.0]),
+                run_mode=mode).engine.notices]
+
+    def test_a_replica_bound_on_a_covariance_run_is_said(self):
+        said = self._oasn_notices(
+            OASN(surface_noise_level_dB=60.0, replica_xmin=500.0,
+                 replica_xmax=900.0), RunMode.COVARIANCE)
+        hits = [m for m in said if 'replica grid is read by REPLICA' in m]
+        assert len(hits) == 1
+        assert 'replica_xmin=500' in hits[0] and 'replica_xmax=900' in hits[0]
+        assert not [m for m in self._oasn_notices(
+            OASN(surface_noise_level_dB=60.0), RunMode.COVARIANCE)
+            if 'replica grid' in m]
+
+    def test_a_noise_field_on_a_replica_run_is_said_and_not_integrated(
+            self):
+        """A replica run's deck carries 'R' and no 'N': under 'N' OASN
+        integrates the noise covariance (CALNSE, unoasn22.f:172-174), which
+        a replica run never returns."""
+        said = self._oasn_notices(
+            OASN(surface_noise_level_dB=60.0, replica_nx=5, replica_nz=5),
+            RunMode.REPLICA)
+        assert len([m for m in said
+                    if 'the noise field given is not used' in m]) == 1
+        assert not [m for m in self._oasn_notices(
+            OASN(replica_nx=5, replica_nz=5), RunMode.REPLICA)
+            if 'noise field' in m]
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            engine = OASN(surface_noise_level_dB=60.0).run_settings(
+                env, Source(depths=50.0, frequencies=100.0),
+                Receiver(depths=[20.0, 40.0], ranges=[0.0]),
+                run_mode=RunMode.REPLICA).engine
+        assert engine.options.split() == ['J', 'R']
+
+    def test_the_replica_counts_resolve_on_a_replica_run_only(self):
+        """``None`` derives 50 / 1 / 20 on a REPLICA run, recorded as run;
+        a COVARIANCE run reads no replica grid, so its record keeps them
+        unset and a pinned count is noticed as unused."""
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        args = (env, Source(depths=50.0, frequencies=100.0),
+                Receiver(depths=[20.0, 40.0], ranges=[0.0]))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            replica = OASN().run_settings(
+                *args, run_mode=RunMode.REPLICA).engine
+            covariance = OASN(surface_noise_level_dB=60.0).run_settings(
+                *args, run_mode=RunMode.COVARIANCE).engine
+        assert (replica.replica_nx, replica.replica_ny,
+                replica.replica_nz) == (50, 1, 20)
+        assert (covariance.replica_nx, covariance.replica_ny,
+                covariance.replica_nz) == (None, None, None)
+        hits = [m for m in self._oasn_notices(
+            OASN(surface_noise_level_dB=60.0, replica_nz=7), RunMode.COVARIANCE)
+            if 'replica grid is read by REPLICA' in m]
+        assert len(hits) == 1 and 'replica_nz=7' in hits[0]
+
+    def test_a_pinned_oasp_fc_beside_a_requested_band_is_said(self):
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            settings = OASP(fc=250.0).run_settings(
+                env, Source(depths=50.0, frequencies=100.0),
+                Receiver(depths=[50.0], ranges=[1000.0]),
+                run_mode=RunMode.BROADBAND,
+                frequencies=np.linspace(50.0, 150.0, 11))
+        assert settings.engine.fc == 250.0
+        assert len([n for n in settings.engine.notices
+                    if 'OASP(fc=250) changes nothing computed' in n.message
+                    ]) == 1
+
+    @pytest.mark.parametrize('mode, flags', [
+        (RunMode.REFLECTION, dict(broadband=True)),
+        (RunMode.REPLICA, dict(reverberation=True)),
+        (RunMode.BROADBAND, dict(broadband=True)),
+    ])
+    def test_a_for_mode_flag_the_mode_does_not_read_warns(self, mode, flags):
+        from uacpy.core.exceptions import FallbackWarning
+        from uacpy.models.oases import OASES
+        with pytest.warns(FallbackWarning, match='is not read for run_mode'):
+            OASES.for_mode(mode, **flags)
+
+    def test_a_for_mode_flag_the_mode_reads_is_silent(self):
+        from uacpy.models.oases import OASES
+        with recorded_warnings() as rec:
+            model = OASES.for_mode(RunMode.COHERENT_TL, broadband=True)
+        assert type(model).__name__ == 'OASP'
+        assert not [w for w in rec if 'is not read' in str(w.message)]
+
+
+class TestTheRoughnessNoticeTakesTheMediumAboveTheInterface:
+    """The Rayleigh parameter's wavenumber is that of the medium the
+    reflected path lengthens in (JKPS §1.7): the water at the seafloor, the
+    sediment layer above a sub-bottom interface."""
+
+    @staticmethod
+    def _env():
+        from uacpy.core.bottom import SeabedColumn
+        from uacpy.core.boundary import SedimentLayer
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=10.0, sound_speed=1700.0,
+                                      density=1.8, attenuation=0.2)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1900.0,
+                    density=2.0, attenuation=0.3)))
+
+    @pytest.mark.parametrize('offset, speed', [(0, 1500.0), (1, 1700.0)],
+                             ids=['seafloor', 'below-the-layer'])
+    def test_the_speed_is_the_layer_above(self, offset, speed):
+        from uacpy.io.oases_writer import oass_bottom_interfaces
+        from uacpy.models.oases._common import _roughness_notice
+        from uacpy.sonar.scattering import _non_perturbative_roughness_notice
+        env = self._env()
+        first_bottom, _ = oass_bottom_interfaces(env)
+        got = _roughness_notice('OASS', env, first_bottom + offset, 1000.0,
+                                1.0, oass_index_space=True)
+        want = _non_perturbative_roughness_notice('OASS', 1000.0, 1.0,
+                                                  sound_speed=speed)
+        assert want is not None and got.message == want
+
+
+@pytest.mark.requires_oases
+class TestABoundaryWithoutADeckSpellingIsRefusedBeforeTheRun:
+    """OASES spells a sea surface only as vacuum or a fluid/elastic
+    half-space and a seabed only as geoacoustic layers over a half-space or
+    a vacuum (``oases_writer.refuse_boundaries_without_deck_spelling``); a
+    rigid boundary has neither. The refusal is made in the checking stage
+    (``OASES._validate_engine``), so ``run_settings()`` refuses exactly what
+    ``run()`` refuses. OASR's deck has no sea surface, so it refuses the
+    seabed only."""
+
+    RIGID = BoundaryProperties(acoustic_type='rigid')
+    SURFACE = r"OASES does not support: a 'rigid' sea surface"
+    BOTTOM = r"OASES does not support: a bottom with acoustic_type='rigid'"
+
+    @staticmethod
+    def _call(name, env, how, tmp_path):
+        kw = {'OASN': dict(surface_noise_level_dB=60.0),
+              'OASS': dict(correlation_length=10.0),
+              'OASSP': dict(correlation_length=10.0)}.get(name, {})
+        model = getattr(uacpy, name)(verbose=False, work_dir=tmp_path, **kw)
+        return getattr(model, how)(
+            env, Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=[30.0, 50.0],
+                     ranges=np.linspace(500.0, 2000.0, 4)))
+
+    @pytest.mark.parametrize('how', ['run_settings', 'run'])
+    @pytest.mark.parametrize('name',
+                             ['OAST', 'OASP', 'OASN', 'OASS', 'OASSP'])
+    def test_a_rigid_surface(self, name, how, tmp_path):
+        # A rough seabed, which OASS and OASSP need to reach their own checks.
+        env = make_pekeris(surface=self.RIGID, roughness=0.5)
+        with pytest.raises(UnsupportedFeatureError, match=self.SURFACE):
+            self._call(name, env, how, tmp_path)
+
+    @pytest.mark.parametrize('how', ['run_settings', 'run'])
+    @pytest.mark.parametrize('name',
+                             ['OAST', 'OASP', 'OASN', 'OASR', 'OASS',
+                              'OASSP'])
+    def test_a_rigid_bottom(self, name, how, tmp_path):
+        env = Environment(bathymetry=100.0, ssp=1500.0, bottom=self.RIGID)
+        with pytest.raises(UnsupportedFeatureError, match=self.BOTTOM):
+            self._call(name, env, how, tmp_path)
+
+    def test_oasr_does_not_read_the_surface(self, tmp_path):
+        settings = self._call('OASR', make_pekeris(surface=self.RIGID),
+                              'run_settings', tmp_path)
+        assert settings.engine is not None

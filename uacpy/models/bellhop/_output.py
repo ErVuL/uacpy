@@ -6,6 +6,7 @@ restored with no-data cells NaN, provenance and output paths stamped."""
 import re
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -16,12 +17,12 @@ from uacpy.core.results import ResultStack
 from uacpy.core.results._superposition import (restack_source_depths,
                                                split_source_depths)
 from uacpy.io.oalib_reader import (
-    read_arr_file, read_prt, read_ray_file, read_shd_file,
+    read_arr_file, read_ray_file, read_shd_file,
 )
 from uacpy.models._extract import (
     attach_output_paths, mask_unresolvable_depths, stamp_result,
 )
-from uacpy.models._launch import require_output
+from uacpy.models._launch import _read_prt_if_present, require_output
 from uacpy.models.bellhop._backend import arrivals_need_merge
 from uacpy.models.bellhop._tables import grid_is_paired, writes_origin_column
 
@@ -62,6 +63,21 @@ _BELLHOP_OUTPUT = {
 _PRT_MAX_ARRIVALS = re.compile(r'Maximum # of arrivals\s*=\s*(\d+)')
 
 
+#: The beam count the binary traced, which every engine prints to the
+#: ``.prt`` (``Bellhop/angleMod.f90:70``,
+#: ``bellhopcuda/src/module/rayangles.hpp:149-150``).
+_PRT_N_BEAMS = re.compile(r'Number of beams in elevation\s*=\s*(\d+)')
+
+
+def chosen_beam_count(work_dir, base_name) -> Optional[int]:
+    """The number of beams the binary traced, as its ``.prt`` reports it
+    (:data:`_PRT_N_BEAMS`); ``None`` when the ``.prt`` holds no count.
+    With ``n_beams=0`` the binary chooses it (``angleMod.f90:38-51``)."""
+    found = _PRT_N_BEAMS.search(
+        _read_prt_if_present(Path(work_dir) / f'{base_name}.prt') or '')
+    return int(found.group(1)) if found else None
+
+
 def read_bellhop_output(work_dir, base_name, run_type, *, model_name,
                         grid_type, backend, exe):
     """Read the one output ``_BELLHOP_OUTPUT[run_type]`` names, as its io
@@ -100,7 +116,7 @@ def warn_if_arrival_table_filled(result, work_dir, base_name) -> None:
     (``bellhopcuda/src/arrivals.hpp:113-119``), and both write only the
     capacity, ``( Maximum # of arrivals = N )``, to the ``.prt``.
     """
-    prt = read_prt(Path(work_dir) / f'{base_name}.prt') or ''
+    prt = _read_prt_if_present(Path(work_dir) / f'{base_name}.prt') or ''
     found = _PRT_MAX_ARRIVALS.search(prt)
     if not found:
         return

@@ -382,7 +382,7 @@ CONVERTED_SITES = [
     # Same shape again: ``FrancoisGarrison`` is built by ``@carrier`` so the
     # fitted-envelope notice lands on the user's line from a hand-built model
     # and from ``FrancoisGarrison.from_temperature_salinity`` alike; the frequency notice is
-    # the base class's, raised once per ``alpha`` / ``alpha_dB_per_m`` call.
+    # the base class's, raised once per ``table`` / ``_alpha_dB_per_m_at_frequency`` call.
     ('core/absorption.py', 'FrancoisGarrison.__post_init__', 1),
     ('core/absorption.py', 'Absorption._check_frequency_range', 1),
     # One helper for both seabed carriers (``SedimentLayer`` and
@@ -404,12 +404,12 @@ CONVERTED_SITES = [
     ('core/results/field.py', 'Field._warn_if_frequency_axis_undersamples', 1),
     ('core/results/field.py', 'Field._warn_if_phase_view_aliases', 2),
     ('core/results/field.py', 'Field._warn_if_undersampled', 2),
-    # The array half of the synthesis, reached from the Field methods, from
-    # BeamformedField.to_time_trace and from
+    # The array half of the synthesis, reached from the Field methods (and
+    # BeamformedField.to_time_trace through them) and from
     # acoustic_signal.synthesize_time_series at different depths.
     ('acoustic_signal/_synthesis.py', 'record_start', 3),
     ('acoustic_signal/_synthesis.py', 'warn_unsolved_bins', 1),
-    ('core/results/_field_synthesis.py', '_synthesize_time_series', 1),
+    ('core/results/_field_synthesis.py', '_check_range_span', 1),
     ('acoustic_signal/_synthesis.py', 'reduced_record_starts', 3),
     ('acoustic_signal/_synthesis.py', 'synthesize_traces', 1),
     # One window builder for the tone extractor and the Fourier synthesis,
@@ -422,12 +422,11 @@ CONVERTED_SITES = [
     ('core/acoustics/modal.py', '_modal_attenuation', 1),
     ('core/acoustics/modal.py', '_water_column_term', 1),
     ('core/acoustics/modal.py', '_check_water_only_tabulation', 1),
-    ('core/acoustics/modal.py', '_halfspace_tail_term', 3),
+    ('core/acoustics/modal.py', '_halfspace_tail_term', 2),
     ('core/acoustics/modal.py', '_warn_if_depth_axis_underresolves', 1),
     ('core/results/reflection.py', 'ReflectionCoefficient._resolve_axes', 1),
     ('core/sediment.py', 'grain_size_to_geoacoustics', 1),
     ('core/altimetry.py', 'generate_sea_surface', 1),
-    ('data/_geo.py', 'capped_n_points', 1),
     ('data/_netcdf.py', 'NetcdfGrid._bounded', 1),
     ('data/bathymetry.py', '_fetch_bathy_grid_backend', 1),
     ('data/bathymetry.py', '_fetch_bathy_transect_backend', 2),
@@ -449,24 +448,21 @@ CONVERTED_SITES = [
     ('core/acoustics/wavenumber.py', '_warn_zero_ranges', 1),
     ('io/oalib_reader.py', '_parse_flp', 1),
     ('io/oalib_reader.py', 'read_shd_bin', 2),
-    ('io/oases_reader.py', '_oast_curve_slots', 1),
-    ('io/oases_reader.py', '_read_oasp_trf_binary', 1),
+    ('io/_parsers.py', '_oast_curve_slots', 1),
+    ('io/_parsers.py', '_read_oasp_trf_binary', 1),
     ('io/oases_writer.py', '_check_n_time_samples', 1),
-    ('io/oases_writer.py', '_check_n_wavenumbers', 1),
     ('io/oases_writer.py', '_check_ssp_layer_count', 1),
     ('io/oases_writer.py', '_emit_bottom_layers', 1),
-    ('io/oases_writer.py', '_format_upper_halfspace', 1),
     ('io/oases_writer.py', '_noise_nw', 1),
     ('io/oases_writer.py', '_warn_oasr_ignores_volume_attenuation', 1),
     ('io/oases_writer.py', '_warn_rough_gradient_surface', 1),
     ('io/oases_writer.py', '_write_oases_header', 1),
     ('io/oases_writer.py', '_write_oasn_replica_block', 1),
     ('io/oases_writer.py', 'write_oassp_input', 1),
-    ('io/refl_io.py', 'stage_reflection_file', 2),
+    ('io/refl_io.py', 'stage_reflection_file', 3),
     ('parallel.py', '_reap_scratch_root', 2),
     ('sonar/reverberation.py', '_warn_if_cell_is_not_short', 1),
     ('sonar/scattering.py', '_warn_outside_chapman_harris_fit', 3),
-    ('sonar/sonar_equation.py', 'detection_range', 1),
     ('sonar/target_strength.py', '_warn_below_geometric', 1),
     ('visualization/plots/_common.py', '_plot_warn', 1),
     ('models/bellhop/_backend.py', 'warn_on_engine_stdout_warnings', 1),
@@ -475,7 +471,7 @@ CONVERTED_SITES = [
     # holds for every warning, and a second in-package door added later
     # (see test_a_warning_reached_through_a_package_frame_names_the_caller)
     # cannot move the attribution.
-    ('acoustic_signal/generate.py', 'synthesize_noise_from_psd', 4),
+    ('acoustic_signal/generate.py', 'synthesize_noise_from_psd', 1),
     ('acoustic_signal/channel.py', 'impulse_response_from_transfer_function',
      2),
     ('acoustic_signal/bands.py', '_band_levels', 1),
@@ -502,20 +498,13 @@ def _through_a_package_frame(function, *args, **kwargs):
 
 def _signal_warning_cases():
     from uacpy.acoustic_signal import (
-        decidecade_band_levels, impulse_response_from_transfer_function,
+        band_levels, impulse_response_from_transfer_function,
         inverse_cwt, synthesize_noise_from_psd)
     ones = np.ones(10)
-    band = np.linspace(10.0, 500.0, 10)
     return [
         ('psd above Nyquist', synthesize_noise_from_psd,
          (ones, np.linspace(10.0, 1000.0, 10)),
          dict(sample_rate=1000.0, nfft=1024), 'above the Nyquist'),
-        ('nfft below 16', synthesize_noise_from_psd, (ones, band),
-         dict(nfft=8), 'below the minimum 16'),
-        ('nfft above the maximum', synthesize_noise_from_psd, (ones, band),
-         dict(nfft=2 * 262144), 'clamping'),
-        ('nfft not a power of two', synthesize_noise_from_psd, (ones, band),
-         dict(nfft=1000), 'not a power of two'),
         ('H above Nyquist', impulse_response_from_transfer_function,
          (np.ones(5),),
          dict(frequencies=np.array([0.0, 100.0, 200.0, 300.0, 400.0]),
@@ -524,7 +513,7 @@ def _signal_warning_cases():
          (np.ones(4),),
          dict(frequencies=np.array([0.0, 100.0, 300.0, 400.0]),
               sample_rate=1000.0), 'not uniformly spaced'),
-        ('coarse PSD grid', decidecade_band_levels,
+        ('coarse PSD grid', band_levels,
          (np.ones(5),), dict(frequencies=np.linspace(0.0, 1000.0, 5)),
          'too coarse'),
         ('non-uniform CWT scales', inverse_cwt,
@@ -537,8 +526,7 @@ def _signal_warning_cases():
 
 
 @pytest.mark.parametrize('label', [
-    'psd above Nyquist', 'nfft below 16', 'nfft above the maximum',
-    'nfft not a power of two', 'H above Nyquist', 'H off the DFT grid',
+    'psd above Nyquist', 'H above Nyquist', 'H off the DFT grid',
     'coarse PSD grid', 'non-uniform CWT scales', 'single CWT scale'])
 def test_a_warning_reached_through_a_package_frame_names_the_caller(label):
     cases = {c[0]: c[1:] for c in _signal_warning_cases()}

@@ -24,6 +24,7 @@ from uacpy.data import (
 )
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.tests._cache_builders import _skip_or_fail
+from uacpy.tests.conftest import recorded_warnings
 
 _WIND_CSV = ("time,zlev,latitude,longitude,{var}\n"
              "UTC,m,degrees_north,degrees_east,m s-1\n"
@@ -146,7 +147,10 @@ def test_fetch_wind_transect(monkeypatch):
     assert track.data == pytest.approx([ms_to_knots(6.0)] * 3)
     assert track.ranges.shape == (3,)
     assert (track.lats[0], track.lons[0]) == (50.0, 0.0)
-    assert track.provenance.requested_date == '2020-01-01'
+    # One record per waypoint, each with the step read.
+    assert len(track.provenance) == 3
+    assert {p.requested_date for p in track.provenance} == {'2020-01-01'}
+    assert {p.data_date for p in track.provenance} == {'2020-01-01T00:00:00Z'}
     pytest.importorskip('xarray')
     ds = track.to_xarray()
     assert ds['data'].dims == ('range',)
@@ -169,7 +173,9 @@ def wind_cache(tmp_path, monkeypatch):
     lon = np.linspace(-179.5, 179.5, 24)
     speed = np.full((12, lat.size, lon.size), np.nan)
     speed[2, 6, 12] = 8.5                        # March, near (0, 0)
-    np.savez_compressed(wdir / wind_local.WIND_FILE, lat=lat, lon=lon, speed=speed)
+    np.savez_compressed(wdir / wind_local.WIND_FILE, lat=lat, lon=lon,
+                        speed=speed,
+                        years=np.arange(1991, 2021, dtype=np.int32))
     return root
 
 
@@ -195,6 +201,51 @@ def test_fetch_wind_local_dispatch(wind_cache):
                            source='local') == pytest.approx(ms_to_knots(8.5))
 
 
+def test_a_climatology_wind_transect_is_dated_by_its_month_and_period(
+        wind_cache):
+    """The cached climatology is not the day's wind: the transect's record
+    says which month and reference period it read, as the point read's
+    does."""
+    track = data.fetch_wind_transect((0.6, 0.6), (0.7, 0.7), n_points=2,
+                                     date='2021-03-15', source='local')
+    assert [p.data_date for p in track.provenance] == \
+        ['month 03, 1991-2020 (climatology)'] * 2
+    assert [p.requested_date for p in track.provenance] == ['2021-03-15'] * 2
+    _speed, point = wind_live.wind_at((0.6, 0.6), date='2021-03-15',
+                                      source='local')
+    assert point == track.provenance[0]
+
+
+def test_an_auto_wind_transect_keeps_one_waypoint_per_climatology_cell(
+        tmp_path, monkeypatch):
+    # A 1° climatology with nodes at half degrees: 0.2 → 3.2 °E along the
+    # equator crosses the cells of 0.5, 1.5, 2.5 and 3.5 °E.
+    root = tmp_path / 'wind_1deg'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    wind_local._CLIM.clear()
+    wdir = root / 'wind'; wdir.mkdir(parents=True)
+    lat = np.linspace(-89.5, 89.5, 180)
+    lon = np.linspace(-179.5, 179.5, 360)
+    np.savez_compressed(wdir / wind_local.WIND_FILE, lat=lat, lon=lon,
+                        speed=np.full((12, lat.size, lon.size), 8.5),
+                        years=np.arange(1991, 2021, dtype=np.int32))
+    track = data.fetch_wind_transect((0.0, 0.2), (0.0, 3.2), date='2021-03-15',
+                                     n_points='auto', source='local')
+    assert [p.data_point[1] for p in track.provenance] == \
+        pytest.approx([0.5, 1.5, 2.5, 3.5])
+    assert (track.lons[0], track.lons[-1]) == pytest.approx((0.2, 3.2))
+
+
+def test_an_auto_wind_transect_on_the_live_service_is_refused(monkeypatch):
+    calls = []
+    monkeypatch.setattr(wind_live, 'http_get',
+                        lambda *a, **k: calls.append(a))
+    with pytest.raises(ConfigurationError, match="source='local'"):
+        data.fetch_wind_transect((0.0, 0.2), (0.0, 3.2), date='2021-03-15',
+                                 n_points='auto')
+    assert calls == []
+
+
 def test_the_wind_source_matches_in_any_case(wind_cache):
     assert data.fetch_wind((0.6, 0.6), date='2021-03-15',
                            source='LOCAL') == pytest.approx(ms_to_knots(8.5))
@@ -212,9 +263,19 @@ def test_the_wave_source_matches_in_any_case(spelling, order):
 
 # ── waves ─────────────────────────────────────────────────────────────────────
 
-def test_ww3_fetch_hs(monkeypatch):
+def _ww3_hs(point):
+    """The WaveWatch III wave height at ``point``, through fetch_waves."""
+    return waves_mod.fetch_waves(point, date='2020-01-01', source='ww3').hs
+
+
+def test_ww3_wave_height(monkeypatch):
     monkeypatch.setattr(ww3_live, 'http_get', _ww3_server(2.4))
-    assert ww3_live.fetch_hs((50.0, 0.0), date='2020-01-01') == pytest.approx(2.4)
+    assert _ww3_hs((50.0, 0.0)) == pytest.approx(2.4)
+
+
+def test_the_one_line_ww3_reader_is_gone():
+    # fetch_waves(source='ww3').hs is the one spelling of a WW3 read.
+    assert not hasattr(ww3_live, 'fetch_hs')
 
 
 @pytest.mark.parametrize('value, answers', [(0.0, True), (-999.0, False)],
@@ -222,10 +283,10 @@ def test_ww3_fetch_hs(monkeypatch):
 def test_a_negative_wave_height_reads_as_no_value(monkeypatch, value, answers):
     monkeypatch.setattr(ww3_live, 'http_get', _ww3_server(value))
     if answers:
-        assert ww3_live.fetch_hs((50.0, 0.0), date='2020-01-01') == value
+        assert _ww3_hs((50.0, 0.0)) == value
     else:
         with pytest.raises(DataFetchError, match='no wave height'):
-            ww3_live.fetch_hs((50.0, 0.0), date='2020-01-01')
+            _ww3_hs((50.0, 0.0))
 
 
 @pytest.mark.parametrize('value, answers', [(0.0, True), (-999.0, False)],
@@ -243,13 +304,13 @@ def test_a_negative_scalar_wind_speed_reads_as_no_value(monkeypatch, value,
 def test_ww3_western_longitude(monkeypatch):
     # lon=-158 must be sent as 202 on the [0, 360) axis.
     monkeypatch.setattr(ww3_live, 'http_get', _ww3_server(2.4))
-    assert ww3_live.fetch_hs((21.0, -158.0), date='2020-01-01') == pytest.approx(2.4)
+    assert _ww3_hs((21.0, -158.0)) == pytest.approx(2.4)
 
 
 def test_ww3_land_raises(monkeypatch):
     monkeypatch.setattr(ww3_live, 'http_get', _ww3_server('NaN'))
     with pytest.raises(DataFetchError, match='no wave height'):
-        ww3_live.fetch_hs((50.0, 0.0), date='2020-01-01')
+        _ww3_hs((50.0, 0.0))
 
 
 def test_ww3_network_failure_is_named_not_called_land(monkeypatch):
@@ -257,7 +318,7 @@ def test_ww3_network_failure_is_named_not_called_land(monkeypatch):
         raise DataFetchError("Could not reach the host: timed out")
     monkeypatch.setattr(ww3_live, 'http_get', down)
     with pytest.raises(DataFetchError, match='timed out'):
-        ww3_live.fetch_hs((50.0, 0.0), date='2020-01-01')
+        _ww3_hs((50.0, 0.0))
 
 
 def test_fetch_waves_auto_falls_to_ww3(monkeypatch):
@@ -272,6 +333,23 @@ def test_fetch_waves_auto_falls_to_ww3(monkeypatch):
     assert out.hs == pytest.approx(1.8) and out.tp is None
     assert out.provenance.source.id == 'ww3'
     assert out.provenance.requested_date == '2020-01-01'
+
+
+@pytest.mark.parametrize('source, notices', [('ww3', 1), ('waverys', 0)])
+def test_a_max_days_wavewatch_does_not_read_is_announced(monkeypatch, source,
+                                                         notices):
+    """WaveWatch III reads the field at date= itself, with no tolerance, so
+    a max_days= it answers changed nothing and says so; WAVERYS reads it."""
+    from uacpy.core.exceptions import FallbackWarning
+    monkeypatch.setattr(ww3_live, 'http_get', _ww3_server(1.8))
+    monkeypatch.setattr('uacpy.data.copernicus.fetch_waves_operational',
+                        lambda point, **kw: _waves_record(1.2))
+    with recorded_warnings() as caught:
+        waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01', source=source,
+                              max_days=5)
+    unused = [w for w in caught if issubclass(w.category, FallbackWarning)
+              and 'max_days=5 was not used' in str(w.message)]
+    assert len(unused) == notices
 
 
 def test_the_sea_state_saves_and_loads_with_its_provenance(tmp_path):
@@ -303,6 +381,38 @@ def test_the_wave_source_tokens_are_the_catalogue_ids(monkeypatch):
     with pytest.raises(ConfigurationError, match="'copernicus'"):
         waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01',
                               source='copernicus')
+
+
+@pytest.mark.parametrize('fetch', ['fetch_waves', 'fetch_sea_surface'])
+def test_a_sea_state_fetch_gives_one_notice_named_after_the_call(monkeypatch,
+                                                                 fetch):
+    """One summary warning per fetch call, named after the function the user
+    called, whatever backend gave each note."""
+    import warnings
+    from uacpy.core.exceptions import ProvenanceWarning
+    from uacpy.data._provenance_notice import provenance_notice
+
+    def noted(point, **kw):
+        provenance_notice("fetch_waves_operational: the data come from a "
+                          "neighbour cell. Pass max_distance_km= to refuse.")
+        provenance_notice("fetch_waves_operational: the data are dated "
+                          "2020-01-05. Pass max_days= to refuse.")
+        return _waves_record(2.1)
+
+    monkeypatch.setattr('uacpy.data.copernicus.fetch_waves_operational', noted)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        if fetch == 'fetch_waves':
+            waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01',
+                                  source='waverys')
+        else:
+            sea_surface.fetch_sea_surface(
+                (50.0, 0.0), date='2020-01-01', rmax=5000.0, n_points=32,
+                rng=np.random.default_rng(1), source='waverys')
+    notices = [str(w.message) for w in rec
+               if issubclass(w.category, ProvenanceWarning)]
+    assert len(notices) == 1, notices
+    assert notices[0].startswith(f'{fetch}: 2 note(s)')
 
 
 def _waves_record(hs, source='waverys'):
@@ -341,7 +451,7 @@ def test_fetch_sea_surface_from_waves(monkeypatch):
     monkeypatch.setattr(waves_mod, 'fetch_waves',
                         lambda point, **kw: _waves_record(2.1))
     alt = sea_surface.fetch_sea_surface(
-        (50.0, 0.0), date='2020-01-01', rmax_m=5000.0, n_points=64,
+        (50.0, 0.0), date='2020-01-01', rmax=5000.0, n_points=64,
         rng=np.random.default_rng(1))
     assert alt.data_sources[0].source.id == 'waverys'
     assert alt.ranges.shape == alt.heights.shape == (64,)
@@ -356,7 +466,7 @@ def test_fetch_sea_surface_wind_fallback(monkeypatch):
         10.0, DataProvenance(source=SOURCES['nbs'],
                              requested_point=tuple(point))))
     alt = sea_surface.fetch_sea_surface(
-        (50.0, 0.0), date='2020-01-01', rmax_m=5000.0, n_points=32,
+        (50.0, 0.0), date='2020-01-01', rmax=5000.0, n_points=32,
         rng=np.random.default_rng(2))
     assert alt.data_sources[0].source.id == 'nbs' and alt.ranges.size == 32
 
@@ -366,7 +476,7 @@ def test_a_sea_surface_draws_from_the_generator_it_is_given(monkeypatch):
     equal surfaces, and the generator is the one drawn from."""
     monkeypatch.setattr(waves_mod, 'fetch_waves',
                         lambda point, **kw: _waves_record(2.1))
-    kw = dict(date='2020-01-01', rmax_m=5000.0, n_points=64)
+    kw = dict(date='2020-01-01', rmax=5000.0, n_points=64)
     a = sea_surface.fetch_sea_surface((50.0, 0.0), rng=np.random.default_rng(9),
                                       **kw)
     b = sea_surface.fetch_sea_surface((50.0, 0.0), rng=np.random.default_rng(9),
@@ -389,7 +499,7 @@ def test_fetch_sea_surface_returns_an_altimetry_carrying_its_provenance(
     monkeypatch.setattr(waves_mod, 'fetch_waves',
                         lambda point, **kw: _waves_record(2.0))
     alt = sea_surface.fetch_sea_surface(
-        (50.0, 0.0), date='2020-01-01', rmax_m=5000.0, n_points=32,
+        (50.0, 0.0), date='2020-01-01', rmax=5000.0, n_points=32,
         rng=np.random.default_rng(1))
     assert isinstance(alt, Altimetry)
     (prov,) = alt.data_sources
@@ -410,7 +520,7 @@ def test_fetch_sea_surface_local_reads_the_cached_climatology(wind_cache,
 
     monkeypatch.setattr(wind_live, 'http_get', boom)
     alt = sea_surface.fetch_sea_surface(
-        (0.6, 0.6), date='2021-03-15', rmax_m=5000.0, n_points=32,
+        (0.6, 0.6), date='2021-03-15', rmax=5000.0, n_points=32,
         rng=np.random.default_rng(3),
         source='local')
     assert alt.data_sources[0].source.id == 'nbs' and alt.ranges.size == 32
@@ -425,7 +535,7 @@ def test_fetch_sea_surface_auto_falls_back_to_the_climatology(wind_cache,
         wind_live, '_wind_speed',
         lambda *a, **kw: (_ for _ in ()).throw(DataFetchError("erddap down")))
     alt = sea_surface.fetch_sea_surface(
-        (0.6, 0.6), date='2021-03-15', rmax_m=5000.0, n_points=32,
+        (0.6, 0.6), date='2021-03-15', rmax=5000.0, n_points=32,
         rng=np.random.default_rng(4),
         source='auto')
     assert alt.data_sources[0].source.id == 'nbs' and alt.ranges.size == 32
@@ -443,7 +553,7 @@ def test_fetch_environment_altimetry_local(wind_cache, monkeypatch):
         altimetry_n_points=32, altimetry_rng=np.random.default_rng(5))
     assert [s.source.id for s in env.altimetry.data_sources] == ['nbs']
     (nbs,) = [s for s in env.data_sources if s.source.id == 'nbs']
-    assert nbs.data_date == 'month 03 (climatology)'      # cache records no period
+    assert nbs.data_date == 'month 03, 1991-2020 (climatology)'
     assert nbs.requested_date == '2021-03-15'
 
 
@@ -453,7 +563,7 @@ def test_live_and_climatology_wind_provenance_differ(dated_wind_cache,
                         lambda point, **kw: (_ for _ in ()).throw(DataFetchError("no waves")))
     monkeypatch.setattr(wind_live, '_wind_speed',
                         lambda *a, **kw: (7.0, None, '2021-03-15T00:00:00Z'))
-    kw = dict(date='2021-03-15', rmax_m=5000.0, n_points=32,
+    kw = dict(date='2021-03-15', rmax=5000.0, n_points=32,
               rng=np.random.default_rng(4))
     (live,) = sea_surface.fetch_sea_surface(
         (0.6, 0.6), source='nbs', **kw).data_sources
@@ -498,14 +608,15 @@ def test_altimetry_requires_date():
                                   transect_to=(50.5, 0.5), altimetry_sources=('waverys', 'ww3'))
 
 
-def test_altimetry_guard_falls_back_to_literal():
-    # altimetry= is the documented fallback when the sea-state fetch cannot
-    # run; a missing date= must reach that fallback, not raise past it.
+def test_an_altimetry_literal_does_not_stand_in_for_a_missing_date():
+    # altimetry= stands in for a sea state a dated request could not get; a
+    # missing date= is the caller's input and is refused as without it.
     alt = np.column_stack([np.linspace(0.0, 5000.0, 10), np.zeros(10)])
-    env = env_mod.fetch_environment(
-        (50.0, 0.0), bathymetry=2000.0, ssp=1500.0, transect_to=(50.5, 0.5),
-        altimetry_sources=('waverys', 'ww3'), altimetry=alt)
-    assert env.altimetry is not None
+    with pytest.raises(ConfigurationError, match='needs date'):
+        env_mod.fetch_environment(
+            (50.0, 0.0), bathymetry=2000.0, ssp=1500.0,
+            transect_to=(50.5, 0.5), altimetry_sources=('waverys', 'ww3'),
+            altimetry=alt)
 
 
 def test_fetch_environment_altimetry(monkeypatch):
@@ -513,7 +624,8 @@ def test_fetch_environment_altimetry(monkeypatch):
     # provenance id must land in env.data_sources.
     alt = sea_surface._altimetry(
         np.column_stack([np.linspace(0, 5000, 10), np.zeros(10)]),
-        sea_surface._provenance('waverys', 50.0, 0.0, '2020-01-01'))
+        DataProvenance(source=SOURCES['waverys'], requested_point=(50.0, 0.0),
+                       requested_date='2020-01-01'))
     monkeypatch.setattr(sea_surface, 'fetch_sea_surface',
                         lambda point, **kw: alt)
     env = env_mod.fetch_environment(
@@ -550,9 +662,9 @@ def _stub_waves(monkeypatch, hs):
                         lambda point, **kw: _waves_record(hs))
 
 
-@pytest.mark.parametrize('rmax_m', [1e3, 1e4, 5e4, 1e5, 4.27e5])
+@pytest.mark.parametrize('rmax', [1e3, 1e4, 5e4, 1e5, 4.27e5])
 def test_sea_surface_holds_its_wave_height_at_every_transect_length(
-        rmax_m, monkeypatch):
+        rmax, monkeypatch):
     """The realization is sized from the sea state, so its significant wave
     height tracks the fetched one however long the transect is.
 
@@ -564,15 +676,15 @@ def test_sea_surface_holds_its_wave_height_at_every_transect_length(
     hs = 2.1
     _stub_waves(monkeypatch, hs)
     alt = sea_surface.fetch_sea_surface(
-        (50.0, 0.0), date='2020-01-01', rmax_m=rmax_m,
+        (50.0, 0.0), date='2020-01-01', rmax=rmax,
         rng=np.random.default_rng(7))
     assert alt.data_sources[0].source.id == 'waverys'
-    assert alt.ranges[0] == 0.0 and alt.ranges[-1] == pytest.approx(rmax_m)
+    assert alt.ranges[0] == 0.0 and alt.ranges[-1] == pytest.approx(rmax)
     # Hs = 4·rms for a Gaussian sea surface.
     assert 4.0 * np.std(alt.heights) == pytest.approx(hs, rel=0.1)
     # The step resolves the peak wavelength lambda_p = 2*pi*U^2/g.
     u = sea_surface._pm_wind_ms(hs)
-    dx = rmax_m / (alt.ranges.size - 1)
+    dx = rmax / (alt.ranges.size - 1)
     from uacpy.core.altimetry import SEA_SURFACE_SAMPLES_PER_PEAK
     from uacpy.core.constants import STANDARD_GRAVITY_M_S2
     assert dx <= (2 * np.pi * u ** 2 / STANDARD_GRAVITY_M_S2
@@ -585,7 +697,7 @@ def test_sea_surface_keeps_the_historical_floor_on_a_short_transect(monkeypatch)
     # does not come back coarser than it used to.
     _stub_waves(monkeypatch, 2.1)
     alt = sea_surface.fetch_sea_surface(
-        (50.0, 0.0), date='2020-01-01', rmax_m=1000.0,
+        (50.0, 0.0), date='2020-01-01', rmax=1000.0,
         rng=np.random.default_rng(1))
     from uacpy.core.altimetry import SEA_SURFACE_MIN_POINTS
     assert alt.ranges.size == SEA_SURFACE_MIN_POINTS
@@ -598,7 +710,7 @@ def test_pinned_n_points_too_coarse_to_resolve_the_peak_warns(monkeypatch):
     _stub_waves(monkeypatch, 2.1)
     with pytest.warns(UserWarning, match=r'dx = 100\.2 m.*n_points >= 6\d{3}'):
         alt = sea_surface.fetch_sea_surface(
-            (50.0, 0.0), date='2020-01-01', rmax_m=50000.0, n_points=500,
+            (50.0, 0.0), date='2020-01-01', rmax=50000.0, n_points=500,
             rng=np.random.default_rng(1))
     assert alt.ranges.size == 500             # the pinned count is still honoured
 
@@ -611,7 +723,7 @@ def test_sea_surface_sizing_is_capped_and_warned_for_a_calm_long_transect(
     _stub_waves(monkeypatch, 0.09)                       # U ~ 2 m/s
     with pytest.warns(UserWarning, match='cap'):
         alt = sea_surface.fetch_sea_surface(
-            (50.0, 0.0), date='2020-01-01', rmax_m=4.27e5,
+            (50.0, 0.0), date='2020-01-01', rmax=4.27e5,
             rng=np.random.default_rng(1))
     from uacpy.core.altimetry import SEA_SURFACE_MAX_POINTS
     assert alt.ranges.size == SEA_SURFACE_MAX_POINTS
@@ -658,11 +770,22 @@ def test_the_wind_cache_reports_the_period_it_was_built_over(dated_wind_cache):
     assert wind_local.climatology_period() == '2013-2022 (climatology)'
 
 
-def test_a_wind_cache_without_a_period_loads_its_grid(wind_cache):
-    """Old caches and the synthetic ones the tests build carry no ``years``.
-    Absent is not an error: the grid still reads, the vintage is unstated."""
-    assert wind_local.climatology_period() is None
-    assert wind_local.wind_speed((0.6, 0.6), date='2021-03-15') == pytest.approx(8.5)
+def test_a_wind_cache_without_its_period_is_refused_as_unreadable(
+        tmp_path, monkeypatch):
+    """uacpy reads only the cache format it writes, which records the years
+    averaged; a cache without them is refused with the reinstall hint."""
+    from uacpy.data._cache import UnreadableCacheError
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    wind_local._CLIM.clear()
+    wdir = tmp_path / 'wind'
+    wdir.mkdir(parents=True)
+    lat = np.linspace(-89.5, 89.5, 12)
+    lon = np.linspace(-179.5, 179.5, 24)
+    np.savez_compressed(wdir / wind_local.WIND_FILE, lat=lat, lon=lon,
+                        speed=np.full((12, lat.size, lon.size), 8.5))
+    with pytest.raises(UnreadableCacheError,
+                       match=r'install\.sh --data wind'):
+        wind_local.wind_speed((0.6, 0.6), date='2021-03-15')
 
 
 def test_the_environment_provenance_carries_the_wind_vintage(dated_wind_cache,
@@ -677,9 +800,6 @@ def test_the_environment_provenance_carries_the_wind_vintage(dated_wind_cache,
         altimetry_n_points=32, altimetry_rng=np.random.default_rng(5))
     (nbs,) = [s for s in env.data_sources if s.source.id == 'nbs']
     assert nbs.data_date == 'month 03, 2013-2022 (climatology)'
-    from uacpy.data.environment import _climatology_vintage
-    assert _climatology_vintage('gebco') is None
-    assert _climatology_vintage('woa23') is None
 
 
 def _published_climatology_bytes(nlat=4, nlon=8, nmonth=12):

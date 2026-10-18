@@ -36,13 +36,12 @@ from uacpy.core.exceptions import (
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
 from uacpy.core.geo import (
-    Coordinate, as_coordinate, normalize_lon, geodesic_waypoints,
-    great_circle_km,
+    Coordinate, as_coordinate, normalize_lon, great_circle_km,
 )
 from uacpy.data._geo import (
-    AlongTrack, require_month, ring_offsets, run_boundary_indices,
-    DEFAULT_MAX_TRANSECT_POINTS, checked_max_points, checked_n_points,
-    capped_n_points, checked_max_distance, checked_offset,
+    AlongTrack, along_track_waypoints, require_month, ring_offsets,
+    run_boundary_indices, auto_budget, checked_max_points, checked_n_points,
+    checked_explicit_n_points, checked_max_distance, checked_offset,
 )
 from uacpy.data._http import http_get
 from uacpy.core.geo import parse_date
@@ -61,20 +60,24 @@ __all__ = ['download_seaice_db', 'fetch_sea_ice_concentration',
 # m/s, cs 1800 m/s, αp 0.4 dB/λ, αs 1.0 dB/λ ("realistic attenuations of
 # 0.4 dB/λ for compressional waves and 1.0 dB/λ for shear waves"). Typical
 # ranges (Etter, *Underwater Acoustic Modeling*): cp 1300-3900, cs 1400-1900
-# m/s. COA §4.10.4 (Figs. 4.22, 4.24) gives these values to a 4 m thick plate;
-# sea_ice_surface builds them into an elastic half-space, the plate's
-# thick-ice limit (its docstring states where that holds).
+# m/s. COA §4.10.4 (Figs. 4.22, 4.24) gives the speeds and attenuations to a
+# 4 m thick plate and states no density; the 0.9 g/cm³ is the 900 kg/m³ COA
+# §8.5.7 gives for the same 4 m, 3500 / 1800 m/s ice plate. sea_ice_surface
+# builds them into an elastic half-space, the plate's thick-ice limit (its
+# docstring states where that holds).
 SEA_ICE_COMPRESSIONAL_SPEED = 3500.0       # m/s
 SEA_ICE_SHEAR_SPEED = 1800.0               # m/s
 SEA_ICE_DENSITY = 0.9                      # g/cm³
 SEA_ICE_COMPRESSIONAL_ATTENUATION = 0.4    # dB/wavelength
 SEA_ICE_SHEAR_ATTENUATION = 1.0            # dB/wavelength
-# NSIDC standard ice-edge definition: ≥15 % concentration counts as ice-covered.
+# NSIDC's ice-edge definition for its extent statistics: ≥15 % concentration
+# counts as ice-covered (NSIDC Sea Ice Index, G02135, user guide). Taking it
+# as the switch between open water and a full elastic canopy is uacpy
+# guidance, not an acoustic criterion: Etter §2.4.2 separates pack ice, the
+# marginal ice zone and open ocean with no concentration bound.
 SEA_ICE_EDGE_CONCENTRATION = 0.15
 
 INDEX_FILE = 'seaice_climatology.npz'
-#: The pre-npz pickled climatology, refused by :func:`uacpy.data._cache.require_npz`.
-RETIRED_INDEX_FILE = 'seaice_climatology.pkl'
 _BASE_URL = 'https://noaadata.apps.nsidc.org/NOAA/G02135'
 _MONTHS = ['01_Jan', '02_Feb', '03_Mar', '04_Apr', '05_May', '06_Jun',
            '07_Jul', '08_Aug', '09_Sep', '10_Oct', '11_Nov', '12_Dec']
@@ -89,7 +92,8 @@ _GRID = {
     'N': {'epsg': 'EPSG:3411', 'x0': -3850000.0, 'y0': 5850000.0, 'px': 25000.0},
     'S': {'epsg': 'EPSG:3412', 'x0': -3950000.0, 'y0': 4350000.0, 'px': 25000.0},
 }
-_POLE_HOLE = 2510         # unobserved cap near the pole — perennial ice → 1.0
+# The unobserved cap near the pole; uacpy guidance fills it as full cover.
+_POLE_HOLE = 2510
 # Codes <= 1000 are concentration in tenths of a percent (1000 = 100 %, hence
 # the /1000 in _to_fraction); higher codes are flags, not data.
 _MAX_CONC = 1000
@@ -115,8 +119,8 @@ def download_seaice_db(cache_dir=None, *, years=None, base_url: str = _BASE_URL,
     """Build the monthly sea-ice climatology and cache it.
 
     Averages the NSIDC monthly concentration grids over ``years`` (default: the
-    five most recent complete calendar years) per hemisphere and calendar month,
-    writing ``<cache>/seaice/seaice_climatology.npz`` — one ``(12, H, W)``
+    five most recent complete calendar years, uacpy guidance) per hemisphere and
+    calendar month, writing ``<cache>/seaice/seaice_climatology.npz`` — one ``(12, H, W)``
     float32 array per hemisphere, under the keys ``'N'`` and ``'S'``. Missing
     months are skipped.
 
@@ -206,14 +210,18 @@ def download_seaice_db(cache_dir=None, *, years=None, base_url: str = _BASE_URL,
                 )
             # Land and coast cells are NaN in every monthly grid (the
             # pole hole is not: it is filled at 1.0, see _to_fraction), so
-            # their climatology is NaN; numpy reports that case through
-            # warnings.warn ("Mean of empty slice"), which np.errstate does
-            # not cover, so both channels are silenced here.
-            with np.errstate(invalid='ignore'), warnings.catch_warnings():
-                warnings.filterwarnings(
-                    'ignore', message='Mean of empty slice',
-                    category=RuntimeWarning)
-                months.append(np.nanmean(np.stack(stacks[m]), axis=0))
+            # their climatology is NaN. The mean over the observed years is
+            # np.nanmean's sum / count, divided only where a year observed
+            # the cell: np.nanmean itself warns "Mean of empty slice" there,
+            # and silencing that would take a warnings.catch_warnings window,
+            # which edits the process-global filter list for every thread.
+            stack = np.stack(stacks[m])
+            missing = np.isnan(stack)
+            total = np.where(missing, 0.0, stack).sum(axis=0)
+            count = (~missing).sum(axis=0)
+            months.append(np.divide(total, count,
+                                    out=np.full(total.shape, np.nan),
+                                    where=count > 0))
         climo[hemi] = np.stack(months).astype(np.float32)    # (12, H, W)
         log_message('seaice', f"hemisphere {hemi}: {climo[hemi].shape}",
                     verbose=verbose)
@@ -250,18 +258,16 @@ def _pyproj_transformer(epsg, *, backend='sea-ice'):
 
 def _build_model():
     """Read the cached climatology and pair it with the two projections."""
-    path = _cache.require_npz('seaice', INDEX_FILE, RETIRED_INDEX_FILE)
+    path = _cache.require('seaice', INDEX_FILE)
     with _cache.reading('seaice', path):
         # allow_pickle=False is passed rather than left to numpy's default:
         # this file is read straight out of the cache directory, and under
         # allow_pickle an object array in it would execute on load.
         with np.load(path, allow_pickle=False) as z:
             climo = {h: z[h] for h in ('N', 'S')}
-            # Optional: caches built before the key existed, and the synthetic
-            # ones the tests write, carry no reference period. Absent is not an
-            # error — it just leaves the vintage unstated.
-            years = ([int(y) for y in z['years']]
-                     if 'years' in z.files else None)
+            # The years averaged, which download_seaice_db writes: the
+            # climatology's reference period.
+            years = [int(y) for y in z['years']]
     result = {'tf': {h: _pyproj_transformer(_GRID[h]['epsg']) for h in ('N', 'S')}}
     result.update(climo)
     result['years'] = years
@@ -269,16 +275,9 @@ def _build_model():
 
 
 def climatology_period():
-    """Reference period of the installed climatology, or ``None``.
-
-    A string such as ``'2019-2023 (climatology)'`` for the provenance
-    ``data_date``. ``None`` where the cache predates the ``years`` key or was
-    written without one — the grids are still usable, their vintage is simply
-    not recorded.
-    """
-    years = _model().get('years')
-    if not years:
-        return None
+    """Reference period of the installed climatology: a string such as
+    ``'2019-2023 (climatology)'`` for the provenance ``data_date``."""
+    years = _model()['years']
     return f"{min(years)}-{max(years)} (climatology)"
 
 
@@ -315,8 +314,9 @@ def _rowcol(model, hemi, lat, lon):
 # climatology is averaged — both are NaN. So an unobserved cell with an observed
 # ocean neighbour is treated as ocean and takes that neighbour's value, while a
 # cell with no observed neighbour stays unobserved and raises. Same construct and
-# the same reasoning as `sound_speed._WET_CELL_SEARCH_RINGS`; kept small so an
-# inland request still fails rather than silently sampling a distant sea.
+# the same reasoning as `sound_speed._WET_CELL_SEARCH_RINGS` (uacpy guidance);
+# kept small so an inland request still fails rather than silently sampling a
+# distant sea.
 _OBSERVED_CELL_SEARCH_RINGS = 2
 
 
@@ -436,14 +436,6 @@ def _sea_ice_reading(point, date, month, who):
             0.0 if own_km is None else own_km)
 
 
-def _offset_checked(prov, warn_km, *, who, max_distance_km):
-    """The offset rule on an NSIDC reading: a ProvenanceWarning past the
-    point's own cell's half-diagonal ``warn_km``, a refusal past
-    ``max_distance_km``."""
-    return checked_offset(prov, who=who, warn_km=warn_km,
-                          max_distance_km=max_distance_km)
-
-
 def sea_ice_at(point: Coordinate, *, date=None, month: Optional[int] = None,
                max_distance_km: Optional[float] = None,
                who: str = 'fetch_sea_ice_concentration'):
@@ -452,8 +444,8 @@ def sea_ice_at(point: Coordinate, *, date=None, month: Optional[int] = None,
     nearest observed neighbour's value, a refusal past ``max_distance_km``.
     Raises as :func:`fetch_sea_ice_concentration` does."""
     conc, prov, warn_km = _sea_ice_reading(point, date, month, who)
-    return conc, _offset_checked(prov, warn_km, who=who,
-                                 max_distance_km=max_distance_km)
+    return conc, checked_offset(prov, who=who, warn_km=warn_km,
+                                max_distance_km=max_distance_km)
 
 
 def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
@@ -490,12 +482,13 @@ def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
 
 
 #: Representative RMS roughness (m) of the underside of Arctic pack ice, for
-#: callers who want the canopy scattering rather than the smooth plate. The
-#: under-ice relief is dominated by deformation features — ridge keels reaching
-#: tens of metres over a much flatter undeformed surface — so no single number
-#: describes it; a metre is the order the pack-ice literature reports for the
-#: RMS of the undeformed-plus-ridged surface, and it is offered as a starting
-#: point to vary, not a measurement of any particular ice cover.
+#: callers who want the canopy scattering rather than the smooth plate. uacpy
+#: guidance: the ice cover is "characterized by significant roughness as well
+#: as many discrete features such as ridges with keels" (Computational Ocean
+#: Acoustics §4.10.4), so no single number describes it, and this one is a
+#: starting point to vary, not a measured or published value. Site estimates
+#: of the under-ice roughness (standard deviation of the ice depth) are charted
+#: in Etter §5.4.4.2, Fig. 5.11 (from Buck 1985).
 SEA_ICE_TYPICAL_ROUGHNESS_M = 1.0
 
 
@@ -506,11 +499,13 @@ def sea_ice_surface(
 ) -> Optional[BoundaryProperties]:
     """Ice concentration (0-1) → the elastic surface the canopy presents.
 
-    Above ``threshold`` (default the NSIDC 15 % ice-edge), returns a
+    Above ``threshold`` (default the NSIDC 15 % ice edge — an extent
+    statistic; using it as the acoustic switch is uacpy guidance), returns a
     half-space :class:`~uacpy.core.environment.BoundaryProperties` for a
     homogeneous Arctic pack-ice canopy — compressional 3500 m/s, shear 1800
-    m/s, density 0.9 g/cm³, attenuations 0.4 / 1.0 dB/λ (Jensen, Kuperman,
-    Porter & Schmidt, *Computational Ocean Acoustics*). Below the threshold the
+    m/s, attenuations 0.4 / 1.0 dB/λ (Jensen, Kuperman, Porter & Schmidt,
+    *Computational Ocean Acoustics* §4.10.4), density 0.9 g/cm³ (the same
+    book's §8.5.7 ice plate). Below the threshold the
     surface is open water, so the function returns ``None`` (leave the
     free-surface default in place). The canopy is treated as a single
     homogeneous elastic boundary regardless of concentration; partial cover is
@@ -547,11 +542,24 @@ def sea_ice_surface(
     concentration : float
         Ice concentration, 0-1.
     threshold : float, optional
-        Lowest concentration taken as ice cover, 0-1. Default 0.15, the NSIDC
-        ice edge.
+        Lowest concentration taken as ice cover, a fraction 0-1. Default 0.15,
+        NSIDC's ice edge for its extent statistics, used as the acoustic
+        switch as uacpy guidance.
     roughness : float, optional
         RMS roughness (m) of the ice underside. Default 0.
+
+    Raises
+    ------
+    ConfigurationError
+        ``threshold`` is not a fraction in [0, 1] (a percentage such as 15
+        is refused, not rescaled).
     """
+    if not (np.isfinite(threshold) and 0.0 <= threshold <= 1.0):
+        raise ConfigurationError(
+            f"sea_ice_surface: threshold={threshold!r} is not a concentration "
+            f"fraction in [0, 1].",
+            remediation="Pass the lowest ice concentration taken as ice "
+                        "cover as a fraction, e.g. 0.15 for 15 %.")
     if not np.isfinite(concentration) or concentration < threshold:
         return None
     return BoundaryProperties(
@@ -592,8 +600,9 @@ def fetch_sea_ice_surface(
     month : int, optional
         The month, 1-12. Pass ``date`` or ``month``, not both.
     threshold : float, optional
-        Lowest concentration taken as ice cover, 0-1. Default 0.15, the NSIDC
-        ice edge.
+        Lowest concentration taken as ice cover, a fraction 0-1. Default
+        0.15, NSIDC's ice edge, used as the acoustic switch as uacpy
+        guidance (see :func:`sea_ice_surface`).
     roughness : float, optional
         RMS roughness (m) of the ice underside. Default 0.
     max_distance_km : float, optional
@@ -663,12 +672,13 @@ def sea_ice_pixel(point: Coordinate, *, hemi: str = 'N'):
                        record="the result's .provenance")
 def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
                                          date=None, month: Optional[int] = None,
-                                         n_points: int = 6,
+                                         n_points=None, max_points=None,
                                          max_distance_km: Optional[float] = None,
                                          ) -> AlongTrack:
     """Sea-ice concentration (0-1) sampled along ``start`` → ``end``, as an
-    :class:`~uacpy.data.AlongTrack` (``'sea_ice_concentration'``) with the
-    ``'seaice'`` provenance; ``NaN`` at a land waypoint.
+    :class:`~uacpy.data.AlongTrack` (``'sea_ice_concentration'``) with one
+    ``'seaice'`` record per waypoint (the cell read and its offset; at a land
+    waypoint, the requested point alone); ``NaN`` at a land waypoint.
 
     Parameters
     ----------
@@ -678,30 +688,44 @@ def fetch_sea_ice_concentration_transect(start: Coordinate, end: Coordinate, *,
         A date whose month selects the climatology.
     month : int, optional
         The month, 1-12. Pass ``date`` or ``month``, not both.
-    n_points : int, optional
-        Waypoints along the great circle. Default 6.
+    n_points : int or 'auto', optional
+        Waypoints along the great circle, used as given; ``None`` (default)
+        is 6 (uacpy guidance), within ``max_points`` when that is set.
+        ``'auto'`` probes ``max_points`` waypoints and keeps one per 25 km
+        NSIDC cell crossed, endpoints anchored.
+    max_points : int, optional
+        The waypoints ``'auto'`` probes; ``None`` (default) is 1000 (uacpy
+        guidance). An explicit ``n_points`` above an explicit
+        ``max_points`` is refused.
     max_distance_km : float, optional
         Refuse a waypoint whose cell stands farther than this (km) from it;
         ``None`` (default) sets no limit beyond the per-waypoint warning.
     """
     who = 'fetch_sea_ice_concentration_transect'
-    n_points = checked_n_points(n_points, who)
     limit = checked_max_distance(max_distance_km, who)
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
-    out = []
+
+    def cell_of(lat, lon):
+        hemi = 'N' if lat >= 0 else 'S'
+        return hemi, _rowcol(_model(), hemi, lat, lon)
+
+    lats, lons, ranges = along_track_waypoints(
+        start, end, n_points, max_points, who=who, cell_of=cell_of)
+    out, records = [], []
     for la, lo in zip(lats, lons):
         try:
             conc, prov, warn_km = _sea_ice_reading((la, lo), date, month, who)
         except DataFetchError:
             out.append(np.nan)                  # land along the transect
+            records.append(_provenance((float(la), float(lo))))
             continue
         # Outside the try: a refusal past max_distance_km is not land.
-        _offset_checked(prov, warn_km, who=who, max_distance_km=limit)
+        records.append(checked_offset(prov, who=who, warn_km=warn_km,
+                                      max_distance_km=limit))
         out.append(conc)
-    return AlongTrack(ranges=np.asarray(ranges_m), lats=np.asarray(lats),
+    return AlongTrack(ranges=np.asarray(ranges), lats=np.asarray(lats),
                       lons=np.asarray(lons), data=np.asarray(out),
                       unit='1', quantity='sea_ice_concentration',
-                      provenance=_provenance())
+                      provenance=tuple(records))
 
 
 @one_provenance_notice(subject="the ice canopy's data",
@@ -729,7 +753,8 @@ def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
     nearest-node, so every reconstructed ice edge lands within one probe step
     of the edge the probe observed, without an oversampled staircase. An
     integer samples exactly that many evenly-spaced waypoints. ``roughness``
-    passes through to :func:`sea_ice_surface` for every ice node.
+    passes through to :func:`sea_ice_surface` for every ice node. Each node
+    carries the record of the cell its concentration was read from.
 
     A waypoint where the climatology has no value (land / unobserved along
     the track) becomes an open-water node, and one ``FallbackWarning`` per call
@@ -748,29 +773,29 @@ def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
         Waypoints, or ``'auto'`` for the zone-edge sampling described below.
         Default ``'auto'``.
     max_points : int, optional
-        Probe count of ``'auto'`` and cap on an explicit count; ``None`` is
-        :data:`~uacpy.data._geo.DEFAULT_MAX_TRANSECT_POINTS`.
+        Probe count of ``'auto'``; ``None`` (default) is 1000 (uacpy
+        guidance). An explicit ``n_points`` above an explicit
+        ``max_points`` is refused.
     threshold : float, optional
-        Lowest concentration taken as ice cover, 0-1. Default 0.15, the NSIDC
-        ice edge.
+        Lowest concentration taken as ice cover, a fraction 0-1. Default
+        0.15, NSIDC's ice edge, used as the acoustic switch as uacpy
+        guidance (see :func:`sea_ice_surface`).
     roughness : float, optional
         RMS roughness (m) of the ice underside. Default 0.
     max_distance_km : float, optional
         As in :func:`fetch_sea_ice_concentration_transect`.
     """
     from uacpy.core.surface import Surface
-    if max_points is None:
-        max_points = DEFAULT_MAX_TRANSECT_POINTS
     max_points = checked_max_points(max_points, 'sea_ice_surface_transect')
     n_points = checked_n_points(n_points, 'sea_ice_surface_transect',
                                 allow_auto=True)
-    probe_n = (max_points if n_points == 'auto'
-               else capped_n_points(n_points, max_points,
-                                    'sea_ice_surface_transect'))
+    probe_n = (auto_budget(max_points) if n_points == 'auto'
+               else checked_explicit_n_points(n_points, max_points,
+                                              'sea_ice_surface_transect'))
     track = fetch_sea_ice_concentration_transect(
         start, end, date=date, month=month, n_points=probe_n,
         max_distance_km=max_distance_km)
-    ranges_m, conc = track.ranges, track.data
+    ranges, conc = track.ranges, track.data
     n_no_data = int(np.count_nonzero(~np.isfinite(np.asarray(conc, float))))
     if n_no_data:
         warnings.warn(
@@ -779,13 +804,12 @@ def sea_ice_surface_transect(start: Coordinate, end: Coordinate, *,
             f"classified as open water — no-data nodes, not measured "
             f"open water.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    prov = (_provenance(),)
     nodes = []
-    for r, c in zip(ranges_m, conc):
+    for r, c, record in zip(ranges, conc, track.provenance):
         c = 0.0 if not np.isfinite(c) else float(c)
         bp = sea_ice_surface(c, threshold=threshold, roughness=roughness) \
             or BoundaryProperties(acoustic_type='vacuum')
-        bp.data_sources = prov
+        bp.data_sources = (record,)
         nodes.append((float(r), bp))
     if n_points == 'auto':
         # Identity = the boundary kind (homogeneous ice canopy vs open-water

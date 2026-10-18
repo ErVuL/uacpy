@@ -26,8 +26,8 @@ from uacpy.tests.conftest import recorded_warnings
 # One function per statistic, so the scaling is the name: these adapters map
 # this file's ``scaling=`` parametrisations onto the estimator, and keep its
 # subject the constant-Q BEHAVIOUR rather than the call shape. They pin the
-# scaling this file was written against ('spectrum'), where the estimator
-# defaults to 'density'.
+# scaling this file's expectations are stated in ('spectrum'), where the
+# estimator defaults to 'density'.
 def _cq_spectrum(*args, scaling="spectrum", **kwargs):
     return constant_q(*args, scaling=scaling, **kwargs)
 
@@ -97,10 +97,10 @@ def test_spectrogram_shape_and_finite():
 # ── probabilistic constant-Q ─────────────────────────────────────────────────
 class TestConstantQPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
     """``probabilistic_constant_q`` takes ``ref`` and reports every level as
-    dB re ``ref**2``, but the result used not to carry that value, so every
-    consumer had to guess it and the plotter hardcoded the package default —
-    a 120 dB error for anyone working in µPa. Same fix, and same reasoning, as
-    the Welch histogram carries.
+    dB re ``ref**2``, and the result carries that value, so no consumer has
+    to guess it and the plotter does not fall back on the package default —
+    a 120 dB error for anyone working in µPa. The Welch histogram carries its
+    ``ref`` the same way, for the same reason.
     """
 
     def _run(self, **kw):
@@ -125,9 +125,9 @@ class TestConstantQPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
     def test_the_existing_fields_keep_their_positions(self):
         """Fields carrying what the levels MEAN are appended, never inserted.
 
-        ``ref`` and ``scaling`` both came later, and both went on the end with
-        defaults, so a result another suite builds by hand from the six
-        original fields still constructs and reports both defaults. The
+        ``ref`` and ``scaling`` both sit on the end with defaults, so a
+        result another suite builds by hand from the first six fields
+        constructs and reports both defaults. The
         assertion is on the PREFIX rather than the whole list: freezing the
         full tuple would fail the next honest append while catching nothing a
         prefix check misses, since a reorder moves one of the six.
@@ -726,12 +726,11 @@ class TestNearNyquistBinsReadAToneHigh:
     ])
     def test_at_exactly_nyquist_the_reading_follows_the_tone_s_own_phase(
             self, phase_deg, expected_dB):
-        """At ``f_k = fs/2`` the image lands on DC, where its phase no longer
-        turns with the frame, so the frame average that produces the 3.01 dB
+        """At ``f_k = fs/2`` the image lands on DC, where its phase does not
+        turn with the frame, so the frame average that produces the 3.01 dB
         figure does not apply. The reading is ``10*log10(4 cos**2 phi)``: a
-        COSINE reads 6.02 dB, twice the 3.01 the module used to state flatly
-        for this frequency, and 3.01 is the mean over phase rather than a
-        bound."""
+        COSINE reads 6.02 dB, twice the 3.01 dB frame-average figure, and
+        3.01 is the mean over phase rather than a bound."""
         got = 10 * np.log10(
             self._one_bin_power_at_phase(0.5, phase_deg) / 0.5)
         assert got == pytest.approx(expected_dB, abs=5e-3), (

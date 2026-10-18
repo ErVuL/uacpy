@@ -73,6 +73,16 @@ def test_parallelresult_stacks_sparse_results_into_a_result_stack():
         stack.isel(range=0)                              # wrong (non-stacking) axis
 
 
+@pytest.mark.parametrize('n_workers', [2.7, True, 'two'])
+def test_a_worker_count_that_is_not_a_whole_number_is_refused(n_workers):
+    # A count is used as given: 2.7 is refused, not truncated to 2 workers.
+    from uacpy.parallel import _check_pool_args
+    with pytest.raises(uacpy.ConfigurationError,
+                       match='n_workers must be an integer'):
+        _check_pool_args([object()], n_workers, 'fork')
+    assert _check_pool_args([object()], 2.0, 'fork') == 2
+
+
 def test_a_sweep_named_after_an_axis_of_the_fields_is_refused():
     sr = ParallelResult(results=[_tiny_field(1.0), _tiny_field(2.0)],
                         errors={}, labels=[10.0, 20.0],

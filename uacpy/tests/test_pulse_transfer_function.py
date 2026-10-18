@@ -254,8 +254,7 @@ class TestAPulseOnlyInterferesWithWhatItOverlaps:
     @pytest.mark.parametrize('kwargs,message', [
         ({'duration': 0.0}, 'positive'),
         ({'duration': RECORD}, 'no-op'),
-        ({'duration': 0.02, 'window': 'blackman'}, 'must be None'),
-        ({'duration': 0.02, 'window': 'boxcar'}, 'must be None'),
+        ({'duration': 0.02, 'window': 'blackman'}, "must be 'boxcar'"),
         ({'duration': 0.02, 'origin': 'first'}, 'origin'),
         ({'duration': 0.02, 'origin': 5.0}, 'outside'),
     ])
@@ -327,7 +326,7 @@ class TestArrivalsAnswerForTheirOwnPaths:
     @pytest.mark.parametrize('frequencies,message', [
         ([], 'empty'),
         ([1000.0, np.nan], 'finite'),
-        ([-10.0, 1000.0], 'positive'),
+        ([-10.0, 1000.0], 'non-negative'),
     ])
     def test_it_refuses_a_grid_it_cannot_evaluate_on(self, frequencies,
                                                      message):
@@ -472,7 +471,7 @@ class TestABandStartingOnTheRoundingBoundaryIsPlacedWhole:
         trace = Field(data=h.reshape(1, 1, -1),
                       coords={'depth': [10.0], 'range': [100.0],
                               'frequency': f}, frequencies=f).to_time_trace(
-            window=None, t_start=0.0)
+            sample_rate=1000.0, t_start=0.0)
         t = trace.coords['time']
         direct = 2.0 * np.real(
             (h[None, :] * np.exp(2j * np.pi * f[None, :] * t[:, None])).sum(1)
@@ -494,15 +493,15 @@ class TestABandStartingOnTheRoundingBoundaryIsPlacedWhole:
                               'frequency': f})
         with pytest.raises(ConfigurationError,
                            match='uniformly spaced and ascending'):
-            field.to_time_trace(window=None, t_start=0.0)
+            field.to_time_trace(sample_rate=1000.0, t_start=0.0)
 
 
 class TestOneSignalAtOneReceiver:
     """``to_time_trace(source_waveform=...)`` — the received signal at a position.
 
     ``synthesize_time_series`` convolves every cell; this is the one-receiver
-    form, and it took a ``source_spectrum`` the caller had to sample onto the
-    field's axis, with the same interpolation trap ``broadband_loss`` had.
+    form, which takes the waveform itself and evaluates its exact spectrum on
+    the field's axis.
     """
 
     RATE = 8000.0
@@ -567,7 +566,7 @@ class TestOneSignalAtOneReceiver:
         wrong place.
         """
         field = self.spreading_field()
-        with pytest.warns(UserWarning, match="outside the grid"):
+        with pytest.warns(UserWarning, match="lies outside the 'range' axis"):
             out = field.to_time_trace(
                 depth=50.0, range=5000.0, window=None,
                 source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
@@ -587,7 +586,7 @@ class TestOneSignalAtOneReceiver:
                 source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
                 sample_rate=self.RATE)
         assert not [w for w in caught
-                    if 'outside the grid' in str(w.message)]
+                    if 'lies outside' in str(w.message)]
 
     def off_grid_notices(self, field, range_m):
         with recorded_warnings() as caught:
@@ -595,15 +594,15 @@ class TestOneSignalAtOneReceiver:
                 depth=50.0, range=range_m, window=None,
                 source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
                 sample_rate=self.RATE)
-        return [w for w in caught if 'outside the grid' in str(w.message)]
+        return [w for w in caught if 'lies outside' in str(w.message)]
 
     @pytest.mark.parametrize('range_m,outside', [
-        # The 100-500 m axis matches within 1e-6 of max(span, |value|, 1):
-        # 0.5 mm at the 500 m end, 0.4 mm at the 100 m end.
-        (500.0 + 4.5e-4, False), (500.0 + 5.5e-4, True),
-        (100.0 - 3.5e-4, False), (100.0 - 4.5e-4, True),
+        # The cell is taken as by Field.at: a label more than half the edge
+        # step (200 m on the 100-500 m axis) past either end is off it.
+        (500.0 + 199.0, False), (500.0 + 201.0, True),
+        (100.0 - 199.0, False), (100.0 - 201.0, True),
     ])
-    def test_the_grid_edge_carries_the_axis_match_tolerance(
+    def test_the_grid_edge_is_half_a_sample_step_as_at_takes_it(
             self, range_m, outside):
         assert bool(self.off_grid_notices(self.spreading_field(),
                                           range_m)) is outside
@@ -620,18 +619,9 @@ class TestOneSignalAtOneReceiver:
                       frequencies=f)
         assert self.off_grid_notices(field, 4975.879396984925) == []
 
-    def test_a_waveform_and_a_spectrum_together_are_refused(self):
-        field = self.spreading_field()
-        with pytest.raises(ConfigurationError, match="not both"):
-            field.to_time_trace(
-                depth=50.0, range=500.0,
-                source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
-                sample_rate=self.RATE,
-                source_spectrum=np.ones(field.n_frequencies))
-
     def test_a_waveform_without_a_sample_rate_is_refused(self):
         field = self.spreading_field()
-        with pytest.raises(ConfigurationError, match="sample_rate"):
+        with pytest.raises(TypeError, match="sample_rate"):
             field.to_time_trace(
                 depth=50.0, range=500.0,
                 source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1])
@@ -696,7 +686,7 @@ def test_the_truncate_response_table_reproduces(gap, none, hann):
     configuration it records: two paths (1, 0.7), 25 Hz-4 kHz at 1 Hz, a
     rectangular 20-cycle 1 kHz burst, the gate centred on the first path."""
     fs = 48000.0
-    _, burst = tone_burst(1000.0, 20, sample_rate=fs, window=None)
+    _, burst = tone_burst(1000.0, 20, sample_rate=fs, window='boxcar')
     duration = burst.size / fs
     f = np.arange(25.0, 4000.0, 1.0)
     H = np.exp(-2j * np.pi * f * 0.1) + 0.7 * np.exp(-2j * np.pi * f * (0.1 + gap))

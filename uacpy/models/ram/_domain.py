@@ -15,7 +15,7 @@ from uacpy.core.environment import (
 )
 from uacpy.core.surface import Surface
 from uacpy.core.boundary import BoundaryType
-from uacpy.core.absorption import ConstantAbsorption
+from uacpy.core.absorption import ConstantAbsorption, _absorption_law
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, NumericsWarning,
 )
@@ -152,6 +152,55 @@ _LEAKED_ENERGY_FLOOR_DB = float(
 _MIN_SUBBOTTOM_WAVELENGTHS = 3.0
 
 
+#: Attenuation (dB/wavelength) an unpinned absorbing layer ramps to at the
+#: domain floor: the floor of Collins' sample ramp ``900.0 0.5`` /
+#: ``1000.0 10.0`` (ram.pdf p.12, Fig. 2); upstream mpiramS used 5
+#: (third_party/MODIFICATIONS.md:2431-2432).
+DEFAULT_ABSORBER_ATTENUATION = 10.0
+
+
+def absorber_floor_attenuation(seabed_attenuation, *, knobs):
+    """The attenuation (dB/wavelength) written at the floor of the
+    absorbing layer over a seabed whose own attenuation at the top of the
+    layer is ``seabed_attenuation`` (a scalar, or one per sediment profile):
+    a pinned ``absorber_attenuation`` as given; unpinned,
+    :data:`DEFAULT_ABSORBER_ATTENUATION` raised to the seabed's own where
+    that is higher, so the ramp never decreases ("the attenuation is
+    increased over the lower few wavelengths of the grid", ram.pdf p.7)."""
+    seabed = np.asarray(seabed_attenuation, dtype=float)
+    if knobs.absorber_attenuation is None:
+        return np.maximum(seabed, DEFAULT_ABSORBER_ATTENUATION)
+    return np.full(seabed.shape, float(knobs.absorber_attenuation))
+
+
+def warn_if_pinned_absorber_is_below_the_seabed(env: Environment, *,
+                                                notices=None,
+                                                knobs) -> None:
+    """One notice when a pinned ``absorber_attenuation`` is below the
+    attenuation of a seabed half-space — the medium at the top of the
+    absorbing layer on every backend, which starts at or below the base of
+    the modelled sediment (:func:`absorber_span`,
+    ``collins.absorber_start``) — so the layer's attenuation decreases
+    with depth. The value is written as given."""
+    pinned = knobs.absorber_attenuation
+    if pinned is None:
+        return
+    seabed = [float(c.halfspace.attenuation) for c in env.bottom.columns
+              if BoundaryType.from_string(
+                  c.halfspace.acoustic_type).is_geoacoustic]
+    if not seabed or not float(pinned) < max(seabed):
+        return
+    give_notice(notices,
+        f"RAM: absorber_attenuation={float(pinned):g} dB/wavelength is below "
+        f"the seabed half-space's own {max(seabed):g} dB/wavelength, so the "
+        f"absorbing layer's attenuation decreases with depth; it is written "
+        f"as given. The RAM guide has the attenuation \"increased over the "
+        f"lower few wavelengths of the grid\" (ram.pdf p.7); leave "
+        f"absorber_attenuation unset to ramp to the larger of 10 "
+        f"dB/wavelength and the seabed's own.",
+        NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
 def seabed_sound_speed(env: Environment, c0: float) -> float:
     """Sound speed just below the seafloor, for sizing the real-seabed pad.
 
@@ -194,7 +243,7 @@ def resolve_c0(env: Environment, *, knobs) -> float:
 
     Resolution order:
 
-    1. ``self.c0`` if the user pinned it explicitly.
+    1. ``knobs.c0`` if the user pinned it explicitly.
     2. :func:`~uacpy.models.pe_grid.optimal_c0` — Eq. (15) of
        Lytaev (2023) on the accuracy band the grid chooser scores (the
        water column out to the wider of the aperture and the seabed's
@@ -223,7 +272,7 @@ def water_speed_bounds(env: Environment):
     return float(c.min()), float(c.max())
 
 
-#: Source aperture (degrees) the default ``angle_max`` takes before the
+#: Source aperture (degrees) the default ``angle_max_deg`` takes before the
 #: seabed term: the aperture of the worked example in Lytaev (2023) §5.1
 #: ("We will proceed from the maximum propagation angle θmax = 30°"). Jensen
 #: et al. (*Computational Ocean Acoustics*, Sect. 6.2.4) treat the aperture
@@ -234,9 +283,9 @@ DEFAULT_ANGLE_MAX_DEG = 30.0
 
 def source_aperture(knobs) -> float:
     """The source's maximum propagation angle (degrees): the pinned
-    ``angle_max``, else :data:`DEFAULT_ANGLE_MAX_DEG`."""
-    return (DEFAULT_ANGLE_MAX_DEG if knobs.angle_max is None
-            else float(knobs.angle_max))
+    ``angle_max_deg``, else :data:`DEFAULT_ANGLE_MAX_DEG`."""
+    return (DEFAULT_ANGLE_MAX_DEG if knobs.angle_max_deg is None
+            else float(knobs.angle_max_deg))
 
 
 def steepest_slope_deg(env: Environment) -> float:
@@ -258,7 +307,7 @@ def steepest_slope_deg(env: Environment) -> float:
 def resolve_angle_max(env: Environment, *, knobs) -> float:
     """Maximum propagation angle (degrees) bracketing the Padé spectrum.
 
-    A pinned ``angle_max`` is used as given. Left unset, it is Lytaev
+    A pinned ``angle_max_deg`` is used as given. Left unset, it is Lytaev
     (2023, https://doi.org/10.3390/jmse11030496) §5.5's estimate
     ``θ_max = max(θ_max^src, θ_max^bottom)``: the source aperture
     :data:`DEFAULT_ANGLE_MAX_DEG` and the steepest slope between bottom and
@@ -267,8 +316,8 @@ def resolve_angle_max(env: Environment, *, knobs) -> float:
     of leaving the automatic grid coarser than the ``accuracy`` budget
     implies — capped just under 90°, where the bracket is undefined.
     """
-    if knobs.angle_max is not None:
-        return float(knobs.angle_max)
+    if knobs.angle_max_deg is not None:
+        return float(knobs.angle_max_deg)
     return float(min(max(DEFAULT_ANGLE_MAX_DEG, steepest_slope_deg(env)),
                      89.0))
 
@@ -280,7 +329,7 @@ def compute_zmax(env: Environment, freq: float,
     """
     Compute PE domain depth (zmax) that extends below the seafloor.
 
-    If self.zmax is set, uses that value directly. Otherwise adds:
+    If ``knobs.zmax`` is set, uses that value directly. Otherwise adds:
     - The modelled sediment stack below the max seafloor depth, or the
       deepest source (``source_depth``, m) when that lies deeper
     - A real-seabed pad below that (:func:`adequate_zmax`)
@@ -302,7 +351,7 @@ def compute_zmax(env: Environment, freq: float,
     """
     if knobs.zmax is not None:
         # mpiramS reaches a pinned zmax only through here; the Collins path
-        # resolves it in _resolve_collins_grid and guards it there. Both
+        # resolves it in collins.resolve_collins_grid and guards it there. Both
         # backends clamp the seafloor index the same way
         # (mpiramS/src/ram.f90:101 iz=min(nz,iz), ramgeo1.5.f:135), so the
         # seabed-outside-the-grid pathology is not Collins-specific: measured
@@ -358,7 +407,7 @@ def leaky_field_depth(env: Environment, freq: float, max_range: float, *,
     needs no pad.
 
     The aperture is the source's, not :func:`resolve_angle_max`'s: a relief
-    steeper than ``angle_max`` widens the Padé bracket for the energy it
+    steeper than ``angle_max_deg`` widens the Padé bracket for the energy it
     turns, but the rule follows each component at full strength over the
     whole track. A 4 m step written as a 1 m ramp reads as a 76° slope and,
     over a near-massless seabed (``|R|`` = 0.9998) to 4 km, asked for a
@@ -366,11 +415,13 @@ def leaky_field_depth(env: Environment, freq: float, max_range: float, *,
     against a coupled-mode reference) with ``zmax`` 1779 m and 3500 m.
 
     Bucker's waveguide (COA 4.10.2: 240 m of water over a lossless 1505 m/s,
-    ρ 2.1 half-space, 100 Hz, 2-20 km) needs about 1.1 km of it: its first
-    leaky mode leaves at 3.6° and loses only 1.24 dB/km (Kraken,
-    ``leaky_modes=True``). A pad of 2 seabed wavelengths there read 2.41 dB
-    median |dTL| from a wavenumber integral; ``zmax`` 1000 / 1600 / 2000 m
-    read 0.92 / 0.14 / 0.09 dB. A lossy seabed bounds it by its own loss.
+    ρ 2.1 half-space, 100 Hz, 2-20 km; water density 1.0, the reference's)
+    needs about 1.1 km of it: its first leaky mode leaves at 3.6° (phase
+    speed 1508.0 m/s) and loses only 1.21 dB/km (Kraken,
+    ``leaky_modes=True``). A pad of 2 seabed wavelengths there (``zmax``
+    588 m) read 2.45 dB median |dTL| from a wavenumber integral; ``zmax``
+    1000 / 1600 / 2000 m read 0.96 / 0.14 / 0.08 dB, and the automatic
+    ``zmax`` is 1688.9 m. A lossy seabed bounds it by its own loss.
     """
     from uacpy.core.acoustics.boundaries import reflection_coeff
     media = _seabed_top_media(env)
@@ -589,6 +640,48 @@ def absorbing_layer_thickness(env: Environment, freq: float, *,
             / max(float(freq), 1.0))
 
 
+def mask_absorbing_layer(model_name: str, data, depths,
+                         layer_top) -> np.ndarray:
+    """A copy of ``data`` with every sample inside RAM's absorbing layer
+    set to NaN, and one ``NumericsWarning`` counting them.
+
+    ``data`` holds depth on axis 0 and range on axis 1 (any trailing axes
+    take their cell's mask); ``depths`` (m) are its axis-0 depths;
+    ``layer_top`` is the geometric depth (m) where the layer starts, one per
+    range, or ``(n_ranges, n_frequencies)`` for a Collins band, whose layer
+    width follows each bin's wavelength (axis 2 of ``data``). A sample
+    deeper than its top is masked; one on it is kept.
+
+    The layer's attenuation is artificial: Collins & Siegmann (*Parabolic
+    Wave Equations with Applications*, §1.2.5) introduce it "in an
+    absorbing layer that is placed deep within the sediment to prevent
+    spurious reflections from the boundary at z = H", so a value inside it
+    is a computational artifact. Above it — water and real seabed — the
+    PE field is returned as the binary computed it."""
+    arr = np.asarray(data)
+    out = arr.astype(arr.dtype if np.issubdtype(arr.dtype, np.inexact)
+                     else np.float64, copy=True)
+    z = np.atleast_1d(np.asarray(depths, dtype=float))
+    top = np.asarray(layer_top, dtype=float)
+    inside = z.reshape((-1,) + (1,) * top.ndim) > top[None]
+    inside = np.broadcast_to(
+        inside.reshape(inside.shape + (1,) * (out.ndim - inside.ndim)),
+        out.shape)
+    n_inside = int(np.count_nonzero(inside))
+    if n_inside:
+        out[inside] = np.nan
+        warnings.warn(
+            f"{model_name}: {n_inside} of {out.size} samples lie inside the "
+            f"artificial absorbing layer (from {float(np.min(top)):.1f} m "
+            f"down) and are returned as NaN: its attenuation is a "
+            f"computational device to stop reflections from the grid floor "
+            f"(Collins & Siegmann, Parabolic Wave Equations with "
+            f"Applications, §1.2.5), not the seabed. Pin a deeper zmax= to "
+            f"place the layer below those receivers.",
+            NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return out
+
+
 def warn_if_seafloor_outside_grid(zmax: float, env, *,
                                    dz: Optional[float] = None,
                                    kind: Optional[str] = None,
@@ -644,8 +737,7 @@ def warn_if_seafloor_outside_grid(zmax: float, env, *,
         # A pinned zmax that clears the SEAFLOOR can still end inside the
         # sediment STACK. Nothing downstream notices: the Collins block builder
         # does not clip at zmax — ``_seabed.piecewise_breakpoints`` takes zmax
-    # only
-        # to give the half-space a non-zero extent, and emits every layer step
+        # only to give the half-space a non-zero extent, and emits every layer step
         # regardless — so ``zread`` simply interpolates the oversized block
         # onto the shorter grid, and on rams0.5 its fill loop replaces the
         # layer with a linear gradient to the half-space value. The absorbing
@@ -680,7 +772,7 @@ def warn_if_seafloor_outside_grid(zmax: float, env, *,
         if freq is not None:
             # "the lower FEW wavelengths" (ram.pdf p.7), not uacpy's own
             # generous 20-lambda auto pad: comparing against
-            # _adequate_zmax would warn at zmax=700 m here, which measures
+            # adequate_zmax would warn at zmax=700 m here, which measures
             # 0.32 dB — noise. Three wavelengths tracks the measured error
             # curve instead: silent at 700 m (0.32 dB) and 1500 m, warning
             # at 300 m (3.1 dB) and 222 m (16.0 dB).
@@ -775,11 +867,11 @@ def water_attenuation_active(env: Environment) -> bool:
     """Whether the deck carries a water-attenuation block: an absorption
     model is set and is not the zero constant, which the block would
     only spell out as a column of zeros."""
-    absorption = env.absorption
+    absorption = _absorption_law(env.absorption)
     if absorption is None:
         return False
     return not (isinstance(absorption, ConstantAbsorption)
-                and absorption.value_dB_per_wavelength == 0.0)
+                and absorption.value == 0.0)
 
 
 def water_attenuation_depths(env: Environment, zmax: float,
@@ -799,8 +891,9 @@ def water_attenuation_depths(env: Environment, zmax: float,
     pts.update(float(d) for d in np.atleast_1d(env.ssp.depths)
                if 0.0 <= float(d) <= zmax)
     pts.update(np.linspace(0.0, min(float(env.depth), zmax), 33).tolist())
-    if env.absorption is not None:
-        pts.update(float(v) for v in env.absorption._breakpoint_depths()
+    absorption = _absorption_law(env.absorption)
+    if absorption is not None:
+        pts.update(float(v) for v in absorption._breakpoint_depths()
                    if 0.0 <= float(v) <= zmax)
     depths = np.array(sorted(pts), dtype=float)
     if dz is not None and float(dz) > 0.0:
@@ -855,12 +948,13 @@ def water_alpha_band(env: Environment, frequencies,
     taken node by node at each node's sound speed (a
     :class:`ConstantAbsorption`, written as its value; a table).
     """
+    absorption = _absorption_law(env.absorption)
     if (not water_attenuation_active(env)
-            or env.absorption._needs_node_sound_speed):
+            or absorption._needs_node_sound_speed):
         return None
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     depths = water_attenuation_depths(env, zmax)
-    table = env.absorption.table(f, depths, units='dB/m').data
+    table = absorption.table(f, depths, units='dB/m').data
     return {'frequencies': f, 'depths': depths,
             'dB_per_m': np.asarray(table, dtype=float).reshape(
                 depths.size, f.size)}
@@ -870,16 +964,17 @@ def water_alpha_dB_per_wavelength(env: Environment, freq: float,
                                    depths: np.ndarray,
                                    c: np.ndarray) -> np.ndarray:
     """Water attenuation in dB per local wavelength at ``depths``
-    (:meth:`~uacpy.core.absorption.Absorption.alpha_dB_per_wavelength`).
+    (:meth:`~uacpy.core.absorption.Absorption._alpha_dB_per_wavelength_at_frequency`).
 
     A :class:`ConstantAbsorption` already is dB per local wavelength —
     the unit the AT writers put in the deck unchanged — so its value is
-    written as given; routing it through ``alpha_dB_per_m`` (which
+    written as given; routing it through its dB/m evaluation (which
     converts at ``DEFAULT_SOUND_SPEED``) and back at ``c(z)`` would
     scale it by ``c(z)/DEFAULT_SOUND_SPEED``. Every other law is
     ``alpha[dB/m](f, z) · c(z) / f``.
     """
-    return env.absorption.alpha_dB_per_wavelength(freq, depths, c)
+    return _absorption_law(env.absorption)._alpha_dB_per_wavelength_at_frequency(
+        freq, depths, c)
 
 
 def deck_depth(z, *, knobs):

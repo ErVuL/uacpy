@@ -47,10 +47,8 @@ plot.compare(value='magnitude'/'phase')
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -91,8 +89,8 @@ fields = {
 # OASP rebuilds an equispaced grid of its own, so its sweep bounds go on the
 # constructor. It needs the OASES binaries; without them the comparison runs
 # on the other models.
-# OASP says which ladder it returned; that notice is printed, any other
-# warning is shown as usual.
+# OASP returns its own FFT ladder rather than the requested list and says so;
+# that notice is printed.
 try:
     with warnings.catch_warnings(record=True) as caught:
         fields['OASP'] = uacpy.OASP(
@@ -101,11 +99,7 @@ try:
             env, source, receiver, run_mode=uacpy.RunMode.BROADBAND,
             frequencies=frequencies)
     for warning in caught:
-        if 'FFT ladder' in str(warning.message):
-            print(f"  noted: {str(warning.message).split('. OASP is')[0]}")
-        else:
-            warnings.showwarning(warning.message, warning.category,
-                                 warning.filename, warning.lineno)
+        print(f"  noted: {str(warning.message).splitlines()[0]}")
 except uacpy.ExecutableNotFoundError:
     print("  OASP skipped: OASES executable not found (./install.sh --oases yes)")
 
@@ -150,7 +144,7 @@ print(f"  SPARC              p{sparc.data.shape}, dt={sparc.dt * 1e3:.3f} ms "
 # Bellhop's other time-domain route: delay-and-sum of its arrivals against a
 # real source waveform.
 fs, chirp_duration = 2000.0, 0.1
-t_chirp, chirp = lfm_chirp(50.0, 150.0, chirp_duration, sample_rate=fs)
+_, chirp = lfm_chirp(50.0, 150.0, chirp_duration, sample_rate=fs)
 chirp_response = uacpy.Bellhop(backend='fortran').run(
     env, source,
     uacpy.Receiver(depths=np.array([TARGET_DEPTH]),
@@ -189,19 +183,13 @@ fig.savefig(OUT / 'example_19_transfer_functions.png', dpi=150,
 plt.close(fig)
 
 # ── TL against depth at the centre frequency ────────────────────────────────
-fig, ax = plt.subplots(figsize=(8, 6))
-for name, field in fields.items():
-    # Slice to one (frequency, range) cell, leaving a 1-D vector over depth.
-    cut = field.at(frequency=source.frequencies[0], range=TARGET_RANGE).to_dB()
-    ax.plot(np.asarray(cut.dB).ravel(), field.depths, label=name, linewidth=1.5)
-ax.set_xlabel('Transmission loss (dB)')
-ax.set_ylabel('Depth (m)')
-ax.set_title(f'TL vs depth at {source.frequencies[0]:.0f} Hz, '
-             f'{TARGET_RANGE / 1000:.0f} km')
-ax.invert_yaxis()
-ax.legend()
-ax.grid(True, alpha=0.3)
-fig.tight_layout()
+# Each field sliced to one (frequency, range) cell: a 1-D cut over depth.
+fig, _ = uacpy.plot.compare(
+    [field.at(frequency=source.frequencies[0], range=TARGET_RANGE)
+     for field in fields.values()],
+    labels=list(fields), figsize=(8, 6),
+    title=f'TL vs depth at {source.frequencies[0]:.0f} Hz, '
+          f'{TARGET_RANGE / 1000:.0f} km')
 fig.savefig(OUT / 'example_19_tl_depth_comparison.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
@@ -212,6 +200,7 @@ t_start = max(0.0, arrival_s - 0.5)          # half a second of lead-in
 traces = {}
 for name, field in fields.items():
     trace = field.to_time_trace(depth=TARGET_DEPTH, range=TARGET_RANGE,
+                                sample_rate=fs, window='hann',
                                 t_start=t_start)
     traces[name] = (trace.times * 1000, trace.data)
 traces['Bellhop (chirp)'] = (
@@ -246,35 +235,23 @@ plt.close(fig)
 
 # ── The chirp in and the chirp out ──────────────────────────────────────────
 fig, (ax_tx, ax_rx) = plt.subplots(2, 1, figsize=(12, 6))
-ax_tx.plot(t_chirp * 1000, chirp, 'k-', linewidth=0.8)
-ax_tx.set_title(f'Source: LFM chirp 50-150 Hz, '
-                f'{chirp_duration * 1000:.0f} ms')
-ax_rx.plot(*traces['Bellhop (chirp)'], color='b', linewidth=0.8)
-ax_rx.set_title(f'Received: Bellhop delay-and-sum at {TARGET_DEPTH:.0f} m, '
-                f'{TARGET_RANGE / 1000:.0f} km')
-for ax in (ax_tx, ax_rx):
-    ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('Amplitude')
-    ax.grid(True, alpha=0.3)
+uacpy.plot.plot_waveform(chirp, fs, ax_tx, time_units='ms', color='k',
+                         linewidth=0.8,
+                         title=f'Source: LFM chirp 50-150 Hz, '
+                               f'{chirp_duration * 1000:.0f} ms')
+uacpy.plot.plot_waveform(
+    chirp_response.at(depth=TARGET_DEPTH, range=TARGET_RANGE).data, fs, ax_rx,
+    t0=float(chirp_response.times[0]), time_units='ms', color='b',
+    linewidth=0.8,
+    title=f'Received: Bellhop delay-and-sum at {TARGET_DEPTH:.0f} m, '
+          f'{TARGET_RANGE / 1000:.0f} km')
 fig.tight_layout()
 fig.savefig(OUT / 'example_19_bellhop_chirp.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 # ── SPARC's own waterfall, one trace per range ──────────────────────────────
-fig, ax = plt.subplots(figsize=(12, 6))
-times_ms = sparc.times * 1000
-for index, trace in enumerate(sparc.data[0]):          # depth 0 → (n_r, n_t)
-    normalised = trace / (np.max(np.abs(trace)) + 1e-30) * 0.8
-    ax.plot(times_ms, normalised + index, 'k-', linewidth=0.7)
-    ax.text(times_ms[-1] * 1.01, index,
-            f'{sparc_receiver.ranges[index] / 1000:.1f} km', fontsize='small',
-            va='center')
-ax.set_xlabel('Time (ms)')
-ax.set_ylabel('Range (trace index)')
-ax.set_title('SPARC time-domain waveforms')
-ax.set_xlim(times_ms[0], times_ms[-1])
-ax.grid(True, alpha=0.3)
-fig.tight_layout()
+fig, _ = sparc.at(depth=50.0).plot(stacked=True, figsize=(12, 6),
+                                    title='SPARC time-domain waveforms')
 fig.savefig(OUT / 'example_19_sparc_time_series.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)

@@ -351,7 +351,7 @@ writes `u·f3 / sqrt(r)`, while `rams0.5.f` writes `u / sqrt(r)` (its
 carrier `exp(+i k0 r)` — baked into `u` in `rams0.5.f` (via the `g0`
 march step), factored out in `ramsurf1.5.f` — so the RAM Python wrapper
 applies a per-backend correction (conjugate ψ and the Hankel phase
-`exp(-iπ/4)` for both, `models/ram/_pe_phase.py:135,156,175`; an extra
+`exp(-iπ/4)` for both, `models/ram/_pe_phase.py::psi_to_travelling_wave`; an extra
 `exp(-i k0 r)` for ramsurf only) before tagging the result
 `phase_reference='travelling_wave'`, so every broadband-capable model
 presents the same shape of H(f) to the IFFT pipeline. See the per-binary
@@ -439,7 +439,7 @@ The travelling-wave conversion therefore branches on `kind`: rams gets
 `np.conj(H) · exp(−iπ/4)`, ramsurf gets
 `np.conj(H) · exp(−i k₀(ω) r) · exp(−iπ/4)` — the `exp(−iπ/4)` is the
 Hankel-asymptotic cylindrical-spreading phase both Collins branches
-apply (`models/ram/_pe_phase.py:135,156,175`; mpiramS bakes it into `psif`
+apply (`models/ram/_pe_phase.py::psi_to_travelling_wave`; mpiramS bakes it into `psif`
 itself). After this convention bookkeeping all
 three RAM backends land the IFFT peak at `r/c₀` (matching JKPS
 *Computational Ocean Acoustics* §8.2 eq. 8.1–8.4 within real
@@ -1400,7 +1400,7 @@ multi-range output grid `rsc` becomes `rg(nr) - rs` where upstream it was
 branch fire slightly earlier. It fires within the first output segment
 either way — the branch compares the distance left to the *current* output
 range rather than the absolute range marched, which is what makes
-`stability_range_m` largely inert on a multi-range grid (upstream behaviour;
+`stability_range` largely inert on a multi-range grid (upstream behaviour;
 `ram._stability.warn_stability_range_inert_on_a_multi_range_grid` warns about it).
 
 ```diff
@@ -1899,7 +1899,7 @@ below 4 stop the run with an error naming the minimum (the same loud-stop
 pattern as `c0_user`), since `profl`'s layout needs at least [surface,
 seafloor, one interior point, domain floor] and `nzs = 1` would write
 `zwork(2)` past the end of a 1-element allocation.
-`uacpy.io.mpirams_writer.write_inpe` enforces the same bound before a deck
+`uacpy.io.mpirams_writer.write_mpirams_inpe` enforces the same bound before a deck
 is written.
 
 ```diff
@@ -2433,5 +2433,5 @@ upstream hardcoded — `cs = 0/0/200/200`, `rho = 1.2`, `attn =
 3-frequency band (`fc = 75` Hz, `Q = 75`, `T = 1` s), sized to run in
 under a second. Verified: the installed `s_mpiram` runs it to completion
 and its `psif.dat` is bit-identical to the same deck written by
-`uacpy.io.mpirams_writer.write_inpe`. Filename lines carry no trailing
+`uacpy.io.mpirams_writer.write_mpirams_inpe`. Filename lines carry no trailing
 comment — `read (nunit,'(a)')` takes the whole record as the filename.

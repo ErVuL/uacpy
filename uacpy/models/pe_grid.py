@@ -13,10 +13,10 @@ approximation of the propagator ``exp(ikΔx(√(1+ξ) − 1))``. This module:
   water column's propagating components out to the wider of the caller's
   aperture and the seabed's critical angle, everything that carries energy
   to the far field — and a **stability band**, the rest of the medium's
-  hull (Lytaev §4.1), held non-amplifying only. Scored on the whole hull a
-  hard rock seabed put the branch point ``ξ = −1`` inside the interval and
-  every grid was refused; scored on the aperture alone a rock seabed
-  (critical angle 51°) read better than sand while measuring 3 dB rms
+  hull (Lytaev §4.1), held non-amplifying only. Scored on the whole hull,
+  a hard rock seabed puts the branch point ``ξ = −1`` inside the interval
+  and every grid is refused; scored on the aperture alone, a rock seabed
+  (critical angle 51°) reads better than sand while measuring 3 dB rms
   worse at 1–5 km, its trapped modes between 30° and 51° unseen.
 * Picks a reference sound speed ``c₀`` (:func:`optimal_c0`, Eq. 15 on the
   accuracy band) so that band straddles the Padé sweet spot ``ξ = 0``.
@@ -52,11 +52,117 @@ the internal march grid.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+
+#: The Padé order ``[p/p]`` a default RAM run marches (``RAM(n_pade=)``) and
+#: the grid functions here score by default, so a search answers RAM's own
+#: question: Collins' sample deck ``np = 8`` (ram.pdf p.12, Fig. 2), the
+#: ``[7/8]`` order of every table in Lytaev (2023), and the Acoustics
+#: Toolbox's RAM writer (``Matlab/Slicer/write_ram_in.m:82``).
+DEFAULT_N_PADE = 8
+
+
+class GridChoice(NamedTuple):
+    """The ``(Δx, Δz)`` :func:`optimize_grid` chose (or scored), with the
+    bands it was scored on.
+
+    Attributes
+    ----------
+    dr, dz : float
+        Range and depth steps (m).
+    predicted_error : float
+        ``τ · n_steps`` at the grid.
+    growth : float
+        ``max |P/Q| − 1`` per step over the stability band outside the
+        accuracy band; 0 when there is none.
+    c0 : float
+        The reference sound speed (m/s), echoed back.
+    kz_max : float
+        Vertical wavenumber (rad/m) of the steepest scored component.
+    alpha : float
+        The vertical-FD scheme parameter.
+    p : int
+        The Padé order scored.
+    xi_min, xi_max : float
+        The accuracy band at ``c0``.
+    xi_stab_min, xi_stab_max : float
+        The stability band.
+    trapped_end_binds : bool
+        Whether the steepest scored component is the seabed's
+        critical-angle mode.
+    """
+    dr: float
+    dz: float
+    predicted_error: float
+    growth: float
+    c0: float
+    kz_max: float
+    alpha: float
+    p: int
+    xi_min: float
+    xi_max: float
+    xi_stab_min: float
+    xi_stab_max: float
+    trapped_end_binds: bool
+
+    def to_dict(self) -> dict:
+        """The fields as a plain dict, which :meth:`from_dict` reads
+        back."""
+        return dict(self._asdict())
+
+    @classmethod
+    def from_dict(cls, d) -> 'GridChoice':
+        """The choice :meth:`to_dict` wrote."""
+        return cls(**d)
+
+
+class GrowthMargin(NamedTuple):
+    """How far a rams0.5 march sits from divergence
+    (:func:`rams_growth_margin`): the rotation's own ``dr``-independent
+    growth (``floor*``) and, for a given ``dr``, the step's (``None``
+    without one).
+
+    Attributes
+    ----------
+    floor, floor_leak : float
+        The rotation's growth (:func:`rotated_growth_floor`) and the seabed's
+        leak (Np/m) at the steep component where their excess is largest.
+    floor_xi : float
+        That component's ``ξ``.
+    floor_excess : float
+        ``floor − leak/safety`` there; positive: no range step can cure it.
+    growth, leak : float or None
+        The step's amplification and the seabed's leak (Np/m) at the
+        component where ``growth − leak/safety`` is largest.
+    xi, grazing_deg : float or None
+        That component's ``ξ`` and grazing angle (degrees).
+    excess : float or None
+        ``growth − leak/safety``; positive means the rule predicts
+        divergence.
+    """
+    floor: float
+    floor_leak: float
+    floor_xi: float
+    floor_excess: float
+    growth: Optional[float] = None
+    leak: Optional[float] = None
+    xi: Optional[float] = None
+    grazing_deg: Optional[float] = None
+    excess: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        """The fields as a plain dict, which :meth:`from_dict` reads
+        back."""
+        return dict(self._asdict())
+
+    @classmethod
+    def from_dict(cls, d) -> 'GrowthMargin':
+        """The margin :meth:`to_dict` wrote."""
+        return cls(**d)
 
 
 class GridInfeasibleError(ConfigurationError):
@@ -294,7 +400,7 @@ def _step_error(
 
     # Exact propagator at ξ₁, on the COMPLEX branch. ξ drops below -1 over the
     # evanescent part of the angular spectrum, which the auto grid reaches
-    # whenever sin(angle_max) > sqrt(2)·c_min/c_max — with the shipped 30°
+    # whenever sin(angle_max_deg) > sqrt(2)·c_min/c_max — with the shipped 30°
     # default, any seabed faster than ~2.83× the water speed (basalt, granite,
     # limestone under a slope). A REAL sqrt returns NaN there, `abs(NaN - pq)`
     # is NaN, and `NaN > err_max` is False, so err_max would keep its 0.0
@@ -398,10 +504,10 @@ def combined_error(
 
 
 def _bands(
-    c0: float, c_min: float, c_max: float, angle_max: float,
+    c0: float, c_min: float, c_max: float, angle_max_deg: float,
     c_min_all: Optional[float] = None, c_max_all: Optional[float] = None,
 ) -> dict:
-    """The two ``ξ`` bands scored at ``c₀`` (``angle_max`` in **degrees**;
+    """The two ``ξ`` bands scored at ``c₀`` (``angle_max_deg`` in **degrees**;
     ``c_min`` / ``c_max`` the water column, ``c_min_all`` / ``c_max_all``
     the whole domain, default the water bounds).
 
@@ -418,7 +524,7 @@ def _bands(
     c0, c_min, c_max = float(c0), float(c_min), float(c_max)
     c_min_all = c_min if c_min_all is None else min(float(c_min_all), c_min)
     c_max_all = c_max if c_max_all is None else max(float(c_max_all), c_max)
-    sin2 = np.sin(np.deg2rad(float(angle_max))) ** 2
+    sin2 = np.sin(np.deg2rad(float(angle_max_deg))) ** 2
     xi_aperture = -sin2 + (c0 / c_max) ** 2 - 1.0
     xi_trapped = (c0 / c_max_all) ** 2 - 1.0
     trapped = bool(xi_trapped < xi_aperture)
@@ -433,14 +539,14 @@ def _bands(
     )
 
 
-def optimal_c0(c_min: float, c_max: float, angle_max: float,
+def optimal_c0(c_min: float, c_max: float, angle_max_deg: float,
                c_max_all: Optional[float] = None) -> float:
     """Picks ``c₀`` so the accuracy band centres on the Padé sweet spot
     ``ξ = 0``: Lytaev (2023) Eq. (15) — *Mesh Optimization for the Acoustic
     Parabolic Equation*, https://doi.org/10.3390/jmse11030496 — on
     whichever end bounds the band (:func:`_bands`).
 
-    ``angle_max`` is in **degrees**. ``c_min`` / ``c_max`` bound the water
+    ``angle_max_deg`` is in **degrees**. ``c_min`` / ``c_max`` bound the water
     column; a seabed ``c_max_all`` faster than ``c_max`` adds the trapped
     end's own symmetric solution (``ξ_min = −ξ_max`` there: Eq. 15 of
     ``(c_min, c_max_all)`` at zero aperture), and the candidate leaving the
@@ -451,7 +557,7 @@ def optimal_c0(c_min: float, c_max: float, angle_max: float,
     ----------
     c_min, c_max : float
         Water-column speed bounds (m/s).
-    angle_max : float
+    angle_max_deg : float
         Maximum propagation angle, in degrees.
     c_max_all : float, optional
         The fastest speed (m/s) anywhere, a seabed included.
@@ -460,12 +566,12 @@ def optimal_c0(c_min: float, c_max: float, angle_max: float,
         s2 = np.sin(np.deg2rad(float(theta))) ** 2
         return float(c_min * c_hi * np.sqrt((2.0 + s2) / (c_min ** 2 + c_hi ** 2)))
 
-    candidates = [eq15(c_max, angle_max)]
+    candidates = [eq15(c_max, angle_max_deg)]
     if c_max_all is not None and float(c_max_all) > float(c_max):
         candidates.append(eq15(float(c_max_all), 0.0))
 
     def half_width(c0):
-        b = _bands(c0, c_min, c_max, angle_max, c_max_all=c_max_all)
+        b = _bands(c0, c_min, c_max, angle_max_deg, c_max_all=c_max_all)
         return max(abs(b['xi_min']), abs(b['xi_max']))
 
     return min(candidates, key=half_width)
@@ -475,7 +581,8 @@ def optimal_c0(c_min: float, c_max: float, angle_max: float,
 # Main optimizer
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Bounds of the Δz search ladder (m) and the geometric ratio both ladders use.
+# Bounds of the Δz search ladder (m) and the geometric ratio both ladders
+# use: search bounds, uacpy guidance.
 DZ_MIN = 0.01
 DZ_MAX = 5.0
 LADDER_RATIO = 1.5
@@ -514,15 +621,15 @@ def optimize_grid(
     c_max: float,
     x_max: float,
     c0: float,
-    angle_max: float = 30.0,
+    angle_max_deg: float = 30.0,
     eps: float = 1e-3,
-    p: int = 6,
+    p: int = DEFAULT_N_PADE,
     alpha: float = 0.0,
     tau_cache: Optional[dict] = None,
     c_min_all: Optional[float] = None,
     c_max_all: Optional[float] = None,
     grid: Optional[Tuple[float, float]] = None,
-) -> dict:
+) -> GridChoice:
     """Find the coarsest ``(Δx, Δz)`` whose accumulated error stays under
     ``ε`` over ``⌈x_max/Δx⌉`` march steps for the given ``c₀`` — or, with
     ``grid=(dr, dz)``, score that pair instead of searching.
@@ -548,13 +655,14 @@ def optimize_grid(
         Reference sound speed (m/s). The RAM wrapper resolves its
         default via :func:`optimal_c0` before calling in here; pass any
         pinned user value through unchanged.
-    angle_max : float
+    angle_max_deg : float
         Maximum propagation angle in **degrees**. Default 30°.
     eps : float
         Total accuracy budget (max ``|τ · n_steps|``). Default 1e-3.
         Unused with ``grid``.
     p : int
-        Padé order ``[p/p]``. Default 6 (matches our RAM default).
+        Padé order ``[p/p]``. Default :data:`DEFAULT_N_PADE` (8), the
+        order a default RAM run marches.
     alpha : float
         Vertical-FD scheme parameter. ``0.0`` = standard second-order
         tridiagonal (rams0.5 / ramsurf1.5). ``1/12`` = 4th-order Numerov
@@ -579,15 +687,9 @@ def optimize_grid(
 
     Returns
     -------
-    dict
-        Keys: ``c0`` (echoed back), ``dr``, ``dz``, ``xi_min`` /
-        ``xi_max`` (the accuracy band at the given ``c0``),
-        ``xi_stab_min`` / ``xi_stab_max`` (the stability band),
-        ``kz_max`` (rad/m, the steepest scored component),
-        ``trapped_end_binds`` (it is the seabed's critical-angle mode),
-        ``predicted_error`` (``τ · n_steps`` at the grid), ``growth``
-        (``max |P/Q| − 1`` per step over the stability band outside the
-        accuracy band; 0 when there is none), ``alpha``, ``p``.
+    GridChoice
+        The grid, its ``predicted_error`` and ``growth``, and the bands it
+        was scored on (attribute access: ``choice.dr``).
 
     Raises
     ------
@@ -600,8 +702,8 @@ def optimize_grid(
     """
     c0_use = float(c0)
     k0 = 2.0 * np.pi * frequency / c0_use
-    angle_max_rad = np.deg2rad(float(angle_max))
-    bands = _bands(c0_use, c_min, c_max, angle_max,
+    angle_max_rad = np.deg2rad(float(angle_max_deg))
+    bands = _bands(c0_use, c_min, c_max, angle_max_deg,
                    c_min_all=c_min_all, c_max_all=c_max_all)
     xi_min, xi_max = bands['xi_min'], bands['xi_max']
     xi_stab_min, xi_stab_max = bands['xi_stab_min'], bands['xi_stab_max']
@@ -665,32 +767,53 @@ def optimize_grid(
         # RAM catches this to walk its ε / θ_max relaxation ladder.
         raise GridInfeasibleError(
             f"No (Δx, Δz) candidate satisfies ε={eps:.2e} for "
-            f"f={frequency:.1f} Hz, c₀={c0_use:.0f} m/s, θ_max={float(angle_max):.1f}°, "
+            f"f={frequency:.1f} Hz, c₀={c0_use:.0f} m/s, θ_max={float(angle_max_deg):.1f}°, "
             f"x_max={x_max:.0f} m on the accuracy band "
             f"ξ ∈ [{xi_min:.3f}, {xi_max:.3f}] with the Δz ladder "
             f"[{dz_ladder_end(frequency, c_min):.3g}, {DZ_MAX:g}] m and "
             f"the Δx ladder "
             f"[{dx_candidates[-1]:.3g}, {dx_top:.3g}] m."
         )
-    return dict(
+    return GridChoice(
         c0=c0_use, kz_max=float(kz_max), alpha=float(alpha), p=int(p),
         **bands, **best,
     )
 
 
-def grid_error(*, dr: float, dz: float, **kwargs) -> float:
+def grid_error(
+    *,
+    dr: float,
+    dz: float,
+    frequency: float,
+    c_min: float,
+    c_max: float,
+    x_max: float,
+    c0: float,
+    angle_max_deg: float = 30.0,
+    p: int = DEFAULT_N_PADE,
+    alpha: float = 0.0,
+    tau_cache: Optional[dict] = None,
+    c_min_all: Optional[float] = None,
+    c_max_all: Optional[float] = None,
+) -> float:
     """Accumulated Padé error ``τ · n_steps`` at an arbitrary ``(dr, dz)``:
-    :func:`optimize_grid`'s ``predicted_error`` for ``grid=(dr, dz)``, same
-    remaining keyword arguments.
+    :func:`optimize_grid`'s ``predicted_error`` for ``grid=(dr, dz)``.
 
     Parameters
     ----------
     dr, dz : float
         The range and depth steps (m).
-    **kwargs
-        :func:`optimize_grid`'s remaining keywords.
+    frequency, c_min, c_max, x_max, c0 : float
+        As in :func:`optimize_grid`.
+    angle_max_deg, p, alpha, tau_cache, c_min_all, c_max_all : optional
+        As in :func:`optimize_grid` (``angle_max_deg`` in degrees; ``p``
+        default :data:`DEFAULT_N_PADE`, RAM's own order).
     """
-    return optimize_grid(grid=(dr, dz), **kwargs)['predicted_error']
+    return optimize_grid(
+        frequency=frequency, c_min=c_min, c_max=c_max, x_max=x_max, c0=c0,
+        angle_max_deg=angle_max_deg, p=p, alpha=alpha, tau_cache=tau_cache,
+        c_min_all=c_min_all, c_max_all=c_max_all,
+        grid=(dr, dz)).predicted_error
 
 
 def rams_dz_shear_cap(c_shear_min: float, frequency: float,
@@ -868,7 +991,7 @@ def rotated_growth_floor(xi, k0: float, n_pade: int,
 def seabed_leak_rate(xi, *, c0: float, water_sound_speed: float,
                      water_density: float, seabed_speed: float,
                      seabed_density: float,
-                     seabed_attenuation_dB_lambda: float,
+                     seabed_attenuation: float,
                      depth: float) -> np.ndarray:
     """Per-metre loss (Np/m) of the steep component ``ξ`` to the seabed of a
     ``depth`` m channel: the fluid-fluid Rayleigh reflection loss at its
@@ -891,7 +1014,7 @@ def seabed_leak_rate(xi, *, c0: float, water_sound_speed: float,
         Seabed compressional speed (m/s).
     seabed_density : float
         Seabed density (g/cm³).
-    seabed_attenuation_dB_lambda : float
+    seabed_attenuation : float
         Seabed attenuation (dB/wavelength).
     depth : float
         Water depth (m).
@@ -906,7 +1029,7 @@ def seabed_leak_rate(xi, *, c0: float, water_sound_speed: float,
             np.rad2deg(grazing),
             sound_speed=float(seabed_speed),
             density=float(seabed_density),
-            attenuation=float(seabed_attenuation_dB_lambda),
+            attenuation=float(seabed_attenuation),
             water_sound_speed=float(water_sound_speed),
             water_density=float(water_density)))
         leak = -np.log(np.clip(r, 1e-12, 1.0)) * np.tan(grazing) / (2.0 * float(depth))
@@ -932,19 +1055,17 @@ def _rams_steep_band(c0: float, water_sound_speed: float, seabed_speed: float):
 def rams_growth_margin(dr: Optional[float], *, frequency: float, c0: float,
                        water_sound_speed: float, water_density: float,
                        seabed_speed: float, seabed_density: float,
-                       seabed_attenuation_dB_lambda: float, depth: float,
+                       seabed_attenuation: float, depth: float,
                        n_pade: int, theta_deg: float,
-                       safety: float = RAMS_STABILITY_SAFETY) -> dict:
-    """How far the rams0.5 march at ``dr`` sits from divergence.
-
-    Returns ``{'growth', 'leak', 'xi', 'grazing_deg', 'excess', 'floor',
-    'floor_leak', 'floor_xi', 'floor_excess'}``: at the steep component where
+                       safety: float = RAMS_STABILITY_SAFETY) -> GrowthMargin:
+    """How far the rams0.5 march at ``dr`` sits from divergence, as a
+    :class:`GrowthMargin`: at the steep component where
     ``growth − leak/safety`` is largest, the step's amplification and the
     seabed's leak (both Np/m), that ``ξ``, and the excess itself — positive
     means the rule predicts divergence — and the same three for the
     rotation's own ``dr``-independent growth (:func:`rotated_growth_floor`),
     which a positive ``floor_excess`` says no range step can cure. With
-    ``dr=None`` only the floor entries are returned.
+    ``dr=None`` the step's fields are ``None``.
 
     Parameters
     ----------
@@ -962,7 +1083,7 @@ def rams_growth_margin(dr: Optional[float], *, frequency: float, c0: float,
         Seabed compressional speed (m/s).
     seabed_density : float
         Seabed density (g/cm³).
-    seabed_attenuation_dB_lambda : float
+    seabed_attenuation : float
         Seabed attenuation (dB/wavelength).
     depth : float
         Water depth (m).
@@ -980,13 +1101,14 @@ def rams_growth_margin(dr: Optional[float], *, frequency: float, c0: float,
         xi, c0=c0, water_sound_speed=water_sound_speed,
         water_density=water_density,
         seabed_speed=seabed_speed, seabed_density=seabed_density,
-        seabed_attenuation_dB_lambda=seabed_attenuation_dB_lambda,
+        seabed_attenuation=seabed_attenuation,
         depth=depth)
     floor = rotated_growth_floor(xi, k0, n_pade, theta_deg)
     floor_excess = floor - leak / float(safety)
     j = int(np.argmax(floor_excess))
-    out = {'floor': float(floor[j]), 'floor_leak': float(leak[j]),
-           'floor_xi': float(xi[j]), 'floor_excess': float(floor_excess[j])}
+    out = GrowthMargin(floor=float(floor[j]), floor_leak=float(leak[j]),
+                       floor_xi=float(xi[j]),
+                       floor_excess=float(floor_excess[j]))
     if dr is None:
         return out
     growth = rotated_cn_growth(xi, k0, dr, n_pade, theta_deg)
@@ -994,16 +1116,15 @@ def rams_growth_margin(dr: Optional[float], *, frequency: float, c0: float,
     i = int(np.argmax(excess))
     grazing = np.degrees(np.arccos(np.clip(
         np.sqrt(1.0 + xi[i]) * float(water_sound_speed) / float(c0), 0.0, 1.0)))
-    out.update({'growth': float(growth[i]), 'leak': float(leak[i]),
-                'xi': float(xi[i]), 'grazing_deg': float(grazing),
-                'excess': float(excess[i])})
-    return out
+    return out._replace(growth=float(growth[i]), leak=float(leak[i]),
+                        xi=float(xi[i]), grazing_deg=float(grazing),
+                        excess=float(excess[i]))
 
 
 def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
                    water_sound_speed: float, water_density: float,
                    seabed_speed: float, seabed_density: float,
-                   seabed_attenuation_dB_lambda: float, depth: float,
+                   seabed_attenuation: float, depth: float,
                    n_pade: int, theta_deg: float,
                    safety: float = RAMS_STABILITY_SAFETY) -> Optional[float]:
     """The largest range step ``<= dr_max`` at which the rams0.5 rotated
@@ -1032,7 +1153,7 @@ def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
         Seabed compressional speed (m/s).
     seabed_density : float
         Seabed density (g/cm³).
-    seabed_attenuation_dB_lambda : float
+    seabed_attenuation : float
         Seabed attenuation (dB/wavelength).
     depth : float
         Water depth (m).
@@ -1048,10 +1169,10 @@ def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
                   water_sound_speed=water_sound_speed,
                   water_density=water_density, seabed_speed=seabed_speed,
                   seabed_density=seabed_density,
-                  seabed_attenuation_dB_lambda=seabed_attenuation_dB_lambda,
+                  seabed_attenuation=seabed_attenuation,
                   depth=depth, n_pade=n_pade, theta_deg=theta_deg,
                   safety=safety)
-    if rams_growth_margin(None, **params)['floor_excess'] > 0.0:
+    if rams_growth_margin(None, **params).floor_excess > 0.0:
         return None
     # The search is monotone only while the step is a fraction of a
     # wavelength: past k0·dr ~ 2π the Crank-Nicolson factor saturates and
@@ -1059,18 +1180,18 @@ def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
     # step no march survives. One wavelength is the ceiling.
     k0 = 2.0 * np.pi * float(frequency) / float(c0)
     dr_hi = min(float(dr_max), 2.0 * np.pi / k0)
-    if rams_growth_margin(dr_hi, **params)['excess'] <= 0.0:
+    if rams_growth_margin(dr_hi, **params).excess <= 0.0:
         return dr_hi
     dr_lo = dr_hi
     for _ in range(30):
         dr_lo *= 0.5
-        if rams_growth_margin(dr_lo, **params)['excess'] <= 0.0:
+        if rams_growth_margin(dr_lo, **params).excess <= 0.0:
             break
     else:
         return dr_lo
     for _ in range(12):
         mid = float(np.sqrt(dr_hi * dr_lo))
-        if rams_growth_margin(mid, **params)['excess'] <= 0.0:
+        if rams_growth_margin(mid, **params).excess <= 0.0:
             dr_lo = mid
         else:
             dr_hi = mid
@@ -1092,7 +1213,7 @@ RAMS_THETA_LADDER_DEG = (45.0, 40.0, 30.0, 25.0, 20.0, 15.0, 10.0, 5.0)
 def rams_stable_theta(*, frequency: float, c0: float,
                       water_sound_speed: float, water_density: float,
                       seabed_speed: float, seabed_density: float,
-                      seabed_attenuation_dB_lambda: float, depth: float,
+                      seabed_attenuation: float, depth: float,
                       n_pade: int, theta_deg: float,
                       safety: float = RAMS_STABILITY_SAFETY) -> Optional[float]:
     """The largest rotation angle on :data:`RAMS_THETA_LADDER_DEG` at or
@@ -1116,7 +1237,7 @@ def rams_stable_theta(*, frequency: float, c0: float,
         Seabed compressional speed (m/s).
     seabed_density : float
         Seabed density (g/cm³).
-    seabed_attenuation_dB_lambda : float
+    seabed_attenuation : float
         Seabed attenuation (dB/wavelength).
     depth : float
         Water depth (m).
@@ -1132,11 +1253,11 @@ def rams_stable_theta(*, frequency: float, c0: float,
                   water_sound_speed=water_sound_speed,
                   water_density=water_density, seabed_speed=seabed_speed,
                   seabed_density=seabed_density,
-                  seabed_attenuation_dB_lambda=seabed_attenuation_dB_lambda,
+                  seabed_attenuation=seabed_attenuation,
                   depth=depth, n_pade=n_pade, safety=safety)
     for theta in RAMS_THETA_LADDER_DEG:
         if theta > float(theta_deg) + 1e-9:
             continue
-        if rams_growth_margin(None, theta_deg=theta, **params)['floor_excess'] <= 0.0:
+        if rams_growth_margin(None, theta_deg=theta, **params).floor_excess <= 0.0:
             return theta
     return None

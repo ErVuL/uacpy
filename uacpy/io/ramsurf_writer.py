@@ -54,7 +54,7 @@ def _write_block(
     fh.write(_TERM)
 
 
-def write_ramin(
+def write_ram_in(
     filepath: Union[str, Path],
     *,
     kind: str,
@@ -63,7 +63,7 @@ def write_ramin(
     zr_line: float,
     rmax_march: float,
     dr: float,
-    ndr: int,
+    range_decimation: int,
     zmax: float,
     dz: float,
     depth_decimation: int,
@@ -74,9 +74,9 @@ def write_ramin(
     range_segments: Sequence[dict],
     surface: Optional[Sequence[Tuple[float, float]]] = None,
     n_stability: int = 1,
-    stability_range_m: float = 0.0,
+    stability_range: float = 0.0,
     rams_rotation: int = 1,
-    rams_rotation_angle: float = 60.0,
+    rams_rotation_angle_deg: float = 60.0,
     title: str = "uacpy ram.in",
 ) -> None:
     """
@@ -101,12 +101,12 @@ def write_ramin(
     frequency, zs, zr_line : float
         Centre frequency (Hz), source depth (m), receiver depth (m) at
         which ``tl.line`` is written.
-    rmax_march, dr, ndr : float, float, int
-        Domain range (m), range step (m), output stride (every ``ndr``
-        steps).
+    rmax_march, dr, range_decimation : float, float, int
+        Domain range (m), range step (m), output stride (every
+        ``range_decimation`` steps; the deck's ``ndr``).
     zmax, dz, depth_decimation, zmplt : float, float, int, float
-        Computational depth (m), depth step (m), output stride, plot
-        depth (m).
+        Computational depth (m), depth step (m), output stride (the deck's
+        ``ndz``), plot depth (m).
     c0, n_pade : float, int
         Reference sound speed (m/s) and number of Padé coefficients.
     bathymetry : list of (range, depth)
@@ -140,11 +140,11 @@ def write_ramin(
         ``depth`` ≥ 0 means how far below z=0 the pressure-release
         surface sits at that range. Self-extends to ``2*rmax`` like the
         bathymetry (``ramsurf1.5.f:87-88``).
-    n_stability, stability_range_m : int, float
+    n_stability, stability_range : int, float
         Row-5 stability fields (``ramgeo`` and ``ramsurf``; ``rams`` takes
         ``irot, theta`` in their place).
-    rams_rotation, rams_rotation_angle : int, float
-        Row-5 elastic stability fields (``rams`` only). ``rams_rotation_angle`` is the
+    rams_rotation, rams_rotation_angle_deg : int, float
+        Row-5 elastic stability fields (``rams`` only). ``rams_rotation_angle_deg`` is the
         Padé rotation angle in degrees (0 < theta < 90).
     title : str
         Header line (row 1). Free text, ignored by the binary.
@@ -168,7 +168,7 @@ def write_ramin(
                        for seg in range_segments]
     if any(with_water_attn) and not all(with_water_attn):
         raise ConfigurationError(
-            "write_ramin: water_attn must be given in every range segment "
+            "write_ram_in: water_attn must be given in every range segment "
             "or in none. The binary reads a fifth block per section only "
             "when row 5 announces it, so a mixed deck would misread the "
             "next section's range line as a profile block.")
@@ -190,7 +190,7 @@ def write_ramin(
         # seafloor node a whole cell up.
         fh.write(f"{title}\n")
         fh.write(f"{float(frequency):.12g} {float(zs):.12g} {float(zr_line):.12g}\n")
-        fh.write(f"{float(rmax_march):.12g} {float(dr):.12g} {int(ndr)}\n")
+        fh.write(f"{float(rmax_march):.12g} {float(dr):.12g} {int(range_decimation)}\n")
         fh.write(
             f"{float(zmax):.12g} {float(dz):.12g} {int(depth_decimation)} {float(zmplt):.12g}\n"
         )
@@ -201,11 +201,11 @@ def write_ramin(
         tail = ' 1' if iattw else ''
         if kind == 'rams':
             fh.write(
-                f"{float(c0):.12g} {int(n_pade)} {int(rams_rotation)} {float(rams_rotation_angle):.12g}{tail}\n"
+                f"{float(c0):.12g} {int(n_pade)} {int(rams_rotation)} {float(rams_rotation_angle_deg):.12g}{tail}\n"
             )
         else:
             fh.write(
-                f"{float(c0):.12g} {int(n_pade)} {int(n_stability)} {float(stability_range_m):.12g}{tail}\n"
+                f"{float(c0):.12g} {int(n_pade)} {int(n_stability)} {float(stability_range):.12g}{tail}\n"
             )
 
         if kind == 'ramsurf':

@@ -103,10 +103,9 @@ def require_deck_time_grid(rts_data, deck_time, work_dir, run_base, *,
     raise exc
 
 
-def stack_traces(inputs, runs, metadata, *, band_hz, model_name,
-                 provenance):
+def stack_traces(inputs, runs, *, band, model_name, provenance):
     """The received time series for ``output_mode='R'`` and ``'D'``, on
-    the marched pulse band ``band_hz``.
+    the marched pulse band ``band``.
 
     ``sparc.f90`` writes one slice per run — one receiver depth in
     horizontal mode, one receiver range in vertical mode
@@ -122,7 +121,6 @@ def stack_traces(inputs, runs, metadata, *, band_hz, model_name,
     spec = _LOOPED_TIME_SERIES_MODES[mode]
     loop_values = np.atleast_1d(np.asarray(
         getattr(inputs.receiver, spec['loop_attr']), dtype=float))
-    n = len(loop_values)
     # ``runs[0].positions`` is the file's own second axis: the output
     # ranges in horizontal mode, the output DEPTHS in vertical mode (see
     # ``other_coord`` in the table).
@@ -132,8 +130,6 @@ def stack_traces(inputs, runs, metadata, *, band_hz, model_name,
     # last digit and would make every SPARC trace fail Field's
     # uniform-spacing contract.
     time = _output_times(engine.time_max, engine.n_time_samples)
-    nt = int(time.size)
-    dt = float(time[1] - time[0]) if nt > 1 else 0.0
     # rts_data.pressure is (nt, n_other) here; want (n_other, nt). The
     # ``scale`` divides out the sqrt(pi) the 'R' branch is hot by.
     traces = [np.asarray(rts_data.pressure).T * spec['scale']
@@ -151,18 +147,12 @@ def stack_traces(inputs, runs, metadata, *, band_hz, model_name,
             spec['mask_reason']),
         coords={'depth': axes['depth'], 'range': axes['range'],
                 'time': time},
-        band_hz=band_hz,
+        band=band,
         **result_kwargs(
             model_name, provenance, inputs.source,
             backend='sparc',
             frequencies=settings.frequencies,
             phase_reference=settings.output.phase_reference,
-            **{spec['runs_key']: n},
-            dt=float(dt),
-            fs=(1.0 / float(dt)) if dt else float('nan'),
-            nt=int(nt),
-            t_start=float(time[0]) if len(time) else 0.0,
-            **metadata,
         ),
     )
 
@@ -244,11 +234,18 @@ def rts_to_pressure(
 
     Without ``pulse_type``, it evaluates the Hann-windowed transform **at**
     ``frequency`` — :func:`~uacpy.acoustic_signal.tone_phasor`,
-    the same estimator :meth:`~uacpy.Field.extract_tone` uses — and returns
-    ``(p_at_freq, ranges)`` where ``p_at_freq`` is the model-native,
-    source-normalised complex pressure suitable for wrapping in a complex
-    narrowband :class:`Field` (``coords={'depth', 'range'}``,
-    ``phase_reference='travelling_wave'``).
+    ``A = 2/Σw · Σ x_n w_n e^{-2πi f t_n}``, the same estimator
+    :meth:`~uacpy.Field.extract_tone` uses — and returns
+    ``(p_at_freq, ranges)``: the complex amplitude of a steady tone at
+    ``frequency`` in the record. That is the field's complex pressure only
+    when the record holds a steady tone. A SPARC ``.rts`` is the response to
+    the transient pulse SPARC marches, so this value is the pulse response
+    weighted by the window where the arrival sits and divided by the
+    window's sum: it changes with the record length and the arrival time,
+    and the source spectrum is not divided out (measured: one Ricker-shaped
+    arrival at 0.2 s in records of 0.5 / 1.0 / 2.0 s, fs 2 kHz, gives
+    -24.4 / -38.8 / -56.0 dB at 50 Hz). Pass ``pulse_type`` to divide the
+    source pulse's spectrum out.
 
     A ``.rts`` picks its own ``nt`` and ``dt``, so ``frequency`` is
     essentially never on an rfft bin; the nearest bin is off by -0.056 dB
@@ -271,9 +268,16 @@ def rts_to_pressure(
 
     A post-processing utility for a ``.rts`` read by
     :func:`uacpy.io.read_rts_file`;
-    :class:`uacpy.models.SPARC` returns ``p(t)`` and does not call it. The
-    projection is not a calibrated substitute for Kraken/Scooter TL — see the
-    module docstring of ``uacpy/tests/test_sparc_output_modes.py``.
+    :class:`uacpy.models.SPARC` returns ``p(t)`` and does not call it. Even
+    deconvolved, the projection is not a calibrated substitute for
+    Kraken/Scooter TL: ``sparc.f90:313`` sets ``Atten = 0`` (no stabilizing
+    attenuation; Scooter uses ``Atten = Deltak``, ``scooter.f90:129``),
+    ``Nk`` is sized across the whole pulse band, and the default
+    ``'PN+B'`` band-pass is applied per wavenumber while the deconvolution
+    divides by one scalar ``S(ω0)``. Measured on a guide with exactly one
+    propagating mode, the CW TL taken from SPARC this way is 2.4 dB off in
+    median with 13 dB excursions (Scooter: 0.07 dB) and converges under no
+    grid setting.
     """
     p = rts.pressure
     times = rts.times
@@ -330,19 +334,22 @@ def rts_to_pressure(
         # by construction. Against a three-path 60 ms channel the bin
         # ratio drifts to +0.06 dB and +6.0 deg at half a bin, while the
         # pair below stays at 0.0000 dB and 0.000 deg.
-        S_at_f0 = _tone_phasor(s_t, t, frequency, window=None,
-                              who="rts_to_pressure")
+        # The DTFT of a transient at ``frequency`` is its spectrum there:
+        # no steady tone, so no negative-frequency image to solve for.
+        S_at_f0 = _tone_phasor(s_t, t, frequency, window='boxcar',
+                              who="rts_to_pressure", steady_tone=False)
         if S_at_f0 == 0:
             raise ConfigurationError(
                 "rts_to_pressure: source spectrum is zero at "
                 f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
                 "deconvolve (check pulse / frequency).")
-        return (_tone_phasor(p, t, frequency, window=None, axis=0,
-                            who="rts_to_pressure") / S_at_f0), ranges
+        return (_tone_phasor(p, t, frequency, window='boxcar', axis=0,
+                            who="rts_to_pressure", steady_tone=False)
+                / S_at_f0), ranges
 
-    # The Hann-windowed transform evaluated AT `frequency` on the file's own
-    # output times (sparc.f90:159 reads them with ReadVector, so they may
-    # start anywhere); tone_phasor normalises by the window's coherent gain,
+    # The Hann-weighted tone fit AT `frequency` on the file's own output
+    # times (sparc.f90:159 reads them with ReadVector, so they may start
+    # anywhere); tone_phasor solves for the tone's negative-frequency image,
     # so a steady tone returns its own amplitude and phase. Deferred:
     # acoustic_signal pulls scipy, and uacpy's public surface is imported
     # without it (test_lazy_imports).

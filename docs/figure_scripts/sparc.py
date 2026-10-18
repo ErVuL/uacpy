@@ -18,7 +18,6 @@ import numpy as np
 from figure_scripts._common import TALL, WIDE, shallow_water
 
 import uacpy
-from uacpy.core.results import Field
 from uacpy.models import SPARC
 from uacpy.plot import plot_time_snapshots
 
@@ -48,10 +47,9 @@ def record_section():
     array = uacpy.Receiver(depths=50.0, ranges=np.linspace(200.0, 1200.0, 24))
     p = SPARC(time_max=1.0, n_time_samples=2048).run(env, source, array)
 
-    section = p.at(depth=50.0).to_dict()
-    section['data'] = (section['data']
-                       * np.sqrt(section['coords']['range'])[:, None])
-    fig, ax = Field.from_dict(section).plot(
+    section = p.at(depth=50.0)
+    gained = section.replace(data=section.data * np.sqrt(section.ranges)[:, None])
+    fig, ax = gained.plot(
         stacked=True, figsize=TALL,
         title='SPARC — horizontal array at 50 m, gained by √r')
     # km, not m: the stacked view reads a range axis in km, as every

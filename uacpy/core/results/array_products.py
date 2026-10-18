@@ -7,6 +7,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, Optional
 
+from uacpy.core._beamforming import MVDR_DIAGONAL_LOADING
 from uacpy.core.exceptions import ConfigurationError
 
 from uacpy.core.results._base import Result, coordinate_axis
@@ -166,7 +167,7 @@ class Covariance(Result):
     """
 
     #: The plotter that draws this result (``.plot()``).
-    _plotter = '_plot_covariance'
+    _plotter = 'plot_covariance'
 
     def __init__(
         self,
@@ -287,11 +288,20 @@ class Covariance(Result):
     def _ambiguity(self, surface, candidates: dict):
         """``surface`` as the ambiguity Field over ``candidates`` (from
         :meth:`_ambiguity_candidates`), relative to its peak in this
-        covariance's unit (:attr:`unit`; ``''`` when it records none)."""
-        return ambiguity_field(
+        covariance's unit (:attr:`unit`; ``''`` when it records none),
+        carrying this covariance run's identity (model, backend, run mode,
+        run settings, provenance, source depths). A level relative to its
+        own peak, it carries no source level, weights or phase reference,
+        and none of the covariance's metadata."""
+        field = ambiguity_field(
             surface, candidates,
             reference_unit=self.unit,
             frequencies=candidates['frequency'], model=self.model)
+        identity = self.id_kwargs()
+        identity.update(frequencies=field.frequencies, phase_reference=None,
+                        source_level_dB=None, source_weights=None,
+                        metadata=None)
+        return field.replace(**identity)
 
     def bartlett(self, replicas: "Replicas"):
         """Conventional Bartlett MFP ambiguity surface of ``replicas``
@@ -322,27 +332,41 @@ class Covariance(Result):
         return self._ambiguity(bartlett(self.covariance, replicas.replicas),
                                candidates)
 
-    def mvdr(self, replicas: "Replicas", *, diagonal_loading: float = 1e-6):
+    def mvdr(self, replicas: "Replicas", *,
+             diagonal_loading: float = MVDR_DIAGONAL_LOADING):
         """Minimum-Variance Distortionless-Response (Capon) MFP ambiguity
         surface of ``replicas`` against this covariance, per frequency:
         :func:`uacpy.acoustic_signal.mvdr` with ``normalize=None``.
 
         ``M(f, c) = 1 / (wᴴ · (C(f) + δ·I)⁻¹ · w)`` with
-        ``δ = diagonal_loading · trace(C(f))/N``. Small loading (~1e-6)
-        stabilises a rank-deficient covariance for sharp Capon peaks; larger
-        loading (~0.1+) flattens the surface toward Bartlett for mismatch
-        robustness. The 1e-6 default suits the full-rank covariance OASN
-        writes to its ``.xsm``; :func:`uacpy.sonar.mvdr`, over a *measured*
-        few-snapshot CSDM, defaults to 1e-2 instead. A frequency bin carrying
-        no power is NaN throughout, with a warning, and so is a candidate
-        with a zero-norm replica.
+        ``δ = diagonal_loading · trace(C(f))/N``. Small loading stabilises a
+        rank-deficient covariance for sharp Capon peaks; larger loading
+        (~0.1+) flattens the surface toward Bartlett for mismatch
+        robustness. Adding ``γI`` to ``K`` is the white-noise-constraint
+        processor of Jensen et al., *Computational Ocean Acoustics*, sect.
+        10.3.4.1, which sets ``γ`` from the white-noise gain it allows ("A
+        typical constraint might be 3-dB down, with trial and error being an
+        excellent starting guide") rather than as a fixed fraction.
+
+        Each frequency's slice is :func:`uacpy.sonar.mvdr` of that
+        frequency's covariance and replicas, at the same default loading,
+        up to that frequency's constant: ``sonar.mvdr`` scales each surface
+        to its own peak, while this keeps the MVDR power across the
+        frequencies, in the covariance's unit, as :meth:`bartlett` does. A
+        frequency bin carrying no power is NaN throughout, with a warning,
+        and so is a candidate with a zero-norm replica.
 
         Parameters
         ----------
         replicas : Replicas
             The candidate replica set.
         diagonal_loading : float, optional
-            Loading as a fraction of ``trace(C)/N``. Default 1e-6.
+            Loading as a fraction of ``trace(C)/N``. Default 1e-2
+            (``MVDR_DIAGONAL_LOADING``, uacpy guidance, the one default the
+            package's MVDR processors share): Stergiopoulos (*Advanced
+            Signal Processing Handbook*, §4.2.3) says only to "add some
+            small quantity to the diagonal", and JKPS §10.3.4.1 sets it from
+            an allowed white-noise-gain drop; neither gives a fixed value.
 
         Returns
         -------
@@ -388,7 +412,7 @@ class Replicas(Result):
     """
 
     #: The plotter that draws this result (``.plot()``).
-    _plotter = '_plot_replicas'
+    _plotter = 'plot_replicas'
 
     def __init__(
         self,

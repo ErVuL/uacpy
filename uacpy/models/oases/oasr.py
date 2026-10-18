@@ -18,7 +18,10 @@ from uacpy.core.results import PhaseReference, ReflectionCoefficient
 from uacpy.core.exceptions import (
     ConfigurationError, UnsupportedFeatureError, ValidityWarning,
 )
-from uacpy.io.oases_writer import write_oasr_input, REFL_TYPE_TO_OPTION
+from uacpy.io.oases_writer import (
+    REFL_TYPE_TO_OPTION, refuse_boundaries_without_deck_spelling,
+    write_oasr_input,
+)
 from uacpy.io.oases_reader import read_oasr_reflection_coefficients
 from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, _host_options
 from uacpy.models.oases._common import (
@@ -139,19 +142,21 @@ def _resolve_reflection_type(options, reflection_type) -> str:
     independent ``transmit`` flag, and ``oasjun21.f:80-84`` then picks
     ``trcoef(iparm)`` over ``rfcoef(iparm)``. So ``'N T t'`` is a P-wave
     *transmission* run, not a contradiction: ``'t'`` decides which of the
-    two tables is read and wins here, and among the parameter letters the
-    last one in the line wins, because each occurrence overwrites
-    ``IPARM``.
+    two tables is read, and among the parameter letters the last one in
+    the line wins, because each occurrence overwrites ``IPARM``. With
+    ``'t'``, the P-SV parameter ``'S'`` is ``'P-SV transmission'``, any
+    other ``'transmission'``.
     """
     if options is None:
         return reflection_type or OASR_REFLECTION_TYPE
     opts = str(options)
-    if REFL_TYPE_TO_OPTION['transmission'] in opts:
-        return 'transmission'
     by_letter = {letter: name
                  for name, letter in REFL_TYPE_TO_OPTION.items()
-                 if name != 'transmission'}
+                 if len(letter) == 1 and name != 'transmission'}
     seen = [by_letter[ch] for ch in opts if ch in by_letter]
+    if REFL_TYPE_TO_OPTION['transmission'] in opts:
+        return ('P-SV transmission' if seen and seen[-1] == 'P-SV'
+                else 'transmission')
     return seen[-1] if seen else OASR_REFLECTION_TYPE
 
 
@@ -233,7 +238,7 @@ def _reject_slowness_sampling(options) -> None:
     )
 
 
-def _oasr_settings(*, options, reflection_type, angles, angle_type,
+def _oasr_settings(*, options, reflection_type, angles_deg, angle_type,
                    plot_angle_step, plot_frequency_step,
                    interface_roughness, source) -> OASRSettings:
     """The option line, the angle axis and the frequency sweep the OASR
@@ -260,7 +265,7 @@ def _oasr_settings(*, options, reflection_type, angles, angle_type,
     return OASRSettings(
         options=options,
         reflection_type=reflection_type,
-        angles_deg=(angles if angles is not None
+        angles_deg=(angles_deg if angles_deg is not None
                     else default_grazing_angles()),
         angle_type=angle_type,
         frequency_sweep=(freq_min, freq_max, n_freq),
@@ -282,16 +287,22 @@ class OASR(OASES):
     -----
     Range-independent reflection-vs-angle/freq solver. Supports
     elastic bottom layers. Returns a
-    :class:`ReflectionCoefficient` with ``theta`` (1-D grazing-angle grid in
+    :class:`ReflectionCoefficient` with ``angles_deg`` (1-D grazing-angle grid in
     degrees, whichever ``angle_type`` the input angles were given in; the
-    ``angle_type`` used is stamped in the metadata) and ``R``/``phi`` shaped
-    ``(n_angles, n_frequencies)`` for a sweep, 1-D for one frequency. A
-    multi-frequency Source, equispaced (``np.linspace(f1, f2, n)``), gives
-    the broadband sweep; the deck carries only ``(freq_min, freq_max, N)``, so a
-    vector that is not equispaced is evaluated on
-    ``np.linspace(freq_min, freq_max, N)`` with a warning (on
-    ``np.geomspace`` under option ``'C'``, which makes the sweep
+    ``angle_type`` used is ``result.run_settings.engine.angle_type``) and
+    ``magnitude`` /
+    ``phase`` shaped ``(n_angles, n_frequencies)`` for a sweep, 1-D for one
+    frequency. A multi-frequency Source, equispaced
+    (``np.linspace(f1, f2, n)``), gives the broadband sweep; the deck carries
+    only ``(freq_min, freq_max, N)``, so a vector that is not equispaced is
+    refused with a ``ConfigurationError`` naming the ``np.linspace`` grid
+    (``np.geomspace`` under option ``'C'``, which makes the sweep
     logarithmic).
+
+    ``reflection_type='P-SV transmission'`` (or a raw ``'S t T'``) returns
+    the P-SV transmission coefficient into the seabed (oasr.tex:142-145,
+    ``unoasr21.f:356-376``), labelled so; ``'transmission'`` is the P-P
+    one.
 
     ``OASR().run_settings(env, source, receiver).engine`` is the
     :class:`OASRSettings` a run would write its deck from — the option
@@ -306,7 +317,7 @@ class OASR(OASES):
     Examples
     --------
     >>> from uacpy.models import OASR
-    >>> oasr = OASR(angles=np.linspace(0, 90, 100))
+    >>> oasr = OASR(angles_deg=np.linspace(0, 90, 100))
     >>> refl = oasr.run(env, source, receiver)
     """
 
@@ -359,7 +370,7 @@ class OASR(OASES):
         self,
         *,
         executable: Optional[Path] = None,
-        angles: Optional[np.ndarray] = None,
+        angles_deg: Optional[np.ndarray] = None,
         angle_type: str = OASR_ANGLE_TYPE,
         reflection_type: Optional[str] = None,
         options: Optional[str] = None,
@@ -378,7 +389,7 @@ class OASR(OASES):
         ----------
         executable : Path, optional
             Path to OASR binary. Auto-detected if ``None``.
-        angles : ndarray, optional
+        angles_deg : ndarray, optional
             Angle grid in degrees, uniformly spaced. OASR's deck carries only
             ``(ANGLE1, ANGLE2, NANG)`` and generates the grid itself
             (``unoasr21.f:173-177``), so a non-uniform array raises
@@ -389,8 +400,9 @@ class OASR(OASES):
             ``grazing = 90 - incidence`` before being written to the input
             file). Default: 'grazing'.
         reflection_type : str, optional
-            ``'P-P'`` (effective default) | ``'transmission'``, translated to
-            OASR option letter ``'N'`` / ``'t'``. ``'P-SV'`` and ``'P-Slow'``
+            ``'P-P'`` (effective default) | ``'transmission'`` |
+            ``'P-SV transmission'``, translated to OASR option letters
+            ``'N'`` / ``'t'`` / ``'S t'``. ``'P-SV'`` and ``'P-Slow'``
             raise :class:`UnsupportedFeatureError`: the incident medium at the
             seabed is the water column, which carries no SV wave, and no uacpy
             carrier expresses the poro-elastic medium the Biot slow wave needs.
@@ -431,8 +443,8 @@ class OASR(OASES):
             Standard plumbing (see :class:`PropagationModel`).
         """
         super().__init__(**_host_options(locals()))
-        self.angles = (
-            np.asarray(angles, dtype=float) if angles is not None else None
+        self.angles_deg = (
+            np.asarray(angles_deg, dtype=float) if angles_deg is not None else None
         )
         self.angle_type = angle_type
         # Kept as passed so ``copy()`` round-trips and so an explicit value
@@ -487,12 +499,21 @@ class OASR(OASES):
         _reject_shear_reflection_types(self.options, self.reflection_type)
         _reject_slowness_sampling(self.options)
 
+    def _validate_engine(self, env, source, receiver, run_mode, *,
+                         request=None) -> None:
+        """Stage 2: refuse a seabed half-space the OASR deck cannot spell
+        (:func:`~uacpy.io.oases_writer.refuse_boundaries_without_deck_spelling`).
+        The deck has no sea surface — its layer 1 is the water half-space
+        carrying the incident wave (:func:`~uacpy.io.write_oasr_input`) — so
+        the surface is not checked."""
+        refuse_boundaries_without_deck_spelling(env, surface=False)
+
     def _resolve_engine_settings(self, env, source, receiver, settings, *,
                                  given_env, request=None) -> 'OASRSettings':
         """Stage 3: :func:`_oasr_settings` for this model's knobs."""
         return _oasr_settings(
             options=self.options, reflection_type=self.reflection_type,
-            angles=self.angles, angle_type=self.angle_type,
+            angles_deg=self.angles_deg, angle_type=self.angle_type,
             plot_angle_step=self.plot_angle_step,
             plot_frequency_step=self.plot_frequency_step,
             interface_roughness=self.interface_roughness, source=source)
@@ -525,7 +546,7 @@ class OASR(OASES):
             source=inputs.source,
             receiver=inputs.receiver,
             options=engine.options,
-            angles=np.array(engine.angles_deg),
+            angles_deg=np.array(engine.angles_deg),
             angle_type=engine.angle_type,
             reflection_type=engine.reflection_type,
             **writer_kwargs,
@@ -570,19 +591,17 @@ class OASR(OASES):
         """Stage 5: the :class:`ReflectionCoefficient` as the run's own —
         ``theta`` in grazing degrees, the travelling-wave phase of
         ``inputs.settings.output`` the reader stamps — with the reflection
-        type as its :attr:`~ReflectionCoefficient.reflection_type` and the
-        sampling and angle types in its ``metadata``."""
+        type as its :attr:`~ReflectionCoefficient.reflection_type`. The
+        angle convention the run read its angles in is
+        ``run_settings.engine.angle_type``; ``angles_deg`` is grazing either
+        way."""
         engine = inputs.settings.engine
         table = ReflectionCoefficient(
-            angles=raw.angles, magnitude=raw.magnitude, phase=raw.phase,
+            angles_deg=raw.angles_deg, magnitude=raw.magnitude, phase=raw.phase,
             reflection_type=engine.reflection_type, **raw.id_kwargs())
         # read_oasr_reflection_coefficients refuses a slowness table, so
         # the table read is angle-sampled.
-        field = self._stamp_file_result(
-            table, inputs.source, backend='oasr',
-            sampling_type='angle',
-            angle_type=engine.angle_type,
-        )
+        field = self._stamp_file_result(table, inputs.source, backend='oasr')
         attach_output_paths(
             field, inputs.work_dir, deck.stem,
             primary_files=(

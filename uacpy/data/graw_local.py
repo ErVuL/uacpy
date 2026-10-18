@@ -25,10 +25,10 @@ from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
                                  grain_size_from_density,
                                  grain_size_to_geoacoustics)
 from uacpy.data import _cache
-from uacpy.core.geo import as_coordinate, geodesic_waypoints
-from uacpy.data._geo import AlongTrack, checked_max_distance, checked_n_points
+from uacpy.core.geo import as_coordinate
+from uacpy.data._geo import (AlongTrack, along_track_waypoints,
+                             checked_max_distance)
 from uacpy.data._netcdf import NetcdfGrid
-from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.data._provenance_notice import one_provenance_notice
 
 __all__ = ['download_graw_db', 'fetch_seabed_density',
@@ -145,6 +145,12 @@ def fetch_seabed_density(point, *, max_distance_km=None):
     graw_node(lat, lon, who='fetch_seabed_density',
               max_distance_km=checked_max_distance(max_distance_km,
                                                    'fetch_seabed_density'))
+    return _finite_density(lat, lon)
+
+
+def _finite_density(lat, lon):
+    """The grid's density (g/cm³) at ``(lat, lon)``; ``DataFetchError`` where
+    the cell holds no value."""
     rho = _grid().density(lat, lon)
     if not np.isfinite(rho):
         raise DataFetchError(
@@ -156,37 +162,46 @@ def fetch_seabed_density(point, *, max_distance_km=None):
 
 @one_provenance_notice(subject='the samples',
                        record="the result's .provenance")
-def fetch_seabed_density_transect(start, end, *,
-                                  n_points=6, max_distance_km=None) -> AlongTrack:
+def fetch_seabed_density_transect(start, end, *, n_points=None,
+                                  max_points=None,
+                                  max_distance_km=None) -> AlongTrack:
     """Graw seabed bulk density (g/cm³) sampled along ``start`` → ``end``,
-    as an :class:`~uacpy.data.AlongTrack` (``'seabed_density'``) with the
-    ``'graw'`` provenance; ``NaN`` at any waypoint without a finite grid
-    value.
+    as an :class:`~uacpy.data.AlongTrack` (``'seabed_density'``) with one
+    ``'graw'`` record per waypoint (the node read and its offset); ``NaN``
+    at any waypoint without a finite grid value.
 
     Parameters
     ----------
     start, end : (lat, lon)
         Transect endpoints in decimal degrees.
-    n_points : int, optional
-        Waypoints along the great circle. Default 6.
+    n_points : int or 'auto', optional
+        Waypoints along the great circle, used as given; ``None`` (default)
+        is 6 (uacpy guidance), within ``max_points`` when that is set.
+        ``'auto'`` probes ``max_points`` waypoints and keeps one per 5′ grid node
+        crossed, endpoints anchored.
+    max_points : int, optional
+        The waypoints ``'auto'`` probes; ``None`` (default) is 1000 (uacpy
+        guidance). An explicit ``n_points`` above an explicit
+        ``max_points`` is refused.
     max_distance_km : float, optional
         Refuse a waypoint whose node stands farther than this (km) from it;
         ``None`` (default) sets no limit beyond the per-waypoint warning.
     """
-    n_points = checked_n_points(n_points, 'fetch_seabed_density_transect')
-    limit = checked_max_distance(max_distance_km, 'fetch_seabed_density_transect')
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
-    for la, lo in zip(lats, lons):
-        graw_node(la, lo, who='fetch_seabed_density_transect', max_distance_km=limit)
+    who = 'fetch_seabed_density_transect'
+    limit = checked_max_distance(max_distance_km, who)
+    lats, lons, ranges = along_track_waypoints(
+        start, end, n_points, max_points, who=who,
+        cell_of=lambda la, lo: (_grid().row(la), _grid().col(lo)))
+    records = tuple(graw_node(la, lo, who=who, max_distance_km=limit)
+                    for la, lo in zip(lats, lons))
     g = _grid()
     rho = np.array([g.density(la, lo) for la, lo in zip(lats, lons)])
-    return AlongTrack(ranges=np.asarray(ranges_m), lats=np.asarray(lats),
+    return AlongTrack(ranges=np.asarray(ranges), lats=np.asarray(lats),
                       lons=np.asarray(lons), data=rho, unit='g/cm3',
-                      quantity='seabed_density',
-                      provenance=DataProvenance(source=SOURCES['graw']))
+                      quantity='seabed_density', provenance=records)
 
 
-def _phi_from_density(rho, hamilton_fit=None):
+def _phi_from_density(rho, hamilton_fit=None, water_density=None):
     """Bulk density (g/cm³) → mean grain size (ϕ), under ``hamilton_fit``'s
     Hamilton & Bachman fit.
 
@@ -201,12 +216,14 @@ def _phi_from_density(rho, hamilton_fit=None):
     (abyssal plain at 1.45 g/cm³: ϕ 9.0 against 7.45, 16 m/s slow).
     """
     return grain_size_from_density(
-        rho, hamilton_fit=hamilton_fit or DEFAULT_GRAIN_SIZE_ENVIRONMENT)
+        rho, water_density=water_density,
+        hamilton_fit=hamilton_fit or DEFAULT_GRAIN_SIZE_ENVIRONMENT)
 
 
 def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
+                      water_density=None,
                       model=DEFAULT_GRAIN_SIZE_MODEL, hamilton_fit=None,
-                      max_distance_km=None, timeout=None, verbose=False):
+                      max_distance_km=None):
     """Model-ready half-space bottom from the Graw measured-density grid.
 
     The returned bottom carries a ``graw`` ``DataProvenance`` with the
@@ -222,29 +239,31 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
     the default water) the grain size is held at its 9 ϕ end, which is most
     of the deep ocean; the note at the top of this module gives the resolution
     along the rest of the range.
-    ``timeout``/``verbose`` are accepted (and ignored — this backend is
-    offline) for signature uniformity with the network bottom fetchers.
     ``water_sound_speed`` (m/s) scales the velocity ratio to the in-situ
-    near-seabed water; ``None`` uses the Hamilton reference. ``model`` picks
+    near-seabed water; ``None`` uses the Hamilton reference.
+    ``water_density`` (g/cm³) is the near-seabed water the measured density
+    is a ratio to in the grain-size inversion; ``None`` uses the package's
+    one water (1.027). ``model`` picks
     the relations that turn that grain size into sound speed and
     attenuation (``'hamilton'`` or ``'apl-uw'``); the density stays the
     grid's measured value, and the grain size is always Hamilton's
     inversion of it, under the same ``hamilton_fit`` fit the forward step
     uses.
     """
-    from uacpy.core.sediment import canonical_grain_size_selection
-    model, hamilton_fit = canonical_grain_size_selection(
+    from uacpy.core.sediment import _canonical_grain_size_selection
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who='fetch_bottom_graw')
     lat, lon = as_coordinate(point)
     prov = graw_node(lat, lon, who='fetch_bottom_graw',
                      max_distance_km=checked_max_distance(max_distance_km,
                                                           'fetch_bottom_graw'))
-    rho = fetch_seabed_density(point)
+    rho = _finite_density(lat, lon)
     hamilton_fit = hamilton_fit or DEFAULT_GRAIN_SIZE_ENVIRONMENT
-    phi = _phi_from_density(rho, hamilton_fit)
+    phi = _phi_from_density(rho, hamilton_fit, water_density=water_density)
     geo = grain_size_to_geoacoustics(phi, model=model,
                                      hamilton_fit=hamilton_fit,
-                                     water_sound_speed=water_sound_speed)
+                                     water_sound_speed=water_sound_speed,
+                                     water_density=water_density)
     return BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=geo['sound_speed'],

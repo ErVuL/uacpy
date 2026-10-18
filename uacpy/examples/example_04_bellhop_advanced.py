@@ -11,7 +11,7 @@ The water column is the top 500 m of the Munk profile. Munk's sound-channel
 axis is at 1300 m, below this domain, so over 0-500 m the profile only
 decreases (1548.5 → 1513.2 m/s): downward refraction, no channel.
 
-Uses: Bellhop(beam_type=, grid_type=, n_beams=, launch_angles=, beam_shift=,
+Uses: Bellhop(beam_type=, n_beams=, launch_angles_deg=, beam_shift=,
 beam_width_type=, beam_curvature=, eps_multiplier=, r_loop=, n_image=, ib_win=)
 · Source(source_type='line') · Source(beam_pattern=) ·
 Source.plot_beam_pattern · multi-depth Source → one Field over source_depth ·
@@ -21,9 +21,7 @@ plot_field(source=) · plot.shared_colorbar
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,7 +42,6 @@ env = uacpy.Environment(
         sound_speed=np.array([1600, 1650, 1700, 1750]),   # hardening
         density=np.array([1.5, 1.7, 1.9, 2.1]),
         attenuation=np.array([0.8, 0.6, 0.4, 0.3]),       # less lossy
-        shear_speed=np.zeros(4),
         acoustic_type='half-space'),
     absorption=uacpy.Thorp(),
 )
@@ -54,33 +51,32 @@ source = uacpy.Source(depths=75.0, frequencies=100.0)
 receiver = uacpy.Receiver(depths=np.linspace(10, 450, 50),
                           ranges=np.linspace(300, 30000, 150))
 
-gaussian = uacpy.Bellhop(backend='fortran', beam_type='B', grid_type='R', n_beams=500,
-                         launch_angles=(-85, 85)).run(
-    env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+gaussian = uacpy.Bellhop(backend='fortran', beam_type='B', n_beams=500,
+                         launch_angles_deg=(-85, 85)).run(env, source, receiver)
 
-cerveny = uacpy.Bellhop(backend='fortran', 
-    beam_type='C', grid_type='R', n_beams=500, launch_angles=(-85, 85),
+cerveny = uacpy.Bellhop(
+    backend='fortran', beam_type='C', n_beams=500, launch_angles_deg=(-85, 85),
     beam_width_type='M', beam_curvature='Z', eps_multiplier=0.7,
     r_loop=10000.0, n_image=2, ib_win=4, beam_shift=True).run(
-    env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+    env, source, receiver)
 
 # Geometry lives on the Source, not the model: same Bellhop, different source.
 # 'line' is an infinite coherent line source (Cartesian spreading) rather than
 # a point source (cylindrical).
-line = uacpy.Bellhop(backend='fortran', beam_type='B', grid_type='R', n_beams=500).run(
+line = uacpy.Bellhop(backend='fortran', beam_type='B', n_beams=500).run(
     env, uacpy.Source(depths=source.depths, frequencies=source.frequencies,
                       source_type='line'),
-    receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+    receiver)
 
 # Three source depths in ONE binary call — the Bellhop binary loops the source
 # axis natively. The shelf is 100 m deep at r=0, so every source must sit in
-# the water column there. n_beams=0 lets Bellhop count the beams itself
+# the water column there. The default n_beams lets Bellhop count the beams itself
 # (angleMod.f90:44-50): the larger of 0.3·r·f/c0 at the farthest receiver
 # (1800 at 30 km and 300 Hz) and π/atan(D/(10·r)), which keeps each beam thin
 # against the water depth (about 1900 for the 500 m end of the shelf).
 array_source = uacpy.Source(depths=[20.0, 50.0, 80.0], frequencies=300.0)
-multi = uacpy.Bellhop(backend='fortran', n_beams=0, launch_angles=(-85, 85)).run(
-    env, array_source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+multi = uacpy.Bellhop(backend='fortran', launch_angles_deg=(-85, 85)).run(
+    env, array_source, receiver)
 # One Field whose leading source_depth axis holds each source's field:
 # multi.at(source_depth=z) is one source's 2-D Field.
 print(f"  {multi!r}")
@@ -113,8 +109,8 @@ print(f"  phased array: {array_depths.size} elements {spacing_m:.0f} m apart "
       f"({spacing_wavelengths:.1f} λ), steered {STEER_DEG:.0f}° down → "
       f"median TL {np.nanmedian(steered.dB):.1f} dB")
 
-rays = uacpy.Bellhop(backend='fortran', beam_type='g', grid_type='R', n_beams=50,
-                     launch_angles=(-80, 80), beam_shift=True).run(
+rays = uacpy.Bellhop(backend='fortran', beam_type='g', n_beams=50,
+                     beam_shift=True).run(
     env, source, receiver, run_mode=uacpy.RunMode.RAYS)
 
 # A beam pattern is an (angle_deg, level_dB re peak) table. The angle axis is
@@ -140,9 +136,9 @@ pattern_levels = 20.0 * np.log10(
 directional_source = uacpy.Source(
     depths=source.depths, frequencies=source.frequencies,
     beam_pattern=np.column_stack([pattern_angles, pattern_levels]))
-directional = uacpy.Bellhop(backend='fortran', beam_type='B', grid_type='R', n_beams=500,
-                            launch_angles=(-85, 85)).run(
-    env, directional_source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+directional = uacpy.Bellhop(backend='fortran', beam_type='B', n_beams=500,
+                            launch_angles_deg=(-85, 85)).run(
+    env, directional_source, receiver)
 
 fig, _ = env.plot()
 fig.savefig(OUT / 'example_04_environment.png', dpi=150, bbox_inches='tight')

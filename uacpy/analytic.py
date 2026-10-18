@@ -18,6 +18,10 @@ unchanged:
                           trapped-mode sum (JKPS §2.4.5)
 ========================  ====================================================
 
+:func:`pekeris_modes` returns that waveguide's trapped modes themselves as a
+:class:`~uacpy.core.results.Modes`, the textbook check of a mode solver's
+eigenvalues and shapes.
+
 Conventions are the engines': the travelling-wave phase ``exp(-i k R)``
 (``phase_reference='travelling_wave'``), and a point source normalised to
 unit pressure amplitude at 1 m, so ``Field.tl`` is transmission loss
@@ -40,14 +44,16 @@ import numpy as np
 from scipy.optimize import brentq
 
 from uacpy.core.acoustics.boundaries import pekeris_root
-from uacpy.core.acoustics.modal import modal_field
+from uacpy.core.acoustics.modal import (SAMPLES_PER_VERTICAL_WAVELENGTH,
+                                        modal_field)
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.results import Field, PhaseReference
+from uacpy.core.results import Field, MediaTable, Modes, PhaseReference
 from uacpy.core.results._superposition import _stack_fields
 
-__all__ = ["free_field", "lloyd_mirror", "ideal_waveguide", "pekeris"]
+__all__ = ["free_field", "lloyd_mirror", "ideal_waveguide", "pekeris",
+           "pekeris_modes"]
 
 # Evanescent modes kept by the ideal-waveguide sum: every mode whose
 # exp(-|k_rm| r) at the nearest nonzero receiver range is above this.
@@ -320,36 +326,10 @@ def _pekeris_kz(k, k1, depth, rho_w, rho_b):
     return np.array(roots), kz_max
 
 
-def pekeris(env, source, receiver):
-    """Isovelocity water over a lossless fluid half-space — the Pekeris
-    waveguide's trapped-mode sum (JKPS §2.4.5).
-
-    Water ``sin(k_z z)``, bottom ``sin(k_z D) exp(-gamma (z - D))``, the
-    eigenvalues from continuity of pressure and of ``(1/rho) dp/dz`` at the
-    seabed. Only the trapped modes — the residues of the wavenumber
-    integral — are summed; the branch-line integral around ``k_r = k_1``
-    (the continuous spectrum, JKPS Fig. 2.26) is omitted, so the field is
-    exact only where that part has decayed — tens of water depths out when
-    the bottom is lossless, because the near-cutoff leaky modes decay
-    slowly. Against Scooter with ``c_high=1e9`` on 100 m of water over a
-    lossless 1700 m/s, 1.5 g/cm³ bottom at 100 Hz, the median level
-    difference over depth is 2.4 dB at 0.5 km, 0.95 dB at 1 km, 0.57 dB at
-    2 km and at most 0.05 dB from 5 km out.
-
-    Parameters
-    ----------
-    env : Environment
-        Flat, isovelocity, lossless water over a half-space bottom with
-        ``sound_speed`` above the water's and ``attenuation`` 0.
-    source : Source
-        Point source(s) in the water; several depths give one
-        Field over a leading ``source_depth`` axis.
-    receiver : Receiver
-        Depth x range grid (m); depths below the seabed take the bottom's
-        evanescent form.
-    """
-    who = 'pekeris'
-    _check_source(source, who)
+def _pekeris_waveguide(env, who):
+    """``(c, rho_w, c_b, rho_b, D)`` of a Pekeris waveguide — isovelocity
+    lossless water over a faster, lossless, unlayered fluid half-space —
+    or raise."""
     c, rho_w = _isovelocity_water(env, who)
     bottom = env.bottom
     if (bottom.acoustic_type != 'half-space' or bottom.is_layered
@@ -370,7 +350,59 @@ def pekeris(env, source, receiver):
         raise ConfigurationError(
             f"{who}: a trapped mode needs the bottom faster than the "
             f"water; got {c_b} m/s under {c} m/s.")
-    depth = float(env.depth)
+    return c, rho_w, c_b, rho_b, float(env.depth)
+
+
+def _pekeris_trapped_modes(f, c, rho_w, c_b, rho_b, depth, zz):
+    """``(k_r, psi)`` of the trapped modes at ``f`` Hz: horizontal
+    wavenumbers (rad/m) and shapes on depths ``zz``, ``(len(zz), n)``,
+    normalised to ``∫ psi² / rho dz = 1`` over water and half-space. Water
+    ``sin(k_z z)``, bottom ``sin(k_z D) exp(-gamma (z - D))``."""
+    k = 2 * np.pi * f / c
+    k1 = 2 * np.pi * f / c_b
+    kz, kz_max = _pekeris_kz(k, k1, depth, rho_w, rho_b)
+    gamma = np.real(pekeris_root(kz_max ** 2 - kz ** 2))
+    norm = ((depth / 2 - np.sin(2 * kz * depth) / (4 * kz)) / rho_w
+            + np.sin(kz * depth) ** 2 / (2 * gamma * rho_b))
+    zz = np.asarray(zz, dtype=float)[:, None]
+    water = np.sin(kz * zz)
+    below = np.sin(kz * depth) * np.exp(-gamma * np.clip(zz - depth, 0, None))
+    psi = np.where(zz <= depth, water, below) / np.sqrt(norm)
+    return np.sqrt(k ** 2 - kz ** 2), psi
+
+
+def pekeris(env, source, receiver):
+    """Isovelocity water over a lossless fluid half-space — the Pekeris
+    waveguide's trapped-mode sum (JKPS §2.4.5).
+
+    Water ``sin(k_z z)``, bottom ``sin(k_z D) exp(-gamma (z - D))``, the
+    eigenvalues from continuity of pressure and of ``(1/rho) dp/dz`` at the
+    seabed. Only the trapped modes — the residues of the wavenumber
+    integral — are summed; the branch-line integral around ``k_r = k_1``
+    (the continuous spectrum, JKPS Fig. 2.26) is omitted, so the field is
+    exact only where that part has decayed — tens of water depths out when
+    the bottom is lossless, because the near-cutoff leaky modes decay
+    slowly. Against Scooter with ``c_high=1e9`` on 100 m of water over a
+    lossless 1700 m/s, 1.5 g/cm³ bottom at 100 Hz, the median level
+    difference over depth is 2.4 dB at 0.5 km, 0.95 dB at 1 km, 0.57 dB at
+    2 km and at most 0.05 dB from 5 km out. The modes themselves are
+    :func:`pekeris_modes`.
+
+    Parameters
+    ----------
+    env : Environment
+        Flat, isovelocity, lossless water over a half-space bottom with
+        ``sound_speed`` above the water's and ``attenuation`` 0.
+    source : Source
+        Point source(s) in the water; several depths give one
+        Field over a leading ``source_depth`` axis.
+    receiver : Receiver
+        Depth x range grid (m); depths below the seabed take the bottom's
+        evanescent form.
+    """
+    who = 'pekeris'
+    _check_source(source, who)
+    c, rho_w, c_b, rho_b, depth = _pekeris_waveguide(env, who)
     z = np.asarray(receiver.depths, dtype=float)
     r = np.asarray(receiver.ranges, dtype=float)
     for zs in np.atleast_1d(source.depths):
@@ -379,27 +411,82 @@ def pekeris(env, source, receiver):
                 f"{who}: source depth {zs} m is not inside the water "
                 f"(0, {depth}) m.")
 
-    def psi(kz, gamma, zz):
-        """Unnormalised mode shapes at depths ``zz`` -> (len(zz), n)."""
-        zz = np.asarray(zz, dtype=float)[:, None]
-        water = np.sin(kz * zz)
-        below = np.sin(kz * depth) * np.exp(-gamma * np.clip(zz - depth, 0, None))
-        return np.where(zz <= depth, water, below)
-
     def pressure(zs, f):
-        k = 2 * np.pi * f / c
-        k1 = 2 * np.pi * f / c_b
-        kz, kz_max = _pekeris_kz(k, k1, depth, rho_w, rho_b)
-        gamma = np.real(pekeris_root(kz_max ** 2 - kz ** 2))
-        norm = ((depth / 2 - np.sin(2 * kz * depth) / (4 * kz)) / rho_w
-                + np.sin(kz * depth) ** 2 / (2 * gamma * rho_b))
-        amp = 1.0 / np.sqrt(norm)
-        kr = np.sqrt(k ** 2 - kz ** 2)
-        psi_z = amp * psi(kz, gamma, z)
-        psi_s = amp * psi(kz, gamma, [zs])[0]
-        return modal_field(kr, psi_s, psi_z, r, source_density=rho_w,
+        kr, psi = _pekeris_trapped_modes(f, c, rho_w, c_b, rho_b, depth,
+                                         np.append(z, zs))
+        return modal_field(kr, psi[-1], psi[:-1], r, source_density=rho_w,
                            form='hankel')
 
     return _assemble(pressure, source, receiver, backend='pekeris',
                      extra={'sound_speed': c, 'bottom_sound_speed': c_b,
                             'bottom_density': rho_b})
+
+
+def pekeris_modes(env, frequency, *, depths=None):
+    """The trapped modes of a Pekeris waveguide (JKPS §2.4.5) as a
+    :class:`~uacpy.core.results.Modes`: the eigenvalues :func:`pekeris`
+    sums, and their shapes.
+
+    The vertical wavenumbers are the roots of
+    ``rho_w gamma sin(k_z D) + rho_b k_z cos(k_z D) = 0`` on
+    ``0 < k_z < sqrt(k^2 - k_1^2)``, one per interval
+    ``((m - 1/2) pi / D, m pi / D)`` (continuity of pressure and of
+    ``(1/rho) dp/dz`` at the seabed), ``k_r = sqrt(k^2 - k_z^2)`` real and
+    each mode's phase speed between the water's and the bottom's. The
+    shapes are normalised to ``∫ psi² / rho dz = 1`` over the water and the
+    half-space, the normalisation of Kraken's modes, so a mode set from a
+    solver compares with this one entry for entry, and
+    :meth:`~uacpy.core.results.Modes.modal_pressure_field` gives
+    :func:`pekeris`' field in its far-field form.
+
+    Parameters
+    ----------
+    env : Environment
+        As :func:`pekeris`: flat, isovelocity, lossless water over a faster,
+        lossless fluid half-space.
+    frequency : float
+        Frequency (Hz).
+    depths : array_like, optional
+        Depths (m) to tabulate the shapes at; below the seabed they take the
+        bottom's evanescent form. ``None`` tabulates the water column from 0
+        to the seabed with ``SAMPLES_PER_VERTICAL_WAVELENGTH`` (8) samples
+        per vertical wavelength of the highest trapped mode. The modal sums
+        read a shape between tabulated depths by linear interpolation, so
+        tabulate at the source and receiver depths to evaluate a field.
+
+    Returns
+    -------
+    Modes
+        ``k`` (real, rad/m), ``phi`` on ``depths``, ``media`` with the water
+        and half-space densities, the seabed depth and the half-space speed
+        (so :attr:`~uacpy.core.results.Modes.trapped` is all ``True``),
+        ``model='analytic'``, ``backend='pekeris'``.
+    """
+    who = 'pekeris_modes'
+    c, rho_w, c_b, rho_b, depth = _pekeris_waveguide(env, who)
+    f = float(frequency)
+    if not (np.isfinite(f) and f > 0.0):
+        raise ConfigurationError(
+            f"{who}: frequency must be a positive finite number of Hz; got "
+            f"{frequency!r}.")
+    if depths is None:
+        k = 2 * np.pi * f / c
+        k1 = 2 * np.pi * f / c_b
+        kz_max = np.sqrt(k ** 2 - k1 ** 2)
+        n = int(np.ceil(SAMPLES_PER_VERTICAL_WAVELENGTH * depth * kz_max
+                        / (2 * np.pi))) + 1
+        depths = np.linspace(0.0, depth, max(n, 2))
+    zz = np.atleast_1d(np.asarray(depths, dtype=float))
+    kr, psi = _pekeris_trapped_modes(f, c, rho_w, c_b, rho_b, depth, zz)
+    if kr.size == 0:
+        raise ConfigurationError(
+            f"{who}: no mode is trapped at {f:g} Hz (the first cuts off at "
+            f"{c_b * c / (4 * depth * np.sqrt(c_b ** 2 - c ** 2)):.6g} Hz, "
+            f"JKPS Eq. 2.191).",
+            remediation="Raise the frequency above the first cutoff.")
+    media = MediaTable(water_density=rho_w, tops=(0.0,), densities=(rho_w,),
+                       bottom_depth=depth, halfspace_density=rho_b,
+                       halfspace_sound_speed=c_b, halfspace_attenuation=0.0)
+    return Modes(k=kr.astype(complex), phi=psi, depths=zz, media=media,
+                 model='analytic', backend='pekeris', frequencies=f,
+                 metadata={'sound_speed': c})

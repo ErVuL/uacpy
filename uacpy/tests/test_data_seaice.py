@@ -56,7 +56,8 @@ def synthetic_model(monkeypatch):
     # like once the climatology has averaged the flag codes away.
     north[8] = np.nan
     model = {'tf': {'N': _FakeTF(x, y), 'S': _FakeTF(0.0, 0.0)},
-             'N': north, 'S': np.zeros((12, 5, 6), dtype=np.float32)}
+             'N': north, 'S': np.zeros((12, 5, 6), dtype=np.float32),
+             'years': [2019, 2023]}
     monkeypatch.setattr(seaice_local, '_model', lambda: model)
     return model
 
@@ -90,7 +91,8 @@ def test_a_coastal_spillover_cell_takes_its_observed_neighbour(synthetic_model):
 
 def test_out_of_grid_is_ice_free(monkeypatch):
     far = {'tf': {'N': _FakeTF(1e9, 1e9), 'S': _FakeTF(1e9, 1e9)},
-           'N': np.zeros((12, 5, 6), np.float32), 'S': np.zeros((12, 5, 6), np.float32)}
+           'N': np.zeros((12, 5, 6), np.float32), 'S': np.zeros((12, 5, 6), np.float32),
+           'years': [2019, 2023]}
     monkeypatch.setattr(seaice_local, '_model', lambda: far)
     assert seaice_local.fetch_sea_ice_concentration((85.0, 0.0), month=3) == 0.0
 
@@ -122,16 +124,29 @@ def test_transect_classifies_each_waypoint_from_its_own_cell(monkeypatch):
     north[2, 1, 3] = 0.9
     north[2, 3, 3] = 0.05
     model = {'tf': {'N': _LatBandTF(), 'S': _LatBandTF()},
-             'N': north, 'S': np.zeros((12, 5, 6), dtype=np.float32)}
+             'N': north, 'S': np.zeros((12, 5, 6), dtype=np.float32),
+             'years': [2019, 2023]}
     monkeypatch.setattr(seaice_local, '_model', lambda: model)
 
     track = seaice_local.fetch_sea_ice_concentration_transect(
         (86.0, 0.0), (85.0, 0.0), month=3, n_points=4)
     r, c = track.ranges, track.data
-    assert track.provenance.source.id == 'seaice'
+    # One record per waypoint: its own requested point and the centre of
+    # the cell it read (85.5 N in the pack-ice band, 85.0 N in the other).
+    assert [p.source.id for p in track.provenance] == ['seaice'] * 4
+    assert [p.requested_point[0] for p in track.provenance] == \
+        pytest.approx(track.lats.tolist())
+    assert [p.data_point[0] for p in track.provenance] == \
+        pytest.approx([85.5, 85.5, 85.5, 85.0])
     assert r.shape == (4,) and c.shape == (4,)
     assert r[0] == 0.0 and np.all(np.diff(r) > 0)
     assert c.tolist() == pytest.approx([0.9, 0.9, 0.9, 0.05])
+    # 'auto' keeps one waypoint per cell crossed, the ends anchored.
+    auto = seaice_local.fetch_sea_ice_concentration_transect(
+        (86.0, 0.0), (85.0, 0.0), month=3, n_points='auto', max_points=50)
+    assert auto.lats.tolist() == pytest.approx([86.0, 85.0])
+    assert auto.data.tolist() == pytest.approx([0.9, 0.05])
+    assert len(auto.provenance) == 2
     # The same per-waypoint zones drive the surface classification: 0.9 ≥ the
     # 15 % ice-edge → elastic canopy, 0.05 < it → open-water vacuum.
     surf = seaice_local.sea_ice_surface_transect(
@@ -150,7 +165,7 @@ def test_sea_ice_surface_transect(synthetic_model):
     assert surf.n_ranges == 4 and surf.is_elastic
     assert surf.at(range=0).acoustic_type == 'half-space'
     assert {p.source.id for p in surf.data_sources} == {'seaice'}
-    assert [p.range_m for p in surf.data_sources] == list(surf.ranges)
+    assert [p.range for p in surf.data_sources] == list(surf.ranges)
 
 
 def test_auto_transect_places_ice_edge_at_observed_boundary(monkeypatch):
@@ -159,14 +174,14 @@ def test_auto_transect_places_ice_edge_at_observed_boundary(monkeypatch):
     (ice → open water) transect at its endpoints only, and the nearest-node
     ``Surface`` then rebuilt the edge at mid-transect — 600+ km off the
     NSIDC March edge on an (85°N, 0°E) → (60°N, 0°E) transect."""
-    length_m = 1_000_000.0
+    length = 1_000_000.0
     edge_m = 300_000.0                    # ice for r < edge_m, open water beyond
     probe_n = 200
-    step_m = length_m / (probe_n - 1)
+    step_m = length / (probe_n - 1)
 
     def fake_transect(start, end, *, date=None, month=None, n_points=6,
                       max_distance_km=None):
-        r = np.linspace(0.0, length_m, n_points)
+        r = np.linspace(0.0, length, n_points)
         return _track(r, np.where(r < edge_m, 0.9, 0.0))
 
     monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
@@ -175,7 +190,7 @@ def test_auto_transect_places_ice_edge_at_observed_boundary(monkeypatch):
         (85.0, 0.0), (60.0, 0.0), month=3, max_points=probe_n)
     rr = np.asarray(surf.ranges, dtype=float)
     kinds = [bp.acoustic_type for bp in surf.nodes]
-    assert rr[0] == 0.0 and rr[-1] == pytest.approx(length_m)
+    assert rr[0] == 0.0 and rr[-1] == pytest.approx(length)
     assert kinds[0] == 'half-space' and kinds[-1] == 'vacuum'
     # Nearest-node reconstruction transitions midway between adjacent kept
     # nodes of different kind; that must land within one probe step of the
@@ -188,21 +203,27 @@ def test_auto_transect_places_ice_edge_at_observed_boundary(monkeypatch):
     assert surf.at(range=edge_m + step_m).acoustic_type == 'vacuum'
 
 
-def test_an_explicit_count_above_max_points_is_capped_with_a_warning(
+def test_an_explicit_count_is_used_as_given_and_refused_above_max_points(
         monkeypatch):
-    seen = {}
+    seen = []
 
     def fake_transect(start, end, *, date=None, month=None, n_points=6,
                       max_distance_km=None):
-        seen['n_points'] = n_points
+        seen.append(n_points)
         return _track(np.linspace(0.0, 1.0e6, n_points), np.full(n_points, 0.9))
 
     monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
                         fake_transect)
-    with pytest.warns(UserWarning, match=r'n_points=6 exceeds max_points=3'):
+    seaice_local.sea_ice_surface_transect(
+        (85.0, 0.0), (60.0, 0.0), month=3, n_points=1500)
+    seaice_local.sea_ice_surface_transect(
+        (85.0, 0.0), (60.0, 0.0), month=3, n_points=3, max_points=3)
+    assert seen == [1500, 3]
+    with pytest.raises(ConfigurationError,
+                       match=r'n_points=4 exceeds max_points=3'):
         seaice_local.sea_ice_surface_transect(
-            (85.0, 0.0), (60.0, 0.0), month=3, n_points=6, max_points=3)
-    assert seen['n_points'] == 3
+            (85.0, 0.0), (60.0, 0.0), month=3, n_points=4, max_points=3)
+    assert seen == [1500, 3]
 
 
 def test_auto_transect_collapses_a_uniform_zone_to_one_node(monkeypatch):
@@ -218,6 +239,18 @@ def test_auto_transect_collapses_a_uniform_zone_to_one_node(monkeypatch):
         (85.0, 0.0), (60.0, 0.0), month=3, max_points=50)
     assert surf.n_ranges == 1
     assert surf.at(range=0).acoustic_type == 'half-space'
+
+
+@pytest.mark.parametrize('bad', [15, -0.01, 1.01, float('nan')])
+def test_a_threshold_that_is_no_fraction_is_refused(bad):
+    with pytest.raises(ConfigurationError, match='concentration fraction'):
+        seaice_local.sea_ice_surface(0.3, threshold=bad)
+
+
+def test_the_threshold_bounds_zero_and_one_are_accepted():
+    assert seaice_local.sea_ice_surface(0.0, threshold=0.0) is not None
+    assert seaice_local.sea_ice_surface(0.99, threshold=1.0) is None
+    assert seaice_local.sea_ice_surface(1.0, threshold=1.0) is not None
 
 
 def test_sea_ice_surface_gates_on_threshold():
@@ -307,6 +340,39 @@ def test_a_partial_climatology_says_how_thin_it_is(tmp_path, monkeypatch):
         assert climo['N'].shape == (12, 4, 4)    # still a usable climatology
 
 
+def test_a_never_observed_cell_averages_to_nan_with_no_warnings_window(
+        tmp_path, monkeypatch, recwarn):
+    """A cell no year observed (land, coast: code 2540) averages to NaN and
+    an observed one to the mean of its observations, as np.nanmean gives —
+    with no warning, and without a warnings.catch_warnings window, which
+    edits the process-global filter list for every thread while held."""
+    pytest.importorskip('tifffile')
+
+    def no_window(*a, **k):
+        raise AssertionError('a process-global warnings window was opened')
+
+    def grid(buf):
+        year_2022 = b'_2022' in buf.getvalue()
+        return np.array([[2540, 600, 2540 if year_2022 else 400],
+                         [1000, 1000, 1000]], dtype=np.uint16)
+
+    monkeypatch.setattr(seaice_local, 'http_get',
+                        lambda url, **kw: url.encode())
+    monkeypatch.setattr('tifffile.imread', grid)
+    with monkeypatch.context() as during:   # pytest itself opens windows
+        during.setattr(seaice_local.warnings, 'catch_warnings', no_window)
+        out = seaice_local.download_seaice_db(cache_dir=str(tmp_path),
+                                              years=[2022, 2023])
+    with np.load(out, allow_pickle=False) as climo:
+        north = climo['N']
+    assert north.shape == (12, 2, 3) and north.dtype == np.float32
+    assert np.isnan(north[:, 0, 0]).all()
+    assert np.allclose(north[:, 0, 1], 0.6)
+    assert np.allclose(north[:, 0, 2], 0.4)      # observed in 2023 only
+    assert np.allclose(north[:, 1, :], 1.0)
+    assert not [w for w in recwarn if issubclass(w.category, RuntimeWarning)]
+
+
 def test_sea_ice_surface_transect_warns_once_for_no_data_waypoints(monkeypatch):
     def fake_transect(start, end, *, date=None, month=None, n_points=6,
                       max_distance_km=None):
@@ -352,7 +418,7 @@ def test_sea_ice_names_the_cell_it_substituted(monkeypatch):
     grid[:, 2, 3] = 0.8                       # one observed cell, east of centre
     model = {'tf': {h: seaice_local._pyproj_transformer(
         seaice_local._GRID[h]['epsg']) for h in ('N', 'S')},
-        'N': grid, 'S': grid}
+        'N': grid, 'S': grid, 'years': [2019, 2023]}
     monkeypatch.setattr(seaice_local, '_model', lambda: model)
     monkeypatch.setattr(seaice_local, '_rowcol',
                         lambda m, hemi, lat, lon: (2, 2))
@@ -380,7 +446,7 @@ def test_sea_ice_direct_hit_is_silent(monkeypatch):
     grid = np.full((12, 5, 5), 0.8, dtype=np.float32)
     model = {'tf': {h: seaice_local._pyproj_transformer(
         seaice_local._GRID[h]['epsg']) for h in ('N', 'S')},
-        'N': grid, 'S': grid}
+        'N': grid, 'S': grid, 'years': [2019, 2023]}
     monkeypatch.setattr(seaice_local, '_model', lambda: model)
     monkeypatch.setattr(seaice_local, '_rowcol',
                         lambda m, hemi, lat, lon: (2, 2))
@@ -472,8 +538,11 @@ def test_the_seaice_period_is_read_back_from_the_cache(tmp_path, monkeypatch):
     assert seaice_local.climatology_period() == '2019-2023 (climatology)'
 
 
-def test_a_seaice_cache_without_a_period_loads_its_grids(tmp_path, monkeypatch):
-    """Old caches carry no ``years``. Absent is not an error."""
+def test_a_seaice_cache_without_its_period_is_refused_as_unreadable(
+        tmp_path, monkeypatch):
+    """uacpy reads only the cache format it writes, which records the years
+    averaged; a cache without them is refused with the reinstall hint."""
+    from uacpy.data._cache import UnreadableCacheError
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
     seaice_local._model.memo.clear()
     dest = tmp_path / 'seaice'
@@ -482,23 +551,19 @@ def test_a_seaice_cache_without_a_period_loads_its_grids(tmp_path, monkeypatch):
     np.savez_compressed(dest / seaice_local.INDEX_FILE, **grids)
     monkeypatch.setattr(seaice_local, '_pyproj_transformer',
                         lambda epsg, **kw: _FakeTF(0.0, 0.0))
-    assert seaice_local.climatology_period() is None
-    assert seaice_local._model()['N'].shape == (12, 4, 4)   # grids still read
+    with pytest.raises(UnreadableCacheError,
+                       match=r'install\.sh --data seaice'):
+        seaice_local.climatology_period()
 
 
-def test_the_environment_provenance_carries_the_seaice_vintage(tmp_path,
-                                                               monkeypatch):
-    from uacpy.data.environment import _climatology_vintage
-    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    seaice_local._model.memo.clear()
-    dest = tmp_path / 'seaice'
-    dest.mkdir(parents=True)
-    grids = {h: np.full((12, 4, 4), 0.6, dtype=np.float32) for h in ('N', 'S')}
-    np.savez_compressed(dest / seaice_local.INDEX_FILE,
-                        years=np.arange(2019, 2024, dtype=np.int32), **grids)
-    monkeypatch.setattr(seaice_local, '_pyproj_transformer',
-                        lambda epsg, **kw: _FakeTF(0.0, 0.0))
-    assert _climatology_vintage('seaice') == '2019-2023 (climatology)'
+def test_a_fetched_sea_ice_canopy_is_dated_by_the_cache_period(
+        synthetic_model):
+    """The canopy's own fetcher stamps the climatology period it read, so an
+    environment built on it cites the vintage with no lookup of its own."""
+    surface = seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=3)
+    (prov,) = surface.data_sources
+    assert prov.source.id == 'seaice'
+    assert prov.data_date == '2019-2023 (climatology)'
 
 
 def test_sea_ice_grid_names_the_bad_month_before_the_bad_hemisphere(monkeypatch):
@@ -517,5 +582,5 @@ def _track(ranges, concentration):
     return AlongTrack(ranges=ranges, lats=np.zeros(n), lons=np.zeros(n),
                       data=concentration, unit='1',
                       quantity='sea_ice_concentration',
-                      provenance=DataProvenance(source=SOURCES['seaice']))
+                      provenance=(DataProvenance(source=SOURCES['seaice']),) * n)
 

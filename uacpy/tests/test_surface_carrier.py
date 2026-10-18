@@ -8,7 +8,7 @@ from uacpy.core.boundary import BoundaryProperties
 from uacpy.core.surface import Surface
 from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.altimetry import Altimetry
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.models.kraken import _checks, _window
 from uacpy.tests.conftest import recorded_warnings
 
@@ -307,7 +307,7 @@ class TestDelegatedWritesAreValidated:
             s.density = -3.0
         with pytest.raises(ConfigurationError, match='must be positive'):
             s.sound_speed = 0.0
-        with pytest.raises(ConfigurationError, match='exceeds'):
+        with pytest.warns(ValidityWarning, match='exceeds'):
             s.attenuation = 500.0
         with pytest.raises(ConfigurationError, match='non-negative'):
             s.roughness = -1.0

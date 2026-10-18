@@ -58,12 +58,35 @@ def test_the_pcm_encodings_are_readable_by_the_stdlib_wave_module(tmp_path):
         assert handle.getnframes() == 960
 
 
-def test_a_pcm_encoding_normalizes_to_full_scale_by_default(tmp_path):
+def test_a_pcm_encoding_keeps_the_level_by_default(tmp_path):
+    """The samples are written as given: a calibrated signal inside ±1
+    keeps its level, half full scale reading back as half full scale."""
     path = tmp_path / 'half.wav'
-    write_wav(path, _tone(peak=0.5), FS)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        write_wav(path, _tone(peak=0.5), FS)
+
+    _, data = wavfile.read(path)
+    assert np.abs(data).max() == round(0.5 * 32767)
+
+
+def test_normalize_true_scales_a_pcm_signal_to_full_scale(tmp_path):
+    path = tmp_path / 'half.wav'
+    write_wav(path, _tone(peak=0.5), FS, normalize=True)
 
     _, data = wavfile.read(path)
     assert np.abs(data).max() == 32767
+
+
+def test_a_pcm_signal_past_full_scale_is_clipped_naming_normalize(tmp_path):
+    """The one case the encoding forces a change: a sample beyond ±1 is
+    clipped, and the warning names normalize=True."""
+    with pytest.warns(UserWarning,
+                      match=r"1 of 3 samples are past full scale.*"
+                            r"normalize=True"):
+        write_wav(tmp_path / 'loud.wav', np.array([2.0, -0.5, 0.25]), FS)
+    _, data = wavfile.read(tmp_path / 'loud.wav')
+    assert data.tolist() == [32767, round(-0.5 * 32767), round(0.25 * 32767)]
 
 
 def test_a_float_encoding_keeps_the_absolute_level_by_default(tmp_path):
@@ -81,7 +104,7 @@ def test_normalize_scales_a_signal_far_below_full_scale_exactly(tmp_path):
     ``peak + 1e-12``) under-scales by the signal's own size: at a 1e-9 peak it
     lands three orders of magnitude low instead of at full scale."""
     path = tmp_path / 'tiny.wav'
-    write_wav(path, 1e-9 * _tone(peak=1.0), FS)
+    write_wav(path, 1e-9 * _tone(peak=1.0), FS, normalize=True)
 
     _, data = wavfile.read(path)
     assert np.abs(data).max() == 32767
@@ -90,7 +113,7 @@ def test_normalize_scales_a_signal_far_below_full_scale_exactly(tmp_path):
 def test_silence_is_written_as_silence(tmp_path):
     """The one signal that cannot be divided by its peak."""
     path = tmp_path / 'silence.wav'
-    write_wav(path, np.zeros(100), FS)
+    write_wav(path, np.zeros(100), FS, normalize=True)
 
     _, data = wavfile.read(path)
     assert data.size == 100
@@ -615,20 +638,21 @@ def test_read_wav_info_refuses_what_read_wav_refuses(tmp_path):
         read_wav_info(tmp_path / 'absent.wav')
 
 
-def test_the_bit_depth_recovers_the_adc_counts_for_volt_params(tmp_path):
+def test_read_wav_output_goes_straight_into_pressure_from_recording(
+        tmp_path):
     """The route read_wav_info's docstring gives: read_wav's fractions of
-    2**(bits-1) - 1 times that full scale are the integer codes written, and
-    ``pressure_from_recording(volt_params=(bits, v_ref))`` divides those
-    by 2**(bits-1)."""
+    2**(bits-1) - 1, passed with ``x_scale='read_wav'`` and the file's bit
+    depth, give the ADC pressure of the integer codes written, the codes
+    over 2**(bits-1) times v_ref."""
     from uacpy.acoustics import pressure_from_recording
     codes = np.array([0, 16384, -16384, 32767, -32768])
     fmt = struct.pack('<HHIIHH', 1, 1, 8000, 16000, 2, 16)
     (tmp_path / 'codes.wav').write_bytes(
         _riff(fmt, struct.pack(f'<{codes.size}h', *codes)))
-    info = read_wav_info(tmp_path / 'codes.wav')
     x, _ = read_wav(tmp_path / 'codes.wav')
-    counts = x * (2 ** (info.bits - 1) - 1)
-    assert np.allclose(counts, codes, rtol=0, atol=1e-9)
-    p = pressure_from_recording(counts, sensitivity=0, gain=0,
-                                volt_params=(info.bits, 2.0))
-    assert np.allclose(p, 1e-6 * 2.0 * codes / 2 ** 15)
+    p = pressure_from_recording(
+        x, sensitivity=0, gain=0,
+        volt_params=(read_wav_info(tmp_path / 'codes.wav').bits, 2.0),
+        x_scale='read_wav')
+    np.testing.assert_allclose(p, 1e-6 * 2.0 * codes / 2 ** 15,
+                               rtol=1e-12, atol=0)

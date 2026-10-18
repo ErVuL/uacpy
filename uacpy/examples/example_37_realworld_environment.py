@@ -17,14 +17,15 @@ Then three further composites: a modelled range-dependent LAYERED seabed run
 through RAM, a comparison of two seabed descriptions (grain-size half-space
 against CRUST1.0 layered elastic), and an under-ice Arctic transect.
 
-The `try` blocks here are the feature, not scaffolding: this is the one example
-that reaches outside the process. It runs from the offline cache when installed
-(./install.sh --data all), otherwise hits the live APIs, and falls back to
-representative synthetic data — labelled `[offline fallback]` — if a service is
-unreachable, so it always plots. Each fetch logs notes on where its data come
-from (a seabed sample far from the point asked for, a sound-speed profile
-extrapolated down to the seafloor); they state the provenance of the numbers
-and are left visible.
+This is the one example that reaches outside the process. It runs from the
+offline cache when installed (./install.sh --data all), otherwise hits the live
+APIs; a map or transect fetch that neither can answer raises its typed error,
+naming the dataset to install or the network. The one-point EMODnet seabed and
+the sea-ice composite are extras, skipped with the reason printed when their
+data cannot be fetched. Each fetch logs notes on where its data come from (a
+seabed sample far from the point asked for, a sound-speed profile extrapolated
+down to the seafloor); they state the provenance of the numbers and are left
+visible.
 
 Uses: data.fetch_bathy_grid · data.fetch_environment (range-dependent
 bathymetry + SSP + bottom + ice) · data.is_installed ·
@@ -34,10 +35,8 @@ data.citations · plot.plot_overview(map_fn=) · plot.plot_sea_ice_map · plot.p
 
 import datetime as _dt
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -91,68 +90,31 @@ def run_tl(env, frequency=FREQ_HZ):
     receiver = uacpy.Receiver(
         depths=np.linspace(1, env.bathymetry.depth, 150),
         ranges=np.linspace(1000.0, env.bathymetry.range_max, 350))
-    try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            tl = uacpy.Bellhop(backend='fortran').run(
-                env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
-        for warning in caught:
-            print(f"  TL note: {str(warning.message).splitlines()[0]}")
-        print(f"  TL: ok ({tl.dB.shape} grid, {frequency:g} Hz)")
-    except Exception as exc:                    # model not built / run failed
-        print(f"  TL: [skipped] {str(exc).splitlines()[0]}")
-        tl = None
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        tl = uacpy.Bellhop(backend='fortran').run(env, source, receiver)
+    for warning in caught:
+        print(f"  TL note: {str(warning.message).splitlines()[0]}")
+    print(f"  TL: ok ({tl.dB.shape} grid, {frequency:g} Hz)")
     return tl, source, receiver
 
 
 # ── The regional bathymetry grid the map is drawn from ──────────────────────
-try:
-    grid = data.fetch_bathy_grid(REGION_LAT, REGION_LON,
-                                 n_lat=N_LAT, n_lon=N_LON,
-                                 source=GRID_SOURCE)
-    via = 'the installed GEBCO grid' if GRID_CACHED else 'OpenTopoData'
-    print(f"  grid: ok ({N_LAT}×{N_LON} via {via}, "
-          f"{np.isnan(grid.depths).sum()} land cells)")
-except UACPYError as exc:
-    print(f"  grid: [offline fallback] {exc.message.splitlines()[0]}")
-    lats = np.linspace(*REGION_LAT, N_LAT)
-    lons = np.linspace(*REGION_LON, N_LON)
-    lon_mesh, lat_mesh = np.meshgrid(lons, lats)
-    # A basin centred on the region, so the stand-in grid has sea cells.
-    depth = 2800.0 * np.exp(-(((lat_mesh - np.mean(REGION_LAT)) / 3) ** 2
-                              + ((lon_mesh - np.mean(REGION_LON)) / 3) ** 2))
-    depth[depth < 200] = np.nan
-    grid = data.BathyGrid(lats=lats, lons=lons, depths=depth)
+grid = data.fetch_bathy_grid(REGION_LAT, REGION_LON, n_lat=N_LAT, n_lon=N_LON,
+                             source=GRID_SOURCE)
+via = 'the installed GEBCO grid' if GRID_CACHED else 'OpenTopoData'
+print(f"  grid: ok ({N_LAT}×{N_LON} via {via}, "
+      f"{np.isnan(grid.depths).sum()} land cells)")
 
 # ── The transect environment: seafloor, water column and seabed all vary ────
-try:
-    env = data.fetch_environment(
-        TRANSECT_START, date=DATE, transect_to=TRANSECT_END,
-        name="North Sea — Norwegian Trench transect",
-        n_points=TRANSECT_POINTS, bathymetry_sources=BATHY_SOURCE,
-        range_dependent_ssp=True, ssp_n_points=SSP_POINTS,
-        range_dependent_bottom=True, bottom_sources='local',
-        bottom_n_points=BOTTOM_POINTS, with_absorption=True)
-    print(f"  environment: ok ({env!r})")
-except UACPYError as exc:
-    print(f"  environment: [offline fallback] {exc.message.splitlines()[0]}")
-    ranges = np.linspace(0.0, 370000.0, 5)
-    depths = np.array([0, 50, 100, 200, 300.0])
-    base = np.array([1505, 1500, 1496, 1494, 1493.0])
-    section = np.linspace(0, 370000, 40)
-    env = uacpy.Environment(
-        name='North Sea transect (fallback)',
-        # Shelf (~110 m) dipping into the Norwegian Trench (~300 m) and back.
-        bathymetry=np.column_stack(
-            [section, 110 + 190 * np.sin(np.pi * section / 370000) ** 2]),
-        ssp=uacpy.SoundSpeedProfile(
-            depths=depths, ranges=ranges,
-            sound_speed=np.column_stack([base + 1.0 * np.sin(0.7 * k)
-                                  for k in range(5)])),
-        bottom=data.bottom_from_class('silt'),
-        # No fetched T/S/pH offline: Thorp, which needs none, keeps the
-        # volume absorption — 0.053 dB/km at 800 Hz, 19.9 dB over 374 km.
-        absorption=uacpy.Thorp())
+env = data.fetch_environment(
+    TRANSECT_START, date=DATE, transect_to=TRANSECT_END,
+    name="North Sea — Norwegian Trench transect",
+    n_points=TRANSECT_POINTS, bathymetry_sources=BATHY_SOURCE,
+    range_dependent_ssp=True, ssp_n_points=SSP_POINTS,
+    range_dependent_bottom=True, bottom_sources='local',
+    bottom_n_points=BOTTOM_POINTS, with_absorption=True)
+print(f"  environment: ok ({env!r})")
 
 tl, source, receiver = run_tl(env)
 
@@ -230,8 +192,7 @@ if data.is_installed('sediment'):
     layered_receiver = uacpy.Receiver(
         depths=np.linspace(1, env.bathymetry.depth, 100),
         ranges=np.linspace(1000.0, env.bathymetry.range_max, 200))
-    layered_tl = model.run(layered_env, layered_source, layered_receiver,
-                           run_mode=uacpy.RunMode.COHERENT_TL)
+    layered_tl = model.run(layered_env, layered_source, layered_receiver)
     print(f"  layered seabed: RAM→{backend} at {RDLB_FREQ_HZ:g} Hz, "
           f"{layered_tl.dB.shape} grid")
 
@@ -318,17 +279,21 @@ if data.is_installed('seaice'):
             bottom_n_points=BOTTOM_POINTS,
             range_dependent_surface=True, surface_n_points=BOTTOM_POINTS,
             with_absorption=True)
-        ice_tl, ice_source, ice_receiver = run_tl(ice_env)
         ice_track = data.fetch_sea_ice_concentration_transect(
             ice_a, ice_b, month=month, n_points=BOTTOM_POINTS)
         ice_grid = data.sea_ice_grid(month, hemi='N')
-
-        for name, spot in [("Central Arctic (88 N, perennial)", (88.0, 0.0)),
-                           ("Fram Strait (79 N, seasonal)", (79.0, -3.0))]:
-            march = data.fetch_sea_ice_concentration(spot, month=3)
-            september = data.fetch_sea_ice_concentration(spot, month=9)
+        seasons = {name: (data.fetch_sea_ice_concentration(spot, month=3),
+                          data.fetch_sea_ice_concentration(spot, month=9))
+                   for name, spot in [
+                       ("Central Arctic (88 N, perennial)", (88.0, 0.0)),
+                       ("Fram Strait (79 N, seasonal)", (79.0, -3.0))]}
+    except UACPYError as exc:             # a sea-ice fetch failed: say why
+        print(f"  sea-ice overview: [skipped] {exc.message.splitlines()[0]}")
+    else:
+        for name, (march, september) in seasons.items():
             print(f"  {name}: March {march:.0%} ice, "
                   f"September {september:.0%} ice")
+        ice_tl, ice_source, ice_receiver = run_tl(ice_env)
 
         # The same composite, with the pluggable left panel swapped for the
         # NSIDC sea-ice map.
@@ -346,8 +311,6 @@ if data.is_installed('seaice'):
         fig.savefig(OUT / 'example_37_sea_ice.png', dpi=130,
                     bbox_inches='tight')
         plt.close(fig)
-    except Exception as exc:              # noqa: BLE001 — outside-world demo
-        print(f"  sea-ice overview: [skipped] {str(exc).splitlines()[0]}")
 else:
     print("  sea ice: [skipped] needs ./install.sh --data seaice")
 

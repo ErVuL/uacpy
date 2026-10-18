@@ -22,10 +22,15 @@ Layout:
 * ``ramsurf_writer`` / ``ramsurf_reader`` — Collins rams0.5 / ramsurf1.5.
 * ``grn_reader`` — Scooter / SPARC Green's-function files, read into the
   ``GreensFunction`` result.
-* ``audio_io`` — ``.wav`` output for a computed or measured signal.
+* ``audio_io`` — ``.wav`` files: ``read_wav``, ``read_wav_info``,
+  ``read_wav_metadata`` and ``write_wav``, for a computed or measured signal.
+* ``at_codes`` — the Acoustics-Toolbox deck letters the writers and
+  ``read_env`` share.
 * ``input_checks`` — what a reader or writer checks before it trusts its
   input (``reject_unknown_kwargs``, ``_collapsed_pair_index``).
 * ``_fortran_helpers`` — private low-level Fortran-record helpers.
+* ``_parsers`` — the raw output-file parsers the engines read (OAST
+  ``.plp``/``.plt``, OASP ``.trf``, Collins grids); package-internal.
 
 Planned 3-D support
 -------------------
@@ -60,7 +65,6 @@ from uacpy.io.oalib_reader import (
     read_flp,
     read_flp3d,
     read_rts_file,
-    read_ts,
     read_prt,
 )
 from uacpy.io.oalib_writer import (
@@ -103,12 +107,12 @@ from uacpy.io.oases_reader import (
     OasesRhsHeader,
 )
 from uacpy.io.mpirams_writer import (
-    write_inpe, write_ssp_file, write_bth_file, write_ranges_file,
-    write_sediment_file,
+    write_mpirams_inpe, write_mpirams_ssp, write_mpirams_bathymetry, write_mpirams_ranges,
+    write_mpirams_sediment,
     write_water_attenuation_file,
 )
 from uacpy.io.mpirams_reader import PsifFile, read_psif
-from uacpy.io.ramsurf_writer import write_ramin
+from uacpy.io.ramsurf_writer import write_ram_in
 from uacpy.io.ramsurf_reader import (
     PeGrid, read_tl_line, read_tl_grid, read_pcomplex_grid,
 )
@@ -123,7 +127,7 @@ __all__ = [
     "read_arr_file", "read_ray_file",
     "read_ssp_2d", "SspTable", "read_ssp_3d", "Ssp3dFile",
     "read_flp", "read_flp3d", "FlpFile", "Flp3dFile",
-    "read_rts_file", "read_ts", "RtsFile",
+    "read_rts_file", "RtsFile",
     "read_prt",
     # Boundary auxiliary I/O
     "read_bathymetry", "read_altimetry", "read_boundary_3d", "BoundaryTable",
@@ -162,11 +166,11 @@ __all__ = [
     "write_oasr_input", "write_oass_input", "write_oassp_input",
     "OasnNoise", "OasnReplicaGrid",
     # mpiramS writers
-    "write_inpe", "write_ssp_file", "write_bth_file", "write_ranges_file",
-    "write_sediment_file",
+    "write_mpirams_inpe", "write_mpirams_ssp", "write_mpirams_bathymetry", "write_mpirams_ranges",
+    "write_mpirams_sediment",
     "write_water_attenuation_file",
     # ramsurf writer
-    "write_ramin",
+    "write_ram_in",
     # Audio
     "write_wav", "read_wav", "read_wav_info", "WavInfo", "read_wav_metadata",
 ]

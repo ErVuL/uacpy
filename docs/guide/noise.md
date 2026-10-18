@@ -145,7 +145,7 @@ WenzNoise(frequencies=None, *, wind_speed_kn, rain_rate='no', water_depth='deep'
 | `*_model` | `None`, a name from the registry, or a callable | `None` |
 
 Wind speed is in **knots**, the unit `uacpy.data.fetch_wind` returns and
-`generate_sea_surface(wind_speed_kn=…)` takes. Every published coefficient
+`generate_sea_surface(wind_speed_19_5m_kn=…)` takes. Every published coefficient
 in this family is fitted in knots (DRDC-RDDC-2022-D051 §2.3 eq. 8); the one
 stated in m/s (Coates) converts inside, and the unit rule for every wind
 argument is in [§5](#wind-speed-from-a-beaufort-force-or-a-sea-state). A
@@ -182,7 +182,7 @@ the linear PSD is SI Pa²/Hz, the unit the synthesis takes for a signal in Pa
 
 ```python
 psd = wenz.as_psd()                          # Pa²/Hz
-t, x, fs = uacpy.acoustic_signal.synthesize_noise_from_psd(
+t, x = uacpy.acoustic_signal.synthesize_noise_from_psd(
     psd, wenz.frequencies, sample_rate=96_000, duration=30.0)
 ```
 
@@ -319,7 +319,7 @@ is an implementation that takes shortcuts.
 underwater-communications literature uses, so `WIND_MODELS` and
 `SHIPPING_MODELS` let you reproduce either convention from the same call.
 
-`knudsen` is the original, in the form most commonly used:
+`knudsen` is the original, as one straight line in log U and log f:
 
 ```
 NL = 44 + 20·log₁₀(U_kn) − 17·log₁₀(f_kHz)          dB re 1 µPa²/Hz
@@ -327,7 +327,10 @@ NL = 44 + 20·log₁₀(U_kn) − 17·log₁₀(f_kHz)          dB re 1 µPa²/H
 
 Straight parallel lines in log-log, which is the shape Knudsen, Alford and
 Emling (1948) published — their curves shift with wind by the same amount at
-every frequency. Both coefficients are theirs. `−17` dB/decade is the paper's
+every frequency. The slope and the constant are theirs; the wind term
+`20·log₁₀(U_kn)` is not — they drew one curve per wind force, not a law in U —
+and no cited source states it: it is uacpy guidance,
+checked against their figure below. `−17` dB/decade is the paper's
 stated −5 dB/octave (−16.61 dB/decade) to 0.4 dB/decade, restated by Dahl
 *et al.* (2007) as a "5 dB reduction in average pressure spectral density per
 factor of two increase in frequency". The constant 44 is the calm curve: wind
@@ -432,13 +435,26 @@ having one. `knudsen` has none either, its measurements being coastal.
 
 Every uacpy fetcher returns wind in **knots**, and every wind argument takes
 it: the Wenz family (`WenzNoise`, `wind_noise_level`),
-`sonar.chapman_harris_surface`, `sonar.apl_uw_surface_backscatter`,
-`bubble_surface_loss` and `generate_sea_surface` all name it `wind_speed_kn`;
-the fits stated in m/s convert inside. A speed read in m/s converts first.
-`uacpy.units` carries the bridge: `ms_to_knots` / `knots_to_ms` (the factor
+`sonar.chapman_harris_surface`, `sonar.apl_uw_surface_backscatter` and
+`bubble_surface_loss` name it `wind_speed_kn`, `generate_sea_surface` and
+`Altimetry.from_sea_state` name it `wind_speed_19_5m_kn`; the fits stated in
+m/s convert inside. A speed read in m/s converts first.
+The unit is shared; the measurement height is not. The noise and scattering
+laws, and `fetch_wind`, use the wind at **10 m**, the standard height for
+wind at sea (APL-UW TR 9407, §II.A; Ainslie 2010 §8.1.2.2.1: "except in the
+expression for PM … the intended wind speed measurement height is 10 m").
+`generate_sea_surface` and `Altimetry.from_sea_state` take the
+**Pierson-Moskowitz wind at 19.5 m** (Brekhovskikh & Lysanov, Fig. 1.24), the
+height their argument's name states,
+which is about 6 % stronger: a 10 m reading divides by 0.94 first (the
+neutral-stability ratio of Ainslie Eq. 8.12, the one `data.fetch_sea_surface`
+applies), and passed unchanged it builds a wave height about 12 % low.
+`uacpy.units` carries the knot bridge: `ms_to_knots` / `knots_to_ms` (the factor
 is `KNOTS_PER_M_PER_S`, 3600/1852), plus
 `beaufort_to_wind_speed`, `sea_state_to_wind_speed` and
-`wind_speed_to_beaufort` over the Urick (1983) `BEAUFORT_SCALE`. Passing a m/s
+`wind_speed_to_beaufort` over `BEAUFORT_SCALE` (Wenz's Beaufort ranges and sea
+states, Jensen et al. Table 1.6, with force 8 on sea state 6 as the WMO code
+pairs them, APL-UW TR 9407 §II.A Table 2). Passing a m/s
 value as knots is worth a measured **5.7 dB** at 1 kHz for 10 m/s, understating
 the total.
 
@@ -458,9 +474,10 @@ A force names a *band* of speeds, so `beaufort_to_wind_speed` returns its
 midpoint — a choice, not a conversion: at force 3 the band's ends move
 the default wind term at 1 kHz by −1.68 dB and +1.40 dB, 3.08 dB end to
 end. Sea state 6 spans forces 7 and 8, and `sea_state_to_wind_speed` resolves
-it to force 8 (37.0 kn), following Dahl *et al.* (2007) on the WMO
-correspondence; the force-7 midpoint (30.5 kn) would read 1.67 dB lower at
-1 kHz, so the choice is stated rather than left to chance. Pass a measured
+it to force 8 (37.0 kn), as the WMO sea-state code does (TR 9407 Table 2 lists
+37.5 kn for WMO sea state 6); Wenz's sea state 6 is force 7, whose midpoint
+(30.5 kn) would read 1.67 dB lower at 1 kHz, so the choice is stated rather
+than left to chance. Pass a measured
 speed whenever you have one: Dahl *et al.* (2007) note that sea-surface noise
 "correlates much better with wind speed than with sea state".
 
@@ -472,7 +489,7 @@ This is the one unit error that will silently cost you 20 dB.
 
 Every level in `WenzNoise` is a **spectral** level: dB re 1 µPa²/**Hz**, a
 density. `radiated_noise_level` and `monopole_source_level` in
-[§7](#7-ship-radiated-noise-iso-17208) return **band** levels: dB re 1 µPa·m
+[§7](#7-ship-radiated-noise-iso-17208) return **band** levels: dB re 1 µPa²·m²
 integrated over a decidecade band. Differencing one against the other is a
 `10·log₁₀(w)` error, where `w` is the bandwidth — 20 dB over a 100 Hz band.
 
@@ -601,8 +618,10 @@ SL_mp,f = 230.0 − 35.94·log₁₀ f + 9.17·log₁₀[1 + (f/340)²]   dB re 
 It was measured between 30 Hz and 1200 Hz. Above 1200 Hz it continues with the
 −23 dB per decade Ainslie extrapolates it with (§8.3.1.4), joined at 1200 Hz, up
 to 15 kHz; that gradient was fitted to one cargo ship at low speed, and the
-extrapolated curve agrees with it near 12 kn. A frequency outside 30 Hz–15 kHz
-is refused. 158.45 dB at 100 Hz, 131.21 dB at 1 kHz.
+extrapolated curve agrees with it near 12 kn. Outside 30 Hz–15 kHz the same
+expressions are evaluated (Eq. 8.195 below 30 Hz, the −23 dB/decade line above
+15 kHz) with one `ValidityWarning` naming the measured and the extrapolated
+bands. 158.45 dB at 100 Hz, 131.21 dB at 1 kHz.
 
 It is an ensemble mean with **no speed or length term**: Ainslie states none
 for it, and one ship's spectrum moves with its speed (Ainslie's Fig. 8.16). Nor is it
@@ -676,25 +695,32 @@ A weighted SEL map is compared with the SEL entry of its own group
 `EXPOSURE_THRESHOLDS['VHF'][...]['TTS']['SEL']`); a peak level is compared
 unweighted.
 
-| Key | Group |
-|---|---|
-| `LF` | Low-frequency cetaceans |
-| `HF` | High-frequency cetaceans |
-| `VHF` | Very-high-frequency cetaceans |
-| `SI` | Sirenians |
-| `PCW` | Phocid carnivores in water |
-| `OCW` | Other marine carnivores in water |
-| `PCA` | Phocid carnivores **in air** |
-| `OCA` | Other marine carnivores **in air** |
+| Key | Group | NMFS (2018) name |
+|---|---|---|
+| `LF` | Low-frequency cetaceans | LF |
+| `HF` | High-frequency cetaceans | **MF** |
+| `VHF` | Very-high-frequency cetaceans | **HF** |
+| `SI` | Sirenians | — |
+| `PCW` | Phocid carnivores in water | PW |
+| `OCW` | Other marine carnivores in water | OW |
+| `PCA` | Phocid carnivores **in air** | — |
+| `OCA` | Other marine carnivores **in air** | — |
+
+The keys are Southall et al. (2019)'s, not NMFS (2018)'s: a user thinking in
+NMFS names reads `'HF'` as the porpoise group, which is `'VHF'` here
+(References).
 
 ```python
-from uacpy.noise import HEARING_GROUPS
+from uacpy.noise import HEARING_GROUPS, auditory_weighting
 
 in_water = ['LF', 'HF', 'VHF', 'SI', 'PCW', 'OCW']
-in_air = [g for g in HEARING_GROUPS if g not in in_water]
+f = np.logspace(1.0, 5.5, 400)
 
-fig, ax = uacpy.plot.plot_weighting(in_water)
-uacpy.plot.plot_weighting(in_air, ax=ax, linestyle='--')
+ax = None
+for group in HEARING_GROUPS:
+    fig, ax = uacpy.plot.plot_weighting(
+        f, auditory_weighting(f, group), ax=ax, label=group,
+        linestyle='-' if group in in_water else '--')
 ```
 
 ![Southall 2019 auditory weighting](figures/noise_weighting_groups.png)
@@ -718,8 +744,13 @@ underwater spectrum.
 | Function | Takes | Returns |
 |---|---|---|
 | `auditory_weighting(frequency, group)` | frequency in **Hz** | `W(f)` in dB, peak 0 |
-| `apply_weighting(level_dB, *, frequency, group)` | a level **spectrum** | `L(f) + W(f)`, still a spectrum |
-| `weighted_level(psd_dB, *, frequency, group)` | a level **density** | one broadband number |
+| `apply_weighting(level_dB, *, frequency, weighting)` | a level **spectrum** | `L(f) + W(f)`, still a spectrum |
+| `weighted_level(psd_dB, *, frequency, weighting, axis=-1)` | a level **density** (one spectrum, or one per cell along `axis`) | one broadband number per spectrum |
+
+`weighting=` takes what it takes on every SEL: a hearing group name, your own
+`W(f_Hz) -> dB` function, or a `(frequencies_Hz, W_dB)` table
+(`uacpy.acoustics.frequency_weighting`); a DC bin (`f ≤ 0`, the first bin of
+`welch`) carries no weight, so a `welch` spectrum goes in as it comes.
 
 `weighted_level` integrates: `10·log₁₀(∫ 10^((L+W)/10) df)`. It takes a
 **density** (dB re ref²/Hz) precisely so that the answer does not depend on how
@@ -734,22 +765,23 @@ from uacpy.acoustics import sum_levels_dB
 from uacpy.noise import WenzNoise, apply_weighting
 
 bands = WenzNoise(wind_speed_kn=15.0).decidecade_levels(100.0, 1000.0)
-band_weighted = apply_weighting(bands.levels, frequency=bands.centers, group='LF')
+band_weighted = apply_weighting(bands.levels, frequency=bands.centers, weighting='LF')
 weighted_total = sum_levels_dB(band_weighted, axis=-1)   # one weighted level
 ```
 
 Examples 35 and 36 print that weighted band sum for each group.
 
 ```python
+from uacpy.acoustics import band_level
 from uacpy.noise import apply_weighting, weighted_level
 
 f = np.logspace(1.0, 5.0, 1200)              # 10 Hz - 100 kHz
 wenz = WenzNoise(f, wind_speed_kn=10.0, shipping_level='medium')
 
-unweighted = 10.0 * np.log10(np.trapezoid(10.0 ** (wenz.total / 10.0), f))
-weighted = {g: weighted_level(wenz.total, frequency=f, group=g) for g in in_water}
+unweighted = band_level(wenz.total, f)
+weighted = {g: weighted_level(wenz.total, frequency=f, weighting=g) for g in in_water}
 
-apply_weighting(wenz.total, frequency=f, group='LF')   # the weighted spectrum itself
+apply_weighting(wenz.total, frequency=f, weighting='LF')   # the weighted spectrum itself
 ```
 
 ![Weighted vs unweighted](figures/noise_weighted_soundscape.png)
@@ -785,7 +817,7 @@ keep more.
 import numpy as np
 from uacpy.acoustic_signal import tone_burst
 from uacpy.acoustics import sound_exposure_level, frequency_weighting
-from uacpy.core.results import Field
+from uacpy import Field
 
 fs = 8000.0
 recording = np.random.default_rng(0).standard_normal(8000)      # 1 s of p(t), Pa
@@ -817,7 +849,9 @@ and example 47 runs it for a survey line.
 
 The steps live on three pages and four namespaces; these are the calls in
 order, for one pile strike seen by very-high-frequency cetaceans (Southall
-`'VHF'`, the NMFS "HF" group).
+`'VHF'`, the NMFS "HF" group). uacpy has no pile-driving source model: the
+strike's waveform and its energy source level (ESL) come from a measurement or
+a source model of your own, and the recipe takes them as given.
 
 ```python
 import numpy as np
@@ -984,9 +1018,20 @@ submodel:
   NMFS (2018) Technical Guidance, NMFS-OPR-59, but its cetacean labels move one
   step: NMFS LF / MF / HF / PW / OW are Southall LF / HF / VHF / PCW / OCW, so a
   harbour porpoise (NMFS "HF") is `'VHF'` here.
+- Knudsen, V. O., Alford, R. S. & Emling, J. W., "Underwater ambient noise",
+  *J. Marine Research* 7, 410–429, 1948 — the `'knudsen'` wind model's curves.
+- Dahl, P. H., Miller, J. H., Cato, D. H. & Andrew, R. K., "Underwater ambient
+  noise", *Acoustics Today* 3(1), 2007.
+- Hildebrand, J. A., Frasier, K. E., Baumann-Pickering, S. & Wiggins, S. M.,
+  "An empirical model for wind-generated ocean noise", *JASA* 149, 4516, 2021,
+  doi:10.1121/10.0005430 — Table IV, the cross-check of the Knudsen curves.
 - Urick, R. J., *Principles of Underwater Sound*, 3rd ed., 1983 — chapter 7 for
-  ambient noise, and the Beaufort/sea-state table reproduced in the `WenzNoise`
-  docstring.
+  ambient noise.
+- Jensen, F. B., Kuperman, W. A., Porter, M. B. & Schmidt, H., *Computational
+  Ocean Acoustics*, 2nd ed., 2011, Table 1.6 (from Wenz) — the Beaufort ranges
+  and sea states of `BEAUFORT_SCALE`.
+- APL-UW TR 9407, *High-Frequency Ocean Environmental Acoustic Models
+  Handbook*, 1994, §II.A and Table 2 — the WMO sea-state code and its winds.
 
 ---
 

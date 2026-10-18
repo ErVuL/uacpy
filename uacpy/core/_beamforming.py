@@ -8,10 +8,10 @@ every matched-field surface in the package (:func:`uacpy.sonar.bartlett`,
 those functions over a replica bank.
 
 The covariance they consume is built here as well:
-:func:`snapshot_covariance` is the ``(d dH)/L`` average behind both
-:func:`uacpy.acoustic_signal.sample_covariance` and :func:`uacpy.sonar.csdm`,
-so the estimate and the checks that make it meaningful are one implementation
-under two public names.
+:func:`snapshot_covariance` is the ``(d dH)/L`` average behind
+:func:`uacpy.sonar.csdm` and :meth:`uacpy.acoustic_signal.Snapshots.covariance`,
+so the estimate, its diagonal loading and the checks that make it meaningful
+are one implementation.
 
 This module sits in ``core`` because ``acoustic_signal`` and ``sonar`` both
 depend on ``core`` and ``core`` must depend on neither.
@@ -21,15 +21,29 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
 
+#: Default MVDR diagonal loading, as a fraction of the average eigenvalue
+#: ``tr(K)/N`` (uacpy guidance). No source gives a fixed value:
+#: Stergiopoulos, *Advanced Signal Processing Handbook*, §4.2.3, says only that
+#: "it may be necessary to diagonally load the matrix, i.e., add some small
+#: quantity to the diagonal"; JKPS §10.3.4.1 sets the loading per replica from
+#: an allowed drop of the white-noise gain ("A typical constraint might be
+#: 3-dB down, with trial and error being an excellent starting guide"). Any
+#: positive loading keeps the inverse defined for a CSDM of fewer snapshots
+#: than sensors (rank at most L < N); the value 1e-2 itself is uacpy's.
+MVDR_DIAGONAL_LOADING = 1e-2
 
-def snapshot_covariance(snapshots, who: str) -> np.ndarray:
-    """``K = (d dH) / L`` for an ``(N, L)`` snapshot matrix, with its guards.
 
-    Backs :func:`uacpy.acoustic_signal.sample_covariance` and
-    :func:`uacpy.sonar.csdm`: one average, one set of checks, two public
-    names that add their own policy on top (``sample_covariance`` offers
-    diagonal loading). The four checks travel with the arithmetic because
-    each of them is a property of the average itself:
+def snapshot_covariance(snapshots, who: str, *,
+                        diagonal_loading: float = 0.0) -> np.ndarray:
+    """``K = (d dH) / L`` for an ``(N, L)`` snapshot matrix, with its guards,
+    plus ``diagonal_loading · tr(K)/N`` on the diagonal when it is set.
+
+    Backs :func:`uacpy.sonar.csdm` and
+    :meth:`uacpy.acoustic_signal.Snapshots.covariance`: one average, one set
+    of checks. ``diagonal_loading`` must be a finite number ``>= 0``: only a
+    non-negative ridge regularises ``K``. The four checks on the snapshots
+    travel with the arithmetic because each of them is a property of the
+    average itself:
 
     * 2-D shape - a flat array is not a snapshot matrix;
     * ``N >= 1`` - a zero-sensor matrix averages to an empty ``(0, 0)``
@@ -43,6 +57,16 @@ def snapshot_covariance(snapshots, who: str) -> np.ndarray:
 
     ``who`` names the public function in every message.
     """
+    try:
+        loading = float(diagonal_loading)
+    except (TypeError, ValueError):
+        loading = np.nan
+    if (isinstance(diagonal_loading, bool) or not np.isfinite(loading)
+            or loading < 0.0):
+        raise ConfigurationError(
+            f"{who}: diagonal_loading must be a finite number >= 0; got "
+            f"{diagonal_loading!r}. It scales the tr(K)/N ridge added to the "
+            f"diagonal, and only a non-negative ridge regularises K.")
     try:
         d = np.asarray(snapshots, dtype=complex)
     except (TypeError, ValueError) as exc:
@@ -82,7 +106,11 @@ def snapshot_covariance(snapshots, who: str) -> np.ndarray:
             f"Bartlett/MVDR surface all-NaN; clean the snapshots first. Got "
             f"{int(np.count_nonzero(bad))} non-finite value(s) of {d.size}, "
             f"first at flat index {int(np.argmax(bad))}.")
-    return (d @ d.conj().T) / d.shape[1]
+    k = (d @ d.conj().T) / d.shape[1]
+    if loading:
+        n = k.shape[0]
+        k = k + loading * (np.real(np.trace(k)) / n) * np.eye(n)
+    return k
 
 
 def quadratic_form(R: np.ndarray, W: np.ndarray) -> np.ndarray:

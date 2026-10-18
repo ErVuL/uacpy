@@ -13,10 +13,8 @@ Field.from_netcdf · Field.to_xarray · Arrivals.to_dataframe · Field.plot
 """
 
 import os
-import sys
 import tempfile
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -40,8 +38,7 @@ receiver = uacpy.Receiver(depths=np.linspace(5, 95, 37),   # 2.5 m: 30 m is one
 scratch = tempfile.TemporaryDirectory(dir=OUT)
 work = Path(scratch.name)
 bellhop = uacpy.Bellhop(backend='fortran', work_dir=work / 'field')
-field = bellhop.run(env, source, receiver,
-                    run_mode=uacpy.RunMode.COHERENT_TL)
+field = bellhop.run(env, source, receiver)
 arrivals = bellhop.copy(work_dir=work / 'arrivals').run(
     env, source, uacpy.Receiver(depths=[30.0], ranges=[2000.0]),
     run_mode=uacpy.RunMode.ARRIVALS)
@@ -69,8 +66,8 @@ print(f"  NetCDF: {nc_path.stat().st_size / 1e3:.0f} kB, read back "
       f"{'exactly' if np.array_equal(back.data, field.data) else 'CHANGED'}")
 print(f"  xarray: dims {labelled.dims}, units {labelled.attrs['units']!r}")
 print(f"  pandas: {table.shape[0]} rows x {table.shape[1]} columns, "
-      f"strongest path {table.loc[table.amplitudes.idxmax(), 'kinds']!r}, "
-      f"first arrival at {table.delays.min():.4f} s")
+      f"strongest path {table.loc[table.amplitude.idxmax(), 'kind']!r}, "
+      f"first arrival at {table.delay.min():.4f} s")
 
 # The three copies of the field drawn as one TL cut: run, .shd, NetCDF.
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))

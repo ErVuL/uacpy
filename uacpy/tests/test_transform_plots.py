@@ -16,20 +16,23 @@ import pytest
 from uacpy.acoustic_signal.gathers import (
     fk_transform, radon_transform, taup_transform,
 )
+from uacpy.acoustic_signal import BandLevels
+from uacpy.core.exceptions import ConfigurationError
+from uacpy.plot import plot_beam_power
 from uacpy.visualization.plots.signal import (
     plot_fk, plot_radon, plot_taup,
-    plot_angular_spectrum, plot_band_levels, plot_coherence, plot_frf,
+    plot_band_levels, plot_coherence, plot_frf,
     plot_lsfir_diagnostics, plot_psd)
 
 
 def test_plot_fk_returns_fig_ax():
     f, k, p, _ = fk_transform(
         np.random.default_rng(0).standard_normal((128, 32)), 1000.0, 5.0)
-    fig, ax = plot_fk(f, k, p, scaling="power", sound_speed=1500.0, title="t")
+    fig, ax = plot_fk(f, k, p, scaling="density", sound_speed=1500.0, title="t")
     assert fig is not None and ax.images
     plt.close(fig)
     fig2, ax2 = plt.subplots()
-    _, ax3 = plot_fk(f, k, p, ax=ax2, scaling="power")
+    _, ax3 = plot_fk(f, k, p, ax=ax2, scaling="density")
     assert ax3 is ax2
     plt.close(fig2)
 
@@ -37,11 +40,25 @@ def test_plot_fk_returns_fig_ax():
 def test_plot_radon():
     d = np.zeros((256, 24))
     d[60, :] = 1.0
-    mo = np.linspace(-1.5e-3, 1.5e-3, 41)
-    m, taus, R = radon_transform(d, 1000.0, 10.0, mo, kind="linear")
-    fig, ax = plot_radon(m, taus, R, kind="linear")
+    mo = np.linspace(-1e-5, 1e-5, 41)
+    m, taus, R = radon_transform(d, 1000.0, 10.0, mo, kind="parabolic")
+    fig, ax = plot_radon(m, taus, R, kind="parabolic")
     assert ax.images
     plt.close(fig)
+
+
+def test_plot_radon_needs_the_family_of_bare_arrays():
+    from uacpy.core.exceptions import ConfigurationError
+    d = np.zeros((256, 24))
+    d[60, :] = 1.0
+    m, taus, R = radon_transform(d, 1000.0, 10.0, np.linspace(0, 1e-5, 5),
+                                 kind="parabolic")
+    with pytest.raises(ConfigurationError, match='pass kind='):
+        plot_radon(m, taus, R)
+    with pytest.raises(ConfigurationError,
+                       match='not a Radon moveout family'):
+        plot_radon(m, taus, R, kind='linear')
+    assert not plt.get_fignums()
 
 
 class TestRadonResultCarriesItsKind:
@@ -121,15 +138,19 @@ _FREQS3 = np.array([10.0, 100.0, 1000.0])
 
 
 @pytest.mark.parametrize('fn, params, args', [
-    (plot_band_levels, ('centers', 'levels', 'ax'),
-     (np.array([63.0, 80.0, 100.0]), np.array([90.0, 95.0, 92.0]))),
-    (plot_angular_spectrum, ('angles_deg', 'spectrum', 'ax', 'dB'),
+    (plot_band_levels, ('centers', 'levels', 'ax', 'lower', 'upper'),
+     (BandLevels(np.array([63.0, 80.0, 100.0]), np.array([90.0, 95.0, 92.0]),
+                 lower=np.array([56.2, 71.0, 89.1]),
+                 upper=np.array([70.8, 89.1, 112.0]),
+                 band_type='decidecade', ref=1e-6),)),
+    (plot_beam_power, ('angles_deg', 'power', 'ax', 'dB', 'label'),
      (np.linspace(-90.0, 90.0, 7), np.linspace(1.0, 2.0, 7))),
     (plot_frf, ('frequencies', 'tf', 'ax', 'tag'),
      (_FREQS3, np.array([1.0 + 1.0j, 2.0 + 0.0j, 0.5 - 0.5j]))),
-    (plot_coherence, ('frequencies', 'coh', 'ax'),
+    (plot_coherence, ('frequencies', 'coherence', 'ax'),
      (_FREQS3, np.array([0.9, 0.95, 0.99]))),
-    (plot_lsfir_diagnostics, ('Minfo', 'Vinfo', 'g'),
+    (plot_lsfir_diagnostics, ('information_matrix', 'information_vector',
+                              'impulse_response', 'fig'),
      (np.eye(3), np.arange(3.0), np.linspace(0.0, 1.0, 4))),
 ])
 def test_signal_plotter_signature_and_smoke(fn, params, args):
@@ -144,16 +165,55 @@ def test_signal_plotter_signature_and_smoke(fn, params, args):
     plt.close(fig)
 
 
-def test_both_beam_power_plotters_label_the_peak_relative_level_alike():
-    """``plot_angular_spectrum`` and ``plot_beam_power`` draw one quantity,
-    beam power in dB re its own maximum, against look angle; the axis says
-    're max' on both, since a bare 'Power (dB)' hides the reference."""
-    fig, ax = plot_angular_spectrum(np.linspace(-90.0, 90.0, 7),
-                                    np.linspace(1.0, 2.0, 7))
-    assert ax.get_ylabel() == 'Power (dB re max)'
+def test_one_beam_power_plotter_takes_a_result_or_arrays():
+    """``plot_beam_power`` draws beam power in dB re its own maximum
+    against look angle from a ``BeamformedField`` or from an angular
+    spectrum's two arrays (Bartlett, MVDR, MUSIC), labelled alike; ``dB=False``
+    draws it linear, and ``label=`` overlays several processors."""
+    angles = np.linspace(-90.0, 90.0, 7)
+    fig, ax = plot_beam_power(angles, np.linspace(1.0, 2.0, 7),
+                              label='Bartlett')
+    plot_beam_power(angles, np.linspace(2.0, 1.0, 7), ax=ax, label='MVDR')
+    assert ax.get_ylabel() == 'Beam power (dB re max)'
     assert ax.get_xlabel() == 'Look angle (°)'
     assert np.max(ax.lines[0].get_ydata()) == 0.0
+    assert [t.get_text() for t in ax.get_legend().get_texts()] == [
+        'Bartlett', 'MVDR']
     plt.close(fig)
+    fig, ax = plot_beam_power(angles, np.linspace(1.0, 2.0, 7), dB=False)
+    np.testing.assert_allclose(ax.lines[0].get_ydata(),
+                               np.linspace(1.0, 2.0, 7) / 2.0)
+    assert ax.get_ylabel() == 'Beam power (re max)'
+    plt.close(fig)
+    with pytest.raises(ConfigurationError, match='at= picks a point'):
+        plot_beam_power(angles, np.ones(7), at=0)
+
+
+def test_a_null_look_angle_sits_on_the_floor_of_the_beam_plotter():
+    """A look angle with zero beam power is ``-inf`` dB; it is drawn on the
+    120 dB floor, from a BeamformedField and from arrays alike, the one null
+    policy of the dB lines."""
+    import warnings
+    from uacpy.acoustic_signal import BeamformedField
+    response = np.array([1.0, 0.5, 0.0, 0.5, 1.0], dtype=complex)
+    beams = BeamformedField(response, np.linspace(-60.0, 60.0, 5),
+                            np.ones(1), None)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        fig, ax = beams.plot()
+    try:
+        level = ax.lines[0].get_ydata()
+        assert np.all(np.isfinite(level))
+        assert level[2] == pytest.approx(-120.0)
+        assert level[0] == pytest.approx(0.0)
+    finally:
+        plt.close(fig)
+    fig, ax = plot_beam_power(np.linspace(-60.0, 60.0, 5),
+                              np.abs(response) ** 2)
+    try:
+        assert ax.lines[0].get_ydata()[2] == pytest.approx(-120.0)
+    finally:
+        plt.close(fig)
 
 
 class TestBeamPowerTakesAPointByItsCoordinate:
@@ -190,8 +250,44 @@ class TestBeamPowerTakesAPointByItsCoordinate:
 
 
 def test_plot_lsfir_diagnostics_is_figure_level():
-    # It builds its own three-panel figure and takes no ax=.
+    # It builds its own three-panel figure, or fills a fig= handed to it,
+    # and takes no ax=.
     assert 'ax' not in inspect.signature(plot_lsfir_diagnostics).parameters
+    parent = plt.figure()
+    fig, axes = plot_lsfir_diagnostics(np.eye(3), np.arange(3.0),
+                                       np.linspace(0.0, 1.0, 4), fig=parent)
+    assert fig is parent and len(axes) == 3
+    plt.close(parent)
+
+
+class TestTheFRFPlottersTakeTheResultWhole:
+    """``plot_coherence`` and ``plot_lsfir_diagnostics`` read their arrays
+    off the ``FRFResult`` that holds them, under the result's own names."""
+
+    @staticmethod
+    def _pair():
+        rng = np.random.default_rng(3)
+        x = rng.standard_normal(4096)
+        return x, np.convolve(x, [1.0, 0.5, -0.25])[:x.size]
+
+    def test_coherence_from_a_welch_result(self):
+        from uacpy.acoustic_signal import etfe, frf_welch
+        x, y = self._pair()
+        r = frf_welch(x, y, 1000.0, nperseg=256)
+        fig, ax = plot_coherence(r)
+        np.testing.assert_array_equal(ax.lines[0].get_ydata(), r.coherence)
+        plt.close(fig)
+        with pytest.raises(ConfigurationError, match='carries no coherence'):
+            plot_coherence(etfe(x, y, 1000.0))
+
+    def test_diagnostics_from_an_lsfir_result(self):
+        from uacpy.acoustic_signal import lsfir
+        x, y = self._pair()
+        r = lsfir(x, y, 1000.0, order=4)
+        fig, axes = plot_lsfir_diagnostics(r)
+        np.testing.assert_array_equal(axes[2].lines[0].get_ydata(),
+                                      r.impulse_response)
+        plt.close(fig)
 
 
 class TestFixedYWindowsAreEscapable:
@@ -216,7 +312,7 @@ class TestFixedYWindowsAreEscapable:
         ``vmin``/``vmax`` like every image plotter's."""
         from uacpy.visualization import plots
         for name in ('plot_psd', 'plot_constant_q_psd', 'plot_ppsd',
-                     'plot_constant_q_ppsd', 'plot_sel', 'plot_frf',
+                     'plot_constant_q_ppsd', 'plot_band_levels', 'plot_frf',
                      'plot_coherence', 'plot_wenz'):
             params = inspect.signature(getattr(plots, name)).parameters
             assert {'ymin', 'ymax'} <= set(params), name
@@ -254,8 +350,8 @@ def test_an_angular_spectrum_null_is_drawn_on_its_floor_without_a_warning():
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        fig, ax = plot_angular_spectrum(np.linspace(-90.0, 90.0, 7),
-                                        [0, 1, 2, 4, 2, 1, 0])
+        fig, ax = plot_beam_power(np.linspace(-90.0, 90.0, 7),
+                                  [0, 1, 2, 4, 2, 1, 0])
     drawn = ax.lines[0].get_ydata()
     assert drawn[0] == drawn[-1] == pytest.approx(-120.0)
     plt.close(fig)
@@ -279,4 +375,23 @@ def test_an_undefined_transfer_function_bin_stays_blank_and_sets_no_floor():
     assert np.isnan(drawn[1])
     np.testing.assert_allclose(drawn[[0, 2, 3]], [0.0, -60.0, -20.0],
                                atol=1e-12)
+    plt.close(fig)
+
+
+def test_the_frf_phase_is_in_radians_and_the_magnitude_autoscales():
+    """One convention for a transfer function: phase in radians wrapped to
+    (-π, π], log frequency, |H| autoscaled to what is drawn (a gain of
+    +80 dB is in view without a window of the caller's)."""
+    f = np.array([10.0, 100.0, 1000.0])
+    tf = np.array([1e4 * np.exp(0.5j), 1.0 + 0j, 1e-2 * np.exp(-3.0j)])
+    fig, (ax_mag, ax_phase) = plot_frf(f, tf)
+    np.testing.assert_allclose(ax_phase.lines[0].get_ydata(), np.angle(tf))
+    assert ax_phase.get_ylabel() == 'Phase (rad)'
+    assert ax_phase.get_ylim() == pytest.approx((-np.pi, np.pi))
+    assert ax_mag.get_xscale() == ax_phase.get_xscale() == 'log'
+    lo, hi = ax_mag.get_ylim()
+    assert lo <= -40.0 and hi >= 80.0
+    plt.close(fig)
+    fig, (ax_mag, _) = plot_frf(f, tf, ymin=-10.0, ymax=10.0)
+    assert ax_mag.get_ylim() == (-10.0, 10.0)
     plt.close(fig)

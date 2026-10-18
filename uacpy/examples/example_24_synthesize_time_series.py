@@ -9,9 +9,7 @@ Field.synthesize_time_series · Field.at().plot()
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt

@@ -363,6 +363,27 @@ class TestStabilisingAttenuationIsUndoneCorrectly:
                            times=[0.0, 0.1])
         assert grn._contour_attenuation(k) == 0.0
 
+    def test_the_offset_a_hand_transform_takes_is_public(self):
+        """``contour_attenuation(f)`` is the offset the transforms undo at f:
+        that frequency's Δk of ``wavenumbers(f)`` on a SCOOTER file with the
+        stabiliser on (Δk scales with f, the header holds the first
+        frequency's), 0 with it off."""
+        from uacpy.core.results import GreensFunction
+
+        def grn(atten):
+            return GreensFunction(
+                data=np.zeros((2, 1, 1, 3), np.complex64),
+                phase_speeds=[3000.0, 2000.0, 1500.0], receiver_depths=[10.0],
+                source_depths=[5.0], frequencies=[100.0, 200.0],
+                stabilizing_attenuation=atten, title='SCOOTER - test')
+        on = grn(1e-4)
+        for f in (100.0, 200.0):
+            k = on.wavenumbers(f)
+            assert on.contour_attenuation(f) == pytest.approx(k[1] - k[0])
+        assert on.contour_attenuation(200.0) == pytest.approx(
+            2.0 * on.contour_attenuation(100.0))
+        assert grn(0.0).contour_attenuation(200.0) == 0.0
+
     def test_turning_the_stabiliser_off_warns_with_its_cost(self):
         """Removing the contour offset puts the modal poles back on the
         integration path, which a correct transform cannot repair."""
@@ -408,8 +429,10 @@ class TestScooterDeckResolution:
     """Deck-level checks of the documented ``None`` resolutions
     (``docs/models/scooter.md`` constructor table): the spectral
     ``RMax = receiver.ranges.max() × rmax_factor`` with the multiplier
-    defaulting to 2.0 in every run mode, and
-    ``c_low = 0.9 × min(SSP)`` when only ``c_high`` is pinned. Read off
+    defaulting to 2.0 in every run mode, and ``c_low`` = 0.9 × the slowest
+    speed of every medium (the 1500 m/s water over this fluid seabed) when
+    only ``c_high`` is pinned, 0.85 × the slowest shear speed over an
+    elastic half-space. Read off
     ``run_settings(...).engine``, the settings the deck is written from,
     without launching the binary (``TestTheDeckIsWrittenFromTheResolvedSettings``
     pins that the deck carries them)."""
@@ -436,7 +459,7 @@ class TestScooterDeckResolution:
         # 0.9×1500 = 1350.0, c_high unbounded (k_min = 0); RMax = 3000 m × 2.0.
         engine = self._engine(Scooter(verbose=False))
         assert (engine.c_low, engine.c_high) == pytest.approx((1350.0, 1e9))
-        assert engine.rmax_m == pytest.approx(6000.0)
+        assert engine.rmax == pytest.approx(6000.0)
         assert engine.rmax_factor_origin.startswith('the default, 2 ×')
         assert 'tests/BroadBand/MunkS.env' in engine.rmax_factor_origin
 
@@ -446,7 +469,7 @@ class TestScooterDeckResolution:
         engine = self._engine(
             Scooter(verbose=False), run_mode=RunMode.BROADBAND,
             frequencies=np.linspace(80.0, 120.0, 5))
-        assert engine.rmax_m == pytest.approx(6000.0)
+        assert engine.rmax == pytest.approx(6000.0)
         assert engine.rmax_factor == 2.0
 
     def test_pinned_rmax_factor_wins_in_both_modes(self):
@@ -454,23 +477,47 @@ class TestScooterDeckResolution:
         narrow = self._engine(model)
         broad = self._engine(model, run_mode=RunMode.BROADBAND,
                              frequencies=np.linspace(80.0, 120.0, 5))
-        assert narrow.rmax_m == pytest.approx(15000.0)
-        assert broad.rmax_m == pytest.approx(15000.0)
+        assert narrow.rmax == pytest.approx(15000.0)
+        assert broad.rmax == pytest.approx(15000.0)
         assert broad.rmax_factor_origin == 'Scooter(rmax_factor=…)'
 
     def test_c_low_auto_derives_with_c_high_pinned(self):
-        # Only c_high pinned: c_low still resolves to 0.9 × min(SSP).
+        # Only c_high pinned: c_low resolves to 0.9 × the 1500 m/s water.
         engine = self._engine(Scooter(c_high=1700.0, verbose=False))
         assert (engine.c_low, engine.c_high) == pytest.approx((1350.0, 1700.0))
-        assert engine.c_low_origin == '0.9 × min(env.ssp)'
+        assert engine.c_low_origin == (
+            '0.9 × 1500 m/s, the water — the slowest speed of every medium '
+            '(scooter.f90:193-259)')
         assert engine.c_high_origin == 'Scooter(c_high=…)'
 
+    def test_c_low_over_an_elastic_seabed_reaches_below_the_shear_speed(self):
+        """Over sand (shear 110 m/s) on granite, an elastic half-space, the
+        derived c_low is 0.85 × 110 = 93.5 m/s (``scooter.f90:255-256``), so
+        the seabed interface wave (~0.85 × c_s, JKPS §5.10.5) is in the
+        window and no interface-wave notice is due, even with a receiver
+        0.2 m above the bed, inside the wave's 0.47 m wavelength at 200 Hz."""
+        from uacpy.core import SeabedColumn
+        env = Environment(
+            name='elastic', bathymetry=100.0,
+            ssp=[(0.0, 1500.0), (100.0, 1490.0)],
+            bottom=SeabedColumn.from_presets(
+                layers=[('sand', 8.0)], halfspace='granite', elastic=True))
+        settings = Scooter(verbose=False).run_settings(
+            env, Source(depths=99.0, frequencies=200.0),
+            Receiver(depths=[99.8], ranges=[1000.0]))
+        assert settings.engine.c_low == pytest.approx(93.5, rel=1e-12)
+        assert settings.engine.c_low_origin.startswith(
+            "0.85 × 110 m/s, a sediment layer's shear speed")
+        assert not [n for n in settings.engine.notices
+                    if 'interface' in n.message]
+
     def test_documented_factors_are_the_code_factors(self):
-        # scooter.md and DOCUMENTATION.md state 0.9 as a literal; this
-        # pins the constant so doc-vs-code drift fails a test. 0.90 is
-        # scooter.f90:258's own factor.
-        from uacpy.models._window import C_LOW_FACTOR
-        assert C_LOW_FACTOR == 0.90
+        # scooter.md and DOCUMENTATION.md state 0.90 / 0.85 as literals;
+        # this pins the constants so doc-vs-code drift fails a test.
+        # scooter.f90:258 / :256 are the factors.
+        from uacpy.core.engine_defaults import (
+            C_LOW_FACTOR, C_LOW_FACTOR_ELASTIC)
+        assert (C_LOW_FACTOR, C_LOW_FACTOR_ELASTIC) == (0.90, 0.85)
 
 
 class TestScooterSpectrumOption:
@@ -618,7 +665,8 @@ class TestScooterBroadbandStampsThePhysicalCMax:
         assert result.run_settings.waveguide.c_max == pytest.approx(3000.0)
         assert 'c_max' not in result.metadata
 
-        trace = result.to_time_trace(depth=50.0, range=2000.0)
+        trace = result.to_time_trace(depth=50.0, range=2000.0,
+                                     sample_rate=1000.0)
         t = np.asarray(trace.coords['time'], dtype=float)
         # T_window = 1/df = 0.1 s, so the window opens half a window ahead
         # of the r / c_max = 0.667 s fastest possible arrival — not at the
@@ -774,6 +822,26 @@ class TestScooterKernelTaper:
         assert taper_bounds(self._grn(),
                             taper=Scooter(taper=0.0).taper) == (None, None)
 
+    @pytest.mark.parametrize('range_m, nk, refused', [(600.0, 3, True),
+                                                      (700.0, 4, False)])
+    def test_a_taper_on_too_few_wavenumbers_is_refused_before_the_deck(
+            self, range_m, nk, refused):
+        """1 Hz in 1500 m/s water: RMax = 2 × the range gives Nk = 3 at
+        600 m and 4 at 700 m (``scooter.f90:69``); the taper needs four
+        phase speeds, so the first is refused in stage 3, before any launch,
+        and the second resolves."""
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        call = (env, Source(depths=50.0, frequencies=1.0),
+                Receiver(depths=[50.0], ranges=[range_m]))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            assert Scooter().run_settings(*call).engine.n_wavenumbers == nk
+            if refused:
+                with pytest.raises(ConfigurationError, match='Nk = 3'):
+                    Scooter(taper=0.05).run_settings(*call)
+            else:
+                Scooter(taper=0.05).run_settings(*call)
+
     def test_the_default_is_off_like_fieldsco(self):
         """``Matlab/Scooter/fieldsco.m:23-32`` sets cmin=1e-10, cmax=1e30 and
         calls tapering "user play (at your own risk)". A default that quietly
@@ -881,12 +949,12 @@ class TestScooterRefusesAGreenCubeOverTheReaderBudget:
     def _call(self, nk, nrd=100, nr=1):
         reject_oversized_green_cube(
             nk, 64, 1, nrd, nr,
-            rmax_m=5e4, f_deck=2e3, c_low=1406.0, c_high=3436.0)
+            rmax=5e4, f_deck=2e3, c_low=1406.0, c_high=3436.0)
 
     def _headroom(self, nk, nrd=100, nr=1):
         return reject_oversized_green_cube(
             nk, 64, 1, nrd, nr,
-            rmax_m=5e4, f_deck=2e3, c_low=1406.0, c_high=3436.0)[1]
+            rmax=5e4, f_deck=2e3, c_low=1406.0, c_high=3436.0)[1]
 
     def test_a_cube_well_inside_free_memory_is_accepted(self, monkeypatch):
         self._with_free(monkeypatch, 64 * 1024 ** 3)
@@ -975,22 +1043,29 @@ class TestScooterRefusesAGreenCubeOverTheReaderBudget:
 
 
 class TestAnInterfaceWaveTheDerivedCLowLeavesOutIsAnnounced:
-    """The derived c_low (0.9 x min SSP) lies above a soft seabed's Scholte
-    wave (~0.85 c_s, JKPS §5.10.5): 50 m of water over cp 1600 / cs 300 at
-    20 Hz, source 49 m and receiver 49.5 m — TL moved up to 3.8 dB with
-    c_low = 200. The run says so only when the geometry reaches within one
-    interface wavelength (0.85 c_s / f = 12.75 m) of the seafloor."""
+    """Over an elastic layer on a FLUID half-space the derived c_low is
+    0.90 × the layer's shear speed (``scooter.f90:258``), above its Scholte
+    wave (~0.85 c_s, JKPS §5.10.5): 50 m of water over 20 m of cp 1600 /
+    cs 300 on a 1800 m/s fluid half-space at 20 Hz, c_low 270 m/s; source
+    49 m and receiver 49.5 m — TL moved up to 2.0 dB with c_low = 200. The
+    run says so only when the geometry reaches within one interface
+    wavelength (0.85 c_s / f = 12.75 m) of the seafloor. Over an elastic
+    HALF-SPACE the derived c_low is 0.85 × the slowest speed, at or below
+    the wave, and nothing is said."""
 
     @staticmethod
     def _env(shear_speed=300.0):
-        from uacpy.core import BoundaryProperties
+        from uacpy.core import BoundaryProperties, SeabedColumn, SedimentLayer
         return Environment(
             bathymetry=50.0, ssp=1500.0,
-            bottom=BoundaryProperties(acoustic_type='half-space',
-                                      sound_speed=1600.0, density=1.8,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(20.0, sound_speed=1600.0, density=1.8,
                                       attenuation=0.5,
                                       shear_speed=shear_speed,
-                                      shear_attenuation=0.5))
+                                      shear_attenuation=0.5)],
+                halfspace=BoundaryProperties(
+                    acoustic_type='half-space', sound_speed=1800.0,
+                    density=2.0, attenuation=0.5)))
 
     @staticmethod
     def _said(model, env, zs, zr):
@@ -1012,6 +1087,19 @@ class TestAnInterfaceWaveTheDerivedCLowLeavesOutIsAnnounced:
         assert bool(said) is says, said
         if says:
             assert 'c_low below 255 m/s' in said[0]
+
+    def test_an_elastic_half_space_takes_its_interface_wave_in(self):
+        """The same cs 300 seabed as a half-space: c_low = 0.85 × 300 =
+        255 m/s (``scooter.f90:255-256``), the wave's own speed, so a source
+        1 m above the bed hears no notice."""
+        from uacpy.core import BoundaryProperties
+        env = Environment(
+            bathymetry=50.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5, shear_speed=300.0,
+                                      shear_attenuation=0.5))
+        assert self._said(Scooter(), env, 49.0, [49.5]) == []
 
     def test_a_hard_seabeds_interface_wave_inside_the_window_says_nothing(
             self):
@@ -1276,9 +1364,8 @@ class TestTheSettingsRecordTheDeck:
         assert engine.c_high_origin == 'Scooter(c_high=…)'
 
     def test_the_docstrings_state_the_window_rules(self):
-        """RA-WAVE-8 / RA-WAVE-16: the unbounded c_high names every
-        seabed it applies to, and the default c_low says it leaves the
-        interface waves out."""
+        """The unbounded c_high names every seabed it applies to, and the
+        default c_low states how it meets the interface (Scholte) waves."""
         def entry(doc, start):
             return ' '.join(doc[doc.index(start):doc.index('n_mesh :')]
                             .split())
@@ -1317,7 +1404,7 @@ class TestTheDeckIsWrittenFromTheResolvedSettings:
         speeds = f'{engine.c_low!r} {engine.c_high!r}'
         assert speeds in lines
         assert float(lines[lines.index(speeds) + 1]) == pytest.approx(
-            engine.rmax_m / 1000.0)
+            engine.rmax / 1000.0)
         prt = (tmp_path / 'model.prt').read_text()
         assert int(re.search(r'Nk =\s+(-?\d+)', prt).group(1)) == engine.n_wavenumbers
         if mode == RunMode.BROADBAND:

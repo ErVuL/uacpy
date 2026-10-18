@@ -16,13 +16,13 @@ import numpy as np
 
 from uacpy.acoustic_signal import (
     bartlett,
-    beamform,
+    beamform_field,
     music_spectrum,
     mvdr,
-    sample_covariance,
     shading_taper,
     steering_vectors,
 )
+from uacpy.sonar import csdm
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
 GUIDE = True
@@ -388,7 +388,7 @@ def resolution():
         rng = np.random.default_rng(0)
         x = plane_wave_snapshots(positions, bearings, snr_dB=10.0,
                                  n_snapshots=200, rng=rng, powers_dB=powers)
-        R = sample_covariance(x)
+        R = csdm(x)
         for label, spectrum in (
                 ('Bartlett', bartlett(R, steering)),
                 ('MVDR', mvdr(R, steering)),
@@ -427,7 +427,7 @@ def snapshots():
 
     for k in (8, 16, 32, 256):
         rng = np.random.default_rng(0)
-        R = sample_covariance(plane_wave_snapshots(
+        R = csdm(plane_wave_snapshots(
             positions, bearings, snr_dB=10.0, n_snapshots=k, rng=rng))
         ax_spec.plot(angles, norm_dB(mvdr(R, steering)), lw=1.4,
                      label=f'K = {k:3d}  (K/N = {k / n:g})')
@@ -453,7 +453,7 @@ def snapshots():
         trials = []
         for trial in range(40):
             rng = np.random.default_rng(100 + trial)
-            R = sample_covariance(plane_wave_snapshots(
+            R = csdm(plane_wave_snapshots(
                 positions, bearings, snr_dB=10.0, n_snapshots=int(k), rng=rng))
             trials.append(np.linalg.norm(R - R_true) / np.linalg.norm(R_true))
         errors.append(np.mean(trials))
@@ -477,7 +477,7 @@ def snapshots():
     wide_steering = steering_vectors(positions, wide, FREQ, C)
     for loading in (0.0, 1e-6, 1e-2, 1.0):
         rng = np.random.default_rng(0)
-        R = sample_covariance(plane_wave_snapshots(
+        R = csdm(plane_wave_snapshots(
             positions, bearings, snr_dB=10.0, n_snapshots=12, rng=rng))
         spectrum = norm_dB(
             mvdr(R, wide_steering, diagonal_loading=loading))
@@ -507,7 +507,7 @@ def music_order():
     bearings = (-3.0, 3.0)
 
     rng = np.random.default_rng(0)
-    R = sample_covariance(plane_wave_snapshots(
+    R = csdm(plane_wave_snapshots(
         positions, bearings, snr_dB=10.0, n_snapshots=200, rng=rng))
     eigenvalues = np.linalg.eigvalsh(R)[::-1]
 
@@ -563,18 +563,17 @@ def bearing_time():
         block = plane_wave_snapshots(
             positions, [bearing, 8.0], snr_dB=0.0, n_snapshots=n_snapshots,
             rng=rng, powers_dB=[0.0, 20.0])
-        # beamform returns dB per snapshot; averaging in power over the block
-        # is exactly bartlett of the block's covariance.
-        snr = beamform(block, positions, scan, FREQ, source_level_dB=0.0,
-                       noise_level_dB=0.0).snr
+        # The SNR is dB per snapshot; averaging in power over the block is
+        # exactly bartlett of the block's covariance.
+        snr = beamform_field(block, positions, scan, FREQ).snr_dB(0.0, 0.0)
         conventional[:, t] = 10.0 * np.log10(np.mean(10.0 ** (snr / 10.0), axis=1))
         adaptive[:, t] = 10.0 * np.log10(
-            mvdr(sample_covariance(block), steering))
+            mvdr(csdm(block), steering))
 
     fig, axes = plt.subplots(1, 2, figsize=(9.4, 4.8), sharey=True,
                              layout='constrained')
     vmax = max(conventional.max(), adaptive.max())
-    for ax, data, label in ((axes[0], conventional, 'Conventional (beamform)'),
+    for ax, data, label in ((axes[0], conventional, 'Conventional (beamform_field)'),
                             (axes[1], adaptive, 'MVDR')):
         mesh = ax.pcolormesh(np.arange(n_blocks), scan, data, cmap='viridis',
                              vmin=vmax - 40.0, vmax=vmax, shading='auto')

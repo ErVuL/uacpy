@@ -9,15 +9,13 @@ time trace (OASP).
 OASES is a global-matrix suite, so all four solve a horizontally stratified
 medium; uacpy collapses any range dependence and warns.
 
-Uses: OAST · OASN(surface_noise_level=).compute_covariance · OASR(angles=) ·
-OASP(n_time_samples=, freq_max=) with RunMode.BROADBAND · every result's own
+Uses: OAST · OASN(surface_noise_level_dB=).compute_covariance · OASR(angles_deg=) ·
+OASP(n_time_samples=, freq_min=, freq_max=) with RunMode.BROADBAND · every result's own
 .plot() · Field.at(frequency=) · Field.synthesize_time_series
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -47,11 +45,11 @@ fig, _ = uacpy.plot.plot_field(tl, env=env)
 fig.savefig(OUT / 'example_13_oast_tl.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-# OASN — spatial covariance. Without surface_noise_level the covariance
+# OASN — spatial covariance. Without surface_noise_level_dB the covariance
 # collapses to the 0 dB white-noise floor (the identity); 70 dB is about the
 # Wenz amplitude at 100 Hz.
 # OASN models a vertical array at x = y = 0, so it takes the depths alone.
-covariance = uacpy.OASN(surface_noise_level=70.0).compute_covariance(
+covariance = uacpy.OASN(surface_noise_level_dB=70.0).compute_covariance(
     env, source, uacpy.Receiver(depths=receiver.depths, ranges=0.0))
 print(f"  OASN covariance: {covariance.n_receivers} receivers × "
       f"{covariance.n_frequencies} frequency")
@@ -61,8 +59,8 @@ fig.savefig(OUT / 'example_13_oasn_covariance.png', dpi=150,
 plt.close(fig)
 
 # OASR — plane-wave reflection coefficients, which know how to plot themselves.
-reflection = uacpy.OASR(angles=np.linspace(0, 90, 91)).run(env, source,
-                                                           receiver)
+reflection = uacpy.OASR(angles_deg=np.linspace(0, 90, 91)).run(env, source,
+                                                               receiver)
 one_frequency = (reflection.at(
     frequency=reflection.frequencies[len(reflection.frequencies) // 2])
     if reflection.is_broadband else reflection)
@@ -76,18 +74,20 @@ fig.savefig(OUT / 'example_13_oasr_reflection.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 
-# OASP — a wideband transfer function. The pulse synthesis below is a DFT over
+# OASP — a wideband transfer function over the band of the pulse synthesized
+# below, a 60 Hz Gaussian-windowed sinusoid above -40 dB from 31 to 89 Hz: the
+# band starts at its lower edge (freq_min=30). The pulse synthesis is a DFT over
 # the frequency grid, so its time window is 1/df = (n_time_samples/2)/freq_max.
 # Every receiver's travel time must fit inside that window or far arrivals wrap
 # into early bins: 1024/2 / 120 Hz = 4.27 s of window against 5000 m ≈ 3.3 s of
 # travel, so it fits.
-transfer = uacpy.OASP(n_time_samples=1024, freq_max=120).run(
+centre = 60.0
+transfer = uacpy.OASP(n_time_samples=1024, freq_min=30, freq_max=120).run(
     env, source,
     uacpy.Receiver(depths=np.linspace(5, 95, 19),     # 5 m steps: 50 m is one
                    ranges=np.linspace(500, 5000, 30)),
     run_mode=uacpy.RunMode.BROADBAND)
 frequencies = transfer.coords['frequency']
-centre = float(frequencies[len(frequencies) // 2])
 print(f"  OASP H(f) {transfer.data.shape} over "
       f"{frequencies[0]:.0f}-{frequencies[-1]:.0f} Hz")
 

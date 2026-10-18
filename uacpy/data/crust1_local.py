@@ -48,13 +48,16 @@ from uacpy.core.geo import (
     as_coordinate, normalize_lon, central_angle, geodesic_waypoints,
 )
 from uacpy.data._geo import (
-    checked_max_points, checked_n_points, capped_n_points,
+    checked_max_points, checked_n_points, checked_explicit_n_points,
+    auto_budget, default_n_points,
     checked_max_distance, checked_offset, cell_half_diagonal_km,
 )
 from uacpy.data.globsed_local import globsed_node
-from uacpy.data._provenance_notice import provenance_notice
+from uacpy.data._provenance_notice import (licence_notice_text,
+                                           provenance_notice)
 from uacpy.data._http import http_get, checked_member_size
-from uacpy.data.sediment import _fill_gaps_from_nearest, _warn_filled_gaps
+from uacpy.data.sediment import (DEFAULT_BOTTOM_TRANSECT_POINTS,
+                                  _fill_gaps_from_nearest, _warn_filled_gaps)
 from uacpy.data.sources import SOURCES, DataProvenance
 
 __all__ = ['Crust1Profile', 'download_crust1_db', 'fetch_crust1_profile', 'fetch_bottom_crust1',
@@ -64,7 +67,7 @@ __all__ = ['Crust1Profile', 'download_crust1_db', 'fetch_crust1_profile', 'fetch
 #: although it does not answer (below), so a restored server is preferred to a
 #: mirror without an edit here.
 CRUST1_URL = 'https://igppweb.ucsd.edu/~gabi/crust1/crust1.0.tar.gz'
-#: Tried in order after :data:`CRUST1_URL`, which no longer serves the model:
+#: Tried in order after :data:`CRUST1_URL`, which does not serve the model:
 #: every path under ``igppweb.ucsd.edu`` answers a plain Apache 403 while
 #: ``/`` redirects to ``igpp.ucsd.edu``, the institute's current site. That is
 #: the whole legacy document tree rather than this page in particular --
@@ -98,8 +101,12 @@ _NLAT, _NLON, _NLAYER = 180, 360, 9
 _UPPER_SED, _LOW_SED = 2, 4
 _UPPER_CRYST, _MID_CRYST, _LOW_CRYST = 5, 6, 7
 
-# CRUST1.0 has no Q; nominal compressional attenuation (dB/λ) by default.
-DEFAULT_SEDIMENT_ATTENUATION = 0.5
+# CRUST1.0 has no Q, so the compressional attenuations (dB/λ) are defaults.
+# The basement 0.1 is Computational Ocean Acoustics (Jensen, Kuperman, Porter
+# & Schmidt) Table 1.3's basalt and limestone value. The sediment 0.6 is the
+# median of the same table's unconsolidated rows (clay 0.2, silt 1.0, sand
+# 0.8, gravel 0.6, moraine 0.4), the rule the shear default below follows.
+DEFAULT_SEDIMENT_ATTENUATION = 0.6
 DEFAULT_BASEMENT_ATTENUATION = 0.1
 # Shear loss is NOT the compressional value. Computational Ocean Acoustics
 # (Jensen, Kuperman, Porter & Schmidt) Table 1.3 tabulates α_p / α_s in dB per
@@ -114,20 +121,17 @@ DEFAULT_BASEMENT_ATTENUATION = 0.1
 # loss for low-shear-speed sediments (c_s < c_w)", so on a soft column these
 # defaults barely move the answer; they matter where CRUST1.0's Vs exceeds the
 # water speed, which is most of the crystalline crust and the stiffer
-# sediments, and there a sediment 0.5 / basement 0.1 would understate the
-# loss by factors of 3 and 2.
+# sediments, and there a shear loss taken equal to the compressional
+# sediment 0.6 / basement 0.1 would understate it by factors of 2.5 and 2.
 DEFAULT_SEDIMENT_SHEAR_ATTENUATION = 1.5
 DEFAULT_BASEMENT_SHEAR_ATTENUATION = 0.2
 
 # CRUST1.0 is the catalogue's only commercial_use=False source and ships with no
 # formal licence. Direct callers of the low-level fetcher bypass the orchestrator
 # warning in fetch_environment, so warn here too — a non-commercial dataset must
-# never enter a result silently (DEV.md §7.1).
-_COMMERCIAL_WARNING = (
-    "CRUST1.0 has no formal licence and does not permit commercial use without "
-    "verification — cite Laske et al. 2013 and verify terms before commercial "
-    "use. See uacpy.data.citations() for attribution."
-)
+# never enter a result silently (DEV.md §7.1). The wording is the catalogue
+# check's own, so a fetch_environment run lists it once.
+_COMMERCIAL_WARNING = licence_notice_text(SOURCES['crust1'])
 
 
 def _warn_non_commercial():
@@ -473,16 +477,16 @@ def fetch_crust1_profile(point, *, max_distance_km=None) -> Crust1Profile:
     for i in range(_UPPER_SED, _LOW_CRYST + 1):
         thk = (bnds[i] - bnds[i + 1]) * 1000.0
         if thk > 1e-3:
-            layers.append({'name': names[i], 'thickness_m': float(thk),
+            layers.append({'name': names[i], 'thickness': float(thk),
                            'vp': float(vp[i] * 1000), 'vs': float(vs[i] * 1000),
                            'rho': float(rho[i])})
-    sed_thk = sum(layer['thickness_m'] for layer in layers
+    sed_thk = sum(layer['thickness'] for layer in layers
                   if layer['name'].endswith('sed'))
     return Crust1Profile(
         water_depth=float(-bnds[1] * 1000.0),
         sediment_thickness=float(sed_thk),
         layer_names=tuple(layer['name'] for layer in layers),
-        thickness=np.array([layer['thickness_m'] for layer in layers]),
+        thickness=np.array([layer['thickness'] for layer in layers]),
         sound_speed=np.array([layer['vp'] for layer in layers]),
         shear_speed=np.array([layer['vs'] for layer in layers]),
         density=np.array([layer['rho'] for layer in layers]),
@@ -497,14 +501,17 @@ def fetch_bottom_crust1(point, *, roughness=0.0,
                         basement_shear_attenuation=(
                             DEFAULT_BASEMENT_SHEAR_ATTENUATION),
                         elastic=True, sediment_thickness=None, use_globsed=True,
-                        water_sound_speed=None, max_distance_km=None,
-                        timeout=None, verbose=False):
+                        max_distance_km=None, verbose=False):
     """Layered **elastic** bottom from CRUST1.0 at a ``(lat, lon)`` point.
 
     The CRUST1.0 sediment layers over the crystalline-crust half-space, with
     ``Vs`` retained (``elastic=True``). ``sediment_attenuation`` /
-    ``basement_attenuation`` set the (nominal) dB/λ compressional losses
-    CRUST1.0 lacks, and ``sediment_shear_attenuation`` /
+    ``basement_attenuation`` set the dB/λ compressional losses CRUST1.0
+    lacks — 0.1 in the basement (Computational Ocean Acoustics Table 1.3,
+    basalt and limestone) and 0.6 in the sediments (the median of the
+    table's unconsolidated rows: clay 0.2, silt 1.0, sand 0.8, gravel 0.6,
+    moraine 0.4) — and
+    ``sediment_shear_attenuation`` /
     ``basement_shear_attenuation`` the shear ones. Shear loss is not the
     compressional value: Computational Ocean Acoustics Table 1.3 puts it at
     1.5 to 5 times the compressional figure in unconsolidated sediments (clay
@@ -531,9 +538,8 @@ def fetch_bottom_crust1(point, *, roughness=0.0,
     bottom is bare rock, and the stamp reads ``'globsed-ignored'`` (GlobSed
     consulted but unusable) or ``None`` (explicit value).
 
-    ``timeout`` is ignored (offline) for signature parity with the
-    network bottom fetchers; ``water_sound_speed`` is likewise accepted and
-    ignored (CRUST1.0 yields absolute Vp/Vs/ρ, not water-referenced ratios).
+    CRUST1.0 yields absolute Vp/Vs/ρ, not ratios to the water above, so the
+    column takes no water sound speed.
 
     ``roughness`` is the RMS roughness (m) of the seafloor interface — the top
     of the first returned layer, which is where
@@ -636,7 +642,7 @@ def _bottom_at_point(point, *, layer_kw, sediment_thickness=None,
     return bottom
 
 
-def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
+def fetch_bottom_crust1_transect(start, end, *, n_points=None, max_points=None,
                                  roughness=0.0,
                                  sediment_attenuation=DEFAULT_SEDIMENT_ATTENUATION,
                                  basement_attenuation=DEFAULT_BASEMENT_ATTENUATION,
@@ -645,8 +651,7 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
                                  basement_shear_attenuation=(
                                      DEFAULT_BASEMENT_SHEAR_ATTENUATION),
                                  elastic=True, use_globsed=True,
-                                 water_sound_speed=None, max_distance_km=None,
-                                 timeout=None, verbose=False):
+                                 max_distance_km=None):
     """Range-dependent layered bottom from CRUST1.0 along ``start`` → ``end``.
 
     Each profile rescales its CRUST1.0 sediment column to the local GlobSed
@@ -654,15 +659,13 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
     ``.sediment_thickness_source`` (``'globsed'`` if any waypoint used it).
     ``n_points='auto'`` targets roughly one waypoint per degree of arc —
     CRUST1.0's native 1° resolution — unlike the probe-and-collapse ``'auto'``
-    of the sample-database bottom fetchers.
-    ``max_points`` caps the waypoint count (signature parity with the other
-    transect bottom fetchers); CRUST1.0 is a cached 1° grid, so the sole effect
-    is clamping ``n_points``.
-
-    ``timeout``/``verbose`` are accepted (and ignored — this backend is
-    offline) for signature parity with the network bottom fetchers;
-    ``water_sound_speed`` is likewise accepted and ignored (CRUST1.0 yields
-    absolute Vp/Vs/ρ, not water-referenced ratios).
+    of the sample-database bottom fetchers, within the ``max_points`` budget
+    (``None``: 1000, uacpy guidance; a budget below the native count takes
+    that many waypoints, with a ``FallbackWarning``). An explicit
+    ``n_points`` is used as given, and refused when it exceeds an explicit
+    ``max_points``; ``None`` (default) is
+    :data:`~uacpy.data.sediment.DEFAULT_BOTTOM_TRANSECT_POINTS` (6, uacpy
+    guidance), within ``max_points`` when that is set.
 
     ``roughness`` and the four attenuation keywords are as in
     :func:`fetch_bottom_crust1`, applied at every waypoint. A waypoint whose
@@ -674,19 +677,27 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
     :func:`fetch_bottom_crust1`.
     """
     limit = checked_max_distance(max_distance_km, 'fetch_bottom_crust1_transect')
+    max_points = checked_max_points(max_points, 'fetch_bottom_crust1_transect')
+    if n_points is None:
+        n_points = default_n_points(DEFAULT_BOTTOM_TRANSECT_POINTS, max_points)
     n_points = checked_n_points(n_points, 'fetch_bottom_crust1_transect',
                                 allow_auto=True)
-    # 'auto': CRUST1.0 is a 1-degree cached grid, so target roughly one
-    # waypoint per degree of arc, clamped like the siblings.
     if n_points == 'auto':
-        n_points = max(2, int(np.degrees(central_angle(start, end))) + 1)
-    if max_points is not None:
-        max_points = checked_max_points(max_points,
-                                        'fetch_bottom_crust1_transect')
-    n_points = capped_n_points(n_points, max_points,
-                               'fetch_bottom_crust1_transect')
+        # CRUST1.0 is a 1-degree cached grid: roughly one waypoint per degree
+        # of arc, within the budget of 'auto'.
+        native = max(2, int(np.degrees(central_angle(start, end))) + 1)
+        n_points = min(native, auto_budget(max_points))
+        if native > n_points:
+            warnings.warn(
+                f"fetch_bottom_crust1_transect: one waypoint per degree needs "
+                f"{native} waypoints; n_points='auto' takes {n_points}, its "
+                f"budget. Raise max_points, or pass an explicit n_points.",
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    else:
+        n_points = checked_explicit_n_points(n_points, max_points,
+                                             'fetch_bottom_crust1_transect')
     _warn_non_commercial()
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
+    lats, lons, ranges = geodesic_waypoints(start, end, n_points)
     # The notice is emitted once above, for the transect as a whole; the
     # waypoints go through the builder that does not raise it, so no filter
     # window has to be opened over the loop to keep it quiet.
@@ -714,7 +725,7 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
             remediation="Use an offshore transect, or pick another "
                         "bottom_sources.",
         )
-    profiles, filled = _fill_gaps_from_nearest(profiles, ranges_m)
+    profiles, filled = _fill_gaps_from_nearest(profiles, ranges)
     _warn_filled_gaps('CRUST1.0', filled, len(profiles))
     # A filled waypoint shares its neighbour's column object; give each range
     # its own copy so editing one column cannot change another.
@@ -723,7 +734,7 @@ def fetch_bottom_crust1_transect(start, end, *, n_points=6, max_points=None,
         if id(p) in seen:
             profiles[i] = copy.deepcopy(p)
         seen.add(id(p))
-    rdl = Bottom.from_columns(profiles, ranges=np.asarray(ranges_m))
+    rdl = Bottom.from_columns(profiles, ranges=np.asarray(ranges))
     rdl.sediment_thickness_source = (
         'globsed' if any(getattr(p, 'sediment_thickness_source', None) == 'globsed'
                          for p in profiles) else None)

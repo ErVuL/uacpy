@@ -1,7 +1,10 @@
 """Bubble acoustics: resonance, bubbly-water speed, surface bubble loss.
 
-A bubble is a mass-spring resonator, and a cloud of them is the strongest
-scatterer and the strongest attenuator in the upper ocean.
+A bubble is a mass-spring resonator: "Gas bubbles in sea water are most
+efficient sound scatterers", resonant ones absorb as well as scatter, and at
+high concentration they change the water's compressibility and so its sound
+speed (Brekhovskikh & Lysanov, *Fundamentals of Ocean Acoustics*,
+"Scattering and Absorption of Sound by Gas Bubbles in Water").
 :func:`bubble_resonance` gives the Minnaert frequency of one bubble,
 :func:`bubble_sound_speed` the speed through a void-fraction mixture (Wood's
 equation: air's compressibility with water's density, so at intermediate void
@@ -30,6 +33,7 @@ from typing import Union, Optional
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.units import knots_to_ms
+from uacpy.core._validate import DENSITY_UNITS_SUSPECT_G_CM3
 from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3, STANDARD_ATMOSPHERE_PA,
     STANDARD_GRAVITY_M_S2,
@@ -52,7 +56,7 @@ def bubble_resonance(
     depth: float = 0.0,
     gamma: float = AIR_HEAT_CAPACITY_RATIO,
     p0: float = STANDARD_ATMOSPHERE_PA,
-    water_density_kg_m3: float = DEFAULT_WATER_DENSITY_G_CM3 * 1000.0,
+    water_density: float = DEFAULT_WATER_DENSITY_G_CM3,
 ) -> Union[float, np.ndarray]:
     """
     Calculate resonance frequency of freely oscillating gas bubble in water.
@@ -71,9 +75,10 @@ def bubble_resonance(
     p0 : float, optional
         Atmospheric pressure in Pa (default: the standard atmosphere,
         101325)
-    water_density_kg_m3 : float, optional
-        Density of water in kg/m³ (default: 1027, the package's one water
-        density ``DEFAULT_WATER_DENSITY_G_CM3`` in kg/m³)
+    water_density : float, optional
+        Density of water in g/cm³, the package's density unit (default:
+        ``DEFAULT_WATER_DENSITY_G_CM3``, 1.027). A value above 20 is
+        refused as a kg/m³ number.
 
     Returns
     -------
@@ -95,10 +100,16 @@ def bubble_resonance(
     eq. (8.2.13): ``f_h = (1/2πa)·√(3γ p_A/ρ_A)`` with ``p_A = p_A0 + ρ_A g z``.
     Valid while ``ka ≲ 1``.
     """
+    if water_density > DENSITY_UNITS_SUSPECT_G_CM3:
+        raise ConfigurationError(
+            f"bubble_resonance: water_density={water_density:g} reads as "
+            f"kg/m³; the argument is g/cm³.",
+            remediation=f"Pass water_density={water_density / 1000.0:g}.")
+    rho_kg_m3 = water_density * 1000.0                    # g/cm³ → kg/m³
     g = STANDARD_GRAVITY_M_S2
-    p_air = p0 + water_density_kg_m3 * g * depth
+    p_air = p0 + rho_kg_m3 * g * depth
     return (1 / (2 * np.pi * radius)
-            * np.sqrt(3 * gamma * p_air / water_density_kg_m3))
+            * np.sqrt(3 * gamma * p_air / rho_kg_m3))
 
 
 def bubble_surface_loss(
@@ -217,13 +228,13 @@ def bubble_surface_loss(
 def bubble_sound_speed(
     void_fraction: Union[float, np.ndarray],
     sound_speed: Optional[float] = None,
-    c_gas: float = 340,
-    relative_density: float = 1000,
+    gas_sound_speed: float = 340,
+    gas_density_ratio: float = 1000,
 ) -> Union[float, np.ndarray]:
     """
     Calculate speed of sound in 2-phase bubbly water.
 
-    Wood's equation (Wood 1964; Medwin & Clay eq. 8.3.39).
+    Wood's equation (Wood 1955, as Medwin & Clay give it, eq. 8.3.39).
 
     Parameters
     ----------
@@ -232,10 +243,15 @@ def bubble_sound_speed(
     sound_speed : float, optional
         Speed of sound in water in m/s (default: ``DEFAULT_SOUND_SPEED``,
         the nominal 1500 m/s)
-    c_gas : float, optional
-        Speed of sound in gas in m/s (default: 340)
-    relative_density : float, optional
-        Ratio of density of water to gas (default: 1000)
+    gas_sound_speed : float, optional
+        Speed of sound in the gas in m/s. Default 340, uacpy guidance
+        (arlpy's value): with ``gas_density_ratio`` it sets the gas modulus
+        ``E_b = rho_w gas_sound_speed² / gas_density_ratio``, 1.19e5 Pa at
+        the defaults and 1027 kg/m³ water (see Notes).
+    gas_density_ratio : float, optional
+        Ratio of the water's density to the gas's, ``rho_w / rho_gas``.
+        Default 1000, uacpy guidance (arlpy's value; surface air is about
+        1027/1.2 ≈ 860).
 
     Returns
     -------
@@ -260,22 +276,34 @@ def bubble_sound_speed(
     dispersive and this speed does not apply; the function takes no
     frequency, so staying below resonance is the caller's to check.
 
+    The gas enters only through ``E_b`` and its density. Medwin & Clay take
+    the adiabatic gas modulus ``E_b = gamma p_A`` (sect. 8.3.3), the bubble
+    pressure ``p_A`` growing with depth as in :func:`bubble_resonance`, so
+    the modulus and the gas density both rise with depth. The defaults
+    describe one fixed gas, ``E_b`` 16 % below surface air's
+    ``1.4 x 101325 Pa``: at a void fraction of 1e-5 they give 1372.4 m/s
+    where surface air (``E_b = gamma p_atm``, 1.2 kg/m³) gives 1391.0 m/s,
+    and at 1e-3 they give 331.8 m/s against 360.9 m/s. To model a depth,
+    set ``gas_sound_speed`` and ``gas_density_ratio`` from
+    ``E_b = gamma p_A`` and the gas density there.
+
     References
     ----------
-    Wood, A. B. (1964). A Textbook of Sound.
+    Wood, A. B. (1955). A Textbook of Sound. Macmillan, New York (as cited
+    by Medwin & Clay).
     Medwin, H. & Clay, C. S. (1998). Fundamentals of Acoustical
     Oceanography, sect. 8.3.3, eq. (8.3.39).
     """
     if sound_speed is None:
         sound_speed = DEFAULT_SOUND_SPEED
 
-    # Splitting ``relative_density`` as m = sqrt(rho_w/rho_gas) puts the two
+    # Splitting ``gas_density_ratio`` as m = sqrt(rho_w/rho_gas) puts the two
     # averages on a common footing: ``numerator`` is (rho_w c_w²)/(rho_A c_A²)/m
     # and ``denominator`` is m·rho_A/rho_w, so their product is exactly
     # (c_w/c_A)² — the density ratio and the factor m both cancel, leaving one
     # square root instead of two.
-    m = np.sqrt(relative_density)
-    numerator = (void_fraction * (sound_speed / c_gas) ** 2 * m
+    m = np.sqrt(gas_density_ratio)
+    numerator = (void_fraction * (sound_speed / gas_sound_speed) ** 2 * m
                  + (1 - void_fraction) / m)
     denominator = void_fraction / m + (1 - void_fraction) * m
     return 1 / (1 / sound_speed * np.sqrt(numerator * denominator))

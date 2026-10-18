@@ -14,9 +14,7 @@ plot_scatter · plot_sync_metric · plot_convergence
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -42,7 +40,7 @@ code = comms.ConvCode(interleave_depth=16)
 tx = comms.Transmitter("qpsk", code=code, preamble=256)
 waveform = tx.transmit_passband(frame_bits, fs, fc, sps=sps)
 wav_path = OUT / 'example_32_modem.wav'
-uacpy.io.write_wav(wav_path, waveform, fs)
+uacpy.io.write_wav(wav_path, waveform, fs, normalize=True)
 print(f"  payload  : {len(message)} bytes → {frame_bits.size} framed bits")
 print(f"  waveform : {waveform.size} real samples, "
       f"{waveform.size / fs * 1e3:.0f} ms @ {fs / 1e3:.0f} kHz, "
@@ -53,7 +51,7 @@ print(f"  waveform : {waveform.size} real samples, "
 transmitted, _ = uacpy.io.read_wav(wav_path)
 impulse_response = np.zeros(40)
 impulse_response[[0, 17, 33]] = [1.0, 0.4, 0.2]
-received = np.convolve(transmitted, impulse_response)
+received = comms.apply_channel(transmitted, impulse_response)
 received = resample_poly(received, 100020, 100000)
 received = np.concatenate([np.zeros(11), received])
 snr_dB = 22.0

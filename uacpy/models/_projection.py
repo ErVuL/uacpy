@@ -16,6 +16,7 @@ from uacpy.core.collapse import (
 from uacpy.core.environment import Bathymetry, Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.surface import Surface
+from uacpy.models._registry import engines_supporting
 
 
 #: The reduction each feature a model cannot read gets when neither the
@@ -38,8 +39,9 @@ DEFAULT_COLLAPSE: Dict[str, str] = {
     'elastic': 'fluid',
 }
 
-# Allowed method strings per collapse key (validated at construction in
-# ``PropagationModel.__init__`` so bad values fail loudly rather than deep
+# Allowed method strings per collapse key (validated at construction, by
+# ``_host.set_host_options`` from ``PropagationModel.__init__``, so bad
+# values fail loudly rather than deep
 # inside a writer at ``run()``-time).
 #
 # Read from the carriers that implement each method, never spelled out here:
@@ -47,8 +49,9 @@ DEFAULT_COLLAPSE: Dict[str, str] = {
 # literal copy lets a method be accepted at construction and refused from
 # inside ``run()`` — the exact failure the construction-time check exists to
 # prevent. ``'altimetry'`` and ``'elastic'`` are implemented in this module
-# (``_project_environment`` drops an altimetry; ``_collapse_elastic`` below
-# reads this entry back), so they are the only two written out.
+# (``_project_environment`` drops an altimetry;
+# ``collapse_elastic_boundary`` below reads this entry back), so they are
+# the only two written out.
 VALID_COLLAPSE_METHODS: Dict[str, frozenset] = {
     'bathymetry':        frozenset(DEPTH_COLLAPSE_METHODS),
     'ssp':               frozenset(RANGE_COLLAPSE_METHODS),
@@ -64,6 +67,17 @@ if set(VALID_COLLAPSE_METHODS) != set(DEFAULT_COLLAPSE):
     raise RuntimeError("VALID_COLLAPSE_METHODS keys must match DEFAULT_COLLAPSE keys")
 if not all(DEFAULT_COLLAPSE[k] in VALID_COLLAPSE_METHODS[k] for k in DEFAULT_COLLAPSE):
     raise RuntimeError("DEFAULT_COLLAPSE values must satisfy VALID_COLLAPSE_METHODS")
+
+
+def _engines_keeping_it(flag: str) -> str:
+    """The sentence naming the registered engines that declare ``flag``
+    (:func:`~uacpy.models._registry.engines_supporting`); each model page
+    states the boundary types it keeps the feature on."""
+    names = engines_supporting(flag)
+    if not names:
+        return ""
+    return (f"Engines that keep it: {', '.join(names)} (their model pages "
+            f"give the boundary types).")
 
 
 def _max_roughness(boundaries) -> float:
@@ -244,8 +258,7 @@ def environment_projection(env: 'Environment', *, model_name: str,
         notices.append(
             f"{model_name} does not carry a rough sea surface into "
             f"its deck; env.surface.roughness={surf_sigma:g} m dropped. "
-            f"Use Kraken with a vacuum, rigid or half-space surface, an "
-            f"OASES model, or Scooter with a vacuum surface, to keep it."
+            f"{_engines_keeping_it('rough_surface')}"
         )
 
     bot_sigma = _bottom_roughness(e.bottom)
@@ -254,8 +267,8 @@ def environment_projection(env: 'Environment', *, model_name: str,
         notices.append(
             f"{model_name} does not carry seabed interfacial "
             f"roughness into its deck; env.bottom roughness="
-            f"{bot_sigma:g} m dropped. Use Kraken or an OASES model "
-            f"to keep it."
+            f"{bot_sigma:g} m dropped. "
+            f"{_engines_keeping_it('rough_bottom')}"
         )
 
     if (e.bathymetry.varies_with_range

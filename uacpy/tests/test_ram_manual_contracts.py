@@ -38,8 +38,8 @@ from uacpy.core.environment import (
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
-from uacpy.io.mpirams_writer import write_inpe
-from uacpy.io.ramsurf_writer import write_ramin
+from uacpy.io.mpirams_writer import write_mpirams_inpe
+from uacpy.io.ramsurf_writer import write_ram_in
 from uacpy.models.ram import mpirams as ram_mpirams, collins as ram_collins
 from uacpy.tests.conftest import make_pekeris
 
@@ -60,7 +60,7 @@ class TestInPeRecordOrderMatchesPeramx:
     line and node-weight records this build does not read, and lacks the
     ``c0_user`` / ranges-file / sediment records it does). One side parses
     the read sequence out of the vendored source; the other checks the deck
-    ``write_inpe`` emits slot by slot. Existing tests pin only slot 6
+    ``write_mpirams_inpe`` emits slot by slot. Existing tests pin only slot 6
     (``np nss``); a swap anywhere else would feed every later record to the
     wrong variable and still march."""
 
@@ -88,7 +88,7 @@ class TestInPeRecordOrderMatchesPeramx:
     def _deck(tmp_path, **overrides):
         kwargs = dict(
             fc=111.0, q_factor=22.0, record_duration=33.0, zsrc=44.0, dz=0.55, dr=66.0,
-            n_pade=7, n_stability=2, stability_range_m=88.0, depth_decimation=9, ssp_filename='S.ssp',
+            n_pade=7, n_stability=2, stability_range=88.0, depth_decimation=9, ssp_filename='S.ssp',
             earth_curvature=1, horizontal_interpolation=0, bathymetry_from_file=1, bth_filename='B.bth',
             sedlayer=123.0, n_sediment_points=5,
             cs=np.array([1.0, 2.0, 3.0, 4.0, 5.0]),
@@ -97,7 +97,7 @@ class TestInPeRecordOrderMatchesPeramx:
         )
         kwargs.update(overrides)
         path = tmp_path / 'in.pe'
-        write_inpe(path, **kwargs)
+        write_mpirams_inpe(path, **kwargs)
         return path.read_text().splitlines()
 
     def test_every_scalar_record_lands_in_its_read_slot(self, tmp_path):
@@ -184,8 +184,8 @@ class TestStabilityConstraintDefaultsSpanTheMarch:
             captured.update(kwargs)
             raise RuntimeError('deck captured')
 
-        writer_module = {'write_inpe': ram_mpirams,
-                         'write_ramin': ram_collins}[writer_name]
+        writer_module = {'write_mpirams_inpe': ram_mpirams,
+                         'write_ram_in': ram_collins}[writer_name]
         monkeypatch.setattr(writer_module, writer_name, fake)
         from uacpy.models.ram import RAM
         model = RAM(verbose=False, dr=20.0, dz=2.0, backend=backend)
@@ -198,9 +198,9 @@ class TestStabilityConstraintDefaultsSpanTheMarch:
         src = Source(depths=50.0, frequencies=50.0)
         rcv = Receiver(depths=np.array([50.0]), ranges=np.array([3000.0]))
         captured = self._capture(
-            monkeypatch, 'write_inpe', None,
+            monkeypatch, 'write_mpirams_inpe', None,
             lambda m: m.compute_field(env=env, source=src, receiver=rcv))
-        assert captured['stability_range_m'] == pytest.approx(3000.0)
+        assert captured['stability_range'] == pytest.approx(3000.0)
         assert captured['n_stability'] in (1, 2)
 
     def test_collins_default_row5_is_ns1_rs0(self, monkeypatch):
@@ -208,10 +208,10 @@ class TestStabilityConstraintDefaultsSpanTheMarch:
         src = Source(depths=50.0, frequencies=50.0)
         rcv = Receiver(depths=np.array([50.0]), ranges=np.array([3000.0]))
         captured = self._capture(
-            monkeypatch, 'write_ramin', 'ramgeo',
+            monkeypatch, 'write_ram_in', 'ramgeo',
             lambda m: m.compute_field(env=env, source=src, receiver=rcv))
         assert captured['n_stability'] == 1
-        assert captured['stability_range_m'] == 0.0
+        assert captured['stability_range'] == 0.0
 
 
 # ─── README.OMP: thread count and stack limit ──────────────────────────────
@@ -271,7 +271,7 @@ class TestStackLimitIsRaisedForTheFortranChildren:
     """``README.OMP``: "gfortran and ifort seem to need the ulimit to be set
     larger, otherwise eigenray just segfaults" (its ``ulimit -s unlimited``
     line). Every spawned binary runs with its soft RLIMIT_STACK at the hard
-    limit, raised inside the child by ``uacpy._stack.stack_limit_prefix``;
+    limit, raised inside the child by ``uacpy.models._launch.stack_limit_prefix``;
     the importing process keeps its own limit, and ``UACPY_NO_STACK_RAISE``
     opts out."""
 
@@ -374,19 +374,19 @@ class TestRamInBlockOrderIsTheDocumentedOne:
 
     def test_ramsurf_surface_sits_between_row5_and_bathymetry(self, tmp_path):
         out = tmp_path / 'ram.in'
-        write_ramin(
+        write_ram_in(
             str(out), kind='ramsurf', frequency=100.0, zs=50.0, zr_line=60.0,
-            rmax_march=5000.0, dr=10.0, ndr=2, zmax=400.0, dz=1.0, depth_decimation=2,
+            rmax_march=5000.0, dr=10.0, range_decimation=2, zmax=400.0, dz=1.0, depth_decimation=2,
             zmplt=200.0, c0=1500.0, n_pade=4,
             surface=[(0.0, 1.25)],
             bathymetry=[(0.0, 101.0)],
             range_segments=[
                 dict(range=0.0, water_ssp=[(0.0, 1501.0)],
-                     bottom_c=[(0.0, 1601.0)], bottom_rho=[(0.0, 1.61)],
-                     bottom_attn=[(0.0, 0.61)]),
+                      bottom_c=[(0.0, 1601.0)], bottom_rho=[(0.0, 1.61)],
+                      bottom_attn=[(0.0, 0.61)]),
                 dict(range=2500.0, water_ssp=[(0.0, 1502.0)],
-                     bottom_c=[(0.0, 1602.0)], bottom_rho=[(0.0, 1.62)],
-                     bottom_attn=[(0.0, 0.62)]),
+                      bottom_c=[(0.0, 1602.0)], bottom_rho=[(0.0, 1.62)],
+                      bottom_attn=[(0.0, 0.62)]),
             ])
         lines = out.read_text().splitlines()
         blocks = self._blocks(lines[5:])
@@ -402,10 +402,10 @@ class TestRamInBlockOrderIsTheDocumentedOne:
 
     def test_rams_shear_blocks_interleave_after_cb_and_attn(self, tmp_path):
         out = tmp_path / 'rams.in'
-        write_ramin(
+        write_ram_in(
             str(out), kind='rams', frequency=100.0, zs=50.0, zr_line=60.0,
-            rmax_march=5000.0, dr=10.0, ndr=2, zmax=400.0, dz=1.0, depth_decimation=2,
-            zmplt=200.0, c0=1500.0, n_pade=4, rams_rotation=1, rams_rotation_angle=60.0,
+            rmax_march=5000.0, dr=10.0, range_decimation=2, zmax=400.0, dz=1.0, depth_decimation=2,
+            zmplt=200.0, c0=1500.0, n_pade=4, rams_rotation=1, rams_rotation_angle_deg=60.0,
             bathymetry=[(0.0, 101.0)],
             range_segments=[dict(
                 range=0.0, water_ssp=[(0.0, 1501.0)],

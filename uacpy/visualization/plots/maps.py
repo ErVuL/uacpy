@@ -9,15 +9,17 @@ import matplotlib.colors as _mcolors
 import matplotlib.collections as _mcoll
 import matplotlib.patheffects as _patheffects
 import matplotlib.ticker as _mticker
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.units import km_to_m
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import _cell_edge_extent, _credit_attributions, _default_value, _draw_credit, _draw_sea_ice, _model_attribution, _value_label, typed_plot_error, _title_or
+from uacpy.visualization.plots._common import _cell_edge_extent, _credit_attributions, _default_value, _draw_credit, _draw_sea_ice, _model_attribution, _refuse_axes_after_carrier, _value_label, typed_plot_error, _title_or
 # plot_overview composes a map panel with the TL field and the environment
 # cross-section, so it reaches across to those plotters.
-from uacpy.visualization.plots.fields import plot_field
+from uacpy.visualization.plots.fields import (plot_field, _draw_contours,
+                                              _colorbar_extend,
+                                              _drawn_levels, _value_mesh)
 from uacpy.visualization.plots.environment import plot_environment
 
 
@@ -29,6 +31,21 @@ _ZOOM_MIN_SPAN_PX = 6.0
 _ZOOM_SPAN_PAD = 0.7
 _ZOOM_MARGIN_PX = 16.0
 _ZOOM_WIDTH_RATIO = 1.6
+
+#: The isobaths ``plot_bathymetry_map(contours=True)`` draws: 0-6000 m every
+#: 200 m (uacpy guidance).
+_DEFAULT_ISOBATHS_M = list(range(0, 6000, 200))
+
+#: How every isobath is drawn: dark navy over the depth colours, under the
+#: land fill (zorder 2) so a line never crosses the coast.
+_ISOBATH_STYLE = {'colors': '#0c1830', 'linewidths': 0.8, 'alpha': 0.85,
+                  'zorder': 1.5}
+
+#: Land on the bathymetry map drawn without a coastline (``basemap=False``).
+_PLAIN_MAP_LAND_COLOR = '#d9cdb8'
+
+#: How the sea-ice map's concentration contours are drawn.
+_SEA_ICE_CONTOUR_STYLE = {'color': 'black', 'linewidth': 1.0, 'zorder': 3}
 
 BATHYMETRY_CMAP = _mcolors.LinearSegmentedColormap.from_list('uacpy_bathy', [
     '#86c4cf', '#5aa6bd', '#3f86ab', '#2f6c98',
@@ -170,8 +187,10 @@ def plot_bathymetry_map(
     ``relief_exag``) so real seafloor texture shows instead of a smooth dome;
     ``relief=False`` is a flat colormap. ``contours`` overlays labelled depth
     contour lines: ``True`` for the default set (30 isobaths, 0–6000 m every
-    200 m), an ``int`` for that many auto levels, or an explicit sequence of
-    depths (m); ``None`` (default) draws none.
+    200 m), or the depths (m) to draw — a number is one isobath, a sequence
+    several, as on every map plotter; ``None`` (default) draws none.
+    Explicit depths follow the rule of every map plotter: one outside the
+    map's depth range is reported in one warning and the others are drawn.
 
     ``aspect`` overrides the axes aspect ratio: ``None`` (default) uses the
     equirectangular correction (``1/cos(lat)``); pass a number (e.g. ``1`` for
@@ -210,7 +229,7 @@ def plot_bathymetry_map(
         Shade the relief. Default True.
     relief_exag : float, optional
         Vertical exaggeration of the shading. Default 15.
-    contours : bool, int or sequence of float, optional
+    contours : bool, float or sequence of float, optional
         Isobaths to draw (see above).
     figsize : tuple, optional
         Size (inches) of the new figure. Default ``(9, 7.5)``.
@@ -228,6 +247,9 @@ def plot_bathymetry_map(
     from uacpy.visualization.basemap import land_polygons
 
     provenance = None
+    if hasattr(lats, 'depths'):
+        _refuse_axes_after_carrier('plot_bathymetry_map', lats,
+                                   [('lons', lons), ('depth', depth)])
     if lons is None and depth is None and hasattr(lats, 'depths'):
         # A BathyGrid: its arrays, and the dataset record its credit names.
         provenance = getattr(lats, 'provenance', None)
@@ -276,7 +298,11 @@ def plot_bathymetry_map(
         ax.set_ylim(*lat_rng)
         _draw_graticule(ax, lon_rng, lat_rng, graticule, graticule_minor, proj)
     else:
-        cm = cm.with_extremes(bad='#d9cdb8')
+        # Land is tan with or without relief: the flat mesh paints a NaN cell
+        # in the colormap's ``bad`` colour, the relief image leaves it
+        # transparent over the axes face.
+        cm = cm.with_extremes(bad=_PLAIN_MAP_LAND_COLOR)
+        ax.set_facecolor(_PLAIN_MAP_LAND_COLOR)
         pc = _draw_depth(ax, lons, lats, depth, cm, relief, relief_exag, 1)
         if lon_wrapped:
             # This branch draws no graticule, so its ticks are matplotlib's own
@@ -298,11 +324,21 @@ def plot_bathymetry_map(
     ax.set_aspect(aspect if aspect is not None
                   else 1.0 / np.cos(np.radians(np.mean(lat_rng))))
 
-    if contours is not None and contours is not False and dm.count() > 1:
-        levels = list(range(0, 6000, 200)) if contours is True else contours
-        cs = ax.contour(lons, lats, dm, levels=levels, colors='#0c1830',
-                        linewidths=0.8, alpha=0.85, zorder=1.5)
+    if contours is True and dm.count() > 1:
+        # The package's own isobath set: none is a level the caller named,
+        # so one out of the map's depth range is simply not drawn.
+        cs = ax.contour(lons, lats, dm, levels=_DEFAULT_ISOBATHS_M,
+                        **_ISOBATH_STYLE)
         ax.clabel(cs, inline=True, fontsize='small')
+    elif contours is not None and contours is not False:
+        # Depths the caller named follow the rule of every map plotter: one
+        # outside the map's range is reported, a degenerate grid warns.
+        _draw_contours(ax, lons, lats, np.ma.filled(dm.astype(float), np.nan),
+                       contours, who='plot_bathymetry_map', fmt='%g',
+                       linewidth=_ISOBATH_STYLE['linewidths'], unit=' m',
+                       color=_ISOBATH_STYLE['colors'],
+                       alpha=_ISOBATH_STYLE['alpha'],
+                       zorder=_ISOBATH_STYLE['zorder'])
 
     if transect is not None:
         (a_lat, a_lon), (b_lat, b_lon) = transect
@@ -320,7 +356,7 @@ def plot_bathymetry_map(
                         path_effects=[_patheffects.withStroke(
                             linewidth=2.5, foreground='white')])
         # 'best' keeps the legend off the transect line and its end markers;
-        # 'upper left' sat on the start marker of a transect from that corner.
+        # 'upper left' sits on the start marker of a transect from that corner.
         ax.legend(loc='best')
     if source is not None:
         s_lat, s_lon = source
@@ -410,7 +446,8 @@ def plot_overview(
     tl_kwargs : dict, optional
         Extra keyword arguments forwarded to :func:`plot_field` for the TL
         panel — e.g. ``dict(vmin=40, vmax=110, cmap='turbo')`` to override
-        the default TL colour scale (20–120 dB).
+        the default TL colour scale (20–120 dB). ``show_colorbar=False``
+        drops the TL panel's inset colour bar.
     figsize : tuple, optional
         Size of the new figure, ``(15.5, 5.2)`` by default.
     fig : Figure or SubFigure, optional
@@ -449,20 +486,26 @@ def plot_overview(
         # right-column panels unequal; an inset bar steals no axes width, so
         # both panels keep the full gridspec cell and line up.
         tl_kw = dict(tl_kwargs or {})
-        tl_kw.pop('show_colorbar', None)
+        # The TL bar is this composite's inset, so tl_kwargs' show_colorbar
+        # decides that inset rather than reaching plot_field.
+        show_tl_colorbar = tl_kw.pop('show_colorbar', None)
         # Only the source is marked here: the TL heatmap's cells ARE the
         # receiver grid, so receiver dots would repeat the field's own
         # sampling over it. The environment panel below carries them.
         plot_field(tl, ax=ax_tl, env=env, source=source,
                    title=tl_title, show_colorbar=False, **tl_kw)
-        tl_mappable = next(c for c in ax_tl.collections
-                           if isinstance(c, _mcoll.QuadMesh))
-        tl_cax = ax_tl.inset_axes((1.04, 0.0, 0.03, 1.0))
-        # The bar annotates whatever view tl_kwargs asked plot_field for, so it
-        # is labelled from the field and that view — a hardcoded 'TL (dB)'
-        # would caption linear |p| as a loss in dB.
-        tl_value = tl_kw.get('value') or _default_value(tl)
-        fig.colorbar(tl_mappable, cax=tl_cax, label=_value_label(tl, tl_value))
+        tl_mappable = _value_mesh(ax_tl)
+        if tl_mappable is not None and show_tl_colorbar is not False:
+            tl_cax = ax_tl.inset_axes((1.04, 0.0, 0.03, 1.0))
+            # The bar annotates whatever view tl_kwargs asked plot_field
+            # for, so it is labelled from the field and that view — a
+            # hardcoded 'TL (dB)' would caption linear |p| as a loss in dB.
+            tl_value = tl_kw.get('value') or _default_value(tl)
+            fig.colorbar(
+                tl_mappable, cax=tl_cax, label=_value_label(tl, tl_value),
+                extend=_colorbar_extend(
+                    _drawn_levels(tl, tl_value, who='plot_overview'),
+                    tl_mappable.get_clim()))
         if sea_ice is not None:
             _draw_sea_ice(ax_tl, sea_ice)
     else:
@@ -477,9 +520,9 @@ def plot_overview(
     # cell — the x limit it is synced to below.
     plot_environment(env, ax=ax_env, source=source, receiver=receiver,
                     show_bottom_colorbar=True, sea_ice=sea_ice,
-                    x_max_m=(km_to_m(max(ax_tl.get_xlim()))
-                             if tl is not None and 'range' in tl.coords
-                             else None))
+                    x_max=(km_to_m(max(ax_tl.get_xlim()))
+                           if tl is not None and 'range' in tl.coords
+                           else None))
     ax_env.set_title(env_title)
 
     # Both right-column panels keep their full gridspec cell — neither
@@ -535,6 +578,7 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
                      source=None, cmap='Blues_r', graticule: float = 5.0,
                      zoom: bool = True,
                      concentration_label='Sea-ice concentration (fraction)',
+                     contours: Optional[Sequence[float]] = None,
                      title=None,
                      figsize: Tuple[float, float] = (6.5, 6.5),
                      show_data_credit=True, show_colorbar: bool = True):
@@ -576,6 +620,10 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
         True.
     concentration_label : str, optional
         Colorbar label.
+    contours : sequence or array of float, optional
+        Concentrations (0-1) drawn as labelled contour lines, by the rule of
+        every map plotter: a level outside the grid's range is reported and
+        not drawn. ``None`` (default) draws none.
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
     ax : matplotlib.axes.Axes, optional
@@ -600,6 +648,12 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
     cm = plt.get_cmap(cmap).with_extremes(bad='#b8a98f')   # land / no-data
     im = ax.imshow(np.ma.masked_invalid(grid), cmap=cm, vmin=0.0, vmax=1.0,
                    origin='upper')
+    # On the image's own pixel coordinates (column, row), which the
+    # graticule, the transect and the zoom also use.
+    concentration = np.asarray(grid, dtype=float)
+    _draw_contours(ax, np.arange(concentration.shape[1]),
+                   np.arange(concentration.shape[0]), concentration, contours,
+                   who='plot_sea_ice_map', fmt='%g', **_SEA_ICE_CONTOUR_STYLE)
 
     if graticule:                                  # labelled lat/lon graticule
         sgn = 1 if hemi == 'N' else -1
@@ -683,12 +737,11 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
         ax.legend(loc='best')
     # A bar the height of the map: the image keeps square pixels, so its
     # drawn box is shorter than the slot whenever the window is wider than
-    # the slot, and a bar sized from the slot ran about twice the map's
-    # height. The bar still takes its width from the slot, as every other
+    # the slot, and a bar sized from the slot runs about twice the map's
+    # height. The bar takes its width from the slot, as every other
     # colorbar on this surface does, so a composite (plot_overview) keeps its
     # spacing; it is shrunk to the height the equal-aspect map will draw at.
-    # ``fraction`` and ``pad`` are matplotlib's own defaults, kept so the bar
-    # takes the width it always took.
+    # ``fraction`` and ``pad`` are matplotlib's own defaults.
     slot = ax.get_window_extent()
     x0, x1 = ax.get_xlim()
     y0, y1 = ax.get_ylim()

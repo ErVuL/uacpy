@@ -39,14 +39,14 @@ class KrakenLaunch(FrozenRecord):
         The receiver-depth line of the modes deck (m): where the ``.mod``
         tabulates the mode shapes, merged with the source depths by
         ``kraken.f90:573``.
-    profile_ranges_m : ndarray or None
+    profile_ranges : ndarray or None
         Start range (m) of every profile of a multi-profile deck; ``None``
         for a single profile.
     c_low : float
         The deck's ``cLow`` (m/s), the same in every profile.
     c_high : tuple of float
         The deck's ``cHigh`` (m/s), one per profile.
-    rmax_m : float
+    rmax : float
         The deck's ``RMax`` (m), the mesh-convergence scale of the solve.
     n_mesh : int or tuple of int
         The ``NG`` mesh count written on every medium line (0: the binary
@@ -60,20 +60,20 @@ class KrakenLaunch(FrozenRecord):
     """
 
     _REPR_UNITS = {'deck_frequency': 'Hz', 'marched_frequencies': 'Hz',
-                   'tabulation_depths': 'm', 'profile_ranges_m': 'm',
+                   'tabulation_depths': 'm', 'profile_ranges': 'm', 'rmax': 'm',
                    'c_low': 'm/s', 'c_high': 'm/s'}
 
     deck_frequency: float
     marched_frequencies: Optional[np.ndarray]
     tabulation_depths: np.ndarray
-    profile_ranges_m: Optional[np.ndarray]
+    profile_ranges: Optional[np.ndarray]
     c_low: float
     c_high: Tuple[float, ...]
-    rmax_m: float
+    rmax: float
     n_mesh: Union[int, Tuple[int, ...]]
     field_option: Optional[str] = None
 
-    _ARRAY_FIELDS = ('marched_frequencies', 'tabulation_depths', 'profile_ranges_m')
+    _ARRAY_FIELDS = ('marched_frequencies', 'tabulation_depths', 'profile_ranges')
 
     def __post_init__(self):
         # A list (the to_dict form) is stored as the tuple a frozen record
@@ -101,7 +101,7 @@ class KrakenLaunch(FrozenRecord):
         window = (f"{self.c_high[0]:.6g}" if len(set(self.c_high)) == 1
                   else f"{min(self.c_high):.6g}-{max(self.c_high):.6g}")
         text = (f"{freq}: c {self.c_low:.6g}..{window} m/s, RMax "
-                f"{self.rmax_m:.6g} m, {self.tabulation_depths.size} "
+                f"{self.rmax:.6g} m, {self.tabulation_depths.size} "
                 f"tabulation depths, n_mesh {self.n_mesh}")
         if self.n_profiles > 1:
             text += f", {self.n_profiles} profiles"

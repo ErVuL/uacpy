@@ -67,13 +67,6 @@ def _values_equal(a, b) -> bool:
         return False
 
 
-def _short_repr(value) -> str:
-    """A constructor value as :meth:`PropagationModel.__repr__` shows it:
-    the shared :func:`~uacpy.core._repr.knob` form, so ``print(model)``
-    stays one short line even when a knob holds a large array."""
-    return knob(value)
-
-
 def model_copy(model, overrides: dict):
     """A new instance of ``model``'s class with the same configuration plus
     ``overrides`` (:meth:`PropagationModel.copy`): every constructor
@@ -134,5 +127,7 @@ def model_repr(model) -> str:
             continue
         if default is not _NO_DEFAULT and _values_equal(value, default):
             continue
-        bits.append(f"{name}={_short_repr(value)}")
+        # The shared knob form keeps print(model) one short line even when
+        # a knob holds a large array.
+        bits.append(f"{name}={knob(value)}")
     return f"{type(model).__name__}({', '.join(bits)})"

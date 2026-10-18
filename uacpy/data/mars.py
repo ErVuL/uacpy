@@ -14,7 +14,9 @@ Each sample is converted to a mean grain size (ϕ) by the first usable of:
 3. ``FOLK_CLASS`` (Folk code, e.g. ``'mS'``) → the ϕ of that class's centroid
    on Folk's ternary diagram, through the same mixture expression as (2),
 
-then through :func:`uacpy.data.bottom_from_grain_size`. The server rejects
+then through
+:meth:`~uacpy.core.environment.BoundaryProperties.from_grain_size`. The
+server rejects
 CQL ``BBOX`` filters (Oracle backend), so queries use the plain ``bbox=``
 parameter over an expanding search-radius ladder and filter client-side.
 """
@@ -37,7 +39,7 @@ from uacpy.core.geo import (
 )
 from uacpy.data._geo import checked_max_distance, checked_offset
 from uacpy.data._http import http_get
-from uacpy.data.sediment import SeabedSample, bottom_from_grain_size
+from uacpy.data.sediment import SeabedSample
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
 
@@ -49,7 +51,7 @@ MARS_WFS_URL = 'https://warehouse.ausseabed.gov.au/geoserver/wfs'
 MARS_LAYER = 'ausseabed:Seabed_Sediments_Collection'
 
 #: How far (km) the WFS search reaches for a sample when the caller sets no
-#: ``max_distance_km``.
+#: ``max_distance_km``: uacpy guidance (a search budget), not a physical bound.
 MARS_SEARCH_RADIUS_KM = 100.0
 # Expanding search radii (km): most points on the shelf resolve in the first
 # small box; the final rung is the search radius itself.
@@ -76,9 +78,10 @@ _COVERAGE_BOX = (-90.0, 0.0, 40.0, 180.0)
 #
 # Gravel's coarse end is a **choice**, because the ladder does not stop: its
 # gravel aggregate runs to very coarse boulder gravel at 4096 mm (-12 ϕ). This
-# takes Medwin & Clay's definition instead, quoted below and in the corpus —
-# "gravel … ranges in size from 2 to 256 mm" — so -8 ϕ. The ladder's own -12
-# was rejected on what it produces rather than on taste: it puts the end member
+# takes Medwin & Clay's definition instead (Fundamentals of Acoustical
+# Oceanography §14.5, after Gross 1972) — "gravel … ranges in size from 2 to
+# 256 mm" — so -8 ϕ. The ladder's own -12 is not used, on what it
+# produces rather than on taste: it puts the end member
 # at -6.5 ϕ, and then 'mG', a class that is half mud, converts to -0.30 ϕ,
 # coarser than pure sand. That is a statement about arithmetic, not about a
 # seabed.
@@ -90,16 +93,17 @@ _AGGREGATE_PHI_LIMITS = {
 
 
 def _grade_midpoint_phi(aggregate: str) -> float:
-    """The representative ϕ of one aggregate: the midpoint of its grade range.
+    """The representative ϕ of one aggregate: the midpoint of its grade range
+    (:data:`_AGGREGATE_PHI_LIMITS`, whose limits are cited above).
 
     The midpoint is taken in **ϕ**, which is logarithmic, so it is the
     geometric mean of the diameters — gravel's 2 and 256 mm give 22.6 mm,
-    where an arithmetic midpoint in millimetres would give 129 mm (-7 ϕ). The
-    evidence for the convention is that it is the one under which ``sand`` and
-    ``mud`` come out at 1.5 and 7.5 ϕ, the values this module and the DECK41
-    lithology map (``sediment_db._DECK41_LITHOLOGY_TO_PHI``) have always used
-    for those two words: two of the three reproduce exactly, which is what
-    identifies the third as the outlier rather than merely the odd one.
+    where an arithmetic midpoint in millimetres would give 129 mm (-7 ϕ).
+    Taking the midpoint as the representative value is uacpy guidance; the
+    Folk class centroids built from it are checked against Ainslie (2010)
+    Table 4.16 below. It gives ``sand`` 1.5 ϕ (APL-UW TR 9407 Table 2's
+    medium sand) and ``mud`` 7.5 ϕ, the values the DECK41 lithology map
+    (``sediment_db._DECK41_LITHOLOGY_TO_PHI``) takes for those two words.
     """
     lo, hi = _AGGREGATE_PHI_LIMITS[aggregate]
     return 0.5 * (lo + hi)
@@ -147,9 +151,8 @@ def _phi_of_mixture(gravel: float, sand: float, mud: float) -> float:
 # text states the thresholds in prose — "Sediments with only 0.01 to <5 weight
 # percent gravel are classified as slightly gravelly, and sediments with >=30
 # weight percent are classified as gravel" — and cites "Folk, 1954, fig. 1a,
-# table 1; 1980, p. 25-28, table 1". Folk (1954) itself is cited by APL-UW
-# TR 9407's reference list (``external:APLTM9407.md:3313``) but is not in the
-# local corpus.
+# table 1; 1980, p. 25-28, table 1". Folk (1954) is also in APL-UW TR
+# 9407's reference list.
 _FOLK_CLASS_LIMITS = {
     (0.80, 1.00): ((0.0, 1.0, 'G'),),
     (0.30, 0.80): ((0.0, 0.5, 'mG'), (0.5, 0.9, 'msG'), (0.9, 1.0, 'sG')),
@@ -466,6 +469,7 @@ def fetch_bottom_mars(
     *,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
+    water_density: Optional[float] = None,
     model: str = DEFAULT_GRAIN_SIZE_MODEL,
     hamilton_fit: Optional[str] = None,
     max_distance_km: Optional[float] = None,
@@ -477,25 +481,29 @@ def fetch_bottom_mars(
     """Model-ready bottom from the nearest MARS sample at a ``(lat, lon)`` point.
 
     Convenience wrapper: :func:`fetch_mars_sediment` →
-    :func:`uacpy.data.bottom_from_grain_size`. ``water_sound_speed`` (m/s)
+    :meth:`~uacpy.core.environment.BoundaryProperties.from_grain_size`.
+    ``water_sound_speed`` (m/s)
     scales the grain-size velocity ratio to the in-situ near-seabed water;
-    ``None`` uses the Hamilton reference. ``model`` picks the grain-size
+    ``None`` uses the Hamilton reference.
+    ``water_density`` (g/cm³) is the near-seabed water the density
+    ratio is carried against; ``None`` uses the package's one water (1.027).
+    ``model`` picks the grain-size
     relations (``'hamilton'`` or ``'apl-uw'``); a sample coarser or finer than
     the chosen relations are fitted over is converted at the nearer end of
     that fit, with a ``ValidityWarning`` naming the sample and the route its ϕ
     came from.
     """
-    from uacpy.core.sediment import canonical_grain_size_selection
-    model, hamilton_fit = canonical_grain_size_selection(
+    from uacpy.core.sediment import _canonical_grain_size_selection
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who='fetch_bottom_mars')
     sample = fetch_mars_sediment(
         point, max_distance_km=max_distance_km, layer=layer,
         base_url=base_url, timeout=timeout, verbose=verbose)
     _warn_outside_the_fit(sample, model)
-    bottom = bottom_from_grain_size(
+    bottom = BoundaryProperties.from_grain_size(
         sample.grain_size_phi, roughness=roughness, model=model,
         hamilton_fit=hamilton_fit,
-        water_sound_speed=water_sound_speed)
+        water_sound_speed=water_sound_speed, water_density=water_density)
     # Point samples are sparse, so the nearest one can sit far from the
     # requested position; the sample's own record
     # says where it came from, so ``citations(env)`` reports the hop and

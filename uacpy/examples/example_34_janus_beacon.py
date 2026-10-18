@@ -12,9 +12,7 @@ uacpy.io.write_wav
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,7 +42,7 @@ print(f"  band     : Fc={janus.FC_INITIAL / 1e3:.2f} kHz, "
 
 # 32 preamble chips + 144 data chips of FH-BFSK.
 waveform = comms.janus_transmit(packet, sample_rate=fs)
-uacpy.io.write_wav(OUT / 'example_34_janus.wav', waveform, fs,
+uacpy.io.write_wav(OUT / 'example_34_janus.wav', waveform, fs, normalize=True,
                    metadata={'title': 'JANUS baseline packet',
                              'comment': 'NATO STANAG 4748, initial band'})
 print(f"  waveform : {waveform.size} samples, {waveform.size / fs:.2f} s @ "
@@ -67,9 +65,9 @@ received = received + np.sqrt(
 # janus_detect returns the GO-CFAR statistic the receiver searches;
 # janus_receive detects, demodulates, decodes and parses the packet.
 start, metric = comms.janus_detect(received, fs)
-decoded, crc_ok = comms.janus_receive(received, fs)
+decoded, reception = comms.janus_receive(received, fs)
 print(f"  preamble : detected at sample {start} (GO-CFAR)")
-print(f"  CRC      : {'OK' if crc_ok else 'FAIL'}")
+print(f"  CRC      : {'OK' if reception.crc_ok else 'FAIL'}")
 print(f"  decoded  : class {decoded.class_id}, app type {decoded.app_type}, "
       f"mobility {decoded.mobility}, "
       f"payload match {np.array_equal(decoded.app_data, app_data)}")

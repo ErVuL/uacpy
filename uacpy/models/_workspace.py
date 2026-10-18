@@ -146,8 +146,8 @@ def _release_work_dir(claim) -> None:
     The claim carries the thread that took it, because the release does not
     always run there: the finalizer backing it fires wherever the garbage
     collector happens to be, which was measured running on ``MainThread`` for
-    a claim taken on a worker. Matching the *calling* thread instead made that
-    release a silent no-op and leaked the claim.
+    a claim taken on a worker. Matching the *calling* thread instead would
+    make that release a silent no-op and leak the claim.
 
     A claim the registry no longer holds for that owner is ignored, so a
     double release (``cleanup_work_dir`` and then the finalizer) cannot free a
@@ -257,9 +257,9 @@ def scratch_subdir(model, name: str):
     The redirect is recorded in a thread-local map keyed by the model
     rather than written to ``model.work_dir``: the attribute is shared state
     that :meth:`~uacpy.models.base.PropagationModel._setup_file_manager`
-    reads on every run, so mutating it made a concurrent single-depth run on
-    the same model claim — and be refused for — a ``source_depth_*``
-    directory it never asked for, and left the instance pointing inside a
+    reads on every run, so mutating it would make a concurrent single-depth
+    run on the same model claim — and be refused for — a ``source_depth_*``
+    directory it never asked for, and leave the instance pointing inside a
     subdirectory if a run raised between the two writes. Keying by
     ``id(model)`` keeps a model a hook runs from inheriting the redirect of
     the model that runs it."""
@@ -352,8 +352,9 @@ class FileManager:
         Prefix for temporary directory names. Default is ``'uacpy_'``.
     cleanup : bool, optional
         Whether :meth:`finish` removes the scratch files. Default is True.
-        Both ``__exit__`` and the model recipe (in ``models/base.py``'s module
-        docstring) go through :meth:`finish` from a ``finally``, so a run lets
+        Both ``__exit__`` and a model's run
+        (:meth:`~uacpy.models.base.PropagationModel._run_engine`) go through
+        :meth:`finish` from a ``finally``, so a run lets
         go of its directory the same way whether it succeeded or raised. What
         *this* class decides is how much gets removed; see
         :meth:`cleanup_work_dir`.

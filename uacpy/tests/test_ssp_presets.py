@@ -106,7 +106,7 @@ class TestMackenzieIsEvaluatedOnTheDepthsGiven:
     def _build(self, formula, lat):
         return SoundSpeedProfile.from_temperature_salinity(
             self.z, np.full(4, 2.0), np.full(4, 34.7), formula=formula,
-            latitude_deg=lat).sound_speed[:, 0]
+            latitude=lat).sound_speed[:, 0]
 
     @pytest.mark.parametrize('lat', [0.0, 45.0, 80.0])
     def test_mackenzie_ignores_the_latitude(self, lat):
@@ -124,7 +124,7 @@ class TestMackenzieIsEvaluatedOnTheDepthsGiven:
         np.testing.assert_array_equal(
             self._build('unesco', 30.0),
             sound_speed_at_depth(2.0, 34.7, self.z, formula='unesco',
-                                 latitude_deg=30.0))
+                                 latitude=30.0))
 
 
 class TestTwoColumnsAreNotTwoPairs:

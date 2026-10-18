@@ -1,12 +1,12 @@
 """What an array of receivers sees: steering, covariance and
 beamforming.
 
-:func:`steering_vectors`, :func:`snapshots` / :func:`sample_covariance`, the
-Bartlett and MVDR processors (:func:`bartlett`, :func:`mvdr`, over any bank
-of weight rows) and the MUSIC spectrum, :func:`beamform` along one range
-line and :func:`beamform_field` over a whole modelled field, with the
-array-gain references (:func:`plane_wave_array_gain`,
-:func:`matched_replica_gain`).
+:func:`steering_vectors`, :func:`snapshots` / :meth:`Snapshots.covariance`,
+the Bartlett and MVDR processors (:func:`bartlett`, :func:`mvdr`, over any
+bank of weight rows) and the MUSIC spectrum, :func:`beamform_field` over a
+whole modelled field (its SNR in dB through
+:meth:`BeamformedField.snr_dB`), with the array-gain references
+(:func:`plane_wave_array_gain`, :func:`matched_replica_gain`).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from uacpy.core.exceptions import (ConfigurationError, FallbackWarning,
                                    ValidityWarning)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._beamforming import (
-    loaded_inverse, quadratic_form, snapshot_covariance,
+    MVDR_DIAGONAL_LOADING, loaded_inverse, quadratic_form, snapshot_covariance,
 )
 from uacpy.acoustic_signal._results import PlottedResult, ResultTuple
 from uacpy.core._export import join_complex
@@ -39,46 +39,12 @@ from uacpy.acoustic_signal.windows import _default_noverlap, _fk_tapers
 # needs, and the conventional and adaptive spectra over them.
 # ──────────────────────────────────────────────────────────────────────
 
-class BeamformResult(ResultTuple,
-                     namedtuple("BeamformResult", "snr angles peak_snr")):
-    """Conventional beamformer scan along one range line: ``snr`` (dB) per
-    look angle and range, the look ``angles`` (deg) and the ``peak_snr``
-    (dB).
-
-    The tuple is the measurement, so ``snr, angles, peak_snr = ...``
-    keeps working. ``ranges`` (m), the axis of ``snr`` after the angle one,
-    rides as an attribute when :func:`beamform` was given it, ``None``
-    otherwise; it survives pickling and copying and takes no part in
-    equality.
-    """
-
-    _attrs = ("ranges",)
-
-    def __new__(cls, snr, angles, peak_snr, *, ranges=None):
-        self = super().__new__(cls, snr, angles, peak_snr)
-        self.ranges = ranges
-        return self
-
-    def _field_units(self):
-        return {"snr": "dB", "angles": "deg", "peak_snr": "dB"}
-
-    def _declared_dims(self):
-        # snr leads the fields, so its axes are named here rather than
-        # matched by length against the fields after it.
-        rest = "ranges" if self.ranges is not None else "snr_dim1"
-        return {"snr": ("angles", rest)}
-
-    def _axis_coords(self):
-        return ({} if self.ranges is None
-                else {"ranges": (np.asarray(self.ranges, dtype=float), "m")})
-
-
 class Snapshots(ResultTuple, namedtuple("Snapshots", "frequency data")):
     """Complex single-frequency snapshots, and the bin they were read at.
 
     The tuple is the measurement, so ``frequency, data = snapshots(...)``
     keeps working. ``data`` is ``(n_elements, n_snapshots)``, the shape
-    :func:`sample_covariance` and :func:`uacpy.sonar.csdm` take.
+    :func:`uacpy.sonar.csdm` takes; :meth:`covariance` is that estimate.
 
     ``frequency`` is the DFT bin actually used, which is not the frequency
     asked for: a 1024-point segment at 2 kHz resolves 1.95 Hz, so a request
@@ -91,9 +57,12 @@ class Snapshots(ResultTuple, namedtuple("Snapshots", "frequency data")):
     __slots__ = ()
 
     def covariance(self, *, diagonal_loading: float = 0.0):
-        """``sample_covariance`` of these snapshots, for convenience."""
-        return sample_covariance(self.data,
-                                 diagonal_loading=diagonal_loading)
+        """The covariance ``K = (d dH)/L`` of these snapshots, plus
+        ``diagonal_loading · tr(K)/N`` on its diagonal: what
+        :func:`uacpy.sonar.csdm` returns for ``data``, through the same
+        kernel."""
+        return snapshot_covariance(self.data, "Snapshots.covariance",
+                                   diagonal_loading=diagonal_loading)
 
     def _field_units(self):
         # The snapshots are unscaled DFT bins of the segments.
@@ -101,11 +70,11 @@ class Snapshots(ResultTuple, namedtuple("Snapshots", "frequency data")):
 
 
 def snapshots(data, sample_rate, frequency, *, nperseg, noverlap=None,
-              window=None):
+              window="boxcar", axis=0):
     """Single-frequency snapshots from an array time record.
 
     The bridge between what an array records and what the covariance
-    estimators take. :func:`sample_covariance` averages over snapshots, but
+    estimators take. :func:`uacpy.sonar.csdm` averages over snapshots, but
     a hydrophone array delivers a real time series per element; getting from
     one to the other means segmenting the record, windowing, transforming
     each segment and reading one bin — with a transpose at the end, because
@@ -115,7 +84,8 @@ def snapshots(data, sample_rate, frequency, *, nperseg, noverlap=None,
     Parameters
     ----------
     data : ndarray, shape ``(n_samples, n_elements)``
-        The array record, real or complex.
+        The array record, real or complex; ``(n_elements, n_samples)`` with
+        ``axis=1``.
     sample_rate : float
         Sampling rate (Hz).
     frequency : float
@@ -132,12 +102,16 @@ def snapshots(data, sample_rate, frequency, *, nperseg, noverlap=None,
         rectangular or Hann window, 78 % for flat-top). Overlapped segments
         are correlated, so they buy fewer independent snapshots than their
         count suggests.
-    window : array_like or str, optional
-        Time taper, as :func:`fk_transform` takes it. Default ``None``, a
-        rectangular window (as on :func:`fk_transform`): an on-bin tone keeps
-        its full amplitude. Pass ``'hann'`` to trade that (a Hann halves a
-        snapshot's amplitude) for lower leakage from strong neighbouring
-        bins.
+    window : str or tuple, optional
+        Time taper, a :func:`scipy.signal.get_window` spec as
+        :func:`fk_transform` takes it. Default ``'boxcar'``, no taper (as on
+        :func:`fk_transform`), which ``None`` also selects: an on-bin tone
+        keeps its full amplitude. Pass ``'hann'`` to trade that (a Hann
+        halves a snapshot's amplitude) for lower leakage from strong
+        neighbouring bins.
+    axis : int, optional
+        The time axis of ``data``. Default ``0``, ``(n_samples,
+        n_elements)``.
 
     Returns
     -------
@@ -159,6 +133,13 @@ def snapshots(data, sample_rate, frequency, *, nperseg, noverlap=None,
         raise ConfigurationError(
             f"snapshots: data must be 2-D (n_samples, n_elements); got "
             f"shape {d.shape}.")
+    try:
+        d = np.moveaxis(d, int(axis), 0)
+    except (np.exceptions.AxisError, TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"snapshots: axis={axis!r} is not an axis of the 2-D record "
+            f"shaped {d.shape}; pass 0 for (n_samples, n_elements) or 1 for "
+            f"(n_elements, n_samples).") from exc
     nt, nx = d.shape
     fs = float(sample_rate)
     if not fs > 0 or not np.isfinite(fs):
@@ -201,43 +182,6 @@ def snapshots(data, sample_rate, frequency, *, nperseg, noverlap=None,
             f"snapshots: no whole segment fits — nperseg={seg} with "
             f"n_samples={nt}.")
     return Snapshots(bin_frequency, np.asarray(columns).T)
-
-
-def sample_covariance(snapshots, *, diagonal_loading: float = 0.0):
-    """Spatial covariance ``R = <x x^H>`` from snapshots.
-
-    A non-finite snapshot (dead hydrophone) is refused here — one NaN
-    poisons every covariance entry and the downstream Bartlett surface
-    would come back all-NaN with no diagnostic.
-
-    :func:`uacpy.sonar.csdm` is the same estimate under the matched-field
-    name; both call ``core._beamforming.snapshot_covariance``, so they carry
-    the same guards. This one adds ``diagonal_loading``.
-
-    Parameters
-    ----------
-    snapshots : ndarray
-        Shape ``(n_elements, n_snapshots)`` complex array data.
-    diagonal_loading : float
-        Fraction of ``trace(R)/N`` added to the diagonal for robustness.
-
-    Returns
-    -------
-    ndarray
-        Hermitian covariance matrix ``(n_elements, n_elements)``.
-    """
-    if not diagonal_loading >= 0.0:
-        raise ConfigurationError(
-            f"sample_covariance: diagonal_loading must be >= 0 (got "
-            f"{diagonal_loading!r}); it scales the trace(R)/N ridge added "
-            f"to the diagonal, and only a non-negative ridge regularises R.")
-    # The shared covariance core (core/_beamforming): the same average and the
-    # same shape/L/finiteness checks as uacpy.sonar.csdm.
-    r = snapshot_covariance(snapshots, "sample_covariance")
-    n = r.shape[0]
-    if diagonal_loading > 0.0:
-        r = r + diagonal_loading * (np.trace(r).real / n) * np.eye(n)
-    return r
 
 
 def _unit_rows(weights):
@@ -347,7 +291,7 @@ def _powerless_covariance(R, who: str) -> bool:
     ``diagonal_loading`` is a *fraction of* ``trace(R)/N``, so it vanishes with
     the trace: it stabilises a rank-deficient covariance that still carries
     power, but cannot rescue an all-zero one. That case is ordinary data, not a
-    contrived input — ``sample_covariance`` of a silent segment (a dead
+    contrived input — the covariance of a silent segment (a dead
     element, a stretch of digital silence) returns exactly it. With no power
     MVDR's inverse is singular and MUSIC's noise subspace is arbitrary, so both
     decline rather than return a finite *uniform* pseudospectrum that looks
@@ -368,7 +312,8 @@ def _powerless_covariance(R, who: str) -> bool:
     return True
 
 
-def mvdr(covariance, weights, *, diagonal_loading: float = 1e-6,
+def mvdr(covariance, weights, *,
+         diagonal_loading: float = MVDR_DIAGONAL_LOADING,
          normalize: Optional[str] = None):
     """MVDR / Capon power: ``1 / (w^H (R + δ I)^-1 w)`` for every weight row
     ``w``, each scaled to unit norm, with ``R`` the element ``covariance``
@@ -402,7 +347,14 @@ def mvdr(covariance, weights, *, diagonal_loading: float = 1e-6,
     weights : ndarray
         Weight rows ``(..., N)``, or ``(F, ..., N)`` against a stack.
     diagonal_loading : float, optional
-        Loading as a fraction of ``tr(R)/N``. Default 1e-6.
+        Loading as a fraction of ``tr(R)/N``. Default 1e-2
+        (``MVDR_DIAGONAL_LOADING``, uacpy guidance), the one MVDR default
+        :func:`uacpy.sonar.mvdr` and
+        :meth:`~uacpy.core.results.Covariance.mvdr` share. For the
+        minimum-variance processor "it may be necessary to diagonally load
+        the matrix, i.e., add some small quantity to the diagonal"
+        (Stergiopoulos, *Advanced Signal Processing Handbook*, §4.2.3),
+        which gives no value.
     normalize : {None, 'max'}, optional
         Scale of the output (see above).
     """
@@ -511,10 +463,10 @@ def shading_taper(n_elements: int, window: str = "hann"):
     So ``||w|| = sqrt(n_elements)`` and a ``'boxcar'`` taper is all-ones — the
     normalisation that leaves a :func:`steering_vectors` row unit-norm after
     ``steering_vectors(...) * shading_taper(N)``, and leaves ``trace(R)``
-    alone when the taper is applied to element data. Normalising to unit
-    *mean* instead scaled every power the taper touched by ``mean(w**2)``,
-    which is +2.04 dB for a Hann window on 16 elements — in the direction
-    that makes an array look better than it is.
+    alone when the taper is applied to element data. A unit-*mean* taper
+    would scale every power it touches by ``mean(w**2)``, +2.04 dB for a
+    Hann window on 16 elements — in the direction that makes an array look
+    better than it is.
 
     ``window`` is any ``scipy.signal.get_window`` name (e.g. ``'hann'``,
     ``'hamming'``, ``('chebwin', 30)``, ``('taylor', ...)``).
@@ -524,137 +476,15 @@ def shading_taper(n_elements: int, window: str = "hann"):
     n_elements : int
         Elements in the array.
     window : str or tuple, optional
-        A :func:`scipy.signal.get_window` spec. Default ``'hann'``.
+        A :func:`scipy.signal.get_window` spec. Default ``'hann'``, which
+        ``None`` also selects; ``'boxcar'`` is unshaded.
     """
-    w = get_window(window, int(n_elements), fftbins=False)
+    w = get_window("hann" if window is None else window, int(n_elements),
+                   fftbins=False)
     return w / np.sqrt(np.mean(w ** 2))
 
 
-def beamform(
-    pressure: np.ndarray,
-    positions_m: np.ndarray,
-    angles_deg: np.ndarray,
-    frequency: float,
-    *,
-    source_level_dB: float,
-    noise_level_dB: float,
-    sound_speed: float = DEFAULT_SOUND_SPEED,
-    weights: Optional[np.ndarray] = None,
-    ranges=None,
-) -> BeamformResult:
-    """
-    Plane-wave beamformer — returns signal-to-noise ratio per look angle.
-
-    Performs conventional plane-wave beamforming on ``pressure`` interpreted
-    as a transfer function from a 0-dB source. The returned value is the
-    receive level minus the ambient noise level, i.e. SNR in dB. The first
-    four arguments are in :func:`beamform_field`'s order.
-
-    Parameters
-    ----------
-    pressure : ndarray
-        Pressure transfer-function data with shape (n_phones, n_ranges).
-        Can be complex-valued.
-    positions_m : ndarray
-        Hydrophone positions along the array axis (m), one per row of
-        ``pressure``.
-    angles_deg : ndarray
-        Beam angles in degrees relative to broadside, e.g.
-        ``np.arange(-90, 91)``.
-    frequency : float
-        Frequency in Hz.
-    source_level_dB : float
-        Source level in dB re 1 µPa @ 1 m. Required: the SNR is only as
-        right as this number, so there is no default to fall back on.
-    noise_level_dB : float
-        **Per-element, wideband** noise level in dB at the receiver
-        (i.e. dB re 1 µPa², already integrated over the signal
-        bandwidth). The unit-normalised steering vector already folds
-        the array gain ``10·log10(N)`` into ``|e.conj() @ pressure|``, so do
-        not pre-correct it for the number of elements. For a PSD
-        in dB re 1 µPa²/Hz, multiply by the integration bandwidth in
-        Hz before passing. Pass ``0`` (with ``source_level_dB=0``) to read
-        the receive level of a 0-dB source.
-    sound_speed : float, optional
-        Reference sound speed for steering vectors in m/s.
-    weights : ndarray, optional
-        Per-element shading, one value per hydrophone — e.g. from
-        :func:`shading_taper`, but any real or complex vector will do.
-        Applied to the steering bank and
-        re-normalised to unit row norm, so the noise gain stays 1 and the
-        peak of a matched plane wave is the array gain the taper leaves,
-        ``10*log10(|sum w|**2 / ||w||**2)``. Default: unshaded.
-    ranges : array_like, optional
-        The range (m) of each column of ``pressure``, carried on the result
-        as ``BeamformResult.ranges`` so the ``snr`` axis keeps its values.
-
-    Returns
-    -------
-    BeamformResult
-        ``(snr, angles, peak_snr)``, with ``ranges`` as an attribute:
-    snr : ndarray
-        Signal-to-noise ratio in dB with shape (n_angles, n_ranges).
-    angles : ndarray
-        Angles used for beamforming (degrees from broadside).
-    peak_snr : float
-        Maximum value of ``snr``.
-
-    Notes
-    -----
-    The beamformer computes::
-
-        snr = 20·log10(|e.conj() @ pressure|) + source_level_dB - noise_level_dB
-
-    where ``e`` is the unit-normalised steering-vector matrix from
-    :func:`steering_vectors`.
-
-    References
-    ----------
-    Original MATLAB code by mbp, 2 March 2001
-    """
-    angles = np.atleast_1d(np.asarray(angles_deg, dtype=float))
-    if angles.ndim != 1:
-        raise ConfigurationError(
-            f"beamform: angles_deg must be a 1-D array of look angles "
-            f"(degrees); got shape {angles.shape}.")
-    pressure = require_finite_signal(pressure, "beamform", "pressure")
-    frequency = require_positive_finite_scalar(
-        frequency, "beamform", "frequency", " Hz")
-    sound_speed = require_positive_finite_scalar(
-        sound_speed, "beamform", "sound_speed", " m/s")
-    for name, level in (("source_level_dB", source_level_dB),
-                        ("noise_level_dB", noise_level_dB)):
-        if not (np.ndim(level) == 0 and np.isfinite(level)):
-            raise ConfigurationError(
-                f"beamform: {name} must be a finite scalar in dB; got "
-                f"{level!r}.")
-    if ranges is not None:
-        ranges = np.array(ranges, dtype=float)
-        if pressure.ndim != 2 or ranges.shape != (pressure.shape[1],):
-            raise ConfigurationError(
-                f"beamform: ranges gives the range of each column of a "
-                f"(n_phones, n_ranges) pressure, so it must be 1-D with "
-                f"{pressure.shape[1] if pressure.ndim == 2 else 'n_ranges'} "
-                f"values; got shape {ranges.shape} for pressure of shape "
-                f"{pressure.shape}.")
-    e = _shaded_steering(positions_m, angles, frequency, sound_speed, weights,
-                         'beamform')
-    # Matched filter, the same Hermitian form bartlett/mvdr/music_spectrum use.
-    beamformed = e.conj() @ pressure
-    mag = np.abs(beamformed)
-    if not np.any(mag):
-        warnings.warn(
-            "beamform: all beam outputs are zero (all-zero pressure?); SNR is "
-            "-inf at every angle — check the input pressure.",
-            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    with np.errstate(divide='ignore'):
-        snr = 20 * np.log10(mag) + float(source_level_dB) - float(noise_level_dB)
-    peak_snr = np.max(snr)
-
-    return BeamformResult(snr, angles, peak_snr, ranges=ranges)
-
-
-def _shaded_steering(positions_m, angles_deg, frequency, sound_speed, weights,
+def _shaded_steering(positions, angles_deg, frequency, sound_speed, weights,
                      who):
     """Unit-norm steering bank, optionally shaded and re-normalised.
 
@@ -669,7 +499,7 @@ def _shaded_steering(positions_m, angles_deg, frequency, sound_speed, weights,
                                                " Hz")
     sound_speed = require_positive_finite_scalar(sound_speed, who,
                                                  "sound_speed", " m/s")
-    e = steering_vectors(positions_m, angles_deg, frequency, sound_speed)
+    e = steering_vectors(positions, angles_deg, frequency, sound_speed)
     if weights is None:
         return e
     # Complex is kept, not cast away: a shading may carry phase — a fixed
@@ -706,7 +536,7 @@ def _shaded_steering(positions_m, angles_deg, frequency, sound_speed, weights,
 
 
 _BeamformedFields = namedtuple("BeamformedField",
-                               "response angles element_power frequencies")
+                               "response angles_deg element_power frequencies")
 
 
 class BeamformedField(PlottedResult, _BeamformedFields):
@@ -736,9 +566,9 @@ class BeamformedField(PlottedResult, _BeamformedFields):
 
     _attrs = ("grid_coords",)
 
-    def __new__(cls, response, angles, element_power, frequencies, *,
+    def __new__(cls, response, angles_deg, element_power, frequencies, *,
                 grid_coords=None):
-        self = super().__new__(cls, response, angles, element_power,
+        self = super().__new__(cls, response, angles_deg, element_power,
                                frequencies)
         self.grid_coords = grid_coords
         return self
@@ -754,7 +584,7 @@ class BeamformedField(PlottedResult, _BeamformedFields):
         return self.power.max(axis=0)
 
     @property
-    def best_angle(self):
+    def best_angle_deg(self):
         """Look angle (deg) that won at each point; NaN at a point with no
         beam (a blank cell of the field).
 
@@ -763,10 +593,54 @@ class BeamformedField(PlottedResult, _BeamformedFields):
         pairs and the interference decides which one wins.
         """
         power = self.power
-        angle = np.asarray(self.angles, dtype=float)[
+        angle = np.asarray(self.angles_deg, dtype=float)[
             np.argmax(power, axis=0)]
         # A point with no beam (NaN power) has no winning angle.
         return np.where(np.isnan(power).any(axis=0), np.nan, angle)
+
+    def snr_dB(self, source_level_dB, noise_level_dB):
+        """Signal-to-noise ratio (dB) per look angle and grid point:
+        ``20·log10|response| + source_level_dB - noise_level_dB``, with
+        ``response`` read as the beam output of a transfer function from a
+        0-dB source. The level of the Acoustics Toolbox's
+        ``Matlab/beamform.m`` (vendored in ``third_party/Acoustics-Toolbox``),
+        whose ``power = 20 * log10(abs(e * pressure)) + SL - NL`` this is.
+
+        Parameters
+        ----------
+        source_level_dB : float
+            Source level in dB re 1 µPa @ 1 m.
+        noise_level_dB : float
+            **Per-element, wideband** noise level in dB at the receiver (dB
+            re 1 µPa², already integrated over the signal bandwidth). The
+            unit-normalised steering rows fold the array gain
+            ``10·log10(N)`` into ``|response|``, so do not pre-correct it for
+            the number of elements. For a PSD in dB re 1 µPa²/Hz, add
+            ``10·log10`` of the integration bandwidth in Hz first. Pass ``0``
+            with ``source_level_dB=0`` to read the receive level of a 0-dB
+            source.
+
+        Returns
+        -------
+        ndarray
+            The SNR in dB, the shape of ``response``; ``-inf`` where the
+            beam output is zero.
+        """
+        for name, level in (("source_level_dB", source_level_dB),
+                            ("noise_level_dB", noise_level_dB)):
+            if not (np.ndim(level) == 0 and np.isfinite(level)):
+                raise ConfigurationError(
+                    f"BeamformedField.snr_dB: {name} must be a finite "
+                    f"scalar in dB; got {level!r}.")
+        mag = np.abs(self.response)
+        if not np.any(mag):
+            warnings.warn(
+                "BeamformedField.snr_dB: every beam output is zero (an "
+                "all-zero pressure?), so the SNR is -inf at every angle.",
+                ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        with np.errstate(divide='ignore'):
+            return (20.0 * np.log10(mag) + float(source_level_dB)
+                    - float(noise_level_dB))
 
     def array_gain(self):
         """Realised array gain (dB) at each point:
@@ -791,7 +665,7 @@ class BeamformedField(PlottedResult, _BeamformedFields):
     def _field_units(self):
         # response and element_power carry the input field's samples,
         # steered and summed, unscaled.
-        return {"response": None, "angles": "deg", "element_power": None,
+        return {"response": None, "angles_deg": "deg", "element_power": None,
                 "frequencies": "Hz"}
 
     def _grid_dims(self):
@@ -808,7 +682,7 @@ class BeamformedField(PlottedResult, _BeamformedFields):
         # angle, the grid, and the band when there is one.
         band = ("frequencies",) if self.frequencies is not None else ()
         grid = self._grid_dims()
-        return {"response": ("angles",) + grid + band,
+        return {"response": ("angles_deg",) + grid + band,
                 "element_power": grid + band}
 
     def _axis_coords(self):
@@ -833,19 +707,19 @@ class BeamformedField(PlottedResult, _BeamformedFields):
                                for d in grid}
         return out
 
-    def to_time_trace(self, angle_deg, *, range, source_spectrum=None,
-                      source_waveform=None, sample_rate=None, window='auto',
-                      nfft=None, t_start=None):
+    def to_time_trace(self, angle_deg, *, range, sample_rate,
+                      source_waveform=None, window='boxcar', t_start=None):
         """What one beam actually receives, as a time series.
 
         Only defined for a broadband beamformer — a single frequency has no
         band to transform. Selects the look angle nearest ``angle_deg`` and
-        synthesises its complex response through the package's one IFFT
-        synthesis, the one :meth:`uacpy.Field.to_time_trace` runs, so the
-        window, the time base and the source convolution are not a second
-        implementation of them. Returns a :class:`~uacpy.Field` over
-        ``time`` with the separation pinned as its ``range``; a beam has no
-        depth, so none is pinned.
+        hands its complex response, one cell over ``frequency`` with the
+        separation as its ``range``, to the package's one route,
+        :meth:`uacpy.Field.to_time_trace`: the beam's impulse response, or
+        with ``source_waveform`` its reception, so the window, the time base
+        and the source convolution are not a second implementation of them.
+        Returns a :class:`~uacpy.Field` over ``time`` with the separation
+        pinned as its ``range``; a beam has no depth, so none is pinned.
 
         ``range`` is the source-to-array separation in metres, keyword-only
         like :meth:`Field.to_time_trace`'s, and it is required
@@ -856,29 +730,19 @@ class BeamformedField(PlottedResult, _BeamformedFields):
         the one certainly-wrong time base would be the one that said
         nothing.
 
-        ``source_spectrum`` is the transmitted signal's spectrum on this
-        object's ``frequencies`` (or ``source_waveform`` with its
-        ``sample_rate``, whose exact spectrum is evaluated there); without
-        either the result is the channel's band-limited impulse response
-        through the beam.
-
-        ``sample_rate``, ``window``, ``nfft`` and ``t_start`` are
-        :meth:`Field.to_time_trace`'s — the trace comes back at exactly
-        ``sample_rate`` when one is given, and a record shorter than the
-        waveform is refused;
-        ``window='auto'`` (the default) picks ``'hann'`` for the bare impulse
-        response and no window with a source; ``None`` is always rectangular.
-        ``t_start`` is worth setting: the default window is anchored on a
-        nominal sound speed, and a faster path arrives before the window and
-        wraps to the end of the record.
+        ``sample_rate``, ``source_waveform``, ``window`` and ``t_start`` are
+        :meth:`Field.to_time_trace`'s: the trace comes back at exactly
+        ``sample_rate``, a record shorter than the waveform is refused, and
+        ``window='boxcar'`` (the default; ``None`` takes it too) is the
+        response itself —
+        ``window='hann'`` displays the impulse response without band-edge
+        ringing. ``t_start`` is worth setting: the default window is
+        anchored on a nominal sound speed, and a faster path arrives before
+        the window and wraps to the end of the record.
         """
-        # Local because this is the only method that needs them, and
+        # Local because this is the only method that needs it, and
         # beamforming.py is imported on nearly every uacpy path.
-        from uacpy.core.results import Field, PhaseReference
-        from uacpy.acoustic_signal._synthesis import (
-            check_source_spectrum, refuse_record_shorter_than_waveform,
-            synthesis_grid, synthesize_trace, warn_band_edge_cuts_spectrum,
-            waveform_spectrum_on)
+        from uacpy.core.results import Field
         who = "BeamformedField.to_time_trace"
         if self.frequencies is None:
             raise ConfigurationError(
@@ -895,57 +759,27 @@ class BeamformedField(PlottedResult, _BeamformedFields):
                 f"grid point first — a whole plane of receptions is a set "
                 f"of traces, not one."
             )
-        freqs = np.asarray(self.frequencies, dtype=float)
-        spectrum = waveform_spectrum_on(freqs, source_waveform, sample_rate,
-                                        source_spectrum, who)
-        if spectrum is not None:
-            check_source_spectrum(spectrum, freqs.size, who)
-        if window == 'auto':
-            window = 'hann' if spectrum is None else None
-        # The transmitted signal's duration, for the record-edge notice.
-        if source_waveform is not None:
-            pulse_s = np.size(source_waveform) / float(sample_rate)
-        elif spectrum is None:
-            pulse_s = 0.0
-        else:
-            pulse_s = None
-        idx = int(np.argmin(np.abs(np.asarray(self.angles, dtype=float)
+        idx = int(np.argmin(np.abs(np.asarray(self.angles_deg, dtype=float)
                                    - float(angle_deg))))
-        separation = float(range)
-        plan = synthesis_grid(freqs, window=window, nfft=nfft,
-                              sample_rate=sample_rate, n_samples_floor=0,
-                              who=who)
-        if source_waveform is not None:
-            refuse_record_shorter_than_waveform(
-                plan.df, np.asarray(source_waveform, dtype=float),
-                sample_rate, who)
-        warn_band_edge_cuts_spectrum(spectrum, window, who, freqs=freqs,
-                                     waveform=source_waveform,
-                                     sample_rate=sample_rate)
-        time, trace = synthesize_trace(
-            np.asarray(self.response)[idx], spectrum, plan, range=separation,
-            t_start=t_start, c_max=0.0, c0=0.0, c_slow=0.0,
-            cell_label=f"range {separation:g} m", who=who,
-            pulse_s=pulse_s)
-        return Field(
-            data=trace, coords={'time': time}, pinned={'range': separation},
-            phase_reference=PhaseReference.TIME_DOMAIN_NATIVE,
-            synthesis_window=window,
-            # Without a source spectrum the trace is the band-limited
-            # impulse response, per second.
-            **({'kind': 'impulse_response', 'unit': '1/s'}
-               if spectrum is None else {}))
+        beam = Field(data=np.asarray(self.response)[idx],
+                     coords={'frequency': np.asarray(self.frequencies,
+                                                     dtype=float)},
+                     pinned={'range': float(range)})
+        return beam._cell_time_trace(sample_rate,
+                                     source_waveform=source_waveform,
+                                     window=window, t_start=t_start, who=who)
 
 
-def beamform_field(pressure, positions_m, angles_deg, frequency, *,
+def beamform_field(pressure, positions, angles_deg, frequency, *,
                    sound_speed: float = DEFAULT_SOUND_SPEED,
                    weights=None, grid_coords=None) -> BeamformedField:
     """Conventional beamformer over every point of a field.
 
-    :func:`beamform` answers "what does this array hear along one range
-    line", in dB SNR. This answers "what does it hear at every point of a
-    modelled field", in power, and keeps the look angle that won — which is
-    what a coverage map, a realised array gain or a re-steering study needs.
+    It answers "what does this array hear at every point of a modelled
+    field": the complex beam output, its power, and the look angle that won
+    — what a coverage map, a realised array gain or a re-steering study
+    needs. :meth:`BeamformedField.snr_dB` levels it with a source level and
+    a per-element noise level.
 
     Parameters
     ----------
@@ -953,7 +787,7 @@ def beamform_field(pressure, positions_m, angles_deg, frequency, *,
         Complex pressure, element axis FIRST: ``(n_elements, *grid)``. The
         grid may be anything — ``(n_ranges,)``, ``(n_depths, n_ranges)`` —
         and comes back unchanged behind the angle axis.
-    positions_m : array_like
+    positions : array_like
         Element positions (m), one per element of ``pressure``'s first axis.
     angles_deg : array_like
         Look angles to scan, in degrees from broadside.
@@ -986,10 +820,10 @@ def beamform_field(pressure, positions_m, angles_deg, frequency, *,
     Returns
     -------
     BeamformedField
-        ``response`` (complex) ``(n_angles, *grid)``, ``angles``,
+        ``response`` (complex) ``(n_angles, *grid)``, ``angles_deg``,
         ``element_power`` ``(*grid,)`` and ``frequencies``, with
         ``grid_coords`` as an attribute; with ``.power``, ``.best``,
-        ``.best_angle``, ``.array_gain()`` and — for a band —
+        ``.best_angle_deg``, ``.array_gain()`` and — for a band —
         ``.to_time_trace()``.
 
     Examples
@@ -1002,18 +836,18 @@ def beamform_field(pressure, positions_m, angles_deg, frequency, *,
     >>> p = np.exp(-2j * np.pi * positions * np.sin(np.radians(20.0)))
     >>> beams = beamform_field(p[:, None], positions,
     ...                        np.linspace(-60.0, 60.0, 121), 1500.0)
-    >>> float(beams.best_angle[0]), round(float(beams.array_gain()[0]), 2)
+    >>> float(beams.best_angle_deg[0]), round(float(beams.array_gain()[0]), 2)
     (20.0, 12.04)
     """
     p = np.asarray(pressure)
     if p.dtype == object or p.size == 0:
         # Refuses an empty or non-numeric pressure in the shared words.
         require_finite_signal(pressure, "beamform_field", "pressure")
-    pos = np.asarray(positions_m, dtype=float).ravel()
+    pos = np.asarray(positions, dtype=float).ravel()
     if p.ndim < 1 or p.shape[0] != pos.size:
         raise ConfigurationError(
             f"beamform_field: the FIRST axis of pressure is the element "
-            f"axis, so it must be {pos.size} long to match positions_m; got "
+            f"axis, so it must be {pos.size} long to match positions; got "
             f"shape {p.shape}. Grid axes follow it — e.g. "
             f"(n_elements, n_depths, n_ranges)."
         )
@@ -1073,8 +907,8 @@ def beamform_field(pressure, positions_m, angles_deg, frequency, *,
         points = blank.any(axis=-1) if freqs is not None else blank
         if points.all():
             raise ConfigurationError(
-                f"beamform_field: every grid point of pressure holds a "
-                f"non-finite element sample, so no beam can be formed.",
+                "beamform_field: every grid point of pressure holds a "
+                "non-finite element sample, so no beam can be formed.",
                 remediation="Pass a field with finite samples on every "
                             "element at the points to beamform.")
         resp[:, blank] = np.nan
@@ -1135,8 +969,8 @@ def plane_wave_array_gain(weights) -> float:
     honest: Butler & Sherman's alternating shading gives a genuinely
     NEGATIVE broadside gain, which a magnitudes-only form would erase.
 
-    This is Abraham's shaded-line-array directivity index at the DESIGN
-    frequency: ``DI ~ 10log10[(f_c/f_d)(sum w)^2 / sum w^2]`` with
+    This is Abraham's shaded-line-array directivity index (§8.4.4) at the
+    DESIGN frequency: ``DI ~ 10log10[(f_c/f_d)(sum w)^2 / sum w^2]`` with
     ``f_c = f_d``. Away from the design frequency that leading factor is
     real — see :meth:`BeamformedField.array_gain`, which measures it.
 
@@ -1236,10 +1070,11 @@ def realised_array_gain(response, element_power):
 
     Those entries are the exact quadratic form ``w^H R_n w`` for
     ``R_n = sinc(k*d_ij)``, and they land on the ``f_c/f_d`` factor in
-    Abraham's shaded-line-array directivity index,
-    ``DI ~ 10log10[(f_c/f_d)(sum w)^2 / sum w^2]`` — his "10-dB-per-
-    decade reduction when operating the array below the design
-    frequency". Abraham writes that with ``~``, and the size of the
+    Abraham's shaded-line-array directivity index (*Underwater Acoustic
+    Signal Processing*, §8.4.4),
+    ``DI ~ 10log10[(f_c/f_d)(sum w)^2 / sum w^2]``, which "illustrates a
+    10-dB-per-decade reduction when operating the array at frequencies
+    below the design". Abraham writes that with ``~``, and the size of the
     approximation is exactly statable. Writing the quadratic form as an
     integral of the array factor over ``s = sin(theta)``,
 
@@ -1316,7 +1151,7 @@ def matched_replica_gain(pressure):
                                / np.mean(np.abs(p) ** 2, axis=0))
 
 
-def _decorrelation_spacing(positions_m, weights, frequency, sound_speed,
+def _decorrelation_spacing(positions, weights, frequency, sound_speed,
                            unshaded):
     """Spacing in ``sin(theta)`` at which two beams' NOISE outputs decorrelate.
 
@@ -1340,7 +1175,7 @@ def _decorrelation_spacing(positions_m, weights, frequency, sound_speed,
     and those coincide only for an unshaded array, where both reduce to
     ``lambda/(N*d)``.
     """
-    z = np.asarray(positions_m, dtype=float).ravel()
+    z = np.asarray(positions, dtype=float).ravel()
     w = np.abs(np.asarray(weights)) ** 2
     k = 2.0 * np.pi * float(frequency) / float(sound_speed)
     # Search out to 8 unshaded cells: Blackman needs ~3, and anything
@@ -1359,7 +1194,7 @@ def _decorrelation_spacing(positions_m, weights, frequency, sound_speed,
     return float(grid[rising[0] + 1])
 
 
-def independent_beams(positions_m, angles_deg, frequency,
+def independent_beams(positions, angles_deg, frequency,
                       sound_speed: float = DEFAULT_SOUND_SPEED, *,
                       weights=None) -> float:
     """How many INDEPENDENT looks a scan over ``angles_deg`` really holds.
@@ -1396,7 +1231,7 @@ def independent_beams(positions_m, angles_deg, frequency,
 
     Parameters
     ----------
-    positions_m : array_like
+    positions : array_like
         Element coordinates along the array axis (m).
     angles_deg : array_like
         Look angles from broadside (deg), positive downward.
@@ -1412,7 +1247,7 @@ def independent_beams(positions_m, angles_deg, frequency,
         frequency, "independent_beams", "frequency", " Hz")
     sound_speed = require_positive_finite_scalar(
         sound_speed, "independent_beams", "sound_speed", " m/s")
-    pos = np.asarray(positions_m, dtype=float).ravel()
+    pos = np.asarray(positions, dtype=float).ravel()
     if pos.size < 2:
         raise ConfigurationError(
             f"independent_beams: needs at least 2 elements to have a beam "

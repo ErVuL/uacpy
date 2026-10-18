@@ -47,9 +47,7 @@ Note
 Physics-only helpers. Nothing here imports a model, a reader or a plotter —
 only core modules below them: the constants, exceptions, validators and
 warning frames; the boundary and seabed carriers that ``modal`` reads a
-half-space from; :mod:`uacpy.core.materials` inside
-:func:`bottom_loss_curve` for the named-sediment lookup — so any layer may
-import them: the data layer
+half-space from — so any layer may import them: the data layer
 uses the seawater equations (:mod:`uacpy.data.sound_speed`,
 :mod:`uacpy.data.argo`), :mod:`uacpy.core.ssp` builds profiles through
 :func:`sound_speed_at_depth` (TEOS-10 by default),
@@ -76,7 +74,6 @@ from uacpy.core.acoustics.seawater import (
 )
 from uacpy.core.acoustics.boundaries import (
     reflection_coeff,
-    bottom_loss_curve,
     critical_angle,
     pekeris_root,
 )
@@ -106,6 +103,7 @@ from uacpy.core.acoustics.arrays import (
 )
 from uacpy.core.acoustics.ray_geometry import polyline_miss_distance
 from uacpy.core.acoustics.modal import (
+    medium_density_at,
     modal_attenuation,
     modal_excitation,
     modal_field,
@@ -125,6 +123,7 @@ from uacpy.core.acoustics.levels import (
     received_level_dB,
     sound_exposure_level,
     cumulative_sound_exposure_level,
+    CumulativeExposure,
     track_exposure,
     no_energy_mask,
     sum_levels_dB,
@@ -144,7 +143,6 @@ __all__ = [
     'density',
     'doppler',
     'reflection_coeff',
-    'bottom_loss_curve',
     'critical_angle',
     'bubble_resonance',
     'bubble_surface_loss',
@@ -166,6 +164,7 @@ __all__ = [
     'wavenumber_taper',
     'wavenumbers_from_phase_speeds',
     'polyline_miss_distance',
+    'medium_density_at',
     'modal_attenuation',
     'modal_excitation',
     'modal_field',
@@ -174,6 +173,7 @@ __all__ = [
     'mode_shapes_at',
     'sound_exposure_level',
     'cumulative_sound_exposure_level',
+    'CumulativeExposure',
     'track_exposure',
     'auditory_weighting',
     'frequency_weighting',

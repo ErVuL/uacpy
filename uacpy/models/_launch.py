@@ -6,22 +6,26 @@ carries), the launch of a binary that writes a ``.prt``
 reports on failure — the fatal and warning lines of its ``.prt``, the tail
 of a captured stream — and the one thread rule: whether this process
 launches its engines single-threaded (:func:`_launch_single_threaded`) and
-the thread count an OpenMP binary gets (:func:`openmp_thread_env`)."""
+the thread count an OpenMP binary gets (:func:`openmp_thread_env`) — and the
+two argv prefixes every launch runs under: the child's raised stack limit
+(:func:`stack_limit_prefix`) and its parent-death signal
+(:func:`parent_death_prefix`)."""
 
 import errno
+import functools
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import warnings
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Callable, NamedTuple, Optional, Tuple
+from typing import Callable, List, NamedTuple, Optional, Tuple
 
 from uacpy._log import log_message
-from uacpy._stack import parent_death_prefix, stack_limit_prefix
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import (
     ExecutableNotFoundError, IOWarning, ModelExecutionError,
@@ -247,7 +251,7 @@ def run_subprocess(
     All Fortran acoustic binaries are spawned through this helper so that
     failures surface as ``ModelExecutionError`` with stdout/stderr
     attached, and so every child runs with its soft ``RLIMIT_STACK``
-    raised to the hard limit (:func:`uacpy._stack.stack_limit_prefix`;
+    raised to the hard limit (:func:`stack_limit_prefix`;
     the calling process keeps its own limit). Several Acoustics-Toolbox
     binaries (notably SPARC, whose ``MARCH`` declares twelve automatic
     ``COMPLEX(NTot1)`` arrays at ``Scooter/sparc.f90:354-355``) put large
@@ -286,7 +290,8 @@ def run_subprocess(
     proc = None
     argv = [str(c) for c in cmd]
     # setpriv sets the parent-death signal, then the stack-limit shell
-    # raises the stack, then the binary is exec'd (see uacpy._stack).
+    # raises the stack, then the binary is exec'd (see stack_limit_prefix
+    # and parent_death_prefix at the end of this module).
     prefix = parent_death_prefix() + stack_limit_prefix()
     try:
         if prefix:
@@ -560,6 +565,23 @@ def require_output(model_name: str, candidates, *, what: str, process=None,
     raise exc
 
 
+def _read_prt_if_present(filepath, *, tail_bytes: Optional[int] = None
+                         ) -> Optional[str]:
+    """:func:`~uacpy.io.read_prt`, or ``None`` when the log is absent or
+    unreadable: the read a model run makes of its own ``.prt``, which a
+    binary may not have written.
+
+    Every OS failure is caught, ``Path.exists()``'s too: it re-raises
+    anything but ENOENT/ENOTDIR/EBADF/ELOOP, so an unreadable directory
+    gives EACCES. This runs from :func:`attach_prt_tail` with a
+    ModelExecutionError in flight but not yet raised, so an escape here
+    loses it outright."""
+    try:
+        return read_prt(filepath, tail_bytes=tail_bytes)
+    except OSError:
+        return None
+
+
 def attach_prt_tail(exc, work_dir, base_name, tail_bytes: int = 2000):
     """Append the tail of the binary's ``<base>.prt`` log to ``exc``.
 
@@ -573,8 +595,8 @@ def attach_prt_tail(exc, work_dir, base_name, tail_bytes: int = 2000):
     round-trip that ``run_parallel`` relies on — the rebuilt message is
     re-derived from ``stderr``), keeping ``exc.args`` in sync.
     """
-    tail = read_prt(Path(work_dir) / f"{base_name}.prt",
-                    tail_bytes=tail_bytes)
+    tail = _read_prt_if_present(Path(work_dir) / f"{base_name}.prt",
+                                tail_bytes=tail_bytes)
     if tail is None:
         return
     block = f"\n\n.prt tail:\n{tail}"
@@ -613,7 +635,7 @@ def raise_on_fortran_fatal(model_name: str, result, work_dir, base_name, *,
     success off whatever output file happens to be on disk.
     """
     stderr = result.stderr or ''
-    prt = read_prt(Path(work_dir) / f"{base_name}.prt")
+    prt = _read_prt_if_present(Path(work_dir) / f"{base_name}.prt")
     fatal_stderr = bool(re.search(r'^\s*STOP\s+\S', stderr, re.MULTILINE))
     if not fatal_stderr and (
             prt is None or '*** FATAL ERROR ***' not in prt):
@@ -659,15 +681,24 @@ def terminate_process_group(proc) -> None:
                 pipe.close()
 
 
-#: Notes appended to a forwarded ``.prt`` line that uacpy's result
-#: overrides. ``ReadSzRz`` (``misc/SourceReceiverPositions.f90:135-138``)
-#: moves a receiver below the deck's bottom boundary onto it, and Bellhop and
-#: Scooter, the binaries that print it, return NaN at receivers below the
-#: seafloor (``mask_unresolvable_depths``), not the moved receiver's field.
+#: Notes appended to a forwarded ``.prt`` line: what uacpy's result does
+#: with it, or what the binary's source does next. ``ReadSzRz``
+#: (``misc/SourceReceiverPositions.f90:135-138``) moves a receiver below the
+#: deck's bottom boundary onto it, and Bellhop and Scooter, the binaries that
+#: print it, return NaN at receivers below that boundary
+#: (``mask_unresolvable_depths``: the seafloor on Bellhop, the deepest
+#: sediment interface on Scooter), not the moved receiver's field. After an
+#: inverse iteration that does not converge, KRAKEN and KRAKENC zero the
+#: mode's eigenvector and keep its root (``kraken.f90:665-668``,
+#: ``krakenc.f90:708-711``).
 _PRT_LINE_NOTES = {
     'Receiver below or too near the bottom bdry has been moved up':
-        ' [uacpy returns NaN at receivers below the seafloor, not the moved '
-        'receiver\'s field]',
+        ' [uacpy returns NaN at receivers below the deck\'s bottom boundary '
+        '(the deepest interface it carries), not the moved receiver\'s '
+        'field]',
+    'Inverse iteration failed to converge':
+        ' [the binary zeroes this mode\'s shape and keeps its root, so the '
+        'mode adds nothing to the field; docs/models/kraken.md §7]',
 }
 
 
@@ -682,23 +713,126 @@ def warn_on_prt_warnings(model_name: str, work_dir, base_name) -> None:
     it has just called under-sampled.
 
     These are the solver's words, not uacpy's, so they are passed through
-    verbatim rather than reinterpreted; a line uacpy's own handling
-    overrides carries a note saying so (:data:`_PRT_LINE_NOTES`).
+    verbatim rather than reinterpreted, with the ``mode = N`` line KRAKEN
+    and KRAKENC write just before a warning about one mode
+    (``krakenc.f90:709-710``); a line uacpy's handling overrides, or one
+    whose consequence the source states, carries a note
+    (:data:`_PRT_LINE_NOTES`).
     """
-    text = read_prt(Path(work_dir) / f"{base_name}.prt", tail_bytes=200000)
+    text = _read_prt_if_present(Path(work_dir) / f"{base_name}.prt", tail_bytes=200000)
     if not text:
         return
     seen, lines = set(), []
+    previous = ''
     for raw in text.splitlines():
         line = raw.strip()
-        if line.lower().startswith('warning in') and line not in seen:
-            seen.add(line)
-            lines.append(line + next((note for key, note
-                                      in _PRT_LINE_NOTES.items()
-                                      if key in line), ''))
+        if line.lower().startswith('warning in'):
+            if previous.lower().startswith('mode ='):
+                line = f"{line} ({' '.join(previous.split())})"
+            if line not in seen:
+                seen.add(line)
+                lines.append(line + next((note for key, note
+                                          in _PRT_LINE_NOTES.items()
+                                          if key in line), ''))
+        if line:
+            previous = line
     if lines:
         joined = "\n  ".join(lines)
         warnings.warn(
             f"{model_name} reported {len(lines)} non-fatal "
             f"warning(s) in its .prt log:\n  {joined}",
             IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
+# ── the launch wrappers: child stack limit and parent-death signal ──────
+#
+# Stack limit for the Fortran model binaries, raised in the child only.
+#
+# SPARC-class binaries can blow an 8 MiB default stack on the first large
+# allocation (``Scooter/sparc.f90:354-355`` declares twelve automatic
+# ``COMPLEX(NTot1)`` arrays), and ``mpiramS/README.OMP`` asks for
+# ``ulimit -s unlimited``. :func:`stack_limit_prefix` returns an argv prefix
+# that raises the soft ``RLIMIT_STACK`` to the hard limit inside the spawned
+# shell and then ``exec``s the binary, so the limit of the Python process
+# that imports uacpy is never touched. A ``preexec_fn`` would do the same
+# without the extra hop, but Python documents it as unsafe once threads exist,
+# and uacpy runs models from threads.
+#
+# The prefix is empty — the binary inherits the caller's limit — where there
+# is nothing to raise (soft already at the hard limit), no POSIX shell or
+# ``resource`` module (Windows), or ``UACPY_NO_STACK_RAISE=1`` is set;
+# SPARC-class models may then segfault on large problems.
+#
+# :func:`parent_death_prefix` is the second launch wrapper: on Linux it has
+# ``setpriv --pdeathsig TERM`` set the child's parent-death signal before the
+# stack-limit shell and the binary are exec'd, so the binary is terminated when
+# the Python process that launched it dies — including by SIGKILL, which no
+# Python-side handler can see.
+
+
+def _stack_raise_opted_out() -> bool:
+    # Truthy opt-out only: '0'/'false'/'no' keep the default behaviour
+    # (raising), since someone setting 0 means "do not disable".
+    return os.environ.get('UACPY_NO_STACK_RAISE', '').strip().lower() not in (
+        '', '0', 'false', 'no')
+
+
+def stack_limit_prefix() -> List[str]:
+    """Argv prefix that raises the child's soft stack limit to its hard limit.
+
+    ``['/bin/sh', '-c', 'ulimit -s <hard> 2>/dev/null; exec "$0" "$@"']``:
+    the command follows as ``$0 $@``, so ``exec`` replaces the shell with the
+    binary (same pid, same process group). A refused ``ulimit`` (a hardened
+    container) leaves the inherited limit and the binary still runs.
+    """
+    if os.name != 'posix' or _stack_raise_opted_out():
+        return []
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+    except (ImportError, ValueError, OSError):
+        return []
+    if soft == hard:
+        return []
+    sh = shutil.which('sh') or ('/bin/sh' if os.path.exists('/bin/sh')
+                                else None)
+    if sh is None:
+        return []
+    # ``ulimit -s`` counts KiB.
+    value = ('unlimited' if hard == resource.RLIM_INFINITY
+             else str(int(hard) // 1024))
+    return [sh, '-c', f'ulimit -s {value} 2>/dev/null; exec "$0" "$@"']
+
+
+@functools.lru_cache(maxsize=1)
+def parent_death_prefix() -> List[str]:
+    """Argv prefix that terminates the binary when its launching process dies.
+
+    ``['setpriv', '--pdeathsig', 'TERM', '--']``: util-linux ``setpriv``
+    (2.33 and later) sets ``PR_SET_PDEATHSIG`` and execs the rest of the argv;
+    the setting survives each later ``execve`` (the stack-limit shell's
+    ``exec`` included), so it lands on the binary. Without it a binary started
+    in its own session (``start_new_session``) outlives a Python process ended
+    by SIGTERM or SIGKILL — an outer ``timeout``, a batch scheduler, a
+    notebook kernel restart — and keeps running under init: three KRAKENC
+    runs were found at 98 % CPU after 2.5-3 h. The signal fires when the
+    forking thread exits, and that thread is blocked in ``communicate`` until
+    the binary ends, so it does not fire early.
+
+    Empty where it cannot be provided — not Linux, no ``setpriv``, or one too
+    old to know ``--pdeathsig`` — and the binary is then launched without
+    it. Checked once per process.
+    """
+    if not sys.platform.startswith('linux'):
+        return []
+    setpriv = shutil.which('setpriv')
+    if setpriv is None:
+        return []
+    try:
+        probe = subprocess.run([setpriv, '--help'], capture_output=True,
+                               text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if '--pdeathsig' not in (probe.stdout or '') + (probe.stderr or ''):
+        return []
+    return [setpriv, '--pdeathsig', 'TERM', '--']

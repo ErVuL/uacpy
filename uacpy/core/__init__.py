@@ -28,11 +28,12 @@ _EXPORTS = {
         'Arrivals', 'Rays', 'Modes',
         'Covariance', 'Replicas',
         'ReflectionCoefficient', 'GreensFunction', 'stack_fields',
+        'SoundSpeeds', 'MediaTable',
     )},
     **{name: 'uacpy.core.exceptions' for name in (
         'UACPYError', 'ExecutableNotFoundError', 'ModelExecutionError',
         'InvalidDepthError', 'UnsupportedFeatureError', 'ConfigurationError',
-        'DataFetchError', 'FileFormatError', 'OutputContractError',
+        'MissingFileError', 'DataFetchError', 'FileFormatError', 'OutputContractError',
         'UACPYWarning', 'NumericsWarning', 'ValidityWarning',
         'FallbackWarning', 'ProvenanceWarning', 'IOWarning',
     )},
@@ -76,8 +77,8 @@ if _typing.TYPE_CHECKING:
     )
     from uacpy.core.exceptions import (  # noqa: F401
         ConfigurationError, DataFetchError, ExecutableNotFoundError,
-        FileFormatError, InvalidDepthError, ModelExecutionError,
-        OutputContractError, UACPYError,
+        FileFormatError, InvalidDepthError, MissingFileError,
+        ModelExecutionError, OutputContractError, UACPYError,
         UnsupportedFeatureError, UACPYWarning, NumericsWarning,
         ValidityWarning, FallbackWarning, ProvenanceWarning, IOWarning,
     )
@@ -86,9 +87,9 @@ if _typing.TYPE_CHECKING:
     )
     from uacpy.core.receiver import Receiver  # noqa: F401
     from uacpy.core.results import (  # noqa: F401
-        Arrivals, Covariance, Field, GreensFunction, Modes, PhaseReference,
-        Rays, ReflectionCoefficient, Replicas, Result, ResultStack,
-        stack_fields,
+        Arrivals, Covariance, Field, GreensFunction, MediaTable, Modes,
+        PhaseReference, Rays, ReflectionCoefficient, Replicas, Result,
+        ResultStack, SoundSpeeds, stack_fields,
     )
     from uacpy.core.source import Source  # noqa: F401
 

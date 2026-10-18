@@ -15,8 +15,9 @@ found: <the work dir>", because CPython sets ``filename`` to the cwd when the
 child's chdir fails; the user goes hunting for a binary that is fine.
 
 **F24-3** cleanup failures replaced the model's own error. ``Path.exists()``
-re-raises EACCES on 3.13, and both ``read_prt`` and ``cleanup_work_dir`` call
-it outside the ``try`` their docstrings promise covers it — so a
+re-raises EACCES on 3.13, and both ``_read_prt_if_present`` and
+``cleanup_work_dir`` call it outside the ``try`` their docstrings promise
+covers it — so a
 ``ModelExecutionError`` in flight was demoted to ``__context__``, or (via
 ``attach_prt_tail``, which runs before ``raise exc``) lost outright.
 
@@ -38,9 +39,9 @@ from uacpy.core.exceptions import (
     ExecutableNotFoundError,
     ModelExecutionError,
 )
-from uacpy.io.oalib_reader import read_prt
 from uacpy.models import RAM
 from uacpy.models import _launch, _workspace
+from uacpy.models._launch import _read_prt_if_present
 
 
 LFS_POINTER = ('version https://git-lfs.github.com/spec/v1\n'
@@ -174,7 +175,8 @@ class TestVanishedWorkDirIsNamedAsSuch:
 
 
 class TestCleanupFailuresDoNotMaskTheModelError:
-    """``read_prt`` and ``cleanup_work_dir`` swallow their own OS failures."""
+    """``_read_prt_if_present`` and ``cleanup_work_dir`` swallow their own OS
+    failures."""
 
     @staticmethod
     def _locked_dir(tmp_path):
@@ -201,12 +203,23 @@ class TestCleanupFailuresDoNotMaskTheModelError:
         locked.chmod(0o000)
         return fm, locked
 
+    def test_the_runs_prt_read_returns_none_when_the_file_is_absent(
+            self, tmp_path):
+        """A binary may not have written its ``.prt``; the public
+        ``read_prt`` raises MissingFileError for that, the run's read says
+        None."""
+        assert _read_prt_if_present(tmp_path / 'missing.prt') is None
+        p = tmp_path / 'run.prt'
+        p.write_text('A' * 90 + 'TAIL_MARKER')
+        assert _read_prt_if_present(p, tail_bytes=11) == 'TAIL_MARKER'
+
     @pytest.mark.skipif(os.geteuid() == 0,
                         reason='root ignores the directory search bit')
-    def test_read_prt_returns_none_when_the_file_is_unreadable(self, tmp_path):
+    def test_the_runs_prt_read_returns_none_when_the_file_is_unreadable(
+            self, tmp_path):
         locked = self._locked_dir(tmp_path)
         try:
-            assert read_prt(locked / 'run.prt') is None
+            assert _read_prt_if_present(locked / 'run.prt') is None
         finally:
             locked.chmod(0o755)
 
@@ -470,7 +483,7 @@ class TestSignalDeathIsNamed:
 
 
 def _setpriv_available():
-    from uacpy._stack import parent_death_prefix
+    from uacpy.models._launch import parent_death_prefix
     return bool(parent_death_prefix())
 
 

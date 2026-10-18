@@ -1,9 +1,12 @@
 """Tests for ``uacpy.core.metrics`` — TL-pair agreement helpers
-(``tl_rmse``, ``tl_max_error``, ``tl_bias``).
+(``tl_rmse``, ``tl_max_error``, ``tl_bias``, ``tl_difference``,
+``field_statistics``, ``same_grid``).
 
 All tests synthesize :class:`Field` instances directly; no model
 binary is involved.
 """
+
+import warnings
 
 import numpy as np
 import pytest
@@ -12,6 +15,7 @@ from uacpy.core.exceptions import ConfigurationError
 import uacpy
 from uacpy.core.metrics import tl_bias, tl_max_error, tl_rmse
 from uacpy.core.results import Field
+from uacpy.tests.conftest import recorded_warnings
 
 
 def _tl_field(data, depths, ranges, **kw):
@@ -87,12 +91,39 @@ class TestTLRmseBasic:
 
 
 class TestGridAlignment:
-    """Grids agreeing to ~1 mm compare directly (models interpolate onto the
-    requested receiver grid, leaving sub-mm rounding); genuinely different
-    grids raise. The gate is ``np.allclose(rtol=1e-5, atol=1e-3)`` in
-    ``core/metrics.py``, so the two cases below sit either side of the 1 mm
-    absolute term — at 20 km the relative term contributes 0.2 m, which the
-    1 m case also clears."""
+    """Grids agreeing to sub-millimetre rounding compare directly (models
+    interpolate onto the requested receiver grid); genuinely different grids
+    raise. The gate is :func:`uacpy.metrics.same_grid`: every coordinate
+    within a thousandth of its axis' smallest cell (686 m here, so 0.69 m),
+    which the 0.4 mm case clears and the 1 m case does not."""
+
+    @pytest.mark.parametrize('fraction, agree', [(0.9e-3, True),
+                                                 (1.1e-3, False)])
+    def test_two_grids_agree_within_a_thousandth_of_their_own_cell(
+            self, fraction, agree):
+        """Both sides of the tolerance, on a 41.6 m range grid far from
+        zero: the offset is measured against the cell, not the coordinate's
+        magnitude (1.1e-3 of a cell is 4.6 cm, 9 parts per million of the
+        last range)."""
+        d = np.linspace(5.0, 95.0, 4)
+        r = np.linspace(50.0, 5000.0, 120)
+        cell = r[1] - r[0]
+        a = _tl_field(np.zeros((4, 120)), d, r)
+        b = _tl_field(np.zeros((4, 120)), d, r + fraction * cell)
+        assert uacpy.metrics.same_grid(a, b) is agree
+        if agree:
+            assert tl_rmse(a, b) == pytest.approx(0.0)
+        else:
+            with pytest.raises(ConfigurationError, match='range axes differ'):
+                tl_rmse(a, b)
+
+    def test_axes_in_another_order_are_another_grid(self):
+        d = np.linspace(5.0, 95.0, 4)
+        r = np.linspace(100.0, 400.0, 4)
+        a = Field(data=np.zeros((4, 4)), coords={'depth': d, 'range': r})
+        b = Field(data=np.zeros((4, 4)), coords={'range': r, 'depth': d})
+        assert uacpy.metrics.same_grid(a, a) is True
+        assert uacpy.metrics.same_grid(a, b) is False
 
     def test_submillimetre_offset_compares(self):
         d = np.linspace(5, 95, 10)
@@ -344,6 +375,48 @@ class TestSharedRangesStatesWhatItCompares:
             assert tl_rmse_on_shared_ranges(a, b, depth=depth) == \
                 pytest.approx(20 * np.log10(2.0))
 
+    def test_two_range_cuts_compare_as_the_grids_they_came_from(self):
+        """``field.at(depth=z)`` is a Field read at one depth: it compares
+        with no depth=, to the number the grids give at that depth, and the
+        depth it was cut at is the one the mismatch warning names."""
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        a = self._field([10.0, 20.0], np.linspace(100, 1000, 10))
+        b = self._field([10.0, 20.0], np.linspace(100, 1000, 7), scale=2.0)
+        on_grids = tl_rmse_on_shared_ranges(a, b, depth=10.0)
+        assert np.isfinite(on_grids) and on_grids > 5.0
+        cut_a, cut_b = a.at(depth=10.0), b.at(depth=10.0)
+        assert tl_rmse_on_shared_ranges(cut_a, cut_b) == on_grids
+        assert tl_rmse_on_shared_ranges(a, cut_b, depth=10.0) == on_grids
+        with pytest.warns(UserWarning, match="10 m in `field` and 20 m"):
+            tl_rmse_on_shared_ranges(cut_a, b.at(depth=20.0))
+        with pytest.raises(ConfigurationError,
+                           match='two range cuts are one depth'):
+            tl_rmse_on_shared_ranges(cut_a, cut_b, depth=10.0)
+
+    def test_a_field_without_a_range_axis_is_a_typed_refusal(self):
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        a = self._field([10.0, 20.0], np.linspace(100, 1000, 10))
+        with pytest.raises(ConfigurationError, match='has no range axis'):
+            tl_rmse_on_shared_ranges(a.at(range=500.0), a.at(range=500.0),
+                                     depth=10.0)
+
+    @pytest.mark.parametrize('metric', ['tl_rmse_on_shared_ranges',
+                                        'tl_rmse'])
+    def test_both_field_forms_name_the_same_first_defect(self, metric):
+        """A pressure field against a probability-of-detection field is two
+        defects (kind and unit): both forms report the kind first."""
+        import uacpy.core.metrics as metrics
+        a = self._field([10.0], np.linspace(100, 1000, 10))
+        pd = Field(data=np.full((1, 10), 0.5),
+                   coords={'depth': np.array([10.0]),
+                           'range': np.linspace(100, 1000, 10)},
+                   model='Synthetic', kind='probability_of_detection')
+        kwargs = {'depth': 10.0} if metric == 'tl_rmse_on_shared_ranges' \
+            else {}
+        with pytest.raises(ConfigurationError,
+                           match='different physical quantities'):
+            getattr(metrics, metric)(a, pd, **kwargs)
+
     def test_a_real_field_not_in_dB_is_refused(self):
         from uacpy.core.metrics import tl_rmse_on_shared_ranges
         a = self._field([10.0], np.linspace(100, 1000, 10))
@@ -537,3 +610,95 @@ class TestMetricsOnOneDimensionalCuts:
                           'range': np.array([100.0, 200.0, 300.0])})
         with pytest.raises(ConfigurationError, match="depth and/or range"):
             tl_rmse(f, f)
+
+
+class TestTheDifferenceMapIsAField:
+    """``tl_difference`` returns ``field - reference`` as a Field of kind
+    ``'difference'``, under the metrics' own pair and cell rules."""
+
+    def test_it_is_the_signed_difference_on_the_fields_grid(self):
+        d = np.linspace(5, 95, 4)
+        r = np.linspace(100, 1000, 5)
+        a = _tl_field(np.full((4, 5), 70.0), d, r, model='A', unit='dB',
+                      pinned={'frequency': 250.0})
+        b = _tl_field(np.full((4, 5), 64.0), d, r, model='B', unit='dB')
+        diff = uacpy.metrics.tl_difference(a, b)
+        assert isinstance(diff, Field)
+        assert (diff.kind, diff.unit) == ('difference', 'dB')
+        np.testing.assert_array_equal(diff.data, np.full((4, 5), 6.0))
+        np.testing.assert_array_equal(diff.coords['range'], r)
+        assert diff.pinned == {'frequency': 250.0}
+
+    def test_a_no_energy_cell_has_no_difference(self):
+        """The 600 dB marker is no level: the cell is NaN, as the other
+        metrics leave it out, and the map shows it blank with no warning."""
+        a, b = _complex_pair(zero_col=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            diff = uacpy.metrics.tl_difference(a, b)
+        assert np.all(np.isnan(diff.data[:, 2]))
+        assert np.all(np.isfinite(np.delete(diff.data, 2, axis=1)))
+
+    def test_two_grids_and_two_quantities_are_refused(self):
+        d = np.linspace(5, 95, 4)
+        a = _tl_field(np.zeros((4, 5)), d, np.linspace(100, 1000, 5),
+                      unit='dB')
+        shifted = _tl_field(np.zeros((4, 5)), d, np.linspace(200, 1100, 5),
+                            unit='dB')
+        with pytest.raises(ConfigurationError, match='range axes differ'):
+            uacpy.metrics.tl_difference(a, shifted)
+        with pytest.raises(ConfigurationError,
+                           match="'pressure' field but reference is "
+                                 "'reverberation'"):
+            uacpy.metrics.tl_difference(a, a.replace(kind='reverberation'))
+        with pytest.raises(ConfigurationError, match='both be Fields'):
+            uacpy.metrics.tl_difference(a, np.zeros((4, 5)))
+
+
+class TestFieldStatisticsIsARecord:
+    """``field_statistics`` returns the numbers ``plot_field_statistics``
+    draws: means, standard deviations and the pairwise RMS table."""
+
+    @staticmethod
+    def _field(level_dB, kind='pressure'):
+        r = np.linspace(100.0, 1000.0, 10)
+        return Field(data=np.full((1, r.size), level_dB),
+                     coords={'depth': np.array([50.0]), 'range': r},
+                     model='T', frequencies=100.0, kind=kind, unit='dB')
+
+    def test_the_numbers_are_the_metrics(self):
+        stats = uacpy.metrics.field_statistics(
+            {'a': self._field(60.0), 'b': self._field(66.0), 'c': None},
+            depth=50.0)
+        assert stats.labels == ('a', 'b')
+        np.testing.assert_allclose(stats.mean_dB, [60.0, 66.0])
+        np.testing.assert_allclose(stats.std_dB, [0.0, 0.0])
+        np.testing.assert_allclose(stats.rms_dB, [[0.0, 6.0], [6.0, 0.0]])
+        assert stats.kinds == ('pressure', 'pressure')
+
+    def test_two_quantities_score_nan_with_one_warning(self):
+        """A reverberation loss against a TL is not an agreement metric:
+        the pair's entries are NaN (not a number on the colormap's green),
+        and one warning names the function and the pair."""
+        with recorded_warnings() as caught:
+            stats = uacpy.metrics.field_statistics(
+                [self._field(60.0), self._field(60.0, 'reverberation')],
+                depth=50.0)
+        assert np.isnan(stats.rms_dB[0, 1]) and np.isnan(stats.rms_dB[1, 0])
+        kind_warnings = [str(w.message) for w in caught
+                         if 'agreement metric' in str(w.message)]
+        assert len(kind_warnings) == 1
+        assert kind_warnings[0].startswith('field_statistics:')
+        # The like-for-like pair still scores.
+        same = uacpy.metrics.field_statistics(
+            [self._field(60.0), self._field(60.0)], depth=50.0)
+        assert same.rms_dB[0, 1] == 0.0
+
+    def test_it_exports_and_reads_back(self):
+        stats = uacpy.metrics.field_statistics(
+            [self._field(60.0), self._field(63.0)], depth=50.0)
+        again = type(stats).from_xarray(stats.to_xarray())
+        assert again.labels == stats.labels
+        np.testing.assert_array_equal(again.rms_dB, stats.rms_dB)
+        again = type(stats).from_dict(stats.to_dict())
+        np.testing.assert_array_equal(again.mean_dB, stats.mean_dB)

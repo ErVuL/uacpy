@@ -30,8 +30,9 @@ RANGE_COLLAPSE_METHODS = ('r0', 'rmax', 'mean', 'median')
 #: :meth:`uacpy.Bathymetry.collapse_range` and the model layer's
 #: ``'bathymetry'`` entry. Ordered loudest-first because the default is
 #: ``'max'``: a model that cannot take a sloping bottom is safer run against
-#: the deepest water than the shallowest.
-DEPTH_COLLAPSE_METHODS = ('max', 'median', 'mean', 'min', 'initial')
+#: the deepest water than the shallowest. ``'r0'`` / ``'rmax'`` pick the
+#: first / last node, as on every other carrier.
+DEPTH_COLLAPSE_METHODS = ('max', 'median', 'mean', 'min', 'r0', 'rmax')
 
 
 #: Methods that flatten one column's sediment-layer stack to a half-space,

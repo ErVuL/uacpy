@@ -17,9 +17,9 @@ import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
-from uacpy.core.geo import as_coordinate, geodesic_waypoints
-from uacpy.data._geo import AlongTrack, checked_max_distance, checked_n_points
-from uacpy.data.sources import SOURCES, DataProvenance
+from uacpy.core.geo import as_coordinate
+from uacpy.data._geo import (AlongTrack, along_track_waypoints,
+                             checked_max_distance)
 from uacpy.data._http import download_grid_file
 from uacpy.data._netcdf import NetcdfGrid
 from uacpy.data._provenance_notice import one_provenance_notice
@@ -136,32 +136,40 @@ def globsed_node(lat, lon, *, who, max_distance_km=None):
 
 @one_provenance_notice(subject='the samples',
                        record="the result's .provenance")
-def fetch_sediment_thickness_transect(start, end, *,
-                                      n_points=6, max_distance_km=None) -> AlongTrack:
+def fetch_sediment_thickness_transect(start, end, *, n_points=None,
+                                      max_points=None,
+                                      max_distance_km=None) -> AlongTrack:
     """GlobSed sediment thickness (m) sampled along ``start`` → ``end``, as
-    an :class:`~uacpy.data.AlongTrack` (``'sediment_thickness'``) with the
-    ``'globsed'`` provenance; ``NaN`` at any waypoint GlobSed does not
-    cover.
+    an :class:`~uacpy.data.AlongTrack` (``'sediment_thickness'``) with one
+    ``'globsed'`` record per waypoint (the node read and its offset);
+    ``NaN`` at any waypoint GlobSed does not cover.
 
     Parameters
     ----------
     start, end : (lat, lon)
         Transect endpoints in decimal degrees.
-    n_points : int, optional
-        Waypoints along the great circle. Default 6.
+    n_points : int or 'auto', optional
+        Waypoints along the great circle, used as given; ``None`` (default)
+        is 6 (uacpy guidance), within ``max_points`` when that is set.
+        ``'auto'`` probes ``max_points`` waypoints and keeps one per 5′ grid node
+        crossed, endpoints anchored.
+    max_points : int, optional
+        The waypoints ``'auto'`` probes; ``None`` (default) is 1000 (uacpy
+        guidance). An explicit ``n_points`` above an explicit
+        ``max_points`` is refused.
     max_distance_km : float, optional
         Refuse a waypoint whose node stands farther than this (km) from it;
         ``None`` (default) sets no limit beyond the per-waypoint warning.
     """
-    n_points = checked_n_points(n_points, 'fetch_sediment_thickness_transect')
-    limit = checked_max_distance(max_distance_km, 'fetch_sediment_thickness_transect')
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
-    for la, lo in zip(lats, lons):
-        globsed_node(la, lo, who='fetch_sediment_thickness_transect',
-                     max_distance_km=limit)
+    who = 'fetch_sediment_thickness_transect'
+    limit = checked_max_distance(max_distance_km, who)
+    lats, lons, ranges = along_track_waypoints(
+        start, end, n_points, max_points, who=who,
+        cell_of=lambda la, lo: (_grid().row(la), _grid().col(lo)))
+    records = tuple(globsed_node(la, lo, who=who, max_distance_km=limit)
+                    for la, lo in zip(lats, lons))
     g = _grid()
     thk = np.array([g.thickness(la, lo) for la, lo in zip(lats, lons)])
-    return AlongTrack(ranges=np.asarray(ranges_m), lats=np.asarray(lats),
+    return AlongTrack(ranges=np.asarray(ranges), lats=np.asarray(lats),
                       lons=np.asarray(lons), data=thk, unit='m',
-                      quantity='sediment_thickness',
-                      provenance=DataProvenance(source=SOURCES['globsed']))
+                      quantity='sediment_thickness', provenance=records)

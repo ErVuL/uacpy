@@ -11,14 +11,12 @@ Uses: comms.ber_sweep (BerCurve.plot) · multipath_channel · Arrivals.channel_t
 simulate_link · DFE ·
 detect_preamble · estimate_doppler_scale (a DopplerEstimate) / compensate_doppler ·
 ofdm_modulate / ofdm_demodulate · conv_encode / viterbi_decode · m_sequence ·
-JanusPacket · plot_ber_curve · plot_scatter · plot_convergence ·
+JanusPacket · ber_theory_curve · plot_scatter · plot_convergence ·
 plot_sync_metric · plot_doppler_ambiguity · plot_subcarriers
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -71,7 +69,7 @@ offset = 250
 sync_input = np.concatenate([
     np.zeros(offset, complex), preamble,
     0.2 * (rng.standard_normal(400) + 1j * rng.standard_normal(400))])
-found, sync_metric = comms.detect_preamble(sync_input, preamble, threshold=0.5)
+found, sync_metric = comms.detect_preamble(sync_input, preamble)
 print(f"  preamble found at sample {found} (true {offset})")
 
 # Doppler on a moving platform is a time SCALE, not a frequency shift: a
@@ -124,19 +122,23 @@ print(f"  JANUS 4748      : 64-bit packet → {janus_wav.size / 48000:.2f} s "
 
 fig, axes = plt.subplots(3, 2, figsize=(12, 14), constrained_layout=True)
 # A BerCurve plots with its sweep's n_bits (200 000), which marks a zero-error
-# point as an upper bound, and with its scheme's AWGN theory curve.
+# point as an upper bound; each scheme's AWGN theory is its own curve.
 # Each call titles the axes it draws on, so the last one carries the title.
+fine = np.linspace(ebn0.min(), ebn0.max(), 100)
 qpsk.plot(ax=axes[0, 0], label="QPSK meas")
-qam.plot(ax=axes[0, 0], label="16QAM meas", title="AWGN link")
+comms.ber_theory_curve("qpsk", fine).plot(ax=axes[0, 0])
+qam.plot(ax=axes[0, 0], label="16QAM meas")
+comms.ber_theory_curve("16qam", fine).plot(ax=axes[0, 0], linestyle=":",
+                                           title="AWGN link")
 uacpy.plot.plot_scatter(equalized.rx_symbols[2000:], ax=axes[0, 1],
+                        ideal=modulator.constellation,
                         title=f"QPSK after DFE (BER {equalized.ber:.1e})",
                         color="C0")
-axes[0, 1].scatter(modulator.constellation.real, modulator.constellation.imag,
-                   marker="x", s=80, color="k", zorder=5)
 uacpy.plot.plot_convergence(equalized.mse, ax=axes[1, 0], title="(DFE, RLS)")
 uacpy.plot.plot_sync_metric(sync_metric, threshold=0.5, ax=axes[1, 1])
 uacpy.plot.plot_doppler_ambiguity(doppler, ax=axes[2, 0])
-uacpy.plot.plot_subcarriers(ofdm_channel, 256, ax=axes[2, 1],
+uacpy.plot.plot_subcarriers(comms.subcarrier_response(ofdm_channel, 256),
+                            ax=axes[2, 1],
                             title=f"(ZF BER {ber_ofdm:.1e})")
 
 fig.savefig(OUT / "example_31_underwater_comms.png", dpi=120)

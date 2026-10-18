@@ -12,9 +12,7 @@ from uacpy.core.results import _base as results_base
 
 def test_the_constants_hold_their_values():
     assert generate.MSEQ_PROBE_LEAD_TIME_S == 0.2
-    assert generate.NOISE_SYNTH_MIN_NFFT == 16
     assert generate.NOISE_SYNTH_DEFAULT_NFFT == 2 ** 16
-    assert generate.NOISE_SYNTH_MAX_NFFT == 2 ** 18
     assert transceiver.DEFAULT_PREAMBLE_SYMBOLS == 64
     assert (sync.DOPPLER_SCALE_MAX, sync.DOPPLER_SCALE_COUNT) == (5e-3, 601)
     assert equalize.RLS_INIT_DELTA == 1e-2

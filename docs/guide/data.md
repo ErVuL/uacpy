@@ -1,6 +1,6 @@
 # External data — building an Environment from the real ocean
 
-> `uacpy.data` · 82 public names · GPS coordinates (and a date) in, a
+> `uacpy.data` · 78 public names · GPS coordinates (and a date) in, a
 > ready-to-run [`Environment`](environment.md) out
 
 [Environment](environment.md) tells you how to *describe* the ocean. This page
@@ -78,11 +78,11 @@ tl.plot(env=env, source=source)
 |---|---|---|
 | `bathymetry` | ✅ GEBCO | you must pass `bathymetry=` |
 | `ssp` | ✅ WOA23 | you must pass `ssp=` |
-| `bottom` | ❌ | uacpy's default half-space (1600 m/s, 1.5 g/cm³, 0.5 dB/λ) |
+| `bottom` | ❌ | uacpy's default half-space (1600 m/s, 1.5 g/cm³, 0.5 dB/λ; uacpy guidance) |
 | `surface` | ❌ | free (pressure-release) surface |
 | `altimetry` | ❌ | flat sea surface |
 | `absorption` | ❌ (`with_absorption=True`) | none: lossless water (pass `absorption=Thorp()` for a frequency-only law) |
-| `water_density` | with `with_absorption=True` (the T/S row at mid-depth, IES-80) | 1.027 g/cm³ |
+| `water_density` | with `with_absorption=True` (the T/S row at mid-depth, IES-80; a grain-size seabed takes its density ratio against it) | 1.027 g/cm³ |
 
 **Bathymetry and sound speed are mandatory axes**, so with neither a literal
 nor a `*_sources` list they are fetched from the default chains. The seabed,
@@ -117,11 +117,11 @@ environment with no `bottom_sources=` has a *made-up* seabed, and
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `n_points` | `50` | bathymetry samples along the transect; `'auto'` targets GEBCO native resolution |
-| `max_points` | `1000` | ceiling on points probed per axis — the fetch budget |
+| `n_points` | `None` | bathymetry samples along the transect: an int is used as given, `None` is 50 (uacpy guidance); `'auto'` targets GEBCO native resolution |
+| `max_points` | `None` | the sampling budget per axis: the points an `'auto'` count probes, and the ceiling of an unset count; `None` = 1000 for `'auto'` (uacpy guidance). An explicit count above an explicit `max_points` is refused, naming both |
 | `range_dependent_ssp` / `_bottom` / `_surface` | `None` | `None` = range-dependent on a transect, range-independent at a point |
-| `ssp_n_points` | `'auto'` | one column per distinct WOA23 cell crossed |
-| `bottom_n_points` | `6` | seabed samples; `'auto'` probes every waypoint |
+| `ssp_n_points` | `'auto'` | one column per distinct grid cell crossed (WOA23 1°, Copernicus 1/12°) |
+| `bottom_n_points` | `None` | seabed samples, `None` = 6 (uacpy guidance); `'auto'` probes every waypoint |
 | `surface_n_points` | `'auto'` | ice/open-water zones collapsed to one boundary each |
 | `altimetry_n_points`, `altimetry_rng` | `None`, `None` | fetched sea-surface realisation; `n_points=None` sizes the grid from the sea state (8 samples per Pierson-Moskowitz peak wavelength, floored at 500), so a long transect resolves its waves instead of aliasing them flat |
 
@@ -131,6 +131,7 @@ environment with no `bottom_sources=` has a *made-up* seabed, and
 |---|---|---|
 | `bottom_model` | `'hamilton'` | grain-size → geoacoustics relations behind every seabed that arrives as a ϕ (all sources but `crust1`, and a ϕ literal): `'apl-uw'` for 10–100 kHz work, see [§5](#the-grain-size-conversion) |
 | `bottom_hamilton_fit` | `None` | which Hamilton & Bachman fit `'hamilton'` evaluates (the per-layer fetchers' `hamilton_fit=`): `'continental-terrace'` when `None`, `'abyssal-hill'` or `'abyssal-plain'`; a deep-ocean site wants an abyssal fit, which nothing infers; refused beside `bottom_model='apl-uw'` |
+| `surface_threshold` | `None` | lowest sea-ice concentration (fraction 0–1) a fetched surface takes as ice cover; `None` = 0.15, NSIDC's ice edge, uacpy guidance as the acoustic switch (see [ice](#ice--a-different-top-boundary)) |
 | `with_absorption` | `False` | build a `FrancoisGarrison` profile from the site's T/S column (and GLODAP pH) |
 | `max_distance_km` | `None` | refuse data whose point (cast, sample, or cell centre) stands farther than this from the site, on every fetched axis; see [the offset rule](#the-offset-rule) |
 | `max_days` | `None` | staleness guard for the **time-specific** SSP sources (`argo`, `copernicus`); ignored by climatologies |
@@ -152,8 +153,13 @@ identical.
 
 **A literal and a source are not alternatives — they are a value and a
 fallback.** Give both, and the source is fetched first; the literal is used
-only if the fetch yields nothing (no coverage, service down, cache missing).
-Give one, and it is the only thing tried.
+only if the fetch yields nothing (no coverage, service down, cache missing),
+and a `FallbackWarning` then says so and why. A source asked for without an
+argument it needs (`ssp_sources='copernicus'` or `surface_sources='seaice'`
+without `date=`, `altimetry_sources` without `transect_to=`) is refused with a
+`ConfigurationError` whether or not a literal is given: the literal stands in
+for missing data, not for a missing argument. Give one, and it is the only
+thing tried.
 
 ```python
 uacpy.data.fetch_environment(pt, bottom='sand')                  # literal only
@@ -236,15 +242,16 @@ water column.
 Three notes that bite:
 
 - **`emodnet_dtm` is referenced to Lowest Astronomical Tide** where the tide is
-  significant, not mean sea level. LAT lies below MSL, so it reads *shallower*
-  than GEBCO/GMRT by the local MSL − LAT offset: nothing in the micro-tidal
-  Mediterranean and Baltic, several metres on macrotidal Atlantic coasts.
-  Negligible offshore, not negligible on a shelf.
+  significant, not mean sea level (EMODnet Bathymetry DTM product metadata).
+  LAT, the lowest predicted tide, lies below MSL, so it reads *shallower* than
+  an MSL-referenced depth by the local MSL − LAT offset, which the local tide
+  sets: it matters in shallow water on tidal coasts, not offshore.
 - **The live GEBCO path is rate-limited.** OpenTopoData's public host allows
   ≤100 points per request, ≤1 request/s and ≤1000 requests/day, so a 50×50 grid
   is 25 requests. `source='local'` has no cap at all.
-- **`n_points='auto'`** targets GEBCO's native spacing and warns when
-  `max_points` truncates it, telling you the spacing you actually got.
+- **`n_points='auto'`** targets GEBCO's native spacing and warns when its
+  `max_points` budget truncates it, telling you the spacing you actually got.
+  An explicit `n_points` is sampled as given.
 
 ---
 
@@ -339,7 +346,8 @@ with the temperature and salinity there
 the one row nearest that depth instead, whose water then stands for the whole
 column). pH is the cached GLODAP column when installed, as `(depth, pH)`
 pairs on its own levels, one value at the column's mid-depth from Copernicus
-BGC on that branch, and 8.0 (the package's reference sea water) otherwise (a fetched pH is declared `ph_scale='total'` and converted to the
+BGC on that branch, and 8.0 (the package's reference sea water, announced in
+the call's notice with the reason) otherwise (a fetched pH is declared `ph_scale='total'` and converted to the
 NBS scale the formula was fitted on; see [environment](environment.md)). The
 mid-depth T/S row sets `env.water_density` (IES-80 at that T and S), the one
 density every deck's water column carries — see
@@ -370,10 +378,14 @@ through.
 | `pelagic` | global | modelled from depth + latitude | public domain | ✅ no download |
 
 Each returns a **half-space** `BoundaryProperties`, so any model can consume it.
-For the EMODnet cache there is also `fetch_emodnet_substrate_local((lat, lon))`, which
-answers with the substrate **record** at a point — the Folk class and its
-polygon — rather than a converted half-space, for when you want to see what the
-map says before it becomes geoacoustics.
+For EMODnet there is also `fetch_emodnet_substrate((lat, lon))`, which
+answers with the substrate **record** at a point — the Folk class of the
+polygon holding it, with its provenance — rather than a converted half-space,
+for when you want to see what the map says before it becomes geoacoustics.
+It is cache-first like every fetcher: the installed polygons, then the live
+WFS when they are absent (`source='local'` stays offline). A record from the
+WFS adds the layer's text fields in `details`; one from the installed
+polygons leaves `details` empty, the index storing the Folk code only.
 
 ```python
 sources = [
@@ -425,8 +437,8 @@ your result, run two of them and look at the spread.
 
 Most of those sources report a **mean grain size** on the Wentworth ϕ scale, not
 geoacoustics. `uacpy.data.grain_size_to_geoacoustics` is the
-conversion — `uacpy.data.bottom_from_grain_size` wraps it into a half-space
-`BoundaryProperties` — and
+conversion — `uacpy.BoundaryProperties.from_grain_size` wraps it into a
+half-space `BoundaryProperties` — and
 you can call it yourself, on one ϕ or on an array of them (a grain-size map,
 the samples of a survey), which returns arrays of the same shape and reports
 every substituted value in one warning. Its inverse,
@@ -499,8 +511,9 @@ Three things worth reading off the plot:
   keep extrapolating and the clamp does move the numbers (1.8 m/s at ϕ = 9.5,
   47 m/s at ϕ = −1.5), which the same warning reports.
 
-Two shortcuts wrap the conversion: `bottom_from_grain_size(phi)` and
-`bottom_from_class('sand')`, both returning a ready `BoundaryProperties`.
+Two constructors return a ready half-space: `BoundaryProperties.from_grain_size(phi)`
+(the conversion above) and `BoundaryProperties.from_preset('sand')` (a
+`uacpy.materials` preset, fluid unless `elastic=True`).
 
 **Your own samples along a transect.** Cores, grabs or a survey's mean grain
 sizes become a range-dependent bottom with `bottom_from_samples`: each
@@ -617,11 +630,19 @@ for month, label in ((3, 'March — winter maximum'),
 ![NSIDC sea-ice climatology](figures/data_sea_ice.png)
 
 `surface_sources='seaice'` reads the NSIDC concentration at the point for
-`date`'s month and, above the 15 % ice-edge, replaces the free surface with a
-homogeneous **elastic ice canopy** — c_p 3500 m/s, c_s 1800 m/s, ρ 0.9 g/cm³,
-α_p/α_s 0.4/1.0 dB/λ (*Computational Ocean Acoustics*). Below the ice edge it
-returns nothing and the free surface stands, with no provenance recorded: an
-ice-free point is not silently given an "ice" source.
+`date`'s month and, at or above `surface_threshold` (default 15 %), replaces the free surface with a
+homogeneous **elastic ice canopy** — c_p 3500 m/s, c_s 1800 m/s, α_p/α_s
+0.4/1.0 dB/λ (*Computational Ocean Acoustics* §4.10.4), ρ 0.9 g/cm³ (its
+§8.5.7 ice plate). Below the ice edge it returns nothing and the free surface
+stands, with no provenance recorded: an ice-free point is not silently given an
+"ice" source. The default 15 % is NSIDC's ice edge for extent statistics
+(Sea Ice Index G02135 user guide); taking it as the switch from open water to a
+full canopy is uacpy guidance — no acoustic source sets a concentration bound
+(Etter §2.4.2 separates pack ice, the marginal ice zone and open ocean with
+none), so a marginal-ice-zone point at 20 % is modelled as full canopy. Choose
+your own with `fetch_environment(..., surface_threshold=0.5)`;
+`sea_ice_surface(c, threshold=…)` and `fetch_sea_ice_surface(point, date=…,
+threshold=…)` take the same fraction.
 
 The canopy is an elastic **half-space**, infinitely thick ice with no air above
 it. *Computational Ocean Acoustics* §4.10.4 gives these values to a 4 m plate,
@@ -653,7 +674,7 @@ env = uacpy.data.fetch_environment(
 `'waverys'` (Copernicus WAVERYS) and `'ww3'` (NOAA WaveWatch III) invert an
 observed significant wave height to the effective PM wind with `hs_to_pm_wind(hs)` (`U = √(Hs/0.0214)`, U in m/s, returned in knots at the
 19.5 m PM height so it goes straight into
-`generate_sea_surface(rmax_m, wind_speed_kn)`), which is public so you can apply
+`generate_sea_surface(rmax, wind_speed_19_5m_kn)`), which is public so you can apply
 the same inversion to a wave height of your own, so the realisation reproduces
 the observed `Hs` whether or not the sea is fully developed; `'nbs'` uses the live 10 m NBS wind under a
 fully-developed assumption; `'local'` uses the cached NBS monthly climatology —
@@ -662,7 +683,7 @@ in that order. Sea state is the one axis where the cached product is the last
 resort rather than the first: a monthly mean is exactly what a wave field is
 not.
 
-Called on its own, `fetch_sea_surface(point, date=..., rmax_m=...)` returns the
+Called on its own, `fetch_sea_surface(point, date=..., rmax=...)` returns the
 `Altimetry` carrier, with the sea state's provenance on `.data_sources` like
 every other fetched layer. The cached climatology's record reads
 `data_date='month MM, <period>'`, and a live fetch's record carries the
@@ -686,9 +707,9 @@ is what each axis does with it.
 
 | Axis | Sampling | Why |
 |---|---|---|
-| bathymetry | `n_points=50`, or `'auto'` at GEBCO native spacing | continuous field, nothing to collapse |
-| SSP | `ssp_n_points='auto'` — one column per **distinct WOA23 cell** crossed | the cell is the sample identity, found analytically, so no duplicate column is ever fetched |
-| bottom | `bottom_n_points=6`, explicit | the seabed sources expose no cheap identity, so `'auto'` must *fetch* at every probe point |
+| bathymetry | `n_points=None` (50), or `'auto'` at GEBCO native spacing | continuous field, nothing to collapse |
+| SSP | `ssp_n_points='auto'` — one column per **distinct grid cell** crossed (WOA23 1°, Copernicus 1/12°) | the cell is the sample identity (WOA23's found analytically, Copernicus's from the dataset's own axes), so no duplicate column is ever fetched; each Copernicus column is one remote read, so a long transect makes many |
+| bottom | `bottom_n_points=None` (6) | the seabed sources expose no cheap identity, so `'auto'` must *fetch* at every probe point |
 | surface | `surface_n_points='auto'` — consecutive ice/open zones collapsed | the marginal ice zone at native scale, no staircase |
 
 `bottom_n_points='auto'` is cheap on the local sample databases and expensive on
@@ -701,10 +722,12 @@ range-dependent unless you pass `range_dependent_*=False`, and
 nothing. Setting `range_dependent_bottom=True` with no `bottom_sources=` implies
 `'auto'`.
 
-`bathy_transect_plan(A, B, n_points=...)` and `ssp_transect_plan(A, B)` say
-how many samples each axis would take, and where, without fetching: the
-SSP plan is the list of distinct WOA23 cells, so it is the number of columns
-a transect will fetch.
+`bathy_transect_sampling(A, B, n_points=...)` and `ssp_transect_sampling(A, B)`
+say how many samples each axis would take, and where, without fetching: the
+SSP sampling is the list of distinct WOA23 cells, so it is the number of columns
+a WOA23 transect will fetch. Each takes the defaults of its fetcher
+(`bathy_transect_sampling`: 50 points when `n_points` is unset), so the same
+arguments describe the same transect.
 
 Size a receiver grid off the same geodesic the fetch used:
 
@@ -718,11 +741,12 @@ receiver = uacpy.Receiver(depths=np.linspace(1.0, env.depth, 150),
 `env.transect` carries the two endpoints so a plot can redraw the track.
 
 Data of your own goes on the same geodesic.
-`transect_waypoints(A, B, n_points=n)` returns the `(lats, lons, ranges_m)`
+`transect_waypoints(A, B, n_points=n)` returns the `(lats, lons, ranges)`
 the fetchers sample, so a regional
 multibeam grid or a set of CTD casts lands on the fetched range axis, and
-`assemble_range_dependent(columns, ranges_m)` stacks your own 1-D
-`SoundSpeedProfile` columns into the 2-D profile a fetched transect builds:
+`SoundSpeedProfile.from_casts(ranges, casts)` stacks your own casts (a 1-D
+`SoundSpeedProfile` column as `column.to_pairs()`) into a 2-D profile on the
+union of their depths, as a fetched transect does:
 
 ```python
 lats, lons, r = uacpy.data.transect_waypoints(A, B, n_points=200)
@@ -773,8 +797,8 @@ This is the part that gets people into trouble, so uacpy makes it hard to lose.
 - An `ArgoProfile` (`fetch_argo_profile`) holds one on `.provenance`.
 - A `SeaStateRecord` (`fetch_waves`, `fetch_waves_operational`) holds one on
   `.provenance`.
-- A `SeabedSample` (`fetch_emodnet_substrate`, `fetch_emodnet_substrate_local`,
-  `fetch_sediment_sample`, `fetch_seafloor_lithology`, `fetch_mars_sediment`)
+- A `SeabedSample` (`fetch_emodnet_substrate`, `fetch_sediment_sample`,
+  `fetch_seafloor_lithology`, `fetch_mars_sediment`)
   holds one on `.provenance`; `samples_table(*samples)` puts any of them in
   one DataFrame.
 - A `TSProfile` (`fetch_ts_profile`, `fetch_ts_profile_operational`) or a
@@ -782,10 +806,17 @@ This is the part that gets people into trouble, so uacpy makes it hard to lose.
 - A `BathyGrid` (`fetch_bathy_grid`) holds one on `.provenance`.
 - An `AlongTrack` (the scalar transects: `fetch_sediment_thickness_transect`,
   `fetch_seabed_density_transect`, `fetch_sea_ice_concentration_transect`,
-  `fetch_wind_transect`) holds one on `.provenance`, with the waypoints'
-  lat/lon.
-- A **raw value** (`fetch_bathy`, `fetch_bathy_transect`) holds none. Each one's docstring
-  names the carrier-level function that records it.
+  `fetch_wind_transect`) holds a tuple of records on `.provenance`, one per
+  waypoint (the waypoints' lat/lon on `.lats` / `.lons`): each names the node
+  or cell its value was read from, so `.offset_km` and `.offset_days` are
+  known per waypoint, as for the SSP and bottom columns. Their `n_points`
+  takes `'auto'` too — one waypoint per grid cell crossed, probing
+  `max_points` waypoints (the live NBS wind answers per request, so its
+  `'auto'` needs `source='local'`).
+- A **raw value** (`fetch_bathy`, `fetch_bathy_transect`, `fetch_ph`,
+  `fetch_ph_operational`, `fetch_wind`, `fetch_seabed_density`,
+  `fetch_sediment_thickness`, `fetch_sea_ice_concentration`) holds none. Each
+  one's docstring names the carrier-level function that records it.
 
 A carrier built from a dict fetcher cites that dict's own record, so the two
 can never disagree.
@@ -878,10 +909,15 @@ waypoint, and each sample past a threshold has its own notice. One call of
 sentence of each: `fetch_bottom_transect: 3 note(s) on where the seabed's data
 come from: (1) …; (2) …; (3) …`. A licence notice and a waypoint filled from
 its neighbour are listed the same way; any other warning passes on as it came.
-The single-point fetchers give their own notice.
+The point fetchers whose answer can carry more than one note — `fetch_ssp`,
+`fetch_bottom`, `fetch_sea_surface`, `fetch_waves`, `fetch_argo_profile`,
+`fetch_ssp_argo` and the `*_operational` Copernicus fetchers (a cast both far
+and stale gives a distance and a date note) — fold them the same way, under
+the name of the function called; the other point fetchers give their one
+notice as it is.
 A WOA23 month whose profile runs below 1500 m is spliced to the annual mean
 there (the monthly fields stop at 1500 m); the record says so in
-`split_depth_m` and `period_below`, and its citation reads `month 07
+`split_depth` and `period_below`, and its citation reads `month 07
 (climatology) above 1500 m, annual mean below`.
 
 **A dry point is refused, not served from the nearest water.** `fetch_ssp`,
@@ -902,8 +938,8 @@ survives `env.copy()`, `to_dict` and NetCDF.
 range-dependent SSP, seabed or surface is its own fetch with its own offset,
 checked against the rule above (and `max_distance_km`) where it is read, so
 `env.ssp.data_sources` holds one record per column, each stamped with the
-column's along-track range as `range_m` — `[p for p in env.data_sources if
-p.range_m == r]` is what was read at range `r`. Each record also says what its
+column's along-track range as `range` — `[p for p in env.data_sources if
+p.range == r]` is what was read at range `r`. Each record also says what its
 `data_point` is: `point_kind` (`'cell'`, `'cast'`, `'sample'`, or `None` for a
 value read at the point itself), `cell_size_deg` for a regular grid, and
 `from_neighbour_cell` when the fetcher knows whether the point's own cell was
@@ -944,7 +980,8 @@ EMODnet Geology — seabed substrate  [CC-BY 4.0]
 `DataSource`s, or nothing at all — in which case it renders the whole catalogue, which is the
 quickest way to see what uacpy can pull and under what terms.
 `provenance_table(env, result)` gives the same records as a DataFrame, one row
-per record (per column on a transect) and one for the engine that produced
+per record (per column on a transect), each with its distance `offset_km` and
+time offset `offset_days`, and one row for the engine that produced
 `result`; each
 `DataProvenance` also saves as plain types (`to_dict` / `from_dict`).
 
@@ -980,14 +1017,15 @@ no formal licence at all; the only stated obligation is to cite Laske et al.
 call's one provenance notice:
 
 ```
-ProvenanceWarning: fetch_environment: 2 note(s) on where this environment's
-data come from: (1) CRUST1.0 has no formal licence and does not permit
-commercial use without verification — cite Laske et al. 2013 and verify terms
-before commercial use; (2) fetch_environment: data source 'crust1' (CRUST1.0
-global crustal model (UCSD)) does not permit commercial use without
-verification — see uacpy.data.citations(env) for its licence/attribution.
-Each source's full record is in uacpy.data.citations(env).
+ProvenanceWarning: fetch_environment: 1 note(s) on where this environment's
+data come from: (1) CRUST1.0 global crustal model (UCSD) ('crust1') does not
+permit commercial use without verification — licence: No formal licence — cite
+Laske et al. 2013; verify terms before commercial use. Each source's full
+record is in uacpy.data.citations(env).
 ```
+
+The CRUST1.0 fetchers and `fetch_environment` give this one wording, so a call
+that reaches the source both ways lists it once.
 
 The warning is driven off the catalogue flag, not off a hard-coded name, so any
 future restricted source is covered by the same rule. `citations()` marks the
@@ -1102,15 +1140,16 @@ no attribution required).
 
 **A fetched environment without `bottom_sources=` has a default seabed.**
 Bathymetry and sound speed are fetched by default; the bottom is not. The
-half-space you get is 1600 m/s / 1.5 g/cm³ / 0.5 dB/λ and it is uacpy's
-invention, not data; `fetch_environment` warns when it hands one back. This is
+half-space you get is 1600 m/s / 1.5 g/cm³ / 0.5 dB/λ, a generic fluid
+half-space labelled uacpy guidance, not data; `fetch_environment` warns when it hands one back. This is
 the mistake to check for first.
 
 **`bottom=` is a material, `bottom_sources=` is a source.** `bottom='sand'` is a
 `uacpy.materials` preset; `bottom_sources='emodnet'` is a fetch. They are
 separate arguments precisely so a string can never mean both. The preset is
 fluid, as `Environment(bottom='sand')` reads it;
-`bottom=uacpy.data.bottom_from_class('sand')` keeps its shear. A `bottom=`
+`bottom=uacpy.BoundaryProperties.from_preset('sand', elastic=True)` keeps its
+shear. A `bottom=`
 number is a grain size ϕ, not the sound speed `Environment(bottom=1800)`
 reads, and a number with |ϕ| > 20 is refused.
 

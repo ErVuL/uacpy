@@ -78,14 +78,14 @@ def _broadcast_shape(
     psi_shape: tuple,
     range_axis: int,
     freq_axis: Optional[int],
-    ranges_m: np.ndarray,
+    ranges: np.ndarray,
     k0: Optional[np.ndarray],
 ) -> tuple:
-    """Return broadcast-compatible shapes for ``ranges_m`` and ``k0``
+    """Return broadcast-compatible shapes for ``ranges`` and ``k0``
     against ``psi_shape``, both with singleton dims elsewhere."""
     ndim = len(psi_shape)
     rng_shape = [1] * ndim
-    rng_shape[range_axis] = ranges_m.size
+    rng_shape[range_axis] = ranges.size
     out = (tuple(rng_shape),)
     if k0 is not None and freq_axis is not None:
         k0_shape = [1] * ndim
@@ -98,7 +98,7 @@ def psi_to_travelling_wave(
     psi: np.ndarray,
     *,
     convention: str,
-    ranges_m: np.ndarray,
+    ranges: np.ndarray,
     range_axis: int,
     k0: Optional[Union[float, np.ndarray]] = None,
     freq_axis: Optional[int] = None,
@@ -116,13 +116,13 @@ def psi_to_travelling_wave(
     convention : str
         One of ``'mpirams'``, ``'rams'``, ``'ramsurf'``. See the module
         docstring for what each backend writes.
-    ranges_m : ndarray
+    ranges : ndarray
         1-D array of receiver ranges in metres. Length matches
         ``psi.shape[range_axis]``. Values must be strictly positive
         when ``apply_radial=True`` or ``convention='ramsurf'``; the
         caller is responsible for clipping non-positive ranges.
     range_axis : int
-        Axis of ``psi`` corresponding to ``ranges_m``.
+        Axis of ``psi`` corresponding to ``ranges``.
     k0 : float or 1-D ndarray, optional
         Reference wavenumber ``ω/c₀``. Scalar for narrowband, 1-D
         ``(n_f,)`` for broadband. Required for ``'ramsurf'`` (the
@@ -146,10 +146,10 @@ def psi_to_travelling_wave(
         )
 
     psi_bar = np.conj(psi)
-    ranges_m = np.asarray(ranges_m, dtype=np.float64)
+    ranges = np.asarray(ranges, dtype=np.float64)
 
     rng_shape_only = _broadcast_shape(
-        psi.shape, range_axis, None, ranges_m, None,
+        psi.shape, range_axis, None, ranges, None,
     )[0]
 
     # The point source's far-field phase exp(+iπ/4) — the i of (i/4)·H₀⁽¹⁾
@@ -186,14 +186,14 @@ def psi_to_travelling_wave(
                 raise ConfigurationError(
                     "convention='ramsurf' requires k0= for the carrier."
                 )
-            carrier = np.exp(-1j * float(k0) * ranges_m).reshape(rng_shape_only)
+            carrier = np.exp(-1j * float(k0) * ranges).reshape(rng_shape_only)
         else:
             k0_arr = np.atleast_1d(np.asarray(k0, dtype=np.float64))
             rng_shape, k0_shape = _broadcast_shape(
-                psi.shape, range_axis, freq_axis, ranges_m, k0_arr,
+                psi.shape, range_axis, freq_axis, ranges, k0_arr,
             )
             carrier = np.exp(
-                -1j * k0_arr.reshape(k0_shape) * ranges_m.reshape(rng_shape)
+                -1j * k0_arr.reshape(k0_shape) * ranges.reshape(rng_shape)
             )
         # ramsurf1.5 / ramgeo write the bare envelope: the carrier at :445 /
         # :436 carries no π/4, so the point-source phase is applied here as
@@ -201,7 +201,7 @@ def psi_to_travelling_wave(
         out = psi_bar * carrier * point_source_phase
 
     if apply_radial:
-        radial = (1.0 / np.sqrt(ranges_m)).reshape(rng_shape_only)
+        radial = (1.0 / np.sqrt(ranges)).reshape(rng_shape_only)
         out = out * radial
 
     return out

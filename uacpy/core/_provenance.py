@@ -69,14 +69,14 @@ def dedupe_provenance(carriers, ranges=None) -> tuple:
     The single home for the aggregation ``Bottom`` (over its columns),
     ``Surface`` (over its nodes) and ``Environment`` (over its carriers)
     each expose. ``ranges``, one along-track range (m) per carrier, stamps
-    each record that has no ``range_m`` with its carrier's, so the records of
+    each record that has no ``range`` with its carrier's, so the records of
     a range-dependent carrier say which column they came from. A carrier
     that is ``None``, or carries no ``data_sources``, contributes nothing.
     """
     def stamped(record, r):
-        if r is None or getattr(record, 'range_m', 0.0) is not None:
+        if r is None or getattr(record, 'range', 0.0) is not None:
             return record
-        return dataclasses.replace(record, range_m=float(r))
+        return dataclasses.replace(record, range=float(r))
 
     rs = [None] * len(carriers) if ranges is None else list(ranges)
     return dedupe_records(

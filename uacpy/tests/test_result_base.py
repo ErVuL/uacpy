@@ -257,6 +257,16 @@ class TestTheResultsCoreStatesItsRegistryNotACopy:
         assert f.max().pinned['range'] == 1.0          # a loss: less is louder
 
 
+def test_the_constructor_inputs_of_field_and_modes_are_on_the_top_level():
+    """A Field or Modes built by hand takes a SoundSpeeds and a MediaTable:
+    both are where the result types are, on ``uacpy`` itself."""
+    import uacpy
+    from uacpy.core.results import MediaTable, SoundSpeeds
+    assert uacpy.SoundSpeeds is SoundSpeeds
+    assert uacpy.MediaTable is MediaTable
+    assert {'SoundSpeeds', 'MediaTable'} <= set(uacpy.__all__)
+
+
 class TestArrayProductsCarryOneFrequencyPerSlice:
     """``Covariance`` and ``Replicas`` count frequencies off the array's
     axis 0, so a ``frequencies`` label axis of another length is refused at
@@ -333,7 +343,7 @@ class TestEveryResultTypeRoundTripsThroughADict:
         modes = Modes(k=np.array([0.8 + 1e-5j, 0.7 + 2e-5j]),
                       phi=np.arange(6.0).reshape(3, 2),
                       depths=np.array([0.0, 50.0, 100.0]),
-                      group_velocity=np.array([1480.0, np.nan]),
+                      group_speeds=np.array([1480.0, np.nan]),
                       model='Kraken', frequencies=[100.0],
                       media=MediaTable(water_density=1.0, tops=[0.0, 100.0],
                                        densities=[1.0, 1.8],
@@ -343,13 +353,13 @@ class TestEveryResultTypeRoundTripsThroughADict:
         back = self._round_trip(modes, tmp_path)
         np.testing.assert_array_equal(back.k, modes.k)
         np.testing.assert_array_equal(back.phi, modes.phi)
-        np.testing.assert_array_equal(back.group_velocity,
-                                      modes.group_velocity)
+        np.testing.assert_array_equal(back.group_speeds,
+                                      modes.group_speeds)
         assert back.media == modes.media
         assert back.metadata == {'title': 'round trip'}
 
     def test_a_reflection_table(self, tmp_path):
-        table = ReflectionCoefficient(angles=[10.0, 20.0], magnitude=[0.9, 0.8],
+        table = ReflectionCoefficient(angles_deg=[10.0, 20.0], magnitude=[0.9, 0.8],
                                       phase=[0.3, 0.5], model='Bounce')
         back = self._round_trip(table, tmp_path)
         np.testing.assert_array_equal(back.coefficient, table.coefficient)
@@ -403,7 +413,7 @@ class TestAFileOfAnotherClassIsRefusedNamingItsReader:
                 (Result, 'env.nc', 'an Environment',
                  'Environment.from_netcdf(path)'),
                 (Result, 'ssp.nc', 'a SoundSpeedProfile',
-                 'SoundSpeedProfile.from_xarray(xarray.open_dataset(path))'),
+                 'SoundSpeedProfile.from_netcdf(path)'),
                 (Field, 'modes.nc', 'a Modes', 'Modes.from_netcdf(path)'),
                 (Modes, 'field.nc', 'a Field', 'Field.from_netcdf(path)'),
                 (Modes, 'classless.nc', 'one array',
@@ -514,7 +524,8 @@ class TestEveryResultCarriesTheSettingsItRanWith:
     @pytest.mark.parametrize('synthesise', [
         lambda H: H.synthesize_time_series(source_waveform=np.sin(2 * np.pi * 200.0 * np.arange(0.0, 0.02, 1 / 2000.0)),
                                            sample_rate=2000.0, t_start=0.0),
-        lambda H: H.to_time_trace(depth=10.0, range=300.0, t_start=0.0),
+        lambda H: H.to_time_trace(depth=10.0, range=300.0, t_start=0.0,
+                                  sample_rate=2000.0),
     ], ids=['synthesize_time_series', 'to_time_trace'])
     def test_a_trace_synthesised_from_a_run_carries_its_settings(
             self, synthesise):

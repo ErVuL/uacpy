@@ -14,11 +14,24 @@ from typing import Callable, Optional, Tuple
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 
-__all__ = ['CACHE_BACKEND', 'SourceProvider', 'SourceChain', 'first_answer',
-           'lower_source_spec', 'raise_substantive', 'source_tuple']
+__all__ = ['CACHE_BACKEND', 'MissingPrerequisiteError', 'SourceProvider',
+           'SourceChain', 'first_answer', 'lower_source_spec',
+           'raise_substantive', 'source_tuple']
 
 #: The backend token of a source's cached twin.
 CACHE_BACKEND = 'local'
+
+
+class MissingPrerequisiteError(ConfigurationError):
+    """A source asked for without an argument it needs (``date=``,
+    ``transect_to=``).
+
+    A :class:`ConfigurationError` to every caller. It is the caller's input,
+    not a fetch that yielded nothing, so :func:`uacpy.data.fetch_environment`
+    raises it even when a ``*=`` literal is given: the literal stands in only
+    for data a complete request could not get (no coverage, a service down, a
+    cache absent).
+    """
 
 
 def raise_substantive(errors):

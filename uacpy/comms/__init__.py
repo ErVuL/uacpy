@@ -19,6 +19,8 @@ from .constellations import (
     SCHEMES,
     Modulator,
     constellation,
+    psk_qam_modulate,
+    psk_qam_demodulate,
     dpsk_modulate,
     dpsk_demodulate,
     fsk_modulate,
@@ -45,7 +47,7 @@ from .coding import (
     ConvCode,
     conv_encode,
     viterbi_decode,
-    viterbi_hard,
+    viterbi_from_branch_metrics,
     interleave,
     deinterleave,
     spread,
@@ -109,6 +111,8 @@ from .metrics import (
     symbol_error_rate,
     evm,
     ber_theory,
+    ber_theory_curve,
+    BerTheory,
 )
 # The spreading code lives with the other waveform generators; it is
 # re-exported here so the spreading-code workflow reaches it from comms.
@@ -133,10 +137,12 @@ from . import (  # noqa: F401
 
 __all__ = [
     # modulation
-    "SCHEMES", "Modulator", "constellation", "dpsk_modulate",
+    "SCHEMES", "Modulator", "constellation", "psk_qam_modulate",
+    "psk_qam_demodulate", "dpsk_modulate",
     "dpsk_demodulate", "fsk_modulate", "fsk_demodulate",
     # metrics
     "bit_error_rate", "symbol_error_rate", "evm", "ber_theory",
+    "ber_theory_curve", "BerTheory",
     # channel models
     "awgn", "ebn0_to_snr_dB", "snr_to_ebn0_dB",
     "multipath_channel", "pulse_shaped_taps",
@@ -172,7 +178,8 @@ __all__ = [
     "schmidl_cox_metric", "schmidl_cox_sync", "remove_cfo", "estimate_channel", "ofdm_symbol",
     "equalize_subcarriers",
     # coding
-    "ConvCode", "conv_encode", "viterbi_decode", "viterbi_hard", "interleave",
+    "ConvCode", "conv_encode", "viterbi_decode", "viterbi_from_branch_metrics",
+    "interleave",
     "deinterleave",
     # DSSS
     "m_sequence", "spread", "despread", "spreading_gain_dB",

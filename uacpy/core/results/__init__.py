@@ -11,7 +11,8 @@ from uacpy.core.results._base import (  # noqa: F401
 from uacpy.core.results.field import Field
 from uacpy.core.results.stack import ResultStack
 from uacpy.core.results.rays import Arrivals, Rays
-from uacpy.core.results.modes import MediaTable, Modes
+from uacpy.core.results.modes import (ExcitationPattern, MediaTable,
+                                      ModeDispersion, Modes)
 from uacpy.core.results.array_products import (
     Covariance, Replicas, ambiguity_field,
 )
@@ -25,4 +26,5 @@ __all__ = [
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas', 'ReflectionCoefficient', 'GreensFunction',
     'ambiguity_field', 'SoundSpeeds', 'MediaTable', 'stack_fields',
+    'ModeDispersion', 'ExcitationPattern',
 ]

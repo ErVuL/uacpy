@@ -21,7 +21,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.units import m_to_km
 
 
-def write_inpe(
+def write_mpirams_inpe(
     filepath: Union[str, Path],
     fc: float,
     q_factor: float,
@@ -31,7 +31,7 @@ def write_inpe(
     dr: float,
     n_pade: int,
     n_stability: int,
-    stability_range_m: float,
+    stability_range: float,
     depth_decimation: int,
     ssp_filename: str,
     earth_curvature: bool,
@@ -67,14 +67,19 @@ def write_inpe(
     zsrc : float
         Source depth (m)
     dz : float
-        Depth accuracy parameter (m). Typical: 0.5
+        Depth accuracy parameter (m).
     dr : float
-        Range accuracy parameter (m). Typical: 250.0
+        Range accuracy parameter (m).
     n_pade : int
-        Number of Pade coefficients (2-10, typical: 4)
+        Number of Padé coefficients. :class:`~uacpy.models.RAM` runs 8
+        when unset (ruling 29), the value of Collins's sample ``ram.in``
+        (``third_party/mpiramS/doc/RAM.ORIG/ram.in``, ``c0 np ns rs`` =
+        ``1600.0 8 1 0.0``, beside ``dz`` 2 m and ``dr`` 500 m).
     n_stability : int
-        Number of stability terms (0 for short range, 1-2 for long range)
-    stability_range_m : float
+        Number of stability constraints (1 in Collins's sample ``ram.in``;
+        mpiramS turns them off once the range left is shorter than the
+        stability range, ``ram.f90:250-252``).
+    stability_range : float
         Stability range (m)
     depth_decimation : int
         Output depth decimation factor
@@ -89,9 +94,12 @@ def write_inpe(
     bth_filename : str
         Bathymetry filename (used only if bathymetry_from_file=1)
     sedlayer : float, optional
-        Sediment layer thickness (m). Default: 300.0
+        Sediment layer thickness (m). Default: 300.0, upstream mpiramS's
+        hardcoded ``sedlayer`` (third_party/MODIFICATIONS.md,
+        "Configurable sediment properties").
     n_sediment_points : int, optional
-        Number of sediment depth control points. Default: 50. Must be at
+        Number of sediment depth control points. Default: 50 (uacpy
+        guidance; upstream hardcoded 4). Must be at
         least 4: ``profl`` lays the points out as [surface, seafloor,
         n_sediment_points-3 interior, domain floor] (``mpiramS/src/ram.f90:334-342``).
     cs : ndarray, optional
@@ -126,7 +134,7 @@ def write_inpe(
     ``in.pe`` is positional: ``mpiramS/src/peramx.f90:74-105`` consumes one
     record per line in exactly the order written here — a dummy line (``:74``),
     then ``fc Q``, ``record_duration``, ``zsrc``, ``dz``, ``dr``, ``np_pade nss``,
-    ``stability_range_m``, ``depth_decimation``, ``c0``, ``ssp_filename``, ``earth_curvature``, ``horizontal_interpolation``,
+    ``stability_range``, ``depth_decimation``, ``c0``, ``ssp_filename``, ``earth_curvature``, ``horizontal_interpolation``,
     ``bathymetry_from_file``, ``bth_filename``, the output-ranges filename (``:91``),
     ``sedlayer``, ``n_sediment_points``, ``range_dependent_sediment`` (``:105``). ``range_dependent_sediment = 1`` is followed by
     the sediment filename (``:109``); otherwise by three ``n_sediment_points``-value
@@ -142,7 +150,7 @@ def write_inpe(
     # past the end of a 1-element array.
     if int(n_sediment_points) < 4:
         raise ConfigurationError(
-            f"write_inpe: n_sediment_points must be at least 4 (got {int(n_sediment_points)}). profl "
+            f"write_mpirams_inpe: n_sediment_points must be at least 4 (got {int(n_sediment_points)}). profl "
             f"builds the sub-bottom from [surface, seafloor, n_sediment_points-3 interior, "
             f"domain floor] control points (mpiramS/src/ram.f90:334-342), so "
             f"a deck with n_sediment_points < 4 cannot express the layout and is rejected "
@@ -150,7 +158,11 @@ def write_inpe(
         )
 
     # Placeholder sediment column for a caller that supplies none — uacpy's
-    # RAM wrapper always passes arrays built from env.bottom. ``profl`` puts
+    # RAM wrapper always passes arrays built from env.bottom. It is upstream
+    # mpiramS's hardcoded bottom (cs 0/0/200/200 m/s, rho 1.2, attn
+    # 0.5/0.5/5/5 dB/wavelength over four points; MODIFICATIONS.md
+    # "Configurable sediment properties") spread over n_sediment_points
+    # (uacpy guidance: the floor point alone keeps the 5.0). ``profl`` puts
     # control point 1 at the sea surface, point 2 at the seafloor, points
     # 3..n_sediment_points-1 through the sediment and point n_sediment_points on the domain floor
     # (mpiramS/src/ram.f90:334-342 — uacpy's own rewrite of ``profl``, see
@@ -173,7 +185,7 @@ def write_inpe(
             n_row = len(np.atleast_1d(np.asarray(row)))
             if n_row != int(n_sediment_points):
                 raise ConfigurationError(
-                    f"write_inpe: n_sediment_points={int(n_sediment_points)} but the {name} row holds "
+                    f"write_mpirams_inpe: n_sediment_points={int(n_sediment_points)} but the {name} row holds "
                     f"{n_row} value(s). peramx.f90:151-153 reads exactly "
                     f"n_sediment_points values per row, so a longer row is truncated "
                     f"without a diagnostic and a shorter one runs the "
@@ -191,7 +203,7 @@ def write_inpe(
         f.write(f"{dz}\n")
         f.write(f"{dr}\n")
         f.write(f"{int(n_pade)} {int(n_stability)}\n")
-        f.write(f"{stability_range_m}\n")
+        f.write(f"{stability_range}\n")
         f.write(f"{int(depth_decimation)}\n")
         f.write(f"{c0}\n")
         f.write(f"{ssp_filename}\n")
@@ -201,7 +213,7 @@ def write_inpe(
         f.write(f"{bth_filename}\n")
         # peramx.f90:91-92 takes the output-ranges filename from this line,
         # so this writer is what pins it to 'ranges.dat'. Keep in sync with
-        # :func:`write_ranges_file`.
+        # :func:`write_mpirams_ranges`.
         f.write("ranges.dat\n")
         # Bottom properties. ``peramx.f90:151-153`` reads the three sediment
         # rows as ``read (nunit,*) (cs(jj,1), jj=1,nzs)`` — a list-directed
@@ -214,7 +226,7 @@ def write_inpe(
         # max 29.5 dB against the deck that honours all ten. The mirror case
         # (n_sediment_points larger than the rows) is loud — "End of file", exit 2 — so only
         # the truncating direction needs catching. Same guard as
-        # :func:`write_bth_file`.
+        # :func:`write_mpirams_bathymetry`.
         f.write(f"{sedlayer}\n")
         f.write(f"{int(n_sediment_points)}\n")
         f.write(f"{int(range_dependent_sediment)}\n")
@@ -234,7 +246,7 @@ def write_water_attenuation_file(
     filepath: Union[str, Path],
     depths: np.ndarray,
     frequencies: np.ndarray,
-    attenuation_dB_per_wavelength: np.ndarray,
+    attenuation: np.ndarray,
 ) -> None:
     """Write the water-column attenuation table mpiramS reads.
 
@@ -255,7 +267,7 @@ def write_water_attenuation_file(
         Increasing depths (m), in the frame the deck's other depths use.
     frequencies : ndarray, shape (nf,)
         The bin frequencies (Hz).
-    attenuation_dB_per_wavelength : ndarray, shape (nz, nf)
+    attenuation : ndarray, shape (nz, nf)
         ``alpha(z, f)`` in dB per wavelength: one row per depth, one column
         per frequency. A ``(nz,)`` vector is accepted when ``nf == 1``.
         Any other shape — the transpose ``(nf, nz)`` included — raises
@@ -269,7 +281,7 @@ def write_water_attenuation_file(
     """
     z = np.atleast_1d(np.asarray(depths, dtype=float))
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
-    a = np.asarray(attenuation_dB_per_wavelength, dtype=float)
+    a = np.asarray(attenuation, dtype=float)
     if z.size == 0 or f.size == 0:
         raise ConfigurationError(
             "write_water_attenuation_file: the table needs at least one depth "
@@ -278,7 +290,7 @@ def write_water_attenuation_file(
         a = a[:, None]
     if a.shape != (z.size, f.size):
         raise ConfigurationError(
-            f"write_water_attenuation_file: attenuation_dB_per_wavelength has shape "
+            f"write_water_attenuation_file: attenuation has shape "
             f"{a.shape}; the table is (n_depths, n_frequencies) = "
             f"({z.size}, {f.size}).",
             remediation="One row per depth, one column per frequency; "
@@ -298,7 +310,7 @@ def write_water_attenuation_file(
             fh.write(f"{zi:.12g} " + " ".join(f"{v:.12g}" for v in row) + "\n")
 
 
-def write_sediment_file(
+def write_mpirams_sediment(
     filepath: Union[str, Path],
     ranges: np.ndarray,
     cs_profiles: np.ndarray,
@@ -328,7 +340,7 @@ def write_sediment_file(
     attn_profiles : ndarray
         Attenuation profiles, shape (n_sediment_points, N).
     n_sediment_points : int, optional
-        The ``n_sediment_points`` written into the ``.inpe`` deck by :func:`write_inpe`.
+        The ``n_sediment_points`` written into the ``.inpe`` deck by :func:`write_mpirams_inpe`.
         When given, every profile row is checked against it: ``peramx.f90:
         141-143`` reads each row as ``read (nunit,*) (cs(jj,1), jj=1,nzs)``, a
         list-directed read of exactly ``n_sediment_points`` values, so a longer row is
@@ -345,7 +357,7 @@ def write_sediment_file(
             n_row = int(np.asarray(arr).shape[0])
             if n_row != int(n_sediment_points):
                 raise ConfigurationError(
-                    f"write_sediment_file: the deck declares n_sediment_points={int(n_sediment_points)} "
+                    f"write_mpirams_sediment: the deck declares n_sediment_points={int(n_sediment_points)} "
                     f"but {name}_profiles holds {n_row} depth point(s). "
                     f"peramx.f90:141-143 reads exactly n_sediment_points values per row, so "
                     f"a longer row is truncated without a diagnostic."
@@ -379,7 +391,7 @@ def write_sediment_file(
             f.write("  ".join(f"{v}" for v in attn_profiles[:, ip]) + "\n")
 
 
-def write_ssp_file(
+def write_mpirams_ssp(
     filepath: Union[str, Path],
     depths: np.ndarray,
     sound_speed: np.ndarray,
@@ -405,10 +417,11 @@ def write_ssp_file(
         Sound speed values. Either 1D (nz,) for range-independent,
         or 2D (nz, n_profiles) for range-dependent.
     ranges : ndarray, optional
-        Range of each profile in metres, converted to the km the
-        ``.ssp`` format expects at this boundary. Required if speeds
-        is 2D, and must hold one range per profile. If None and speeds
-        is 1D, writes a single profile at 0.
+        Range of each profile in metres, converted to the km of the
+        mpiramS profile file's ``-1 range_km`` records (not the
+        Acoustics-Toolbox ``.ssp``). Required if ``sound_speed`` is 2D, and
+        must hold one range per profile. If None and ``sound_speed`` is 1D,
+        writes a single profile at 0.
 
     Raises
     ------
@@ -420,7 +433,7 @@ def write_ssp_file(
     sound_speed = np.asarray(sound_speed)
     if sound_speed.ndim not in (1, 2) or sound_speed.shape[0] != depths.size:
         raise ConfigurationError(
-            f"write_ssp_file: speeds has shape {sound_speed.shape} for "
+            f"write_mpirams_ssp: sound_speed has shape {sound_speed.shape} for "
             f"{depths.size} depth(s); it must be (n_depths,) or "
             f"(n_depths, n_profiles).",
             remediation="One row per depth; transpose an (n_profiles, "
@@ -434,12 +447,14 @@ def write_ssp_file(
     else:
         n_profiles = sound_speed.shape[1]
         if ranges is None:
-            raise ConfigurationError("ranges_m required for range-dependent SSP.")
+            raise ConfigurationError(
+                "write_mpirams_ssp: ranges is required for a range-dependent "
+                "sound_speed.")
         ranges = np.asarray(ranges)
         if ranges.size != n_profiles:
             raise ConfigurationError(
-                f"write_ssp_file: ranges_m holds {ranges.size} range(s) but "
-                f"speeds declares {n_profiles} profile(s); the two are written "
+                f"write_mpirams_ssp: ranges holds {ranges.size} range(s) but "
+                f"sound_speed declares {n_profiles} profile(s); the two are written "
                 f"as one header per profile, so a mismatch either indexes past "
                 f"the range vector or silently drops the trailing profiles."
             )
@@ -469,7 +484,7 @@ def write_ssp_file(
                 f.write(f"{depths[iz]} {sound_speed[iz, ip]}\n")
 
 
-def write_bth_file(
+def write_mpirams_bathymetry(
     filepath: Union[str, Path],
     ranges: np.ndarray,
     depths: np.ndarray,
@@ -494,7 +509,7 @@ def write_bth_file(
     depths = np.asarray(depths)
     if ranges.shape != depths.shape:
         raise ConfigurationError(
-            f"write_bth_file: ranges_m ({ranges.size}) and depths_m "
+            f"write_mpirams_bathymetry: ranges ({ranges.size}) and depths "
             f"({depths.size}) must have the same length; a mismatch would "
             f"silently truncate the bathymetry."
         )
@@ -503,7 +518,7 @@ def write_bth_file(
             f.write(f"{r} {d}\n")
 
 
-def write_ranges_file(
+def write_mpirams_ranges(
     filepath: Union[str, Path],
     ranges: np.ndarray,
 ):

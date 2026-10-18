@@ -47,12 +47,6 @@ _LONG_TIMEOUT_STEMS = {
     "example_02_sound_speed_profiles",
     "example_17_boundary_conditions_layered",
     "example_22_ram_lytaev_grid",
-    # Three Bellhop runs over a 401-bin broadband grid plus two synthesis
-    # passes: measured 178 s standalone on an IDLE machine, so it is over
-    # the 120 s tier before any contention. The tier follows that
-    # measurement, as the note above says — it is not a contended run being
-    # waved through.
-    "example_45_broadband_and_exposure_maps",
     # Two Bellhop broadband runs over 3923 frequencies (a 9 x 160 map and the
     # 61 distances one receiver hears) plus the synthesis of each: measured
     # 58 s standalone with two worker threads busy elsewhere, so a loaded
@@ -581,36 +575,19 @@ def test_the_optional_oast_examples_are_not_marked_requires_oases(stem):
     assert "requires_binary" in marks
 
 
-def test_every_example_puts_the_repo_root_on_sys_path():
-    """The bootstrap line has to name the directory that HOLDS the ``uacpy``
-    package, not the package itself.
-
-    ``Path(__file__).parent.parent`` from ``uacpy/examples/x.py`` is
-    ``uacpy/`` — so it never made ``import uacpy`` work from a checkout, and
-    what it did do was publish ``core``, ``models``, ``visualization`` and
-    ``io`` as top-level importable names (``io`` shadowing the stdlib module).
-    """
-    repo_root = EXAMPLES_DIR.parent.parent
-    assert (repo_root / "uacpy" / "__init__.py").is_file(), repo_root
-    offenders = []
-    for path in sorted(EXAMPLES_DIR.glob("*.py")):
-        for line in path.read_text().splitlines():
-            if "sys.path.insert" not in line:
-                continue
-            if "Path(__file__).parents[2]" not in line:
-                offenders.append(f"{path.name}: {line.strip()}")
+def test_examples_import_the_installed_uacpy_without_editing_sys_path():
+    """An example imports ``uacpy`` as the install made it importable
+    (README: ``pip install -e .`` then ``./install.sh``); no example edits
+    ``sys.path``, so the first lines a user copies are imports only."""
+    offenders = [
+        f"{path.name}: {line.strip()}"
+        for path in sorted(EXAMPLES_DIR.glob("example_*.py"))
+        for line in path.read_text().splitlines()
+        if "sys.path" in line
+    ]
     assert not offenders, (
-        "examples put a directory other than the repo root on sys.path:\n"
-        + "\n".join(offenders)
+        "examples edit sys.path:\n" + "\n".join(offenders)
     )
-
-
-def test_the_path_expression_resolves_to_the_repo_root():
-    """Evaluated, not just pattern-matched: ``parents[2]`` has to be the
-    directory holding the package for any of the above to mean anything."""
-    example = next(EXAMPLES_DIR.glob("example_*.py"))
-    assert example.resolve().parents[2] == EXAMPLES_DIR.parent.parent.resolve()
-    assert (example.resolve().parents[2] / "uacpy" / "__init__.py").is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -795,14 +772,13 @@ def test_the_ambiguity_surfaces_are_drawn_through_the_library():
             f"candidate positions.")
 
 
-def test_the_comparison_examples_use_the_librarys_tl_difference_renderer():
-    """The TL-difference panel is ``uacpy.plot.plot_field_difference``, not a
-    copy inside an example.
+def test_the_comparison_examples_use_the_librarys_tl_difference():
+    """The TL-difference panel is ``uacpy.metrics.tl_difference(...)``
+    drawn by its ``.plot()``, not a copy inside an example.
 
-    It was ``examples/plotting_utils._plot_tl_difference`` until it was
-    promoted into the library; a local reimplementation pasted back into one
-    example is the regression this catches, because it would drift from the
-    tagging that keeps a signed residual off the TL colour scale.
+    A local reimplementation pasted back into one example is the regression
+    this catches, because it would drift from the tagging that keeps a
+    signed residual off the TL colour scale.
     """
     for stem in ('example_05_ram_advanced',
                  'example_15_elastic_boundaries_comparison',
@@ -810,7 +786,7 @@ def test_the_comparison_examples_use_the_librarys_tl_difference_renderer():
                  'example_18_rd_bottom_krakenfield_vs_ram',
                  'example_22_ram_lytaev_grid'):
         source = (EXAMPLES_DIR / f'{stem}.py').read_text(encoding='utf-8')
-        assert 'plot_field_difference' in source, stem
+        assert 'tl_difference(' in source, stem
 
     local = []
     for path in sorted(EXAMPLES_DIR.glob('example_*.py')):
@@ -820,7 +796,7 @@ def test_the_comparison_examples_use_the_librarys_tl_difference_renderer():
                 local.append(f'{path.name}:{node.name}')
     assert not local, (
         f"an example defines its own difference renderer: {local}. Use "
-        f"uacpy.plot.plot_field_difference.")
+        f"uacpy.metrics.tl_difference(field, reference).plot().")
 
 
 def _module_constants(tree):
@@ -1030,20 +1006,23 @@ FIGURE_MODULES = sorted(
     if not p.name.startswith("_"))
 
 # Wall clock measured on the 2026-10-03 figure baseline: the sonar page's
-# replica banks take 246 s and the SPARC page's six transients 300 s; every
-# other page takes under 60 s.
-_LONG_FIGURE_MODULES = {"sonar", "sparc"}
+# replica banks take 246 s and the SPARC page's six transients 300 s; the
+# README's figure, a 374 km Fortran Bellhop run at 800 Hz, 126 s (measured
+# 2026-10-18); every other page takes under 60 s.
+_LONG_FIGURE_MODULES = {"sonar", "sparc", "readme"}
 
 # The datasets the data page reads from the install-time cache. Each of its
-# figures pins source='local', so the network cannot stand in for them.
+# figures pins source='local', so the network cannot stand in for them. The
+# README's figure reads the same cache first.
 _DATA_FIGURE_DATASETS = ("gebco", "woa23", "emodnet", "sediment", "diesing",
                          "graw", "crust1", "globsed", "seaice", "coastline")
+_CACHE_FIGURE_MODULES = {"data", "readme"}
 
 
 def _figure_module_marks(module: Path):
     """``slow`` always; ``requires_binary`` / ``requires_oases`` from the
-    engines the module names, as for an example; the data page is skipped
-    when the install-time cache lacks one of its datasets."""
+    engines the module names, as for an example; the data and README pages
+    are skipped when the install-time cache lacks one of its datasets."""
     referenced = _referenced_names(module)
     needs_oases = bool(referenced & _OASES_MODEL_CLASSES)
     marks = [pytest.mark.slow]
@@ -1051,11 +1030,11 @@ def _figure_module_marks(module: Path):
         marks.append(pytest.mark.requires_binary)
     if needs_oases:
         marks.append(pytest.mark.requires_oases)
-    if module.stem == "data" and not _offline_cache_ready(
+    if module.stem in _CACHE_FIGURE_MODULES and not _offline_cache_ready(
             _DATA_FIGURE_DATASETS):
         marks.append(pytest.mark.skip(
-            reason="the data page reads the install-time cache "
-                   "(./install.sh --data all)"))
+            reason=f"the {module.stem} page reads the install-time cache "
+                   f"(./install.sh --data all)"))
     return marks
 
 

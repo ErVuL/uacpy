@@ -603,14 +603,14 @@ def test_parameter_reference_defaults_match_signatures() -> None:
 
 
 def test_oasn_white_noise_level_default_is_none_sentinel() -> None:
-    """OASN's ``white_noise_level`` defaults to ``None`` (written as -200 dB
+    """OASN's ``white_noise_level_dB`` defaults to ``None`` (written as -200 dB
     — a 1e-20 linear power, numerically off), because OASES itself has no off
     switch and an explicit ``0.0`` means a literal 0 dB per sensor. §18 once
     documented ``0.0`` / "0 disables" here; this pins the sentinel so neither
     side regresses."""
     classes = _model_classes()
     sig = inspect.signature(classes["OASN"].__init__)
-    assert sig.parameters["white_noise_level"].default is None
+    assert sig.parameters["white_noise_level_dB"].default is None
 
 
 # ── §17 examples index ────────────────────────────────────────────────────
@@ -1570,12 +1570,12 @@ def _table_call_problems(sig: inspect.Signature, args: list):
 
 
 def test_table_call_problems_reads_both_sides_of_each_rule() -> None:
-    def ts(radius_m, length_m, *, frequency_hz, angle_deg=0.0):
+    def ts(radius, length, *, frequency_hz, angle_deg=0.0):
         """A ts_cylinder-shaped signature."""
     sig = inspect.signature(ts)
-    assert _table_call_problems(sig, ['radius_m', 'length_m', '*',
+    assert _table_call_problems(sig, ['radius', 'length', '*',
                                       'frequency_hz', 'angle_deg=0.0']) == []
-    assert _table_call_problems(sig, ['radius_m', 'length_m', 'frequency_hz',
+    assert _table_call_problems(sig, ['radius', 'length', 'frequency_hz',
                                       '*', 'angle_deg=0.0']) == [
         'frequency_hz is keyword-only',
         '3 positional arguments, the code takes 2']
@@ -1591,7 +1591,7 @@ def test_table_call_problems_reads_both_sides_of_each_rule() -> None:
 @requires_docs
 def test_guide_table_calls_fit_the_signatures() -> None:
     """A guide table's backticked ``name(...)`` is a call a reader copies:
-    ``ts_cylinder(radius_m, length_m, frequency_hz, *, ...)`` printed a
+    ``ts_cylinder(radius, length, frequency_hz, *, ...)`` printed a
     keyword-only argument as positional and the copied call raised
     ``TypeError``. A row passes when any callable of that name accepts it."""
     found = []
@@ -3463,12 +3463,10 @@ def test_the_overlay_paragraph_names_every_plotter_taking_the_overlay():
     para = text.split("`env=` is accepted by every view that has one")[1]
     env_part, geo_part = para.split("`source=` / `receiver=` are", 1)
     geo_part = geo_part.split("The ray plotter draws")[0]
-    # plot_bottom_properties and plot_environment draw env itself;
-    # plot_mode_excitation's `source` is the array it evaluates, and the two
-    # map plotters' is a data label.
+    # plot_bottom_properties and plot_environment draw env itself, and the
+    # two map plotters' `source` is a data label.
     not_overlays = {"plot_bottom_properties", "plot_environment",
-                    "plot_mode_excitation", "plot_bathymetry_map",
-                    "plot_sea_ice_map"}
+                    "plot_bathymetry_map", "plot_sea_ice_map"}
     for name in plots.__all__:
         fn = getattr(plots, name)
         if name in not_overlays or not callable(fn) or inspect.ismodule(fn):
@@ -3617,16 +3615,16 @@ def test_signal_guide_table_signatures_name_the_real_parameters(page):
 
 @requires_docs
 def test_the_signal_guide_says_the_edge_bands_are_nan_without_a_warning():
-    """``decidecade_band_levels`` leaves its two edge bands ``nan`` and
+    """``band_levels`` leaves its two edge bands ``nan`` and
     deliberately does not warn (its docstring says why); the guide promised
     "a one-time warning naming the support"."""
     import warnings
     import numpy as np
-    from uacpy.acoustic_signal import decidecade_band_levels
+    from uacpy.acoustic_signal import band_levels
     f = np.linspace(20.0, 11_000.0, 2000)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        levels = decidecade_band_levels(np.ones_like(f), frequencies=f)[1]
+        levels = band_levels(np.ones_like(f), frequencies=f)[1]
     assert np.isnan(levels[0]) and np.isnan(levels[-1])
     assert not any("support" in str(w.message) for w in caught)
     text = _normalised(DOCS_DIR / "guide" / "signal.md")
@@ -3709,8 +3707,8 @@ def test_the_units_section_names_the_wind_speed_exceptions():
             (noise.WenzNoise, "wind_speed_kn", "WenzNoise(wind_speed_kn=)"),
             (sonar.chapman_harris_surface, "wind_speed_kn",
              "sonar.chapman_harris_surface(wind_speed_kn=)"),
-            (uacpy.generate_sea_surface, "wind_speed_kn",
-             "generate_sea_surface(wind_speed_kn=)"),
+            (uacpy.generate_sea_surface, "wind_speed_19_5m_kn",
+             "generate_sea_surface(wind_speed_19_5m_kn=)"),
             (sonar.apl_uw_surface_backscatter, "wind_speed_kn",
              "sonar.apl_uw_surface_backscatter(wind_speed_kn=)")):
         assert arg in inspect.signature(fn).parameters, (fn, arg)
@@ -3723,7 +3721,7 @@ _DOCTESTED_ENTRY_POINTS = (
     ("uacpy.acoustic_signal", "welch"),
     ("uacpy.acoustic_signal", "beamform_field"),
     ("uacpy.noise", "WenzNoise"),
-    ("uacpy.sonar", "detection_range"),
+    ("uacpy.sonar", "detection_ranges"),
     ("uacpy.sonar", "passive_signal_excess"),
 )
 

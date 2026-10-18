@@ -27,7 +27,7 @@ class TestTheCarriersTheReadersHandBackAreImportable:
         path.write_text(self.TABLE)
         table = io.read_reflection_coefficient(path)
         assert type(table) is uacpy.ReflectionCoefficient
-        assert table.angles.tolist() == [0.0, 45.0, 90.0]
+        assert table.angles_deg.tolist() == [0.0, 45.0, 90.0]
         assert table.magnitude.tolist() == [1.0, 0.5, 0.1]
         assert np.array_equal(table.phase, np.deg2rad([0.0, 3.14, 0.0]))
         assert table.frequencies is None
@@ -156,7 +156,7 @@ class TestTheIoSurfaceIsTheFormatsAUserNames:
                 == 'uacpy.models.sparc._extract')
 
     def test_the_sparc_source_series_writer_is_public(self):
-        """A companion file of a deck, as ``write_inpe``'s four are: a user
+        """A companion file of a deck, as ``write_mpirams_inpe``'s four are: a user
         running SPARC on a deck of their own needs it beside the deck."""
         import inspect
         import uacpy.io

@@ -223,7 +223,7 @@ class Notice(NamedTuple):
     it, or ``None`` when there is nothing to say."""
     note: Optional[str]
     message: str
-    category: type = UACPYWarning
+    category: type
 
     def __repr__(self) -> str:
         return build('Notice', [None if self.note is None else repr(self.note),

@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import uacpy.data as data
+from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import mars
 from uacpy.data.environment import _AUTO_BOTTOM_ORDER
@@ -277,7 +278,7 @@ def test_a_sample_coarser_than_the_relations_says_so(monkeypatch, folk, model):
     with pytest.warns(UserWarning, match='fitted over'):
         bp = mars.fetch_bottom_mars(_P, model=model)
     assert bp.grain_size_phi == pytest.approx(mars._FOLK_TO_PHI[folk])
-    edge = data.bottom_from_grain_size(
+    edge = BoundaryProperties.from_grain_size(
         mars.GRAIN_SIZE_MODEL_RANGES[model][0], model=model)
     assert bp.sound_speed == pytest.approx(edge.sound_speed)
 

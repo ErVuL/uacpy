@@ -26,6 +26,18 @@ def test_a_one_dimensional_profile_collapses_to_a_copy():
     assert ssp.sound_speed[0, 0] == 1500.0
 
 
+@pytest.mark.parametrize('kind', ['analytic', 'n2linear'])
+def test_an_interpolation_scheme_is_refused_as_a_kind_naming_interp_ssp(kind):
+    """``interp_ssp=`` takes these words and changes the deck; as a ``kind``
+    they would describe nothing and change nothing."""
+    pairs = np.array([[0.0, 1500.0], [100.0, 1490.0]])
+    with pytest.raises(ConfigurationError, match='interp_ssp=') as err:
+        SoundSpeedProfile.from_pairs(pairs, kind=kind)
+    assert 'names an interpolation scheme' in str(err.value)
+    for kept in ('measured', 'munk'):
+        assert SoundSpeedProfile.from_pairs(pairs, kind=kept).kind == kept
+
+
 class TestGenerateSeaSurfaceSynthesis:
     """The realisation is the inverse DFT of the Pierson-Moskowitz
     random-phase spectrum, so it must equal the direct cosine sum it is
@@ -406,7 +418,7 @@ class TestTheSeaSurfaceUndersamplingWarningNamesTheNominalPeak:
         # 32 samples over 4 km is a 129 m step against the 18 m that 8
         # samples per 144 m nominal peak wavelength (15 m/s) want.
         with pytest.warns(UserWarning, match='nominal') as rec:
-            generate_sea_surface(4000.0, wind_speed_kn=30.0, n_points=32,
+            generate_sea_surface(4000.0, wind_speed_19_5m_kn=30.0, n_points=32,
                                  rng=np.random.default_rng(1))
         message = str(rec[0].message)
         assert 'omega_p = g/W' in message
@@ -418,7 +430,7 @@ class TestTheSeaSurfaceUndersamplingWarningNamesTheNominalPeak:
         from uacpy.core.altimetry import generate_sea_surface
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            generate_sea_surface(4000.0, wind_speed_kn=20.0, n_points=501,
+            generate_sea_surface(4000.0, wind_speed_19_5m_kn=20.0, n_points=501,
                                  rng=np.random.default_rng(1))
 
 
@@ -481,11 +493,11 @@ class TestTheSeaSurfaceResolutionRuleIsTheWarningsBoundary:
     are the formula's m/s, passed converted to the knots the call takes."""
 
     @staticmethod
-    def _messages(rmax_m, wind, n_points=None):
+    def _messages(rmax, wind, n_points=None):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
             surf = uacpy.generate_sea_surface(
-                rmax_m, wind_speed_kn=uacpy.units.ms_to_knots(wind), n_points=n_points,
+                rmax, wind_speed_19_5m_kn=uacpy.units.ms_to_knots(wind), n_points=n_points,
                 rng=np.random.default_rng(0))
         return surf, ' '.join(str(w.message) for w in caught)
 
@@ -493,11 +505,11 @@ class TestTheSeaSurfaceResolutionRuleIsTheWarningsBoundary:
         return 'aliases' in self._messages(10_000.0, 10.0, n_points)[1]
 
     @staticmethod
-    def _rule(rmax_m, wind):
+    def _rule(rmax, wind):
         """ceil(8 * R / lambda_p) + 1, lambda_p = 2*pi*U**2/g."""
         from uacpy.core.constants import STANDARD_GRAVITY_M_S2
         lambda_p = 2 * np.pi * wind ** 2 / STANDARD_GRAVITY_M_S2
-        return int(np.ceil(8 * rmax_m / lambda_p)) + 1
+        return int(np.ceil(8 * rmax / lambda_p)) + 1
 
     def test_the_documented_rule_is_the_boundary(self):
         n = self._rule(10_000.0, 10.0)
@@ -528,9 +540,9 @@ class TestTheSeaSurfaceResolutionRuleIsTheWarningsBoundary:
         breeze, text = self._messages(10_000.0, 0.51)
         assert breeze.shape[0] == 200_000 and 'cap' in text
 
-    def test_the_range_extent_is_named_rmax_m(self):
+    def test_the_range_extent_is_named_rmax(self):
         params = inspect.signature(uacpy.generate_sea_surface).parameters
-        assert list(params)[0] == 'rmax_m' and 'max_range' not in params
+        assert list(params)[0] == 'rmax' and 'max_range' not in params
         assert params['n_points'].default is None
 
 

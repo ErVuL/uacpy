@@ -374,7 +374,7 @@ class TestKnobsNothingElseEverPasses:
     An unused knob is not a dead one — several here are whole alternative
     input modes, and removing them on a usage count would be the mistake.
     But unused also means *unverified*, and this package has already shipped
-    one that could never work: `plot_mode_excitation(env=…)` called a method
+    one that could never work: a mode-excitation `env=` called a method
     no version of uacpy has ever had, and a bare `except` turned that into a
     silent 1500 m/s.
 
@@ -426,10 +426,12 @@ class TestKnobsNothingElseEverPasses:
             'wigner_ville(analytic=)': lambda: acoustic_signal.wigner_ville(
                 x, 1e6, analytic=False),
             'plot_mode_excitation(dynamic_range_dB=)': lambda: uacpy.plot.plot_mode_excitation(
-                modes, src, sound_speed=1500.0, dynamic_range_dB=30.0),
+                modes.excitation_pattern(src, sound_speed=1500.0),
+                dynamic_range_dB=30.0),
             'plot_mode_excitation(show_array_factor=)':
                 lambda: uacpy.plot.plot_mode_excitation(
-                    modes, src, sound_speed=1500.0, show_array_factor=False),
+                    modes.excitation_pattern(src, sound_speed=1500.0),
+                    show_array_factor=False),
             'plot_matched_field(mark_peak=)': lambda: uacpy.plot.plot_matched_field(
                 ambiguity_field(
                     _np.abs(rng.normal(size=(15, 20))) + 1e-6,
@@ -880,6 +882,8 @@ class TestEveryDrawableTypeNamesItsPlotter:
                                            unit='1'),
             'ambiguity plane': Field(data=np.zeros((2, 3)), coords=plane,
                                      kind='ambiguity', unit='dB'),
+            'difference map': Field(data=np.zeros((2, 3)), coords=plane,
+                                    kind='difference', unit='dB'),
         }
 
     def test_the_field_samples_cover_every_view(self):
@@ -908,9 +912,6 @@ class TestEveryResultCarrierCanDrawItself:
     #: Carriers with no plotter in the package, and the reason. A name here
     #: is a statement that nothing draws it, not that nothing should.
     _NO_PLOTTER_YET = {
-        'BeamformResult': 'scalar detection summary (snr, angles, peak_snr); '
-                          'plot_beam_power draws a BeamformedField, which is '
-                          'a different carrier and has its own .plot()',
         'NoiseComponents': 'a view of the five WenzNoise terms; WenzNoise '
                            'itself plots them, together or alone',
         'DataProvenance': 'attribution metadata, not a measurement',
@@ -920,6 +921,8 @@ class TestEveryResultCarrierCanDrawItself:
         'Snapshots': 'an intermediate on the way to a covariance; what you '
                      'draw is the covariance or the beam surface it feeds, '
                      'and neither is this carrier',
+        'Warped': 'an intermediate on the way back through unwarp_signal; '
+                  'what you read is its spectrogram, a result of its own',
     }
 
     @staticmethod
@@ -1028,8 +1031,10 @@ class TestBothSpellingsOfAPlotAgree:
         import uacpy.acoustic_signal
         import uacpy.comms
         import uacpy.noise
+        import uacpy.sonar
         from uacpy.acoustic_signal._results import PlottedResult
-        for package in (uacpy.acoustic_signal, uacpy.comms, uacpy.noise):
+        for package in (uacpy.acoustic_signal, uacpy.comms, uacpy.noise,
+                        uacpy.sonar):
             for module in pkgutil.iter_modules(package.__path__):
                 importlib.import_module(f'{package.__name__}.{module.name}')
         found, todo = set(), [PlottedResult]
@@ -1044,7 +1049,7 @@ class TestBothSpellingsOfAPlotAgree:
         """One way to build each carrier, keyed by class name, with the free
         plotter that draws it: ``(build, plotter, kwargs)``."""
         import numpy as np
-        from uacpy import acoustic_signal as sig, comms
+        from uacpy import acoustic_signal as sig, comms, sonar
         fs = 2000.0
         x = np.sin(2 * np.pi * 200 * np.arange(1024) / fs)
         y = np.convolve(x, [1.0, 0.5, -0.25])[:x.size]
@@ -1066,6 +1071,7 @@ class TestBothSpellingsOfAPlotAgree:
                 'plot_band_levels', {}),
             'SpectrogramResult': (lambda: sig.spectrogram(x, fs),
                                   'plot_spectrogram', {}),
+            'STFTResult': (lambda: sig.stft(x, fs), 'plot_spectrogram', {}),
             'CWTResult': (lambda: sig.cwt(x, fs), 'plot_cwt', {}),
             'WignerVilleResult': (lambda: sig.wigner_ville(x[:256], fs),
                                   'plot_wigner_ville', {}),
@@ -1084,7 +1090,8 @@ class TestBothSpellingsOfAPlotAgree:
             'TauPResult': (lambda: sig.taup_transform(panel, fs, 1.0),
                            'plot_taup', {}),
             'RadonResult': (lambda: sig.radon_transform(panel, fs, 1.0,
-                                                        moveout),
+                                                        moveout * 1e-3,
+                                                        'parabolic'),
                             'plot_radon', {}),
             'FRFResult': (lambda: sig.frf_welch(x, y, fs, nperseg=256),
                           'plot_frf', {}),
@@ -1101,6 +1108,13 @@ class TestBothSpellingsOfAPlotAgree:
                 lambda: comms.estimate_doppler_scale(
                     x, x, np.linspace(-2e-3, 2e-3, 21)),
                 'plot_doppler_ambiguity', {}),
+            'BerTheory': (lambda: comms.ber_theory_curve('qpsk', [0.0, 4.0]),
+                          'plot_ber_curve', {}),
+            'ChannelResponse': (
+                lambda: sig.channel_response([1.0, 0.5j, -0.25], fs),
+                'plot_channel_response', {}),
+            'RocCurve': (lambda: sonar.roc_curve(2.0, n_points=16),
+                         'plot_roc', {}),
         }
 
     @classmethod
@@ -1288,7 +1302,7 @@ class TestChannelTapsDrawsOnTheAxesItCarries:
     ``symbol_rate`` alone mislabels the frequency axis by a factor of ``sps``
     — 4 to 8 in practice — and left every suite green.
 
-    The delay axis is ``delays_s``, and the same class of mistake lives there:
+    The delay axis is ``delays``, and the same class of mistake lives there:
     ``arange(n) / fs`` starts at zero, while the tap grid starts ``span/2``
     symbols EARLIER than the first arrival, on the leading skirt of the
     transmit pulse. On a span-8 channel at 50 Bd that draws the first arrival
@@ -1305,21 +1319,21 @@ class TestChannelTapsDrawsOnTheAxesItCarries:
         # The peak is NOT the first sample and the grid starts negative, so
         # an index axis and the carried one disagree about where the peak is.
         return ChannelTaps(taps=np.array([0.4j, 1.0, -0.2]),
-                           delays_s=np.array([-1.0, 0.0, 1.0]) / (
+                           delays=np.array([-1.0, 0.0, 1.0]) / (
                                self.SYMBOL_RATE * self.SPS),
                            symbol_rate=self.SYMBOL_RATE, fc=12000.0,
-                           sps=self.SPS, first_arrival_s=0.25)
+                           sps=self.SPS, first_arrival=0.25)
 
     @staticmethod
-    def _delay_axis(axes):
-        """The delay panel's drawn x, in ms. ``stem`` puts the markers on a
-        Line2D and the stems on a collection, so reading the first line is
-        enough and is what a reader of the figure sees."""
+    def _delay_axis(ax):
+        """The drawn delay x, in ms. ``stem`` puts the markers on a Line2D
+        and the stems on a collection, so reading the first line is enough
+        and is what a reader of the figure sees."""
         import numpy as np
-        return np.asarray(axes[0].lines[0].get_xdata(), dtype=float)
+        return np.asarray(ax.lines[0].get_xdata(), dtype=float)
 
     def test_the_peak_tap_is_drawn_at_the_delay_it_carries(self):
-        """``delays_s`` places the taps. With an index axis the peak here
+        """``delays`` places the taps. With an index axis the peak here
         lands at +0.5 ms instead of 0, and every tap with it."""
         import matplotlib
         matplotlib.use('Agg')
@@ -1334,11 +1348,11 @@ class TestChannelTapsDrawsOnTheAxesItCarries:
             plt.close('all')
         peak = int(np.argmax(np.abs(taps.taps)))
         assert drawn[peak] == _pytest.approx(0.0, abs=1e-9), (
-            f'the loudest tap is drawn at {drawn[peak]:g} ms; delays_s puts '
-            f'it at {taps.delays_s[peak] * 1e3:g} ms')
-        assert drawn[0] == _pytest.approx(taps.delays_s[0] * 1e3), (
-            f'the grid starts at {drawn[0]:g} ms; delays_s starts at '
-            f'{taps.delays_s[0] * 1e3:g} ms')
+            f'the loudest tap is drawn at {drawn[peak]:g} ms; delays puts '
+            f'it at {taps.delays[peak] * 1e3:g} ms')
+        assert drawn[0] == _pytest.approx(taps.delays[0] * 1e3), (
+            f'the grid starts at {drawn[0]:g} ms; delays starts at '
+            f'{taps.delays[0] * 1e3:g} ms')
 
     def test_the_free_plotter_and_the_method_draw_the_same_axis(self):
         """``plot_channel(taps)`` is the call ``taps.plot()`` makes, so the
@@ -1363,17 +1377,19 @@ class TestChannelTapsDrawsOnTheAxesItCarries:
             self.SYMBOL_RATE * self.SPS)), bare
 
     def test_the_frequency_axis_spans_the_derived_sample_rate(self):
-        """The right-hand panel is two-sided, so its axis runs to ±fs/2 with
-        fs = symbol_rate * sps. Reading the axis is what catches a rate that
-        is wrong by a factor of sps; reading the taps would not."""
+        """``channel_response(taps)`` is two-sided, so its axis runs to
+        ±fs/2 with fs = symbol_rate * sps. Reading the axis is what catches
+        a rate that is wrong by a factor of sps; reading the taps would
+        not."""
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         import pytest as _pytest
+        from uacpy.acoustic_signal import channel_response
         taps = self._taps()
         try:
-            _fig, axes = taps.plot()
-            drawn = axes[1].lines[0].get_xdata()
+            _fig, ax = channel_response(taps).plot()
+            drawn = ax.lines[0].get_xdata()
         finally:
             plt.close('all')
         expected_fs = self.SYMBOL_RATE * self.SPS
@@ -1383,16 +1399,15 @@ class TestChannelTapsDrawsOnTheAxesItCarries:
             f'spectrum at symbol_rate*sps = {expected_fs:g} Hz should reach '
             f'{expected_fs / 2.0:g}')
 
-    def test_it_returns_the_pair_of_axes_its_plotter_makes(self):
-        """``plot_channel`` draws delay and frequency panels, so this one
-        method returns two axes where the rest of the family returns one."""
+    def test_it_returns_one_axes_like_the_rest_of_the_family(self):
+        """``plot_channel`` draws the taps against delay only; the frequency
+        response is ``channel_response(taps).plot()``."""
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        import numpy as np
         try:
-            fig, axes = self._taps().plot()
-            assert np.size(axes) == 2, axes
+            fig, ax = self._taps().plot()
+            assert ax.figure is fig and ax.containers
         finally:
             plt.close('all')
 
@@ -1426,7 +1441,9 @@ class TestAPlotterDrawsOnlyItsOwnCarrier:
             'CQSpectrogramResult': sig.constant_q_spectrogram(x, fs),
             'WignerVilleResult': sig.wigner_ville(x[:256], fs),
             'TauPResult': sig.taup_transform(panel, fs, 1.0),
-            'RadonResult': sig.radon_transform(panel, fs, 1.0, moveout),
+            'RadonResult': sig.radon_transform(panel, fs, 1.0,
+                                               moveout * 1e-3, 'parabolic'),
+            'STFTResult': sig.stft(x, fs),
             'FKResult': sig.fk_transform(panel, fs, 1.0),
             'AmbiguityResult': sig.ambiguity_function(x[:256], fs),
             'CQTResult': sig.constant_q_transform(x, fs),
@@ -1435,7 +1452,7 @@ class TestAPlotterDrawsOnlyItsOwnCarrier:
             'Cepstrum': sig.cepstrum(x, sample_rate=fs),
         }
         owner = {
-            'plot_spectrogram': 'SpectrogramResult',
+            'plot_spectrogram': ('SpectrogramResult', 'STFTResult'),
             'plot_constant_q_spectrogram': 'CQSpectrogramResult',
             'plot_wigner_ville': 'WignerVilleResult',
             'plot_taup': 'TauPResult',
@@ -1446,7 +1463,7 @@ class TestAPlotterDrawsOnlyItsOwnCarrier:
             'plot_cwt': 'CWTResult',
             'plot_cepstrum': ('ComplexCepstrum', 'Cepstrum'),
         }
-        extra = {'plot_fk': {'scaling': 'power'}}
+        extra = {'plot_fk': {'scaling': 'density'}}
         return carriers, owner, extra
 
     def test_each_plotter_accepts_its_own_carrier_and_no_other(self):
@@ -1455,7 +1472,7 @@ class TestAPlotterDrawsOnlyItsOwnCarrier:
         import matplotlib.pyplot as plt
         from uacpy import plot as visualization
         carriers, owner, extra = self._matrix()
-        assert len(carriers) == 11 and len(owner) == 10, (
+        assert len(carriers) == 12 and len(owner) == 10, (
             'the matrix has stopped covering the family')
         from uacpy.core.exceptions import ConfigurationError
         accepted_foreign, refused_own, refused_by_luck = [], [], []
@@ -1876,7 +1893,7 @@ def test_every_warning_names_its_cause():
 #: check. A layer imports only from its own rank or below;
 #: the exceptions are listed in :data:`_UPWARD_IMPORTS`.
 _LAYER_ORDER = (
-    ('core', 'core.acoustics', '_log', '_stack', '_version'),
+    ('core', 'core.acoustics', '_log', '_version'),
     ('acoustic_signal',),
     ('comms', 'noise'),
     ('core.results',),
@@ -1904,17 +1921,19 @@ _UPWARD_IMPORTS = frozenset({
 #: declares it (``test_packaging`` gates that), and the names such a module
 #: is imported for are covered by its declaration, so they are not repeated
 #: here; a ``_name`` inside any other module belongs to that module. The list
-#: may only shrink, as :data:`_UPWARD_IMPORTS` does, with one exception: the
+#: may only shrink, as :data:`_UPWARD_IMPORTS` does, with two exceptions: the
 #: labelled twin of a public user-level function (the first group below)
-#: may be added, its entry naming that public function in a comment.
+#: may be added, its entry naming that public function in a comment; and a
+#: helper a layer above already used may be made private when it is not for
+#: users (the last group), its entry saying what it is shared for.
 _PRIVATE_NAMES_ACROSS_LAYERS = frozenset({
     # The labelled form of a user-level function: the public one carries no
     # ``who``, and a method (or engine) that delegates passes its own name so
     # a refusal names the call the user made.
     ('uacpy.core.results.field', 'uacpy.acoustic_signal.channel',
-     '_broadband_propagation_loss'),
+     '_broadband_loss'),
     ('uacpy.core.results.field', 'uacpy.acoustic_signal.channel',
-     '_gate_transfer_function'),
+     '_truncate_response'),
     ('uacpy.core.results.field', 'uacpy.acoustic_signal.channel',
      '_transfer_function_from_impulse_response'),
     ('uacpy.core.results.field', 'uacpy.acoustic_signal.spectrum_at',
@@ -1923,6 +1942,10 @@ _PRIVATE_NAMES_ACROSS_LAYERS = frozenset({
      '_modal_attenuation'),
     ('uacpy.core.results.modes', 'uacpy.core.acoustics.modal',
      '_modal_grazing_angles'),
+    # labelled twin of grain_size_to_geoacoustics: returns its report
+    # instead of warning
+    ('uacpy.data.sediment_db', 'uacpy.core.sediment',
+     '_grain_size_to_geoacoustics'),
     # arrival_grid_impulse_response's, for Arrivals.impulse_response
     ('uacpy.core.results.rays', 'uacpy.acoustic_signal.channel',
      '_arrival_cells_impulse_response'),
@@ -1975,6 +1998,53 @@ _PRIVATE_NAMES_ACROSS_LAYERS = frozenset({
      '_check_oass_range_count'),
     ('uacpy.models.oases.oast', 'uacpy.io.oases_writer',
      '_resolve_freq_sweep'),
+    # Helpers a layer above shares that are not for users: the check every
+    # engine that freezes the water absorption law over a band runs, with
+    # its threshold and depths; the law an environment's absorption is
+    # evaluated with (a measured table stays the user's AbsorptionCoefficient
+    # on env.absorption, and this one adapter makes it the tabulated law the
+    # deck writers and engines read, so that law has no public name); the
+    # grain-size selection every seabed backend applies; the provenance
+    # wording the data layer prints; the roughness notice an OASES run gives.
+    ('uacpy.io.bellhop_writer', 'uacpy.core.absorption', '_absorption_law'),
+    ('uacpy.io.oalib_writer', 'uacpy.core.absorption', '_absorption_law'),
+    ('uacpy.io.oases_writer', 'uacpy.core.absorption', '_absorption_law'),
+    ('uacpy.models.bellhop._synthesis', 'uacpy.core.absorption',
+     '_absorption_law'),
+    ('uacpy.models.ram._domain', 'uacpy.core.absorption', '_absorption_law'),
+    ('uacpy.models.ram.mpirams', 'uacpy.core.absorption', '_absorption_law'),
+    ('uacpy.io.oalib_writer', 'uacpy.core.absorption',
+     '_warn_if_band_absorption_frozen'),
+    ('uacpy.io.oalib_writer', 'uacpy.core.absorption',
+     '_BAND_ABSORPTION_WARN_DB_PER_KM'),
+    ('uacpy.io.oalib_writer', 'uacpy.core.absorption',
+     '_BAND_ABSORPTION_CHECK_DEPTHS'),
+    ('uacpy.io.oases_writer', 'uacpy.core.absorption',
+     '_BAND_ABSORPTION_CHECK_DEPTHS'),
+    ('uacpy.models.bellhop._synthesis', 'uacpy.core.absorption',
+     '_warn_if_band_absorption_frozen'),
+    ('uacpy.models.oases._common', 'uacpy.core.absorption',
+     '_warn_if_band_absorption_frozen'),
+    ('uacpy.models.oases._common', 'uacpy.sonar.scattering',
+     '_non_perturbative_roughness_notice'),
+    ('uacpy.data.diesing_local', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('uacpy.data.emodnet_local', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('uacpy.data.environment', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('uacpy.data.graw_local', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('uacpy.data.mars', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('uacpy.data.pelagic', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('uacpy.data.seabed', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('uacpy.data.sediment_db', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('uacpy.data.sources', 'uacpy.core.provenance', '_fetch_summary_line'),
+    ('uacpy.data._geo', 'uacpy.core.provenance', '_point_in_words'),
 })
 
 #: Layers ``core`` may not import when one of its modules is imported.
@@ -2244,161 +2314,242 @@ def test_the_refusal_pin_gate_sees_each_spelling():
         ('test_a', 5), ('test_a', 7), ('test_a', 9)]
 
 
+#: The public modules the unit-suffix sweep reads: the top level and every
+#: subpackage or root module that declares an ``__all__``.
+_SUFFIX_SWEEP_MODULES = (
+    'uacpy', 'uacpy.models', 'uacpy.io', 'uacpy.acoustic_signal',
+    'uacpy.noise', 'uacpy.sonar', 'uacpy.comms', 'uacpy.data',
+    'uacpy.parallel', 'uacpy.acoustics', 'uacpy.metrics', 'uacpy.materials',
+    'uacpy.units', 'uacpy.analytic', 'uacpy.plot')
+
+
 def _public_named_surfaces():
-    """Every name a caller of ``uacpy``, ``uacpy.acoustic_signal``,
-    ``uacpy.comms`` or ``uacpy.sonar`` types: each export's call parameters
-    (``mod.callable(param)``) and each exported class's public attributes
-    (``mod.Class.attr``).
+    """Every name a caller of a public uacpy module types: each export's
+    call parameters (``mod.callable(param)``), each exported class's public
+    attributes over its uacpy bases (``mod.Class.attr``), and the parameters
+    of those of them that are methods (``mod.Class.method(param)``).
 
     Both halves, because a unit suffix has to hold wherever the name is
-    read: ``AmbiguityResult`` is a NamedTuple, so ``delays_s`` is a keyword
+    read: ``AmbiguityResult`` is a NamedTuple, so ``delays`` is a keyword
     at construction *and* an attribute afterwards. Sweeping the surfaces
     together is what makes a suffix rule checkable everywhere at once rather
     than at the one site an audit happened to open."""
+    import dataclasses
+    import importlib
     import inspect
-    import uacpy.acoustic_signal
-    import uacpy.comms
-    import uacpy.sonar
+
+    def add_parameters(prefix, obj):
+        try:
+            signature = inspect.signature(obj)
+        except (TypeError, ValueError):
+            return
+        sites.update(f"{prefix}({param})" for param in signature.parameters
+                     if param not in ('self', 'cls'))
 
     sites = set()
-    for module in (uacpy, uacpy.acoustic_signal, uacpy.comms, uacpy.sonar):
+    for module_name in _SUFFIX_SWEEP_MODULES:
+        module = importlib.import_module(module_name)
         for name in getattr(module, '__all__', ()):
             obj = getattr(module, name, None)
             if not (inspect.isfunction(obj) or inspect.isclass(obj)):
                 continue
-            try:
-                signature = inspect.signature(obj)
-            except (TypeError, ValueError):
-                signature = None
-            if signature is not None:
-                for param in signature.parameters:
-                    sites.add(f"{module.__name__}.{name}({param})")
-            if inspect.isclass(obj):
-                for attr in vars(obj):
-                    if not attr.startswith('_'):
-                        sites.add(f"{module.__name__}.{name}.{attr}")
-                # A namedtuple subclassed to carry methods keeps its field
-                # descriptors on the base it was built from, so ``vars`` on
-                # the subclass alone stops seeing them — the fields are still
-                # readable attributes, and the sweep went quiet about them
-                # rather than reporting fewer. Read them off ``_fields``,
-                # which does not care which class in the chain holds them.
-                for attr in getattr(obj, '_fields', ()):
-                    if not attr.startswith('_'):
-                        sites.add(f"{module.__name__}.{name}.{attr}")
+            add_parameters(f"{module_name}.{name}", obj)
+            if not inspect.isclass(obj):
+                continue
+            attrs = set()
+            for klass in obj.__mro__:
+                if (klass.__module__ or '').startswith('uacpy'):
+                    attrs |= {a for a in vars(klass) if not a.startswith('_')}
+            # A namedtuple subclassed to carry methods keeps its field
+            # descriptors on the base it was built from, so ``vars`` on
+            # the subclass alone stops seeing them — the fields are still
+            # readable attributes. Read them off ``_fields``, which does not
+            # care which class in the chain holds them.
+            attrs |= {a for a in getattr(obj, '_fields', ())
+                      if not a.startswith('_')}
+            # A dataclass field without a default is no class attribute,
+            # only a field.
+            if dataclasses.is_dataclass(obj):
+                attrs |= {f.name for f in dataclasses.fields(obj)
+                          if not f.name.startswith('_')}
+            for attr in attrs:
+                sites.add(f"{module_name}.{name}.{attr}")
+                member = inspect.getattr_static(obj, attr, None)
+                if isinstance(member, (staticmethod, classmethod)):
+                    member = member.__func__
+                if inspect.isfunction(member):
+                    add_parameters(f"{module_name}.{name}.{attr}", member)
     return sites
 
 
+def _with_suffix(sites, suffix):
+    """The sites whose *name* ends in ``suffix`` — the trailing ``)`` of a
+    parameter site is stripped before matching."""
+    return sorted(s for s in sites if s.rstrip(')').endswith(suffix))
+
+
 def _sites_with_suffix(suffix):
-    """The public surfaces whose *name* ends in ``suffix`` — the trailing
-    ``)`` of a parameter site is stripped before matching."""
-    return sorted(s for s in _public_named_surfaces()
-                  if s.rstrip(')').endswith(suffix))
+    """The public surfaces whose name ends in ``suffix``."""
+    return _with_suffix(_public_named_surfaces(), suffix)
 
 
-class TestTheSecondsSuffixIsNotSpentOnMetresPerSecond:
-    """``_s`` is this package's suffix for seconds — eleven public sites use
-    it that way (``delays_s``, ``pulse_length_s``, ``integration_time_s``, …)
-    — so a public ``_ms`` reads as milliseconds, which is what ``_ms``
-    already means at every private site that has one (``t_ms``,
-    ``delays_ms``, ``time_ms`` are all milliseconds). Metres per second is
-    spelled ``_mps``.
-    """
+#: The suffixes of SI units, which a public name leaves unsaid
+#: (DOCUMENTATION.md §15): metres, seconds, hertz in either casing, metres
+#: per second in the spellings it had, radians, steradians; and dB per
+#: wavelength, the attenuation unit, which keeps a plain name.
+_SI_UNIT_SUFFIXES = ('_m', '_s', '_sec', '_hz', '_Hz', '_mps', '_ms', '_m_s',
+                     '_rad', '_sr', '_dB_per_wavelength', '_dB_lambda')
 
-    def test_the_sea_surface_generator_takes_wind_speed_kn(self):
+#: Suffixes ending in an SI letter that state a non-SI unit: dB per metre
+#: is a level per metre (``Modes.with_attenuation(alpha_dB_per_m)``).
+_NON_SI_SUFFIXES = ('_dB_per_m',)
+
+
+class TestNoPublicNameCarriesAnSIUnitSuffix:
+    """A name carries a unit suffix only when its unit is not SI, on inputs
+    and results alike: ``ranges``, ``rmax``, ``delays``, ``bandwidth``,
+    ``phases`` (radians), but ``angles_deg``, ``wind_speed_kn``,
+    ``max_distance_km``, ``source_level_dB``; density, attenuation (dB/λ),
+    latitude / longitude, temperature and salinity keep plain names in their
+    stated units — so a quantity has one spelling wherever it is passed or
+    read (DOCUMENTATION.md §15)."""
+
+    def test_no_public_name_ends_in_an_si_unit_suffix(self):
+        sites = _public_named_surfaces()
+        offenders = [site for suffix in _SI_UNIT_SUFFIXES
+                     for site in _with_suffix(sites, suffix)
+                     if not site.rstrip(')').endswith(_NON_SI_SUFFIXES)]
+        assert not offenders, (
+            "public name(s) spelling an SI unit, which a public name leaves "
+            "unsaid:\n" + "\n".join(offenders))
+
+    def test_the_sweep_reads_the_sites_the_rule_is_about(self):
+        """The far side of the gate: silence there must mean the sweep
+        looked at the names, keywords and fields an SI unit was once
+        spelled on, and at the names a degree angle now carries."""
+        sites = _public_named_surfaces()
+        for site in ('uacpy.acoustic_signal.AmbiguityResult.delays',
+                     'uacpy.acoustic_signal.AmbiguityResult.doppler_shifts',
+                     'uacpy.acoustic_signal.ChannelRegime(symbol_duration)',
+                     'uacpy.acoustic_signal.ChannelRegime.coherence_bandwidth',
+                     'uacpy.acoustic_signal.processing_gain_dB(bandwidth)',
+                     'uacpy.acoustic_signal.arrival_impulse_response(delays_imag)',
+                     'uacpy.acoustic_signal.arrival_transfer_function(phases)',
+                     'uacpy.acoustic_signal.steering_vectors(positions)',
+                     'uacpy.acoustic_signal.warp_signal(range)',
+                     'uacpy.acoustic_signal.BeamformedField.angles_deg',
+                     'uacpy.comms.ChannelTaps.first_arrival',
+                     'uacpy.comms.doppler_from_speed(speed)',
+                     'uacpy.acoustics.doppler(speed)',
+                     'uacpy.comms.fading_taps(doppler_shift_max)',
+                     'uacpy.sonar.detection_threshold_energy(integration_time)',
+                     'uacpy.sonar.volume_reverberation(pulse_length)',
+                     'uacpy.sonar.boundary_reverberation(horizontal_beamwidth)',
+                     'uacpy.sonar.ts_sphere(radius)',
+                     'uacpy.Field.band', 'uacpy.Field.stream_start',
+                     'uacpy.ConstantAbsorption(value)',
+                     'uacpy.BiologicalLayer.z_top',
+                     'uacpy.Rays.distinct_paths(target_depth)',
+                     'uacpy.Rays.launch_angles_deg',
+                     'uacpy.Arrivals.source_angles_deg',
+                     'uacpy.ReflectionCoefficient(angles_deg)',
+                     'uacpy.ReflectionCoefficient.critical_angle_deg',
+                     'uacpy.data.DataProvenance.split_depth',
+                     'uacpy.models.rams_stable_dr(seabed_attenuation)',
+                     'uacpy.models.Kraken(rmax)',
+                     'uacpy.models.RAM(stability_range)',
+                     'uacpy.models.RAM(angle_max_deg)',
+                     'uacpy.models.RAM(rams_rotation_angle_deg)',
+                     'uacpy.models.Bellhop(launch_angles_deg)',
+                     'uacpy.models.OAST(dip_angle_deg)',
+                     'uacpy.models.optimize_grid(angle_max_deg)',
+                     'uacpy.models.OASR(angles_deg)',
+                     'uacpy.io.write_water_attenuation_file(attenuation)',
+                     'uacpy.io.read_shd_bin(xs)',
+                     'uacpy.io.ShdFile.bearings_deg',
+                     'uacpy.io.write_oasr_input(angle_max_deg)',
+                     'uacpy.io.write_reflection_coefficient(angles_deg)',
+                     'uacpy.plot.plot_time_snapshots(times)',
+                     'uacpy.data.extend_ssp_below_data(latitude)',
+                     'uacpy.acoustics.sound_speed_unesco(latitude)',
+                     'uacpy.generate_sea_surface(rmax)',
+                     'uacpy.generate_sea_surface(wind_speed_19_5m_kn)'):
+            assert site in sites, site
+
+    def test_the_suffix_match_reads_the_name_of_each_kind_of_site(self):
+        sites = {'m.f(delay_s)', 'm.C.band_hz', 'm.C.g(fc)', 'm.h(speed)',
+                 'm.k(speed_mps)', 'm.p(rmax_m)', 'm.q(alpha_dB_per_m)'}
+        assert _with_suffix(sites, '_s') == ['m.f(delay_s)']
+        assert _with_suffix(sites, '_hz') == ['m.C.band_hz']
+        assert _with_suffix(sites, '_mps') == ['m.k(speed_mps)']
+        assert _with_suffix(sites, '_m') == ['m.p(rmax_m)', 'm.q(alpha_dB_per_m)']
+        assert 'm.q(alpha_dB_per_m)'.rstrip(')').endswith(_NON_SI_SUFFIXES)
+
+
+class TestTheSeaSurfaceTakesThePiersonMoskowitzWind:
+    """``generate_sea_surface``, ``sea_surface_n_points`` and
+    ``Altimetry.from_sea_state`` take the Pierson-Moskowitz wind, defined at
+    19.5 m (Brekhovskikh & Lysanov, Fig. 1.24), and their argument says so:
+    ``wind_speed_19_5m_kn``. Every other wind argument is the 10 m wind,
+    ``wind_speed_kn``; a 10 m reading divides by 0.94 first (Ainslie 2010
+    Eq. 8.12)."""
+
+    _PM_ENTRIES = ('uacpy.generate_sea_surface',
+                   'uacpy.core.altimetry.sea_surface_n_points',
+                   'uacpy.core.altimetry.Altimetry.from_sea_state')
+
+    def test_each_entry_names_the_height_of_its_wind(self):
+        import inspect
+        for dotted in self._PM_ENTRIES:
+            params = inspect.signature(
+                TestTheWindArgumentsTakeKnots._resolve(dotted)).parameters
+            assert 'wind_speed_19_5m_kn' in params, dotted
+            assert 'wind_speed_kn' not in params, dotted
+
+    def test_unset_is_the_documented_default_wind(self):
         import inspect
         params = inspect.signature(uacpy.generate_sea_surface).parameters
-        assert 'wind_speed_kn' in params
-        # the default is 10 m/s, written in the knots the argument takes
+        # None takes the default, 10 m/s written in the knots the argument
+        # takes, as Altimetry.from_sea_state's None does
         from uacpy.core.altimetry import DEFAULT_SEA_SURFACE_WIND_KN
-        assert params['wind_speed_kn'].default == DEFAULT_SEA_SURFACE_WIND_KN
+        assert params['wind_speed_19_5m_kn'].default is None
+        assert inspect.signature(uacpy.Altimetry.from_sea_state).parameters[
+            'wind_speed_19_5m_kn'].default is None
         assert float(uacpy.units.knots_to_ms(DEFAULT_SEA_SURFACE_WIND_KN)) == pytest.approx(10.0, rel=1e-15)
+        unset = uacpy.generate_sea_surface(
+            5000.0, rng=np.random.default_rng(3))
+        given = uacpy.generate_sea_surface(
+            5000.0, DEFAULT_SEA_SURFACE_WIND_KN, rng=np.random.default_rng(3))
+        np.testing.assert_array_equal(unset, given)
 
-    def test_the_wind_speed_kn_keyword_sets_the_wave_height(self):
+    def test_the_pm_wind_keyword_sets_the_wave_height(self):
         # The name is pinned on the live signature above; this pins that it
         # is the wind speed, so the gate cannot be satisfied by a parameter
         # that merely spells itself right.
         calm = uacpy.generate_sea_surface(
-            2000.0, wind_speed_kn=10.0, n_points=256,
+            2000.0, wind_speed_19_5m_kn=10.0, n_points=256,
             rng=np.random.default_rng(3))
         blow = uacpy.generate_sea_surface(
-            2000.0, wind_speed_kn=30.0, n_points=256,
+            2000.0, wind_speed_19_5m_kn=30.0, n_points=256,
             rng=np.random.default_rng(3))
         # Pierson-Moskowitz: Hs = 0.021*U^2, so 30 kn is 9x the 10 kn sea.
         assert float(np.std(blow[:, 1])) > 5.0 * float(np.std(calm[:, 1]))
 
-    def test_the_seconds_spelling_of_the_wind_speed_keyword_is_not_accepted(self):
-        # The other side of the same boundary: one spelling reaches the
-        # generator and the other is a TypeError, so the two cannot both be
-        # live at once.
-        with pytest.raises(TypeError, match='wind_speed_ms'):
-            uacpy.generate_sea_surface(2000.0, wind_speed_ms=5.0, n_points=64)
-
-    def test_the_seconds_suffix_is_already_spoken_for_across_the_package(self):
-        """The premise the ``_mps`` spelling rests on, measured rather than
-        asserted: ``_s`` names seconds on every public surface that carries
-        it — call parameters and readable attributes alike, which is why the
-        sweep covers attributes too. ``AmbiguityResult.delays_s`` and the
-        ``ChannelTaps`` pair (``delays_s``, ``first_arrival_s``) are both
-        passable and readable, so each counts twice. If this count moves
-        the convention has changed and the rule below has to be restated.
-
-        The count is a tripwire, not a budget: every site it admits must
-        mean seconds. It last moved when the generic channel functions
-        were exported — the power-delay-profile group's four ``delays_s``,
-        the two ``ChannelRegime`` fields that became public with the type,
-        ``arrival_transfer_function``'s ``delays_s`` / ``delays_imag_s``,
-        ``pulse_shaped_taps``'s ``delays_s``, and the same pair on
-        ``simulate_arrival_reception``; then by three when the arrival
-        computations of the result types became functions:
-        ``synthesis_band``'s and ``fold_notice``'s ``delays_s`` and
-        ``received_amplitudes``'s ``delays_imag_s``; then down by one when
-        ``fold_notice``, which takes its caller's error text, went private."""
-        seconds = [s for s in _sites_with_suffix('_s')
-                   if not s.rstrip(')').endswith('_ms')]
-        assert len(seconds) == 30, seconds
-        for site in ('uacpy.acoustic_signal.AmbiguityResult.delays_s',
-                     'uacpy.comms.ChannelTaps(delays_s)',
-                     'uacpy.comms.ChannelTaps.delays_s',
-                     'uacpy.comms.ChannelTaps(first_arrival_s)',
-                     'uacpy.comms.ChannelTaps.first_arrival_s',
-                     'uacpy.acoustic_signal.rms_delay_spread(delays_s)',
-                     'uacpy.acoustic_signal.ChannelRegime(symbol_duration_s)',
-                     'uacpy.acoustic_signal.arrival_transfer_function(delays_imag_s)',
-                     'uacpy.comms.pulse_shaped_taps(delays_s)',
-                     'uacpy.acoustic_signal.simulate_arrival_reception(delays_imag_s)',
-                     'uacpy.acoustic_signal.arrival_impulse_response(delays_s)',
-                     'uacpy.acoustic_signal.arrival_impulse_response(delays_imag_s)'):
-            assert site in seconds, site
-
-    def test_no_public_surface_spells_metres_per_second_as_ms(self):
-        offenders = _sites_with_suffix('_ms')
-        assert not offenders, (
-            "public name(s) ending in `_ms`, which reads as milliseconds "
-            "next to the `_s`-for-seconds sites:\n" + "\n".join(offenders))
-
-    def test_the_mps_spelling_is_the_one_the_sweep_finds(self):
-        """The far side of the previous gate: silence there must mean the
-        sweep looked and found nothing, not that it sees no speed at all.
-
-        ``uacpy.comms.doppler_from_speed`` spells its platform speed
-        ``_mps``; the wind arguments are knots (``_kn``, pinned below); a
-        sound speed is ``sound_speed``, whose unit the package fixes as m/s."""
-        assert _sites_with_suffix('_mps') == [
-            'uacpy.comms.doppler_from_speed(speed_mps)',
-        ]
+    def test_the_10_m_wind_keyword_is_not_accepted(self):
+        # The other side of the same boundary: the 10 m spelling every other
+        # wind argument uses is a TypeError here, so a fetched 10 m wind
+        # cannot reach the PM spectrum under its own name.
+        with pytest.raises(TypeError, match='wind_speed_kn'):
+            uacpy.generate_sea_surface(2000.0, wind_speed_kn=5.0, n_points=64)
 
 
 class TestTheWindArgumentsTakeKnots:
-    """Every public wind argument is ``wind_speed_kn`` and its value is in
-    knots; a law stated in m/s converts once, at its entry. Each m/s-native
-    entry is pinned against its own m/s formula fed the converted value, so
-    dropping a conversion (or adding a second one) fails here."""
+    """Every public wind argument is in knots and says so (``_kn``); a law
+    stated in m/s converts once, at its entry. Each m/s-native entry is
+    pinned against its own m/s formula fed the converted value, so dropping
+    a conversion (or adding a second one) fails here."""
 
     _ENTRIES = ('uacpy.noise.WenzNoise', 'uacpy.noise.wind_noise_level',
-                'uacpy.generate_sea_surface',
-                'uacpy.core.altimetry.sea_surface_n_points',
-                'uacpy.core.altimetry.Altimetry.from_sea_state',
                 'uacpy.sonar.chapman_harris_surface',
                 'uacpy.sonar.apl_uw_surface_backscatter',
                 'uacpy.core.acoustics.bubble_surface_loss')
@@ -2419,14 +2570,23 @@ class TestTheWindArgumentsTakeKnots:
 
     def test_every_wind_entry_names_its_argument_in_knots(self):
         import inspect
+        entries = (self._ENTRIES
+                   + TestTheSeaSurfaceTakesThePiersonMoskowitzWind._PM_ENTRIES)
+        for dotted in entries:
+            params = inspect.signature(self._resolve(dotted)).parameters
+            winds = [p for p in params if p.startswith('wind_speed')]
+            assert winds and all(p.endswith('_kn') for p in winds), dotted
         for dotted in self._ENTRIES:
             params = inspect.signature(self._resolve(dotted)).parameters
             assert 'wind_speed_kn' in params, dotted
-            assert not [p for p in params if p.endswith('_mps')], dotted
 
     def test_the_suffix_sweep_finds_the_knots_sites(self):
         assert _sites_with_suffix('_kn') == [
-            'uacpy.generate_sea_surface(wind_speed_kn)',
+            'uacpy.Altimetry.from_sea_state(wind_speed_19_5m_kn)',
+            'uacpy.acoustics.bubble_surface_loss(wind_speed_kn)',
+            'uacpy.generate_sea_surface(wind_speed_19_5m_kn)',
+            'uacpy.noise.WenzNoise(wind_speed_kn)',
+            'uacpy.noise.wind_noise_level(wind_speed_kn)',
             'uacpy.sonar.apl_uw_surface_backscatter(wind_speed_kn)',
             'uacpy.sonar.chapman_harris_surface(wind_speed_kn)',
         ]
@@ -2635,9 +2795,9 @@ class TestEveryLaunchPassesOneRunner:
 
 #: The io writers that write a deck for one engine, by module and function.
 _WRITER_ENGINES = {
-    ('io/mpirams_writer.py', 'write_inpe'): 'RAM',
-    ('io/mpirams_writer.py', 'write_sediment_file'): 'RAM',
-    ('io/ramsurf_writer.py', 'write_ramin'): 'RAM',
+    ('io/mpirams_writer.py', 'write_mpirams_inpe'): 'RAM',
+    ('io/mpirams_writer.py', 'write_mpirams_sediment'): 'RAM',
+    ('io/ramsurf_writer.py', 'write_ram_in'): 'RAM',
     ('io/oalib_writer.py', 'write_fieldflp'): 'Kraken',
     ('io/oalib_writer.py', 'write_field3dflp'): 'Kraken',
     ('io/oalib_writer.py', 'write_kraken_env_file'): 'Kraken',
@@ -2658,12 +2818,12 @@ _WRITER_ENGINES = {
 _KNOB_ALIASES = {
     'q_factor': ('Q',), 'record_duration': ('T',),
     'dz': ('deltaz',), 'dr': ('deltar',), 'n_pade': ('np_pade', 'np'),
-    'n_stability': ('nss', 'ns_stab', 'ns'), 'stability_range_m': ('rs', 'rs_stab'),
+    'n_stability': ('nss', 'ns_stab', 'ns'), 'stability_range': ('rs', 'rs_stab'),
     'depth_decimation': ('dzm', 'ndz'), 'c0': ('c0_user',), 'earth_curvature': ('iflat',),
-    'n_sediment_points': ('nzs',), 'rams_rotation': ('irot',), 'rams_rotation_angle': ('theta',),
+    'n_sediment_points': ('nzs',), 'rams_rotation': ('irot',), 'rams_rotation_angle_deg': ('theta',),
     # FLP MLimit (field.f90:67-68, :185, M = MIN(MLimit, MSrc)) is the n_modes knob
     'n_modes': ('M_limit', 'mode_limit'), 'n_wavenumbers': ('nw_samples', 'nk'),
-    'launch_angles': ('alpha',), 'ray_step': ('step',), 'time_max': ('t_max',),
+    'launch_angles_deg': ('alpha',), 'ray_step': ('step',), 'time_max': ('t_max',),
     'n_time_samples': ('n_t_out',), 'march_start': ('t_start',), 'courant_factor': ('t_mult',),
     'freq_min': ('f_min', 'fmin'), 'freq_max': ('f_max', 'fmax'),
     'range_min': ('plot_rmin',), 'range_max': ('plot_rmax',),
@@ -2711,11 +2871,11 @@ def test_every_deck_writer_names_a_knob_as_its_model_does():
 
 
 def test_the_writer_knob_gate_sees_a_deck_spelling():
-    """The gate reads the writer it is pointed at: ``write_inpe`` spelled
+    """The gate reads the writer it is pointed at: ``write_mpirams_inpe`` spelled
     with the deck's ``deltaz`` is reported."""
     rel = 'io/mpirams_writer.py'
     text = (_PACKAGE / rel).read_text(encoding='utf-8')
     bad = _writer_knob_misnames(
-        {rel: text.replace('def write_inpe(\n    filepath: Union[str, Path],\n',
-                           'def write_inpe(\n    filepath: Union[str, Path],\n    deltaz,\n', 1)})
-    assert ('io/mpirams_writer.py:write_inpe', 'deltaz', 'dz') in bad
+        {rel: text.replace('def write_mpirams_inpe(\n    filepath: Union[str, Path],\n',
+                           'def write_mpirams_inpe(\n    filepath: Union[str, Path],\n    deltaz,\n', 1)})
+    assert ('io/mpirams_writer.py:write_mpirams_inpe', 'deltaz', 'dz') in bad

@@ -16,9 +16,7 @@ plot_subcarriers · plot_scatter
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,7 +42,7 @@ frame_bits = comms.pack_frame(message)
 code = comms.ConvCode(interleave_depth=16)
 tx = comms.OFDMTransmitter("qpsk", nsc, cp, code=code)
 waveform = tx.transmit_passband(frame_bits, fs, fc, oversample=oversampling)
-uacpy.io.write_wav(OUT / 'example_33_ofdm.wav', waveform, fs)
+uacpy.io.write_wav(OUT / 'example_33_ofdm.wav', waveform, fs, normalize=True)
 band = fs / oversampling
 print(f"  payload  : {len(message)} bytes → {frame_bits.size} framed bits")
 print(f"  waveform : {waveform.size} real samples, "
@@ -55,7 +53,7 @@ print(f"  waveform : {waveform.size} real samples, "
 # clock-skew Doppler, delay, then noise.
 impulse_response = np.zeros(60)
 impulse_response[[0, 25, 51]] = [1.0, 0.5, 0.3]
-received = np.convolve(waveform, impulse_response)
+received = comms.apply_channel(waveform, impulse_response)
 received = resample_poly(received, 100015, 100000)
 received = np.concatenate([np.zeros(37), received])
 snr_dB = 24.0
@@ -106,8 +104,7 @@ axes[0, 0].axhline(fc, color='w', ls='--', lw=1)
 uacpy.plot.plot_sync_metric(metric, ax=axes[0, 1], threshold=0.5,
                             title='Schmidl-Cox timing metric')
 
-# The plotter takes an impulse response; the estimate's inverse DFT is one.
-uacpy.plot.plot_subcarriers(np.fft.ifft(H), nsc, ax=axes[1, 0],
+uacpy.plot.plot_subcarriers(H, ax=axes[1, 0],
                             title='per-subcarrier channel |H|')
 
 uacpy.plot.plot_scatter(diag.symbols, ax=axes[1, 1], ideal=constellation,

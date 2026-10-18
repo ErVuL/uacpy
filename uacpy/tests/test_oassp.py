@@ -11,6 +11,7 @@ writer tests below parse the deck off disk rather than re-deriving it, and the
 chain tests read the binary's own echo.
 """
 
+import io
 import os
 import warnings
 
@@ -19,12 +20,15 @@ import pytest
 
 import uacpy
 from uacpy.core.exceptions import (
-    ConfigurationError, ModelExecutionError, UnsupportedFeatureError,
+    ConfigurationError, ModelExecutionError, NumericsWarning,
+    UnsupportedFeatureError, ValidityWarning,
 )
 from uacpy.models.oases._common import _reject_wavenumber_overrun
+from uacpy.models.oases._sampling import _oassp_wavenumber_count
 from uacpy.models.oases.oassp import (
-    _deck_wavenumber_count, _oassp_options, _oassp_wavenumber_echo_scale,
-    _reject_roughness_wavenumber_overflow, _require_single_rough_interface,
+    _deck_sampling, _deck_wavenumber_count, _oassp_options,
+    _oassp_wavenumber_echo_scale, _reject_roughness_wavenumber_overflow,
+    _require_single_rough_interface, _write_oassp_deck,
 )
 from uacpy.io.oases_writer import write_oassp_input
 from uacpy.io.oases_reader import read_oases_rhs_header
@@ -174,10 +178,11 @@ class TestDeckStructure:
                 assert len(record) == 7, record
 
     def test_default_option_line(self, tmp_path):
-        # 'N' single component, 'J' holds ICNTIN=1 so automatic sampling takes
-        # the complex wavenumber contour rather than OMEGIM = -ln(50)*df
-        # (unoassp30.f:281-289), 's' zeroes the sources (:628-635).
-        assert set(_write(tmp_path)[1].split()) == {'N', 'J', 's'}
+        # 'K' (bulk pressure) single component, 'J' holds ICNTIN=1 so
+        # automatic sampling takes the complex wavenumber contour rather than
+        # OMEGIM = -ln(50)*df (unoassp30.f:281-289), 's' zeroes the sources
+        # (:628-635).
+        assert set(_write(tmp_path)[1].split()) == {'K', 'J', 's'}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,15 +208,37 @@ class TestWriterGuards:
                                match="produces no such input"):
                 _write(tmp_path, options=f'N J s {letter}')
 
-    def test_tau_p_raises(self, tmp_path):
-        with pytest.raises(ConfigurationError, match="tau-p"):
-            _write(tmp_path, options='N J s t')
+    @pytest.mark.parametrize('letter', ['t', 'U', 'V', 'H', 'R', 'S', 'N'])
+    def test_a_valid_letter_the_trf_reader_cannot_read_is_written_and_the_model_refuses_it(
+            self, tmp_path, letter):
+        """tau-p ('t'), the output letters other than the pressure, and 'N'
+        beside 'K' write a valid OASSP deck, which the public writer writes;
+        the OASSP model refuses them, its .trf being one uacpy cannot read
+        back as one pressure."""
+        from uacpy.models.oases._common import _reject_unreadable_trf_options
+        lines = _write(tmp_path, options=f'K J s {letter}')
+        assert letter in lines[1]
+        with pytest.raises(ConfigurationError,
+                           match={'t': "tau-p",
+                                  'N': "both 'N' \\(normal stress\\)"}.get(
+                               letter, "other than the pressure")):
+            _reject_unreadable_trf_options('OASSP', f'K J s {letter}', None)
 
-    def test_decomposition_and_extra_components_raise(self, tmp_path):
-        for letter in ('U', 'V', 'H', 'R', 'K', 'S'):
-            with pytest.raises(UnsupportedFeatureError,
-                               match="multi-component"):
-                _write(tmp_path, options=f'N J s {letter}')
+    @pytest.mark.parametrize('opts, said', [
+        ('K J s V', 'other than the pressure'),
+        ('K J s t', 'tau-p'),
+        ('K J s O', "option 'O'"),
+        ('K s', "without 'J'"),
+        ('N K J s', "both 'N'"),
+    ])
+    def test_the_model_refuses_an_option_line_its_reader_cannot_read(
+            self, opts, said):
+        """The OASSP model itself runs the check, before any binary: a run
+        with these letters would return a .trf uacpy would mislabel."""
+        with pytest.raises(ConfigurationError, match=said):
+            uacpy.OASSP(options=opts, correlation_length=5.0).run_settings(
+                _env(), _source(), _receiver(n_depths=2),
+                run_mode=RunMode.BROADBAND)
 
     def test_volume_scattering_is_refused_by_name(self, tmp_path):
         # D2: a negative CL is OASES' switch to the twelve-token record
@@ -273,17 +300,11 @@ class TestWriterGuards:
     def test_warn_false_writes_the_same_deck_and_says_none_of_its_warnings(
             self, tmp_path):
         """``warn=False`` (OASSP's stage-3 wavenumber count writes the deck
-        for its text alone) reaches every helper that warns: the deck
-        below warns from write_oassp_input itself (c_high without 'P'),
-        from _check_n_time_samples and from _format_upper_halfspace (a
-        rigid surface, three calls down) with ``warn=True``, and says
-        nothing with ``warn=False``, byte for byte the same deck."""
-        env = make_pekeris(
-            bathymetry=128.0,
-            ssp=uacpy.SoundSpeedProfile(depths=[0, 128],
-                                        sound_speed=[1500, 1500]),
-            sound_speed=2300.0, density=2.65, roughness=0.5,
-            surface=BoundaryProperties(acoustic_type='rigid'))
+        for its text alone) reaches the helpers that warn: the deck below
+        warns from write_oassp_input itself (c_high without 'P') and from
+        _check_n_time_samples with ``warn=True``, and says nothing with
+        ``warn=False``, byte for byte the same deck."""
+        env = _env()
         decks, said = {}, {}
         for warn in (True, False):
             folder = tmp_path / str(warn)
@@ -295,8 +316,7 @@ class TestWriterGuards:
             said[warn] = [str(w.message) for w in caught]
         assert [m.split(' ')[:2] for m in said[True]] == [
             ['write_oassp_input:', 'n_time_samples=500'],
-            ['write_oassp_input:', 'c_high=100000'],
-            ['OASES', 'does']]
+            ['write_oassp_input:', 'c_high=100000']]
         assert said[False] == []
         assert decks[False] == decks[True]
 
@@ -451,23 +471,30 @@ class TestModelConfiguration:
         m = uacpy.OASSP(correlation_length=5.0, roughness_spectrum='goff-jordan')
         assert set(_oassp_options(m.options, m.scattered_only,
                                   m.roughness_spectrum).split()) == \
-            {'N', 'J', 's', 'g'}
+            {'K', 'J', 's', 'g'}
         m = uacpy.OASSP(correlation_length=5.0, scattered_only=False)
         assert 's' not in _oassp_options(m.options, m.scattered_only,
                                          m.roughness_spectrum)
 
-    def test_mean_field_gets_option_s_added(self):
-        # Without 's' OASP never calls opfilb(45) (unoasp22.f:251-254) and no
-        # .rhs is written at all.
-        m = uacpy.OASSP(correlation_length=5.0,
-                        mean_field=uacpy.OASP(options='N J'))
-        assert 's' in m._build_mean_field().options
-        # An explicit 's' is not doubled.
+    @pytest.mark.parametrize('options', [None, 'K J', 'N J'])
+    def test_a_mean_field_without_s_is_refused(self, options):
+        """Without 's' OASP never calls opfilb(45) (unoasp22.f:250-254) and
+        no .rhs is written; the producer's option line is the caller's, so
+        it is refused, naming a line that works, as on OASS."""
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)must contain 's' or it writes no "
+                                 r"\.rhs.*OASP\(options='K J s'\)"):
+            uacpy.OASSP(correlation_length=5.0,
+                        mean_field=uacpy.OASP(options=options))
+
+    def test_a_mean_field_with_s_is_run_as_given(self):
         m = uacpy.OASSP(correlation_length=5.0,
                         mean_field=uacpy.OASP(options='N J s'))
         assert m._build_mean_field().options == 'N J s'
+        assert uacpy.OASSP(
+            correlation_length=5.0)._build_mean_field().options == 'K J s'
 
-    @pytest.mark.parametrize('options', ['N J', 'N J s'])
+    @pytest.mark.parametrize('options', ['K J s', 'N J s'])
     def test_a_supplied_mean_field_keeps_its_verbose_and_timeout(
             self, options):
         """The user's producer runs with its own verbose and timeout; its
@@ -1143,6 +1170,118 @@ class TestRoughnessBranchWavenumberBound:
         assert np.nanmax(np.abs(field.data)) > 0.0
 
 
+class TestAnUnpinnedCLowFitsTheRoughnessBranchOverAShearSeabed:
+    """Over a shear seabed the documented ``c_low`` (0.85 × the slowest
+    speed, here the 400 m/s shear speed: 340 m/s) can make oassp2 integrate
+    on more than the 4096 wavenumbers its roughness branch holds. An
+    unpinned ``c_low`` then takes the lowest whole m/s whose count fits,
+    at most 0.90 × the slowest compressional speed (1350 m/s here), and the
+    mean field OASSP builds takes it too; a pinned ``c_low`` or
+    ``n_wavenumbers`` is written as given.
+
+    Case: 100 m of 1500 m/s water over a rough elastic half-space (1700 m/s,
+    shear 400 m/s), source 50 m, receivers 20/50/80 m, 256 samples. Out to
+    1.8 km, 340 m/s needs 5663 wavenumbers, 500 m/s 4098 and 501 m/s 4091;
+    out to 4 km, 1350 m/s needs 3974; out to 5 km, 4870."""
+
+    @staticmethod
+    def _env():
+        return uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0, density=1.8,
+                attenuation=0.5, roughness=0.5, shear_speed=400.0,
+                shear_attenuation=1.0))
+
+    SRC = uacpy.Source(depths=50.0, frequencies=100.0)
+
+    @staticmethod
+    def _receiver(range_max=1800.0):
+        return uacpy.Receiver(depths=[20.0, 50.0, 80.0],
+                              ranges=np.linspace(200.0, range_max, 5))
+
+    def _settings(self, range_max=1800.0, **knobs):
+        with warnings.catch_warnings(record=True) as said:
+            warnings.simplefilter('always')
+            settings = OASSP(correlation_length=5.0, n_time_samples=256,
+                             **knobs).run_settings(
+                self._env(), self.SRC, self._receiver(range_max))
+        return settings.engine, said
+
+    def _count(self, engine, c_low, range_max=1800.0):
+        deck = io.StringIO()
+        _write_oassp_deck(deck, self._env(), self.SRC,
+                          self._receiver(range_max), engine, warn=False)
+        sampling = _deck_sampling(deck.getvalue(), self._receiver(range_max))
+        return _oassp_wavenumber_count(**{**sampling, 'c_low': c_low})
+
+    def test_the_documented_value_passes_the_bound(self):
+        engine, _ = self._settings()
+        assert self._count(engine, 340.0) == 5663
+
+    def test_the_run_takes_the_lowest_whole_value_whose_count_fits(self):
+        engine, _ = self._settings()
+        assert engine.c_low == 501.0
+        assert engine.n_integrated_wavenumbers == (4091,)
+        assert self._count(engine, 500.0) == 4098
+        assert '340 m/s' in engine.c_low_origin
+        assert '5663' in engine.c_low_origin
+
+    def test_the_fit_is_said_naming_the_bound_and_the_interface_wave(self):
+        _, said = self._settings()
+        fits = [str(w.message) for w in said
+                if issubclass(w.category, NumericsWarning)
+                and 'c_low = 501 m/s' in str(w.message)]
+        assert len(fits) == 1
+        for token in ('4096', 'unoassp30.f:542-544', 'Scholte', '§5.10.5',
+                      'n_wavenumbers=4096'):
+            assert token in fits[0]
+
+    def test_the_mean_field_oassp_builds_takes_the_fitted_value(self):
+        engine, said = self._settings()
+        assert engine.mean_field.engine.c_low == 501.0
+        assert engine.mean_field.engine.c_low_origin == engine.c_low_origin
+        assert not [w for w in said if issubclass(w.category, ValidityWarning)
+                    and 'differs from the mean' in str(w.message)]
+
+    def test_a_pinned_c_low_past_the_bound_is_refused(self):
+        with pytest.raises(ConfigurationError, match='5663 wavenumbers'):
+            self._settings(c_low=340.0)
+
+    def test_a_pinned_count_keeps_the_documented_c_low(self):
+        engine, said = self._settings(n_wavenumbers=4096)
+        assert engine.c_low == 340.0
+        assert engine.n_integrated_wavenumbers == (4096,)
+        assert not [w for w in said if 'past the 4096' in str(w.message)]
+
+    def test_the_ceiling_is_the_rule_on_the_compressional_speeds(self):
+        from uacpy.core.engine_defaults import default_c_low
+        from uacpy.models.oases.oassp import _compressional_c_low
+        assert _compressional_c_low(self._env()) == pytest.approx(1350.0)
+        fluid = TestRoughnessBranchWavenumberBound._rough_env()
+        assert _compressional_c_low(fluid) == default_c_low(fluid)[0]
+
+    def test_the_fit_stays_under_the_compressional_c_low(self):
+        engine, _ = self._settings(range_max=4000.0)
+        assert 340.0 < engine.c_low <= 1350.0
+        assert self._count(engine, engine.c_low - 1.0, 4000.0) > 4096
+
+    def test_past_the_compressional_c_low_the_run_is_refused(self):
+        with pytest.raises(ConfigurationError, match='wavenumbers'):
+            self._settings(range_max=5000.0)
+
+    @pytest.mark.slow
+    @pytest.mark.requires_oases
+    def test_the_fitted_run_completes_with_a_finite_field(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            field = OASSP(correlation_length=5.0, n_time_samples=256).run(
+                self._env(), self.SRC, self._receiver())
+        assert field.run_settings.engine.c_low == 501.0
+        assert np.all(np.isfinite(field.data))
+        assert np.nanmax(np.abs(field.data)) > 0.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # OASES-7 — the mean field describes the problem the OASSP deck describes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1346,3 +1485,5 @@ class TestTheSpectralExponentResolvesFromNone:
                                         roughness_spectrum=spectrum)
         assert engine.spectral_exponent == 2.0
         assert bool(messages) is said, messages
+
+

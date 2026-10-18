@@ -11,7 +11,8 @@ Coverage is regional: outside the European-seas footprint the fetch raises
 ``DataFetchError``; ``fetch_environment(bottom_sources='auto')`` then falls
 through to the global sources (grain-size samples, Diesing, MARS, pelagic),
 and a direct caller can pick one of those or supply an explicit grain size (ϕ)
-or sediment class (see :func:`uacpy.data.bottom_from_grain_size`).
+or sediment class (see
+:meth:`~uacpy.core.environment.BoundaryProperties.from_grain_size`).
 
 The Folk 5-class (EUNIS) categories are mapped to representative grain sizes /
 materials, then converted with the calibrated relations in
@@ -25,13 +26,13 @@ import urllib.parse
 from typing import Optional, Union
 
 from uacpy.core.environment import BoundaryProperties
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.geo import Coordinate, as_coordinate, normalize_lon
-from uacpy.data._geo import checked_max_distance, checked_offset
+from uacpy.data._chain import CACHE_BACKEND, first_answer, lower_source_spec
+from uacpy.data._geo import checked_max_distance, checked_offset, require_source
 from uacpy.data._http import http_get
 from uacpy.data.sources import SOURCES, DataProvenance
-from uacpy.data.sediment import (SeabedSample, bottom_from_class,
-                                 bottom_from_grain_size)
+from uacpy.data.sediment import SeabedSample
 from uacpy._log import log_message
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 
@@ -51,7 +52,8 @@ EMODNET_LAYER = 'gtk:seabed_substrate_1m'
 # mm, ϕ = -1 to -8) and the coarse end of the grain-size relations, where
 # MARS places each Folk class at its own centroid (e.g. 'G' at -3.3 ϕ). At -1 ϕ
 # the 'hamilton' relation gives a density of 2.56 g/cm³ (TR 9407 Table 2's
-# ratio 2.492 × 1.027).
+# ratio 2.492 × 1.027). The ϕ of classes 1, 2 and 4 are uacpy guidance: each
+# class groups several Folk classes, and no source gives one ϕ per group.
 _FOLK5_TO_BOTTOM = {
     1: ('phi', 5.0),     # Mud to muddy Sand
     2: ('phi', 2.0),     # Sand
@@ -72,7 +74,8 @@ _FOLK5_UNCLASSIFIED = 6
 
 
 def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None,
-                       model=DEFAULT_GRAIN_SIZE_MODEL, hamilton_fit=None):
+                       water_density=None, model=DEFAULT_GRAIN_SIZE_MODEL,
+                       hamilton_fit=None):
     """``BoundaryProperties`` for one Folk 5-class code, or a typed refusal.
 
     Shared by the live WFS backend and the offline polygon backend
@@ -95,19 +98,21 @@ def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None,
         )
     kind, value = _FOLK5_TO_BOTTOM[code]
     if kind == 'phi':
-        return bottom_from_grain_size(value, roughness=roughness, model=model,
-                                      hamilton_fit=hamilton_fit,
-                                      water_sound_speed=water_sound_speed)
-    return bottom_from_class(value, roughness=roughness)
+        return BoundaryProperties.from_grain_size(
+            value, roughness=roughness, model=model,
+            hamilton_fit=hamilton_fit, water_sound_speed=water_sound_speed,
+            water_density=water_density)
+    return BoundaryProperties.from_preset(value, elastic=True,
+                                          roughness=roughness)
 
 
 #: EPSG:3857's own latitude limit: the Mercator ordinate diverges at the poles,
 #: and the projection is defined only where |y| <= pi*R, i.e. within this many
-#: degrees of the equator. ``as_coordinate`` admits the full +/-90, so a polar
-#: request reached ``log(tan(...))`` with an argument of 0 at -90 (an untyped
-#: ``ValueError: math domain error``) and produced y = 2.4e8 m at +90 -- an
-#: ordinate twelve times the world extent, which the WFS answers with an empty
-#: feature set rather than an error.
+#: degrees of the equator. ``as_coordinate`` admits the full +/-90, and an
+#: unclamped polar request would reach ``log(tan(...))`` with an argument of 0
+#: at -90 (an untyped ``ValueError: math domain error``) and give y = 2.4e8 m
+#: at +90 -- an ordinate twelve times the world extent, which the WFS answers
+#: with an empty feature set rather than an error.
 WEB_MERCATOR_MAX_LAT_DEG = 85.05112877980659
 
 
@@ -115,9 +120,9 @@ def _to_web_mercator(lat: float, lon: float):
     """(lat, lon) degrees → (x, y) metres in EPSG:3857 (the EMODnet CRS).
 
     Latitude is clamped to :data:`WEB_MERCATOR_MAX_LAT_DEG`, the projection's
-    own limit. EMODnet's coverage is European seas, so no clamped request was
-    ever going to return a substrate: the clamp keeps a polar point on the
-    typed "no seabed substrate" path instead of a bare ``ValueError``.
+    own limit. EMODnet's coverage is European seas, so no clamped request
+    returns a substrate: the clamp keeps a polar point on the typed "no seabed
+    substrate" path instead of a bare ``ValueError``.
     """
     # EPSG:3857 projects WGS84 coordinates onto a *sphere* of the WGS84
     # semi-major axis, so this single radius is the whole datum.
@@ -131,24 +136,37 @@ def _to_web_mercator(lat: float, lon: float):
 def fetch_emodnet_substrate(
     point: Coordinate,
     *,
+    source: str = 'emodnet',
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
     max_distance_km: Optional[float] = None,
 ) -> SeabedSample:
-    """Raw EMODnet seabed-substrate record at a ``(lat, lon)`` point.
+    """Raw EMODnet seabed-substrate record at a ``(lat, lon)`` point,
+    cache-first.
+
+    ``source='emodnet'`` reads the installed polygons (``./install.sh --data
+    emodnet``) and asks the live WFS only when they are absent or unreadable
+    — polygons that answered "no substrate here" end the call, the WFS
+    serving the same layer; ``source='local'`` reads the installed polygons
+    only, with no network. ``fetch_bottom(source='emodnet')`` resolves the
+    same way.
 
     Returns a :class:`~uacpy.data.SeabedSample`: the ``folk_5cl`` code as
-    ``folk_class`` (scheme ``'folk5'``), ``details`` holding
-    ``folk_5cl_txt`` and ``original_grain_size``, and the ``'emodnet'``
-    provenance with the requested point as its data point (the polygon
-    contains it).
+    ``folk_class`` (scheme ``'folk5'``) and the ``'emodnet'`` provenance
+    with the requested point as its data point (the polygon contains it).
+    A record read from the live WFS fills ``details`` with ``folk_5cl_txt``
+    and ``original_grain_size``; one read from the installed polygons leaves
+    ``details`` empty, the cached index storing the Folk code only.
 
     Parameters
     ----------
     point : (lat, lon)
         Site coordinates in decimal degrees.
+    source : {'emodnet', 'local'}, optional
+        The installed polygons, then the live WFS (default); or the
+        installed polygons only.
     layer : str, optional
         The WFS layer queried.
     base_url : str, optional
@@ -163,10 +181,47 @@ def fetch_emodnet_substrate(
 
     Raises
     ------
+    ConfigurationError
+        An unknown ``source``; ``source='local'`` with a ``layer`` or
+        ``base_url`` it does not read; ``source='local'`` without the
+        installed polygons.
     DataFetchError
         Service failure, or no coverage at the location (European seas only).
     """
+    source = lower_source_spec(source)
+    require_source(source, ('emodnet', 'local'),
+                   'fetch_emodnet_substrate: source',
+                   remediation="Use 'emodnet' (the installed polygons, then "
+                               "the live WFS) or 'local' (the installed "
+                               "polygons only).")
+    if source == 'local' and (layer != EMODNET_LAYER
+                              or base_url != EMODNET_WFS_URL):
+        raise ConfigurationError(
+            "fetch_emodnet_substrate: layer= and base_url= name the live WFS, "
+            "which source='local' does not read.",
+            remediation="Drop them, or pass source='emodnet'.")
     limit = checked_max_distance(max_distance_km, 'fetch_emodnet_substrate')
+
+    def call(_source, backend):
+        if backend == CACHE_BACKEND:
+            from uacpy.data.emodnet_local import fetch_emodnet_substrate_local
+            return fetch_emodnet_substrate_local(point, max_distance_km=limit)
+        return _emodnet_substrate_live(
+            point, layer=layer, base_url=base_url, timeout=timeout,
+            verbose=verbose, max_distance_km=limit)
+
+    attempts = [('emodnet', CACHE_BACKEND)]
+    if source != 'local':
+        attempts.append(('emodnet', 'wfs'))
+    return first_answer(attempts, call)[0]
+
+
+def _emodnet_substrate_live(point, *, layer, base_url, timeout, verbose,
+                            max_distance_km):
+    """The :func:`fetch_emodnet_substrate` record from the live WFS alone:
+    the twin of :func:`uacpy.data.emodnet_local.fetch_emodnet_substrate_local`
+    that :func:`fetch_bottom_emodnet` reads; ``max_distance_km`` arrives
+    checked."""
     lat, lon = as_coordinate(point)
     x, y = _to_web_mercator(lat, lon)
     query = urllib.parse.urlencode({
@@ -210,7 +265,7 @@ def fetch_emodnet_substrate(
             DataProvenance(source=SOURCES['emodnet'], data_point=(lat, lon),
                            requested_point=(lat, lon)),
             who='fetch_emodnet_substrate', warn_km=0.0,
-            max_distance_km=limit),
+            max_distance_km=max_distance_km),
         details={'folk_5cl_txt': p.get('folk_5cl_txt'),
                  'original_grain_size': p.get('original_grain_size')})
 
@@ -220,6 +275,7 @@ def fetch_bottom_emodnet(
     *,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
+    water_density: Optional[float] = None,
     model: str = DEFAULT_GRAIN_SIZE_MODEL,
     hamilton_fit: Optional[str] = None,
     layer: str = EMODNET_LAYER,
@@ -230,24 +286,28 @@ def fetch_bottom_emodnet(
 ) -> BoundaryProperties:
     """Model-ready bottom from EMODnet seabed substrate at a ``(lat, lon)`` point.
 
-    Convenience wrapper: :func:`fetch_emodnet_substrate` → Folk-class mapping →
-    :func:`uacpy.data.bottom_from_grain_size` / ``bottom_from_class``. Raises
+    The live twin of :func:`uacpy.data.emodnet_local.fetch_bottom_emodnet_local`:
+    the WFS record of :func:`fetch_emodnet_substrate` → Folk-class mapping →
+    ``BoundaryProperties.from_grain_size`` / ``from_preset``. Raises
     ``DataFetchError`` outside European-seas coverage. ``water_sound_speed``
     (m/s) scales the grain-size velocity ratio to the in-situ near-seabed
     water; ``None`` uses the Hamilton reference (class bottoms are absolute and
-    unaffected). ``model`` picks the grain-size relations (``'hamilton'`` or
-    ``'apl-uw'``), see :func:`uacpy.core.sediment.grain_size_to_geoacoustics`.
+    unaffected). ``water_density`` (g/cm³) is the near-seabed water the density ratio is carried against; ``None`` uses the package's one water (1.027). ``model`` picks the grain-size relations
+    (``'hamilton'`` or ``'apl-uw'``), see
+    :func:`uacpy.core.sediment.grain_size_to_geoacoustics`.
     ``max_distance_km`` is as in :func:`fetch_emodnet_substrate`.
     """
-    from uacpy.core.sediment import canonical_grain_size_selection
-    model, hamilton_fit = canonical_grain_size_selection(
+    from uacpy.core.sediment import _canonical_grain_size_selection
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who='fetch_bottom_emodnet')
     lat, lon = as_coordinate(point)
-    sub = fetch_emodnet_substrate(point, layer=layer, base_url=base_url,
-                                 timeout=timeout, verbose=verbose,
-                                 max_distance_km=max_distance_km)
+    sub = _emodnet_substrate_live(
+        point, layer=layer, base_url=base_url, timeout=timeout,
+        verbose=verbose, max_distance_km=checked_max_distance(
+            max_distance_km, 'fetch_bottom_emodnet'))
     bottom = _bottom_from_folk5(sub.folk_class, lat, lon, roughness=roughness,
                                 water_sound_speed=water_sound_speed,
+                                water_density=water_density,
                                 model=model, hamilton_fit=hamilton_fit)
     log_message(
         'seabed', f"EMODnet '{sub.details['folk_5cl_txt']}' at {lat:.3f}, "

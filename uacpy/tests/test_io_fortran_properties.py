@@ -179,14 +179,14 @@ class TestFortranFloatSpellings:
         ``'( 12G15.6 )'`` (``Scooter/sparc.f90:294``), so a sample below
         ~1e-99 arrives with no ``E`` and the whole file failed to parse —
         a file uacpy asked the toolbox to produce."""
-        from uacpy.io.oalib_reader import read_ts
+        from uacpy.io.oalib_reader import read_rts_file
         p = tmp_path / 's.rts'
-        p.write_text("SPARC RTS\n"
+        p.write_text("'SPARC RTS'\n"
                      "   1\n"
                      "   50.000000\n"
                      "   0.500000       0.100000E-02\n"
                      "   0.100000E-01   0.123457-118\n")
-        out = read_ts(p)
+        out = read_rts_file(p)
         assert out.times.tolist() == [0.5, 0.01]
         assert out.pressure.ravel().tolist() == [1.0e-3, 1.23457e-119]
 
@@ -304,7 +304,7 @@ class TestWriterReaderRoundTrips:
             p = tmp_path / f'c{case}.sbp'
             write_source_beam_pattern(p, ang, lvl)
             back = read_source_beam_pattern(p)
-            assert np.max(np.abs(back.angles - ang)) <= 5.1e-7   # %12.6f
+            assert np.max(np.abs(back.angles_deg - ang)) <= 5.1e-7   # %12.6f
             assert np.max(np.abs(back.levels_dB - lvl)) <= 5.1e-7
 
     def test_reflection_table_any_layout(self, tmp_path):
@@ -334,8 +334,8 @@ class TestWriterReaderRoundTrips:
                 p = tmp_path / f'c{case}_{j}.brc'
                 p.write_text(f"{n}\n" + body)
                 d = read_reflection_coefficient(p)
-                assert len(d.angles) == n
-                assert np.array_equal(d.angles, denoted[:, 0])
+                assert len(d.angles_deg) == n
+                assert np.array_equal(d.angles_deg, denoted[:, 0])
                 assert np.array_equal(d.magnitude, denoted[:, 1])
                 assert np.array_equal(d.phase, deg_to_rad(denoted[:, 2]))
 
@@ -358,12 +358,12 @@ class TestWriterReaderRoundTrips:
     def test_ramin_seafloor_node_survives_the_deck(self, tmp_path):
         """The invariant the dz bug violated: with ``dz`` from
         ``ram.grid.snap_dz_to_seafloor(h, n)`` and both ``h`` and ``dz``
-        round-tripped through write_ramin's %.12g deck, the binaries'
+        round-tripped through write_ram_in's %.12g deck, the binaries'
         seafloor node (``iz = int(1 + zb/dz)`` at ramgeo1.5.f:133 and
         ramsurf1.5.f:118, ``iz = z/dz`` at rams0.5.f:135) must land at
         ``1 + n`` (``n`` for rams) exactly,
         with ``zb/dz`` never below ``n``."""
-        from uacpy.io.ramsurf_writer import write_ramin
+        from uacpy.io.ramsurf_writer import write_ram_in
         rng = np.random.default_rng(0x5EED08)
         for case in range(24):
             n = int(rng.integers(5, 2000))
@@ -381,13 +381,13 @@ class TestWriterReaderRoundTrips:
                 seg['bottom_cs'] = [(h, 400.0)]
                 seg['bottom_attns'] = [(h, 1.0)]
             p = tmp_path / f'c{case}.in'
-            write_ramin(p, kind=kind, frequency=100.0, zs=h / 3, zr_line=h / 2,
-                        rmax_march=5000.0, dr=10.0, ndr=1,
-                        zmax=h * float(rng.uniform(1.2, 2.0)), dz=dz, depth_decimation=1,
-                        zmplt=h, c0=1500.0, n_pade=6,
-                        bathymetry=[(0.0, h), (5000.0, h)],
-                        range_segments=[seg],
-                        surface=[(0.0, 0.0)] if kind == 'ramsurf' else None)
+            write_ram_in(p, kind=kind, frequency=100.0, zs=h / 3, zr_line=h / 2,
+                         rmax_march=5000.0, dr=10.0, range_decimation=1,
+                         zmax=h * float(rng.uniform(1.2, 2.0)), dz=dz, depth_decimation=1,
+                         zmplt=h, c0=1500.0, n_pade=6,
+                         bathymetry=[(0.0, h), (5000.0, h)],
+                         range_segments=[seg],
+                         surface=[(0.0, 0.0)] if kind == 'ramsurf' else None)
             lines = p.read_text().splitlines()
             # Deck tokens parse to the same doubles gfortran READ produces
             # (verified bit-exact against a gfortran oracle in exploration).
@@ -455,11 +455,11 @@ def _text_readers():
     from uacpy.io.refl_io import (
         read_reflection_coefficient, read_source_beam_pattern)
     from uacpy.io.oalib_reader import (
-        read_flp, read_rts_file, read_ssp_2d, read_ts)
+        read_flp, read_rts_file, read_ssp_2d)
     return [('bty', read_bathymetry), ('ati', read_altimetry),
             ('brc', read_reflection_coefficient),
             ('sbp', read_source_beam_pattern), ('ssp', read_ssp_2d),
-            ('flp', read_flp), ('ts', read_ts), ('rts', read_rts_file)]
+            ('flp', read_flp), ('rts', read_rts_file)]
 
 
 def _assert_total(reader, path, payload: bytes):
@@ -661,7 +661,7 @@ class TestBinaryReaderTotality:
         from uacpy.io.modes_reader import _read_modes_payload
         from uacpy.io.oalib_reader import read_shd_bin
         from uacpy.io.ramsurf_reader import read_pcomplex_grid, read_tl_grid
-        ram_kw = dict(dr=25.0, ndr=1, dz=1.0, ndz=2)
+        ram_kw = dict(dr=25.0, range_decimation=1, dz=1.0, depth_decimation=2)
         return {
             'shd': lambda p: read_shd_bin(str(p)),
             'mod': lambda p: _read_modes_payload(str(p), frequency=100.0),

@@ -112,9 +112,25 @@ class TestEnvironment:
         assert range_dependent_env.bathymetry.collapse_range('median') == 100.0
         bathymetry = range_dependent_env.bathymetry
         assert bathymetry.collapse_range() == float(bathymetry.depths.max())
-        assert bathymetry.collapse_range('initial') == float(bathymetry.depths[0])
-        with pytest.raises(ConfigurationError, match='Bathymetry.collapse_range'):
-            bathymetry.collapse_range('deepest')
+        assert bathymetry.collapse_range('r0') == float(bathymetry.depths[0])
+        assert bathymetry.collapse_range('rmax') == float(bathymetry.depths[-1])
+        assert bathymetry.depths[0] != bathymetry.depths[-1]
+        for unknown in ('deepest', 'initial'):
+            with pytest.raises(ConfigurationError,
+                               match='Bathymetry.collapse_range'):
+                bathymetry.collapse_range(unknown)
+
+    def test_one_collapse_dict_spells_the_first_column_r0_for_every_carrier(
+            self):
+        """``collapse={'bathymetry': 'r0', 'ssp': 'r0'}`` is one vocabulary:
+        a model takes 'r0' and 'rmax' for the bathymetry as for the other
+        carriers."""
+        from uacpy.models import Scooter
+        Scooter(collapse={'bathymetry': 'r0', 'ssp': 'r0',
+                          'bottom_range': 'r0'})
+        Scooter(collapse={'bathymetry': 'rmax'})
+        with pytest.raises(ConfigurationError, match="'initial'"):
+            Scooter(collapse={'bathymetry': 'initial'})
 
     def test_depth_is_read_only(self, simple_env):
         """``env.depth`` is derived from bathymetry (a getter-only property);
@@ -179,7 +195,7 @@ class TestEnvironmentWaterDensity:
                    water_density=1.02)
         model = Kraken(verbose=False)
         assert _checks.modes_single_profile(
-            env, user_collapse=model._user_collapse,
+            env, collapse=model._collapse,
             model_name=model.model_name).water_density \
             == 1.02
 
@@ -437,7 +453,7 @@ class TestTwoColumnsAreRefusedByEveryTableCoercer:
     two columns of any other length cannot be pairs and are refused naming
     ``np.column_stack``, by the one rule the three share. A 2 x 2 input is
     two pairs, the documented form, so a two-point table written as pairs
-    builds; both sides pinned."""
+    builds; two 1-D arrays are columns at any length; both sides pinned."""
 
     @pytest.mark.parametrize('kwargs, name', [
         (dict(bathymetry=([0.0, 5000.0, 10000.0], [100.0, 150.0, 200.0])),
@@ -457,6 +473,55 @@ class TestTwoColumnsAreRefusedByEveryTableCoercer:
                            match=rf'{name}=\(.*\) is two columns') as err:
             Environment(**kwargs)
         assert 'np.column_stack' in str(err.value)
+
+    @pytest.mark.parametrize('kwargs, name', [
+        (dict(bathymetry=(np.array([0.0, 10000.0]), np.array([100.0, 200.0]))),
+         'bathymetry'),
+        (dict(bathymetry=100.0,
+              altimetry=[np.array([0.0, 10000.0]), np.array([0.5, -0.5])]),
+         'altimetry'),
+        (dict(bathymetry=100.0,
+              ssp=(np.array([0.0, 100.0]), np.array([1500.0, 1490.0]))),
+         'ssp'),
+    ])
+    def test_two_arrays_of_two_samples_are_refused_as_columns(
+            self, kwargs, name):
+        # Read as pairs they would build a 10 km deep seafloor at r = 0, or a
+        # 100 m/s water layer, with no message.
+        with pytest.raises(ConfigurationError,
+                           match=rf'{name}=\(.*\) is two columns') as err:
+            Environment(**kwargs)
+        assert 'read as columns at any length' in str(err.value)
+
+    @pytest.mark.parametrize('kwargs, name', [
+        (dict(bathymetry=([0.0, 10000.0], [100.0, 200.0])), 'bathymetry'),
+        (dict(bathymetry=100.0, altimetry=([0.0, 10000.0], [0.5, -0.5])),
+         'altimetry'),
+        (dict(bathymetry=100.0, ssp=([0.0, 100.0], [1500.0, 1490.0])), 'ssp'),
+    ])
+    def test_a_tuple_of_two_lists_of_two_samples_is_refused_as_columns(
+            self, kwargs, name):
+        # (ranges, depths) written with lists; read as pairs it would build a
+        # 10 km deep seafloor at r = 0, or a 100 m/s water layer.
+        with pytest.raises(ConfigurationError,
+                           match=rf'{name}=\(.*\) is two columns') as err:
+            Environment(**kwargs)
+        assert 'a tuple of two lists, are read as columns' in str(err.value)
+
+    @pytest.mark.parametrize('pairs', [
+        [[0.0, 100.0], [10000.0, 200.0]],
+        ((0.0, 100.0), (10000.0, 200.0)),
+        [(0.0, 100.0), (10000.0, 200.0)],
+    ], ids=['nested list', 'tuple of tuples', 'list of tuples'])
+    def test_the_written_pair_forms_of_a_two_point_table_build(self, pairs):
+        env = Environment(bathymetry=pairs)
+        np.testing.assert_array_equal(env.bathymetry.ranges, [0.0, 10000.0])
+        np.testing.assert_array_equal(env.bathymetry.depths, [100.0, 200.0])
+
+    def test_a_two_by_two_array_is_two_pairs(self):
+        env = Environment(bathymetry=np.array([[0.0, 100.0],
+                                               [10000.0, 200.0]]))
+        np.testing.assert_array_equal(env.bathymetry.depths, [100.0, 200.0])
 
     def test_a_two_point_table_of_pairs_builds(self):
         env = Environment(bathymetry=[(0.0, 100.0), (10000.0, 200.0)],
@@ -1381,7 +1446,7 @@ class TestTheEnvironmentFileIsWrittenPortably:
         for name, what, reader in (
                 ('field.nc', 'a Field', 'Field.from_netcdf(path)'),
                 ('ssp.nc', 'a SoundSpeedProfile',
-                 'SoundSpeedProfile.from_xarray(xarray.open_dataset(path))')):
+                 'SoundSpeedProfile.from_netcdf(path)')):
             with pytest.raises(ConfigurationError,
                                match=rf"(?s)Environment\.from_netcdf: .*"
                                      rf"holds {what}, not an Environment\..*"
@@ -1467,8 +1532,9 @@ class TestAcousticFieldsAreAlwaysPresentOnTheirCarriers:
 
 class TestAnAbsorptionLawSurvivesExport:
     """Every absorption law — Thorp, a Francois-Garrison row and profile,
-    Biological, a constant — and a measured table come back from
-    ``to_dict`` and NetCDF as the same law, under the law's field names."""
+    Biological, a constant — comes back from ``to_dict`` and NetCDF as the
+    same law, under the law's field names, and a measured table as the same
+    table."""
 
     @staticmethod
     def _envs():
@@ -1489,16 +1555,16 @@ class TestAnAbsorptionLawSurvivesExport:
 
     @staticmethod
     def _same_law(a, b):
-        from uacpy.core.absorption import Absorption
-        assert isinstance(a, Absorption)
-        if not hasattr(a, 'measured'):
+        from uacpy.core.absorption import Absorption, AbsorptionCoefficient
+        if isinstance(a, Absorption):
             return a == b
-        return (np.array_equal(a.measured.data, b.measured.data)
-                and np.array_equal(a.measured.depths, b.measured.depths)
-                and np.array_equal(a.measured.frequencies,
-                                   b.measured.frequencies)
-                and a.measured.units == b.measured.units
-                and a.measured.model == b.measured.model)
+        # A measured table comes back as the table, with every field.
+        assert isinstance(a, AbsorptionCoefficient)
+        return (np.array_equal(a.data, b.data)
+                and np.array_equal(a.depths, b.depths)
+                and np.array_equal(a.frequencies, b.frequencies)
+                and (a.units, a.model, a.depth, a.parameters)
+                == (b.units, b.model, b.depth, b.parameters))
 
     def test_to_dict(self):
         for env in self._envs():

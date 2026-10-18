@@ -113,10 +113,8 @@ def read_grn_file(filepath: Union[str, Path]) -> GreensFunction:
 
         # Records 11+: complex Green's function, one record per
         # (freq, source_depth, receiver_depth) tuple, receiver depth fastest —
-        # ``REC = 10 + (ifreq-1)*NSz*NRz + (iS-1)*NRz + iR`` (scooter.f90:588).
-        # ``irec`` is the 0-based record index (record ``irec + 1`` in the
-        # Fortran count), so starting at 9 and incrementing before the first
-        # read lands the first slab on record 11.
+        # ``REC = 10 + (ifreq-1)*NSz*NRz + (iS-1)*NRz + iR`` (scooter.f90:588),
+        # so the first slab is record 11, 0-based record 10.
         #
         # SPARC's snapshot indexes ``iG = (Itout-1)*Pos%NRz + ir``
         # (sparc.f90:286-287) — output time stands in for the frequency axis

@@ -1,6 +1,6 @@
 # Communications — digital modems for the underwater channel
 
-> `uacpy.comms` · 85 public names · modulation, coding, equalisation,
+> `uacpy.comms` · 89 public names · modulation, coding, equalisation,
 > synchronisation, OFDM, DSSS, Doppler, and the NATO JANUS standard
 
 `uacpy.comms` is a digital-communications toolbox built for the one channel
@@ -117,7 +117,7 @@ codeword.
 | `ConvCode(polys, constraint_length, interleave_depth)` | codec bundling encode/decode with matched settings |
 | `conv_encode(bits, polys, constraint_length)` | rate-`1/len(polys)` encoder with zero tail-flush |
 | `viterbi_decode(coded, polys, constraint_length)` | hard-decision Viterbi |
-| `viterbi_hard(bm0, bm1, prev0, prev1, n_states, bit_of_state)` | the survivor selection on its own, for a caller holding its own branch metrics |
+| `viterbi_from_branch_metrics(bm0, bm1, prev0, prev1, n_states, bit_of_state)` | the add-compare-select and traceback on their own, for a caller holding its own branch metrics (hard or soft) |
 | `interleave(bits, depth)` / `deinterleave` | block-local `depth × depth` transpose |
 
 ```python
@@ -143,9 +143,11 @@ the package.
 ## 4. Modulation
 
 ```python
-mod = comms.Modulator('qpsk')
-symbols = mod.modulate(bits)        # 0/1 array -> complex, unit average energy
-bits_out = mod.demodulate(symbols)  # hard minimum-distance decision
+symbols = comms.psk_qam_modulate(bits, 'qpsk')       # 0/1 array -> complex, unit average energy
+bits_out = comms.psk_qam_demodulate(symbols, 'qpsk') # hard minimum-distance decision
+
+mod = comms.Modulator('qpsk')      # the same pair, configured once
+symbols = mod.modulate(bits)
 ```
 
 | Family | Schemes | Notes |
@@ -157,7 +159,8 @@ bits_out = mod.demodulate(symbols)  # hard minimum-distance decision
 
 The table is the package's own: `SCHEMES` maps each scheme name to its
 `(family, order)` — `SCHEMES['16qam'] == ('qam', 16)` — and
-`constellation`, `Modulator` and `ber_theory` all read it.
+`constellation`, `psk_qam_modulate` / `psk_qam_demodulate`, `Modulator` and
+`ber_theory` all read it.
 
 All constellations are **Gray-mapped and unit-average-energy**, so a symbol
 index is its bit label and the Eb/N0 bookkeeping in
@@ -239,11 +242,11 @@ the stochastic and time-varying parts, and the noise.
 
 | Call | Channel |
 |---|---|
-| `multipath_channel(amplitudes, delays_s, *, sample_rate)` | static FIR taps from sparse arrivals |
-| `pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc', rolloff=0.25, sps=1, span=8)` | the same arrivals laid down through the modem's **own pulse** (raised cosine or root raised cosine) rather than on the nearest sample — what a symbol-rate equalizer actually sees; a `ChannelTaps`, the type `Arrivals.channel_taps` returns, so `simulate_link(channel=...)` and `plot_channel` take it whole |
+| `multipath_channel(amplitudes, delays, *, sample_rate)` | static FIR taps from sparse arrivals |
+| `pulse_shaped_taps(amplitudes, delays, symbol_rate, *, pulse='rc', rolloff=0.25, sps=1, span=8)` | the same arrivals laid down through the modem's **own pulse** (raised cosine or root raised cosine) rather than on the nearest sample — what a symbol-rate equalizer actually sees; a `ChannelTaps`, the type `Arrivals.channel_taps` returns, so `simulate_link(channel=...)` and `plot_channel` take it whole |
 | `Arrivals.channel_taps(symbol_rate, fc=…)` | the same taps straight from a propagation result, carrier rotation and pulse included ([§14](#14-driving-the-modem-with-a-modelled-channel)) |
 | `apply_channel(signal, h)` | convolve with a static channel — the linear convolution by FFT overlap-add (`acoustic_signal.apply_impulse_response`; the direct sum below 19 taps), so a long recording through a long channel costs `O(N log M)` |
-| `fading_taps(n_taps, n_samples, doppler_hz, *, sample_rate, rician_k=..., rng=...)` | time-varying tap gains, Rayleigh or Rician |
+| `fading_taps(n_taps, n_samples, doppler_shift_max, *, sample_rate, rician_k=..., rng=...)` | time-varying tap gains, Rayleigh or Rician |
 | `apply_fading_channel(signal, taps, delays_samples)` | apply the time-varying tap-delay line |
 | `awgn(signal, snr_dB, rng=...)` | additive white noise at a target SNR over the whole sampled band (an oversampled signal's in-band SNR is higher by `10·log10(fs/B)`, 8.06 dB for a complex RRC baseband at `sps=8`, `rolloff=0.25`) |
 | `ebn0_to_snr_dB(ebn0_dB, *, bits_per_symbol, symbol_rate, sample_rate, code_rate=1.0, real=False)` / `snr_to_ebn0_dB` | the `awgn` `snr_dB` that realises an information-bit Eb/N0, `SNR = Eb/N0·k·R·Rs/B` with `B = fs` (complex) or `fs/2` (real) — the conversion `simulate_link` makes at one sample per symbol, and the one a passband, FSK or JANUS waveform needs to be plotted against `ber_theory` |
@@ -279,7 +282,7 @@ Before anything can be equalised, the frame has to be found.
 | `detect_preamble(received, preamble, threshold)` | `(start_index_or_None, metric)` |
 | `detect_frames(received, preamble, threshold, min_gap)` | `(list_of_starts, metric)` |
 | `schmidl_cox_preamble(n_subcarriers, cp_len, *, rng=None)` | an OFDM training symbol, two identical halves; `rng=None` draws one fixed PN sequence, so both ends of a link rebuild the same symbol |
-| `schmidl_cox_metric(received, n_subcarriers)` | the timing metric `M(d) = \|P(d)\|²/R(d)²` over the record; windows under a quarter of the peak energy read 0 |
+| `schmidl_cox_metric(received, n_subcarriers)` | the timing metric `M(d) = \|P(d)\|²/R(d)²` over the record; a window whose second half carries no energy, or under a quarter of its first half's, reads 0 (uacpy guidance), so a louder burst elsewhere in the capture does not hide the frame; a tone scores near 1 like the preamble |
 | `schmidl_cox_sync(received, n_subcarriers)` | `(start_or_None, cfo)` — the plateau start of `schmidl_cox_metric` |
 
 ```python
@@ -346,6 +349,7 @@ expect, not from the tap count.
 | `symbol_error_rate(*, reference, received)` | same, on labels or exact symbols |
 | `evm(*, reference, received)` | RMS error-vector magnitude (a fraction) |
 | `ber_theory(scheme, ebn0_dB)` | closed-form AWGN BER; also `'dbpsk'` (`exp(-Eb/N0)/2`) and non-coherent `'bfsk'` (`exp(-Eb/2N0)/2`) for the `dpsk_*`/`fsk_*` modems |
+| `ber_theory_curve(scheme, ebn0_dB)` | the same on a grid, as a `BerTheory` `(ebn0_dB, ber)` whose `.plot(ax=)` overlays it dashed on a measured curve |
 | `ber_sweep(scheme, ebn0_dB, n_bits, ...)` | measured BER over a list of Eb/N0, as a `BerCurve` |
 
 ```python
@@ -362,9 +366,16 @@ A `BerCurve` unpacks as `ebn0_dB, ber = ...`, and carries the sweep's
 `scheme`, `n_bits`, `channel`, `equalizer`, `code` and `n_train` as
 attributes. Its `.plot()` — the same call as `plot_ber_curve(curve)` — reads
 `n_bits` off it, so a point with no errors is drawn as the `1/n_bits` bound
-it is, and overlays the closed-form
-AWGN curve of `scheme` only for an uncoded link with no channel, the one link
-that curve describes.
+it is. The closed-form AWGN curve, which describes an uncoded link with no
+channel, is a curve of its own, `ber_theory_curve(scheme, ebn0_dB)`, drawn
+dashed over the measurement with `ax=`; with one on the axes, the BER axis
+stops one decade below the lowest rate any measured curve there resolved:
+
+```python
+fine = np.linspace(0.0, 12.0, 100)
+fig, ax = qpsk.plot(label='QPSK measured')
+comms.ber_theory_curve('qpsk', fine).plot(ax=ax, label='QPSK theory')
+```
 
 ![Measured BER against theory](figures/comms_ber.png)
 
@@ -531,10 +542,11 @@ is the sync probe *and* the equaliser's training sequence. Both ends must
 agree on it — passing the same integer to both constructors generates the same
 pseudo-random sequence. [`example_32_realdata_modem.py`](../../uacpy/examples/example_32_realdata_modem.py)
 runs this end to end, text in and text out, through a `.wav` file written with
-[`uacpy.io.write_wav`](io.md#9-reference--the-whole-public-surface) — which
-defaults to 16-bit PCM normalised to full scale, the shape a player expects.
-Pass `encoding='float32'` instead when the samples are calibrated and the
-absolute level has to survive the file.
+[`uacpy.io.write_wav`](io.md#9-reference--the-whole-public-surface) with
+`normalize=True`, 16-bit PCM scaled to full scale, the shape a player expects.
+Without it the samples are written as given, so a calibrated signal inside ±1
+keeps its level; pass `encoding='float32'` when the absolute level of a larger
+signal has to survive the file.
 
 ---
 
@@ -557,7 +569,7 @@ tens of milliseconds, and every sample of it is throughput you do not send.
 |---|---|
 | `ofdm_modulate(symbols, n_subcarriers, cp_len)` | map + IFFT + prepend CP |
 | `ofdm_demodulate(received, n_subcarriers, cp_len, channel=, snr_linear=, channel_response=)` | strip CP + FFT + optional ZF/MMSE; `channel=` takes the impulse-response **taps**, `channel_response=` a per-subcarrier `H` such as `estimate_channel`'s output |
-| `ofdm_symbol(subcarrier_values, n_subcarriers, cp_len)` | one CP-prefixed symbol from one length-`n_subcarriers` spectrum |
+| `ofdm_symbol(subcarrier_values, n_subcarriers, cp_len)` | one CP-prefixed symbol from one length-`n_subcarriers` spectrum (another length is refused; `ofdm_modulate` pads to whole blocks) |
 | `subcarrier_response(channel, n_subcarriers)` | `H[k]` on the subcarrier grid — the equalizer's input, unshifted so `k` is the subcarrier index |
 | `equalize_subcarriers(spectra, H, snr_linear=None)` | the one-tap-per-subcarrier division on its own |
 | `OFDMTransmitter(modulation, n_subcarriers, cp_len, code=)` | full frame: preamble, pilot, data, guard |
@@ -641,9 +653,9 @@ significant fraction of its centre frequency.
 
 | Call | Purpose |
 |---|---|
-| `doppler_from_speed(speed_mps, sound_speed=1500)` | `a = v/c` (a float for a scalar speed, an array for an array of speeds) |
+| `doppler_from_speed(speed, sound_speed=1500)` | `a = v/c` (a float for a scalar speed, an array for an array of speeds) |
 | `estimate_doppler_scale(received, template, scales=None)` | a `DopplerEstimate(best_scale, scales, peak_metric)` record (it unpacks as the three); its `.plot()` draws the ambiguity curve with `best_scale` marked |
-| `compensate_doppler(signal, scale)` | resample back to the transmit time base |
+| `compensate_doppler(signal, scale)` | stretch back to the transmit time base by exactly `1 + scale`: output sample `m` is the record's Fourier series at `m/(1+scale)`, `round((1+scale)·N)` samples in all |
 
 ```python
 from uacpy.acoustic_signal import lfm_chirp
@@ -664,10 +676,11 @@ clean = comms.compensate_doppler(record, a_hat)        # back on the transmit cl
 The estimator compensates the *received* record by each candidate scale and
 scores it against the template with the same energy-normalised matched-filter
 metric the preamble detector uses, so the scores are comparable across
-candidates. The estimate is the centre of the curve's highest plateau (the
-metric is a staircase in `a`, as below), marked on the left panel; the curve
-around it is the ambiguity function, and its width tells you how confidently
-you can call it.
+candidates. The estimate is the candidate at the curve's maximum, marked on
+the left panel; the curve around it is the ambiguity function, and its width
+tells you how confidently you can call it. On a real passband record the curve
+also oscillates in `a`, with a period near `1/N` of the record (measured
+0.68/N to 1.39/N on four LFM probes): the main lobe carries fringes.
 
 Two practical limits are visible. First, **resolution is set by the probe's
 duration times its bandwidth**, not by its sample count: the main lobe is
@@ -679,18 +692,19 @@ of the chirp's ambiguity function — the case Abraham (§8.5.1) puts at
 `Δa₃dB ≈ 3.48/(T·B)`.
 
 Second, resolution is not accuracy. The estimate above lands `1.7×10⁻⁵` from
-truth, forty times inside that main lobe, because a smooth peak can be located
-far more finely than its width — as long as the `scales` grid is fine enough to
+truth, forty times inside that main lobe, because a peak can be located far
+more finely than its width — as long as the `scales` grid is fine enough to
 sample it. The default grid is: `linspace(-5e-3, 5e-3, 601)` — about
 ±7.5 m/s, in steps of `1.67×10⁻⁵`, or 0.025 m/s at `c = 1500` — searched in
 two stages: every `stride`-th candidate, then the `2·stride − 1` grid steps
 around the coarse peak. The stride depends on the record length `N`,
-`stride = min(15, floor(1/(N·1.67×10⁻⁵)))`, because the metric is a staircase
-in `a` with one step per `1/N`: 15 below 4000 samples (~70 metric evaluations
-in all), 4 at 13 000 samples (~158), and 1 — a full 601-candidate scan — past
-60 000 samples. The same record handed to that default comes back the same
-one grid step from truth as the 101-point grid above. Pass your own `scales` when the platform can be faster than ±7.5 m/s,
-or to zoom below the 0.025 m/s step.
+`stride = min(15, floor(1/(4·N·1.67×10⁻⁵)))`, four coarse candidates per `1/N`
+so the coarse pass does not step over a fringe: 15 below 1000 samples, 5 at
+2800, and 1 — a full 601-candidate scan — from 15 000 samples (uacpy guidance;
+the two-stage answer is the full scan's on the probes measured). The record
+above (12 982 samples) is scanned in full by that default and comes back
+`3.3×10⁻⁵` from truth, two grid steps. Pass your own `scales` when the
+platform can be faster than ±7.5 m/s, or to zoom below the 0.025 m/s step.
 
 The right panel confirms the convention across the whole speed range: the
 estimate that comes out is `a = v/c`, positive for a closing geometry, and it
@@ -709,7 +723,7 @@ from uacpy.models import Bellhop, RunMode
 
 env, source, _ = shallow_water()        # the shared 100 m channel of the model pages
 point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-arrivals = Bellhop(n_beams=4000, launch_angles=(-10.0, 10.0)).run(
+arrivals = Bellhop(n_beams=4000, launch_angles_deg=(-10.0, 10.0)).run(
     env, source, point, run_mode=RunMode.ARRIVALS)
 
 gains = arrivals.received_amplitudes
@@ -788,7 +802,7 @@ named options `convention='rappaport_0.5'` and `'rappaport_0.9'`, and
 
 Some deliberate choices in that snippet are worth copying:
 
-- **The launch fan is narrow** (`launch_angles=(-10, 10)`). A vertically directive
+- **The launch fan is narrow** (`launch_angles_deg=(-10, 10)`). A vertically directive
   projector is what a real modem uses, and it is also what keeps the delay
   spread finite: over ±45° the same geometry spreads arrivals across 290 ms,
   which no symbol-spaced equaliser of a sane length will touch.
@@ -808,7 +822,8 @@ Some deliberate choices in that snippet are worth copying:
   baseline. Normalising keeps the taps at the constellation's scale.
 
 For a *broadband* channel rather than a set of arrivals, `RunMode.BROADBAND`
-gives `H(d, r, f)` and `Field.plot_impulse_response` inverts it — see
+gives `H(d, r, f)`, `Field.to_time_trace` turns one cell of it into `h(t)`
+and `plot_impulse_response` draws that — see
 [results](results.md). The general "waveform through a modelled channel" tools
 (`impulse_response`, `simulate_reception`) live in
 [signal processing](signal.md).
@@ -893,7 +908,10 @@ other. uacpy implements the **baseline 64-bit packet** and its physical layer.
 | `janus_encode` / `janus_decode` | 64 bits ↔ 144 coded, interleaved channel symbols |
 | `janus_modulate` / `janus_demodulate` | FH-BFSK waveform ↔ a `JanusReception`, which unpacks as `(bits, crc_ok)` |
 | `janus_detect(waveform, sample_rate)` | `(start, statistic)` from the CMRE GO-CFAR detector |
-| `janus_transmit(packet, *, ...)` / `janus_receive(waveform, ...)` | packet ↔ waveform, one call |
+| `janus_transmit(packet, *, sample_rate, ...)` / `janus_receive(waveform, sample_rate, ...)` | packet ↔ waveform, one call; `janus_receive` returns `(packet, reception)`, the `JanusReception` holding `crc_ok` and how the packet was found (`packet` is `None` when no complete frame was in the recording) |
+
+`sample_rate` is required on every JANUS function: a recording read at the
+wrong rate does not decode.
 
 ```python
 app_data = np.zeros(34, dtype=int)
@@ -904,7 +922,7 @@ waveform = comms.janus_transmit(packet, sample_rate=48000.0)      # 1.10 s of re
 rx = np.concatenate([np.zeros(8000), waveform, np.zeros(4000)])   # the packet 8000 samples in
 rx = comms.awgn(rx, 6.0, rng=np.random.default_rng(0)).real       # at 6 dB SNR
 start, statistic = comms.janus_detect(rx, 48000.0)
-decoded, crc_ok = comms.janus_receive(rx, 48000.0)
+decoded, reception = comms.janus_receive(rx, 48000.0)       # reception.crc_ok
 ```
 
 ![JANUS waveform and detector](figures/comms_janus.png)
@@ -934,7 +952,13 @@ the bits and `crc_ok` it carries `detected` (whether the threshold was
 crossed), the preamble `start`, the `doppler_scale` it compensated and the
 detection `statistic`. On noise alone the candidate is decoded too, and CRC-8
 passes a random frame once in 256. A frame that runs past the end of the
-recording is refused rather than decoded.
+recording is not decoded, because a cut-off frame scores as zeros and the
+all-zero packet has a valid CRC: its `JanusReception` holds `bits=None` and
+`crc_ok=False`, and `janus_receive` returns `None` for the packet. On a buffer
+of noise alone the best candidate often lands there: 6 of 12 white-noise
+records (seeds 0-5 at 2 s and 6 s, 48 kHz) do, the other 6 decode to bits with
+`crc_ok=False` (measured). A receive loop over a stream reads both as "no
+packet" from `reception.crc_ok`, with no exception to catch.
 
 ---
 
@@ -942,24 +966,27 @@ recording is refused rather than decoded.
 
 Every figure on this page comes from
 [`docs/figure_scripts/comms.py`](../figure_scripts/comms.py) using the
-plotters in `uacpy.visualization`. The comms family:
+plotters of `uacpy.plot`. The comms family:
 
 | Plotter | Shows |
 |---|---|
 | `plot_scatter(symbols, ax, ideal=)` | a received constellation |
 | `plot_constellation(constellation, ax)` | an ideal Gray-labelled constellation |
 | `plot_eye_diagram(signal, samples_per_symbol, ax)` | the eye |
-| `plot_ber_curve(ebn0_dB, ber_measured, ax, scheme=, n_bits=)` | measured BER with the theory overlay; a zero-error point is marked at `1/n_bits` (▽), not drawn as a measurement |
+| `plot_ber_curve(ebn0_dB, ber_measured, ax, n_bits=)` or `plot_ber_curve(curve)` | measured BER (a `BerCurve`, or arrays), or a `BerTheory` drawn dashed; a zero-error point is marked at `1/n_bits` (▽), not drawn as a measurement |
 | `plot_convergence(mse, ax)` | an equaliser learning curve |
 | `plot_sync_metric(metric, ax, threshold=)` | a synchronisation metric |
-| `plot_channel(taps, (ax_h, ax_f))` or `plot_channel(h, sample_rate, …)` | `\|h\|` and `\|H(f)\|` side by side; a `ChannelTaps` carries both the rate (`symbol_rate × sps`) and the delay axis (`delays_s`, which opens `span/2` symbols ahead of the first arrival), while bare arrays get the index axis |
-| `plot_subcarriers(channel, n_subcarriers, ax)` | the OFDM channel response |
+| `plot_channel(taps, ax=ax)` or `plot_channel(h, sample_rate, ax)` | `\|h\|` against delay; a `ChannelTaps` carries the delay axis (`delays`, which opens `span/2` symbols ahead of the first arrival), while bare arrays get the index axis |
+| `acoustic_signal.channel_response(taps).plot(ax=)` (`plot_channel_response`) | `\|H(f)\|`, two-sided, at the taps' rate (`symbol_rate × sps`) |
+| `plot_subcarriers(response, ax)` | the OFDM channel response `\|H[k]\|` per subcarrier, as `subcarrier_response(channel, n_subcarriers)` (or a channel estimate) gives it |
 | `plot_doppler_ambiguity(estimate, ax)` | the Doppler ambiguity curve of a `DopplerEstimate`, its `best_scale` marked |
 
 All of them take plain arrays (`plot_doppler_ambiguity` takes the
 `DopplerEstimate` record whole), accept `ax` as the last positional argument —
 directly after the data, so it sits second in the one-array and record
-signatures and third in the two-array ones, as the table shows — and return `(fig, ax)`, the
+signatures and third in the two-array ones, as the table shows; a `BerCurve`
+or `ChannelTaps` handed to a two-array plotter (`plot_ber_curve`,
+`plot_channel`) fills only the first slot, so it takes `ax=` by keyword — and return `(fig, ax)`, the
 convention described in [plotting](plotting.md). The `uacpy.comms` modules themselves never import
 matplotlib.
 
@@ -993,10 +1020,11 @@ symbol rate and you halve the taps.
 duration, not by its sample rate.** The 1 s, 4 kHz probe of
 [§13](#13-doppler) resolves `7×10⁻⁴`; oversampling it changes nothing,
 lengthening or widening it is what helps. The *estimate* is far finer than the
-resolution — `1.7×10⁻⁵` here — so a fine `scales` grid does earn its keep, but
-`compensate_doppler` resamples to `round(N·(1+a))` samples, so candidates
-closer together than `1/N` of the record — `7.7×10⁻⁵` for the ~13 000-sample
-record above — resample identically, and refining past that buys nothing.
+resolution — `1.7×10⁻⁵` here — so a fine `scales` grid does earn its keep:
+`compensate_doppler` applies each candidate exactly, and on a real passband
+record the metric's fringes sit about `1/N` apart (`7.7×10⁻⁵` for the
+~13 000-sample record above), which a grid has to sample finely to tell
+apart.
 
 **`CommsReceiver.receive` without an equaliser assumes the payload starts
 exactly `len(preamble)` symbols after the detected start.** With real delay

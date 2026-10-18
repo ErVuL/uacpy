@@ -14,13 +14,13 @@ Two of the three had a trap the obvious bulk read walks into:
   constant ``8`` that the single-precision ``.rpo`` replica reader can hardcode.
   ``test_oasp_trf_double_precision_*`` is what a hardcoded ``8`` fails.
 * the ``.plp`` frequency/depth axes are ordered by first appearance, and
-  :func:`~uacpy.io.oases_reader._match_label_depths` hands out receiver depths
+  :func:`~uacpy.io._parsers._match_label_depths` hands out receiver depths
   greedily in that order, so a ``set`` would reassign curves to other
   receivers instead of raising. ``test_oast_depth_axis_*`` is what a ``set``
   fails.
 
 The synthetic ``.shd`` writer here is also what ``TestMultiSourceShadeFiles``
-at the end of the file uses: ``read_shd_bin``'s ``xs_m=``/``ys_m=`` source
+at the end of the file uses: ``read_shd_bin``'s ``xs=``/``ys=`` source
 selector and its compressed ``'TL'`` source grid decode layouts no uacpy run
 produces, so no model test reaches them.
 """
@@ -34,7 +34,7 @@ from uacpy.core.exceptions import FileFormatError
 from uacpy.io import oalib_reader
 from uacpy.io._fortran_helpers import read_fortran_record
 from uacpy.io.oalib_reader import read_shd_bin
-from uacpy.io.oases_reader import (
+from uacpy.io._parsers import (
     _match_label_depths,
     _oast_curve_slots,
     _read_oasp_trf_binary,
@@ -489,8 +489,8 @@ def test_shd_source_position_selection_reads_the_slab_of_that_source(tmp_path):
 
     for idx_x in range(Nsx):
         for idx_y in range(Nsy):
-            got = read_shd_bin(str(path), xs_m=1000.0 * idx_x,
-                               ys_m=2000.0 * idx_y).pressure
+            got = read_shd_bin(str(path), xs=1000.0 * idx_x,
+                               ys=2000.0 * idx_y).pressure
             slab = idx_x * Nsy + idx_y
             reference = _shd_reference(path, 10 + slab * rows_per_slab,
                                        Ntheta, Nsz, Nrz, Nrr, recl)
@@ -541,7 +541,7 @@ def test_shd_record_shorter_than_its_own_range_row_names_the_disagreement(
 # --------------------------------------------------------------------------
 
 class TestMultiSourceShadeFiles:
-    """``read_shd_bin``'s ``xs_m=``/``ys_m=`` selector and its ``'TL'``
+    """``read_shd_bin``'s ``xs=``/``ys=`` selector and its ``'TL'``
     source-grid layout decode files no uacpy run produces.
 
     Every uacpy wrapper writes a single-source 2-D deck, so the model tests
@@ -578,8 +578,8 @@ class TestMultiSourceShadeFiles:
         # it returns.
         path = tmp_path / 'multi.shd'
         self._write(path)
-        data = read_shd_bin(str(path), xs_m=idx_x * 1000.0,
-                            ys_m=idx_y * 2000.0)
+        data = read_shd_bin(str(path), xs=idx_x * 1000.0,
+                            ys=idx_y * 2000.0)
         slot = idx_x * self.NSY + idx_y
         expected = (slot + 1) + 1j * (slot + 1)
         assert data.pressure.shape == (self.NTHETA, self.NSZ, self.NRZ,
@@ -592,8 +592,8 @@ class TestMultiSourceShadeFiles:
         # two source x positions: 0 m and 1000 m meet at 500 m.
         path = tmp_path / 'nearest.shd'
         self._write(path)
-        below = read_shd_bin(str(path), xs_m=499.0, ys_m=0.0)
-        above = read_shd_bin(str(path), xs_m=501.0, ys_m=0.0)
+        below = read_shd_bin(str(path), xs=499.0, ys=0.0)
+        above = read_shd_bin(str(path), xs=501.0, ys=0.0)
         assert np.all(below.pressure == 1 + 1j)      # slot (0, 0)
         assert np.all(above.pressure == 3 + 3j)      # slot (1, 0)
 
@@ -604,23 +604,28 @@ class TestMultiSourceShadeFiles:
         self._write(path)
         with pytest.raises(TypeError, match='takes 1 positional argument but'):
             read_shd_bin(str(path), 1000.0, 0.0)
-        assert np.all(read_shd_bin(str(path), xs_m=1000.0,
-                                   ys_m=0.0).pressure == 3 + 3j)
+        assert np.all(read_shd_bin(str(path), xs=1000.0,
+                                   ys=0.0).pressure == 3 + 3j)
 
-    def test_xs_m_without_ys_m_raises_a_typed_error(self, tmp_path):
+    @pytest.mark.parametrize('kw', [{'xs': 0.0}, {'ys': 2000.0}],
+                             ids=['xs-only', 'ys-only'])
+    def test_one_selector_without_the_other_raises_a_typed_error(
+            self, tmp_path, kw):
+        """The two select one source position together; ``ys`` alone
+        would otherwise return slot (0, 0) and say no selector was given."""
         from uacpy.core.exceptions import ConfigurationError
         path = tmp_path / 'half.shd'
         self._write(path)
-        with pytest.raises(ConfigurationError, match='ys_m must be provided'):
-            read_shd_bin(str(path), xs_m=0.0)
+        with pytest.raises(ConfigurationError, match='together'):
+            read_shd_bin(str(path), **kw)
 
     def test_the_selector_takes_the_metres_it_returns(self, tmp_path):
         """A coordinate read from ``source_x`` selects its own slot."""
         path = tmp_path / 'round.shd'
         self._write(path)
-        pos = read_shd_bin(str(path), xs_m=0.0, ys_m=0.0)
-        data = read_shd_bin(str(path), xs_m=float(pos.source_x[2]),
-                            ys_m=float(pos.source_y[1]))
+        pos = read_shd_bin(str(path), xs=0.0, ys=0.0)
+        data = read_shd_bin(str(path), xs=float(pos.source_x[2]),
+                            ys=float(pos.source_y[1]))
         assert np.all(data.pressure == 6 + 6j)       # slot 2 * NSY + 1
 
     def test_no_selector_on_a_multi_source_file_warns_and_takes_slot_zero(
@@ -629,7 +634,7 @@ class TestMultiSourceShadeFiles:
         self._write(path)
         with recorded_warnings() as record:
             data = read_shd_bin(str(path))
-        assert any('no xs_m=/ys_m= selector' in str(w.message)
+        assert any('no xs=/ys= selector' in str(w.message)
                    for w in record), [str(w.message) for w in record]
         assert np.all(data.pressure == 1 + 1j)
 
@@ -661,7 +666,7 @@ class TestMultiSourceShadeFiles:
                 _E + 'dd', *limits).ljust(4 * recl, b'\x00')
         path.write_bytes(bytes(raw))
 
-        data = read_shd_bin(str(path), xs_m=2000.0, ys_m=3000.0)
+        data = read_shd_bin(str(path), xs=2000.0, ys=3000.0)
         np.testing.assert_allclose(data.source_x, [0.0, 2000.0, 4000.0])
         np.testing.assert_allclose(data.source_y, [0.0, 3000.0])
         # x index 1, y index 1 -> slot 1 * NSY + 1 = 3.
@@ -672,7 +677,7 @@ class TestMultiSourceShadeFiles:
         # carries Nsx values, not two limits.
         path = tmp_path / 'uncompressed.shd'
         self._write(path)
-        data = read_shd_bin(str(path), xs_m=0.0, ys_m=0.0)
+        data = read_shd_bin(str(path), xs=0.0, ys=0.0)
         np.testing.assert_allclose(data.source_x,
                                    [0.0, 1000.0, 2000.0])
         np.testing.assert_allclose(data.source_y, [0.0, 2000.0])

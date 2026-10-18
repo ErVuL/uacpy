@@ -87,12 +87,9 @@ def _pad_time_slabs_to_common_axis(slabs):
         tail = np.where(no_data, np.nan, tail)
         coords = dict(slab.coords)
         coords['time'] = common_time
-        metadata = dict(slab.metadata)
-        if 'nt' in metadata:
-            metadata['nt'] = n_max
         padded.append(slab.replace(
             data=np.concatenate([data, tail], axis=axis), coords=coords,
-            metadata=metadata, aux_coords=None))
+            aux_coords=None))
     return padded
 
 
@@ -192,20 +189,18 @@ def run_per_source_depth(source, settings: RunSettings, run_one, *,
 def apply_single_source_weight(result, source: 'Source', *, model_name: str):
     """A one-depth ``Source`` with a non-unit weight scales its
     ``Field`` by that weight — the ``n = 1`` case of
-    :meth:`Field.superpose` — and records it in
-    ``metadata['superposed_sources']``. Unit weight leaves the result
-    untouched; a complex weight on a real time-domain trace is refused
-    for the reason ``superpose`` gives."""
+    :meth:`Field.superpose` — and records it as the Field's
+    ``superposed_sources``. Unit weight leaves the result untouched; a
+    complex weight on a real time-domain trace is refused for the reason
+    ``superpose`` gives."""
     if not isinstance(result, Field):
         return result
     w = complex(source.weights[0])
-    result.data, _ = _weighted_sum(
+    data, _ = _weighted_sum(
         result, [result.data], [w], where=f"{model_name}: Source(weights={w})")
-    result.metadata['superposed_sources'] = {
+    return result.replace(data=data, superposed_sources={
         'depths': source.depths.tolist(),
-        'weights': [w.real if not result.is_complex else w],
-    }
-    return result
+        'weights': [w.real if not result.is_complex else w]})
 
 
 def refuse_a_one_depth_weight_on_dB(source: 'Source',

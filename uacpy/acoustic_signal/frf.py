@@ -164,7 +164,7 @@ def _etfe_divide(Y, X, who: str, quantity="the transfer function",
     if not excited.all():
         # Each estimator reaches this divide at its own depth — called
         # directly, or through ``FRF.compute`` — so no single frame count
-        # reaches the user: a hand-counted ``stacklevel=3`` named a line in
+        # reaches the user: a hand-counted ``stacklevel=3`` names a line in
         # this module (measured). ``skip_file_prefixes`` counts no frames at
         # all — it walks to the first file outside the package.
         warnings.warn(
@@ -224,9 +224,12 @@ class FRFResult(PlottedResult,
         or below ``2.2e-16`` it is a minimum-norm choice (``'ls_fir'``).
 
     From :meth:`FRF.compute` on a 2-D block, ``transfer_function`` and
-    ``coherence`` are the means over the measurements, and each ``'ls_fir'``
-    attribute is a tuple with one entry per measurement: fits of different
-    orders have no mean.
+    ``coherence`` come from the measurements' spectra averaged first
+    (``Σ X*·Y / Σ |X|²`` for ``'etfe'`` and ``'p_etfe'``, the averaged Welch
+    spectra for ``'welch'``); for ``'ls_fir'`` the transfer function is the
+    mean of the measurements' FIR responses, and each ``'ls_fir'`` attribute
+    is a tuple with one entry per measurement: fits of different orders have
+    no mean.
     """
 
     _attrs = ("method", "estimator", "coherence", "impulse_response",
@@ -347,8 +350,23 @@ def frf_welch(x, y, sample_rate, *, estimator="H1", nperseg=_DEFAULT_NPERSEG,
     sample_rate = require_positive_finite_scalar(
         sample_rate, "frf_welch", "sample_rate", " Hz")
     params = dict(nperseg=nperseg, noverlap=noverlap, **welch_options)
+    return _welch_frf(x, y, sample_rate, estimator, params, "frf_welch")
+
+
+def _welch_frf(x, y, sample_rate, estimator, params, who):
+    """:func:`frf_welch`'s estimate from one record pair (1-D) or from the
+    rows of a block (2-D, rows = measurements).
+
+    A block's Welch spectra ``Sxx``, ``Syy`` and ``Sxy`` are averaged over
+    the rows first, and H1, H2 and the coherence formed from the averages:
+    a two-channel analyser "averages corresponding values of |X|², |Y|² and
+    X*Y, from which estimates of Sxx, Syy and Sxy are determined. In turn
+    the frequency response … can be calculated" (Jacobsen & Juhl,
+    *Fundamentals of General Linear Acoustics*, App. B.7.3, Eqs. B.74, B.75,
+    B.82)."""
+    params = dict(params)
     if params["noverlap"] is None:
-        segment = min(int(params["nperseg"]), x.size)
+        segment = min(int(params["nperseg"]), x.shape[-1])
         params["noverlap"] = _default_noverlap(
             params.get("window", "hann"), segment)
     freqs, Pxx = _sig.welch(x, sample_rate, scaling="density", **params)
@@ -356,17 +374,19 @@ def frf_welch(x, y, sample_rate, *, estimator="H1", nperseg=_DEFAULT_NPERSEG,
     # ``Pxy`` holds csd(y, x) = Syx = conj(Sxy); the H1 expression
     # ``conj(Pxy)/Pxx`` is the textbook ``Sxy/Sxx``.
     _, Pxy = _sig.csd(y, x, sample_rate, scaling="density", **params)
+    if x.ndim == 2:
+        Pxx, Pyy, Pxy = (np.mean(P, axis=0) for P in (Pxx, Pyy, Pxy))
     # Each division masks bins whose denominator spectrum is numerically
     # zero (relative to its own peak) to nan with a warning, the same
     # policy _etfe_divide applies to the ETFE estimators; a zero or
     # constant record yields masked nan rather than dividing through to
     # inf/nan noise.
     if estimator == "H2":
-        tf = _etfe_divide(Pyy, Pxy, "frf_welch",
+        tf = _etfe_divide(Pyy, Pxy, who,
                           denominator="cross-spectral energy")
     else:
-        tf = _etfe_divide(np.conj(Pxy), Pxx, "frf_welch")
-    coh = _etfe_divide(np.abs(Pxy) ** 2, Pxx * Pyy, "frf_welch",
+        tf = _etfe_divide(np.conj(Pxy), Pxx, who)
+    coh = _etfe_divide(np.abs(Pxy) ** 2, Pxx * Pyy, who,
                        quantity="the coherence",
                        denominator="input or output energy")
     return FRFResult(freqs, tf, method="welch", estimator=estimator,
@@ -441,20 +461,49 @@ def periodic_etfe(x, y, sample_rate, *, period):
     sample_rate = require_positive_finite_scalar(
         sample_rate, "periodic_etfe", "sample_rate", " Hz")
     period = _whole_period(period, "periodic_etfe")
-    n_periods = x.size // period
-    if n_periods < 1:
-        raise ConfigurationError(
-            f"periodic_etfe: signal length must be at least one period; got "
-            f"len(x)={x.size} samples, period={period} samples.")
-    x_avg = np.mean(x[: n_periods * period].reshape(n_periods, period),
-                    axis=0)
-    y_avg = np.mean(y[: n_periods * period].reshape(n_periods, period),
-                    axis=0)
-    X = np.fft.rfft(x_avg)
-    Y = np.fft.rfft(y_avg)
+    X = np.fft.rfft(_period_average(x, period, "periodic_etfe"))
+    Y = np.fft.rfft(_period_average(y, period, "periodic_etfe"))
     freqs = np.fft.rfftfreq(period, d=1 / sample_rate)
     tf = _etfe_divide(Y, X, "periodic_etfe")
     return FRFResult(freqs, tf, method="p_etfe")
+
+
+def _period_average(records, period, who):
+    """The mean of the whole ``period``-sample periods along the last axis of
+    ``records``; samples after the last whole period are not used."""
+    n_samples = records.shape[-1]
+    n_periods = n_samples // period
+    if n_periods < 1:
+        raise ConfigurationError(
+            f"{who}: signal length must be at least one period; got "
+            f"len(x)={n_samples} samples, period={period} samples.")
+    whole = records[..., : n_periods * period]
+    return np.mean(whole.reshape(*records.shape[:-1], n_periods, period),
+                   axis=-2)
+
+
+def _pooled_etfe(X, Y, who):
+    """``Σ X_i*·Y_i / Σ |X_i|²`` over the rows of the input and output
+    spectra ``X`` and ``Y`` (rows = measurements).
+
+    This is the averaged transient estimate of Jacobsen & Juhl,
+    *Fundamentals of General Linear Acoustics*, App. B.6.2, which "will
+    approach the true frequency response function as m increases, since the
+    phase spectrum of the different noise sequences can be expected to vary
+    randomly from one record to another"; the input transients need not be
+    identical. The mean of the rows' ratios ``Y_i/X_i`` is not that
+    estimate: on a 4-tap FIR, 40 white-noise records of 4096 samples and
+    output noise of standard deviation 0.5, its worst error over 100-3500 Hz
+    was 3.4 to 9.8 across five seeds where this one's was 0.22 to 0.26
+    (measured).
+
+    A bin is masked where the root of the summed input power is numerically
+    zero, so one row is masked exactly where :func:`etfe` masks ``Y/X``.
+    """
+    root_power = np.sqrt(np.sum(np.abs(X) ** 2, axis=0))
+    cross = np.sum(np.conj(X) * Y, axis=0)
+    return _etfe_divide(cross / np.where(root_power > 0, root_power, 1.0),
+                        root_power, who)
 
 
 def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
@@ -473,8 +522,8 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
     sample_rate : float
         Sampling rate in Hz.
     order : int or {'AIC', 'BIC', 'FPE', 'CP'}
-        The FIR order, or the criterion that selects it: finite-sample AIC,
-        BIC, FPE, or Mallows' Cp.
+        The FIR order, or the criterion that selects it: Akaike's AIC,
+        Schwarz's BIC, Akaike's FPE, or Mallows' Cp (see Notes).
     n_samples : int, optional
         The leading samples the fit uses (``order <= n_samples``); all of
         them when unset.
@@ -497,6 +546,25 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
 
     Notes
     -----
+    The criteria score each order ``m`` (the number of taps) on its fit's
+    loss ``V = SSE/N``, the mean squared residual over the ``N`` output
+    samples, in their published forms:
+
+    * AIC ``log(V) + 2m/N`` (Akaike, "A new look at the statistical model
+      identification", *IEEE Trans. Automat. Control* 19, 716-723, 1974);
+    * FPE ``V·(1 + m/N)/(1 - m/N)`` (Akaike, "Fitting autoregressive models
+      for prediction", *Ann. Inst. Statist. Math.* 21, 243-247, 1969);
+    * BIC ``log(V) + m·log(N)/N`` (Schwarz, "Estimating the dimension of a
+      model", *Ann. Statist.* 6, 461-464, 1978);
+
+    the three as Ljung gives them for a model of ``m`` parameters fitted to
+    ``N`` data (*System Identification: Theory for the User*, 2nd ed.,
+    1999, §16.4); and Mallows' Cp ``SSE/σ² - N + 2(m + 1)`` (Mallows, "Some
+    comments on Cp", *Technometrics* 15, 661-675, 1973), with ``σ²`` the
+    residual variance of a reference fit at order ``max(2, N // 4)``
+    (capped at ``max_order`` and ``N - 1``; the reference order is uacpy
+    guidance — Mallows takes the full set of regressors).
+
     The fit solves the normal equations ``X.T @ X`` of the covariance
     design matrix, whose condition number is ``cond(X)**2``. The result's
     ``rcond`` is the reciprocal condition number of the system the
@@ -563,47 +631,26 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
                 # sse for every candidate order.
                 y_hat = np.convolve(u[:N], g, mode="full")[:N]
                 residuals = y[:N] - y_hat
-                sse = np.sum(residuals**2) / (N - m_candidate)
+                sse = float(np.sum(residuals**2))
+                loss = sse / N              # Ljung's V, the mean squared residual
 
-                if sse <= exact_tol:
+                if loss <= exact_tol:
                     # Residual at the rounding floor: this order explains
                     # the data exactly, and it is the lowest one that does.
                     best_m = m_candidate
                     best_g = g
                     break
 
-                if m == "AIC":  # AICF
-                    # Finite-sample AIC variant on the unbiased residual
-                    # variance sse = SSE/(N-m): log(sse) +
-                    # (1 + m/(N-m))/(1 - m/(N-m)). Textbook AIC scores
-                    # the ML variance SSE/N with penalty 2m/N; since
-                    # log(SSE/(N-m)) = log(SSE/N) + m/N + O(m²/N²), this
-                    # penalty is heavier by m/N (a mild bias toward
-                    # lower orders that vanishes as N >> m).
-                    score = np.log(sse) + (1 + m_candidate / (N - m_candidate)) / (
-                        1 - m_candidate / (N - m_candidate)
-                    )
-
-                elif m == "FPE":  # FPEF
-                    # Finite-sample FPE on the same unbiased sse:
-                    # sse·(1 + m/(N-m))/(1 - m/(N-m)). Textbook FPE is
-                    # (SSE/N)·(1 + m/N)/(1 - m/N); the SSE/(N-m) inside
-                    # makes this penalty heavier by m/N, as for AIC.
-                    score = (
-                        sse
-                        * (1 + m_candidate / (N - m_candidate))
-                        / (1 - m_candidate / (N - m_candidate))
-                    )
-
-                elif m == "CP":  # Mallows' Cp
-                    score = (
-                        sse * (N - m_candidate) / sigma2 - N + 2 * (m_candidate + 1)
-                    )
-
-                elif m == "BIC":  # Bayesian Information Criterion
-                    # On the unbiased sse, so heavier than the ML-variance
-                    # form log(SSE/N) + m·log(N)/N by m/N, as for AIC.
-                    score = np.log(sse) + (m_candidate * np.log(N)) / N
+                # The published forms (Notes): Akaike's AIC and FPE,
+                # Schwarz's BIC, Mallows' Cp.
+                if m == "AIC":
+                    score = np.log(loss) + 2.0 * m_candidate / N
+                elif m == "FPE":
+                    score = loss * (N + m_candidate) / (N - m_candidate)
+                elif m == "CP":
+                    score = sse / sigma2 - N + 2 * (m_candidate + 1)
+                elif m == "BIC":
+                    score = np.log(loss) + m_candidate * np.log(N) / N
 
                 if score < best_score:
                     best_score = score
@@ -715,7 +762,7 @@ class FRF(SettingsRepr):
     """
 
     def __init__(self, method="welch", estimator="H1", order=512, *,
-                 period=None, **kwargs):
+                 period=None, max_order=4096, stop_count=50, **kwargs):
         """
         Parameters
         ----------
@@ -743,6 +790,13 @@ class FRF(SettingsRepr):
             and averages the records over (:func:`periodic_etfe`'s
             ``period``); its rfft grid is the result's. Refused under
             another method.
+        max_order : int
+            Highest order an ``'ls_fir'`` criterion search tries
+            (:func:`lsfir`'s ``max_order``). Default 4096.
+        stop_count : int
+            An ``'ls_fir'`` criterion search stops after this many
+            consecutive orders with no improvement (:func:`lsfir`'s
+            ``stop_count``). Default 50.
         **kwargs
             Welch options (``nperseg``, ``noverlap``, ``window``, ...), as on
             :func:`frf_welch`; ``nperseg`` is also the ``'ls_fir'`` grid.
@@ -777,36 +831,22 @@ class FRF(SettingsRepr):
                 remediation=f"Use order= for the 'ls_fir' FIR order; Welch "
                             f"options are {sorted(welch_options)}.")
         self.params.update(kwargs)
+        if method not in _FRF_METHODS:
+            raise ConfigurationError(
+                f"FRF: unknown method={method!r}; "
+                "valid: 'welch', 'ls_fir', 'etfe', 'p_etfe'")
         self.method = method
         self.estimator = _require_estimator(estimator, "FRF")
         self.order = order
         self.period = _resolve_period(method, period, "FRF")
+        self.max_order = max_order
+        self.stop_count = stop_count
 
-    def compute(
-        self,
-        x,
-        y,
-        sample_rate,
-        order=None,
-        method=None,
-        estimator=None,
-        nperseg=None,
-        noverlap=None,
-        max_order=4096,
-        stop_count=50,
-        *,
-        period=None,
-    ):
+    def compute(self, x, y, sample_rate):
         """
-        Estimate the frequency response of one record pair, or the mean over
-        the measurements (rows) of a 2-D block.
-
-        ``order``, ``method``, ``estimator``, ``nperseg``, ``noverlap`` and
-        ``period`` apply to
-        this call alone: they override the constructor's values for the run and
-        leave the object's own settings as the constructor set them, so two
-        results from one ``FRF`` are comparable unless the caller says
-        otherwise on each call.
+        Estimate the frequency response of one record pair, or the average
+        over the measurements (rows) of a 2-D block, with the estimator and
+        settings the constructor set.
 
         Parameters
         ----------
@@ -816,64 +856,22 @@ class FRF(SettingsRepr):
             Output signal array, the shape of ``x``.
         sample_rate : float
             Sampling frequency (Hz).
-        order : int or str, optional
-            FIR order for ``'ls_fir'``, or an order-selection criterion
-            (``'AIC'``, ``'BIC'``, ``'FPE'``, ``'CP'``); the constructor's
-            ``order`` when omitted.
-        method : str, optional
-            Method for this call ('welch', 'ls_fir', 'etfe', 'p_etfe');
-            the constructor's ``method`` when omitted.
-        estimator : str, optional
-            Estimator for the Welch method for this call ('H1', 'H2');
-            the constructor's ``estimator`` when omitted.
-        nperseg : int, optional
-            Segment length for this call; the constructor's
-            ``params['nperseg']`` when omitted.
-        noverlap : int, optional
-            Overlap for Welch for this call; the constructor's
-            ``params['noverlap']`` when omitted.
-        max_order : int
-            Highest order a criterion search tries. Default 4096, as on
-            :func:`lsfir`.
-        stop_count : int
-            A criterion search stops after this many consecutive orders with
-            no improvement. Default 50, as on :func:`lsfir`.
-        period : int, optional
-            The ``'p_etfe'`` excitation period in samples for this call; the
-            constructor's ``period`` when omitted. Refused under another
-            method.
 
         Returns
         -------
         FRFResult
-            The one record pair's estimate; for a 2-D block, the mean
-            transfer function (and coherence) over the measurements, with
-            each ``'ls_fir'`` attribute a tuple of one entry per measurement.
+            The one record pair's estimate. For a 2-D block, the estimate
+            from the measurements' spectra averaged first, as a two-channel
+            analyser averages them (Jacobsen & Juhl, App. B.6.2 and B.7.3):
+            ``Σ X*·Y / Σ |X|²`` for ``'etfe'`` and ``'p_etfe'`` (each row
+            period-averaged first), H1 or H2 and the coherence from the
+            averaged Welch spectra for ``'welch'``. For ``'ls_fir'``, the
+            mean of the measurements' FIR responses, with each ``'ls_fir'``
+            attribute a tuple of one entry per measurement.
         """
-        # Per-call arguments are resolved into locals and left there: the
-        # constructor's method, estimator, order and Welch parameters are what
-        # the next call with no arguments uses, so one `compute(method='etfe')`
-        # cannot move a later plain `compute()` onto a different estimator or
-        # a different frequency grid.
-        method = self.method if method is None else method
-        estimator = _require_estimator(
-            self.estimator if estimator is None else estimator, "FRF.compute")
-        order = self.order if order is None else order
+        method, estimator, order = self.method, self.estimator, self.order
+        period = self.period
         params = dict(self.params)
-        if nperseg is not None:
-            params["nperseg"] = nperseg
-        if noverlap is not None:
-            params["noverlap"] = noverlap
-        if method not in _FRF_METHODS:
-            raise ConfigurationError(
-                f"FRF.compute: unknown method={method!r}; "
-                "valid: 'welch', 'ls_fir', 'etfe', 'p_etfe'")
-        # A period given to this call must belong to the method it runs; the
-        # constructor's is read only when this call runs 'p_etfe'.
-        if period is not None or method == "p_etfe":
-            period = _resolve_period(
-                method, self.period if period is None else period,
-                "FRF.compute")
 
         # Convert inputs to 2D arrays (rows = measurements)
         x = np.asarray(x)
@@ -902,40 +900,50 @@ class FRF(SettingsRepr):
         sample_rate = require_positive_finite_scalar(
             sample_rate, "FRF.compute", "sample_rate", " Hz")
 
-        results = []
-        for x_i, y_i in zip(x, y):
-            if method == "welch":
-                results.append(frf_welch(x_i, y_i, sample_rate,
-                                         estimator=estimator, **params))
-            elif method == "ls_fir":
-                results.append(lsfir(
-                    x_i, y_i, sample_rate, order=order, n_samples=x_i.size,
-                    max_order=max_order, stop_count=stop_count,
-                    nperseg=params["nperseg"]))
-            elif method == "etfe":
-                results.append(etfe(x_i, y_i, sample_rate))
-            else:
-                results.append(periodic_etfe(x_i, y_i, sample_rate,
-                                             period=period))
         if single_measurement:
-            return results[0]
+            x_1, y_1 = x[0], y[0]
+            if method == "welch":
+                return frf_welch(x_1, y_1, sample_rate, estimator=estimator,
+                                 **params)
+            if method == "etfe":
+                return etfe(x_1, y_1, sample_rate)
+            if method == "p_etfe":
+                return periodic_etfe(x_1, y_1, sample_rate, period=period)
 
-        # A block's measurements share one record length, so every row
-        # lands on the same grid: the nperseg rfft grid for 'welch' and
-        # 'ls_fir', the period's for 'p_etfe', the full-record one for
-        # 'etfe'.
-        first = results[0]
-        per_fit = {}
         if method == "ls_fir":
+            results = [lsfir(x_i, y_i, sample_rate, order=order,
+                             n_samples=x_i.size, max_order=self.max_order,
+                             stop_count=self.stop_count,
+                             nperseg=params["nperseg"])
+                       for x_i, y_i in zip(x, y)]
+            if single_measurement:
+                return results[0]
+            # Each row's FIR response is linear in its output record, so the
+            # block's response is the mean of the rows' responses, all on the
+            # nperseg rfft grid.
             per_fit = {name: tuple(getattr(r, name) for r in results)
                        for name in ("impulse_response", "order", "rcond",
                                     "information_matrix",
                                     "information_vector")}
-            per_fit["criterion"] = first.criterion
-        coherence = (np.mean([r.coherence for r in results], axis=0)
-                     if method == "welch" else None)
-        return FRFResult(
-            first.frequencies,
-            np.mean([r.transfer_function for r in results], axis=0),
-            method=method, estimator=first.estimator, coherence=coherence,
-            **per_fit)
+            return FRFResult(
+                results[0].frequencies,
+                np.mean([r.transfer_function for r in results], axis=0),
+                method=method, criterion=results[0].criterion, **per_fit)
+
+        # A block: the measurements' spectra are averaged first and the
+        # transfer function formed from the averages (_welch_frf,
+        # _pooled_etfe), on the grid every row shares — the nperseg rfft grid
+        # for 'welch', the period's for 'p_etfe', the full-record one for
+        # 'etfe'.
+        for x_i, y_i in zip(x, y):
+            _paired_records(x_i, y_i, "FRF.compute")
+        if method == "welch":
+            return _welch_frf(x, y, sample_rate, estimator, params,
+                              "FRF.compute")
+        if method == "p_etfe":
+            x = _period_average(x, period, "FRF.compute")
+            y = _period_average(y, period, "FRF.compute")
+        freqs = np.fft.rfftfreq(x.shape[1], d=1 / sample_rate)
+        tf = _pooled_etfe(np.fft.rfft(x, axis=-1), np.fft.rfft(y, axis=-1),
+                          "FRF.compute")
+        return FRFResult(freqs, tf, method=method)

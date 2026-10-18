@@ -14,6 +14,7 @@ import numpy as np
 from uacpy.core.exceptions import (
     ConfigurationError, NumericsWarning, ValidityWarning,
 )
+from uacpy.core._fourier import dtft_at
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = [
@@ -49,51 +50,6 @@ def wavenumbers_from_phase_speeds(phase_speeds: np.ndarray,
     return 2.0 * np.pi * float(frequency) / c
 
 
-def _dft_row(G: np.ndarray, f_idx: float,
-             win: Optional[np.ndarray] = None) -> np.ndarray:
-    """Row ``f_idx`` of ``np.fft.fft(G, axis=0)``, without the other rows.
-
-    ``f_idx`` may be fractional: the contraction is then the transform
-    evaluated at ``f_idx / nt`` cycles per sample, between the DFT bins —
-    what :func:`snapshot_frequency_component` uses to evaluate at the
-    frequency itself rather than at the nearest bin.
-
-    ``np.fft.fft(cube, axis=0)[f_idx]`` transforms all ``nt`` frequencies and
-    keeps one — measured 5.1x the cube in peak RSS, which is ~17 GB on a
-    512 x 200 x 4096 snapshot, to produce an (nrd, nk) slab. That row is a
-    contraction of ``G`` against ``exp(-2i pi f_idx n / nt)``, so it costs the
-    slab plus one pass over the cube instead.
-
-    ``win`` (a real per-sample taper) folds into the kernel. Mind what numpy
-    does with it today: ``G * win[:, None, None]`` promotes a complex64 cube
-    to complex128, so that FFT runs in DOUBLE precision and the windowed
-    branch is accurate to ~1e-16 rather than the ~1e-7 of a single-precision
-    transform. Contracting a complex128 kernel against the whole cube would
-    promote it the same way and hand most of the memory back (3.2x the cube
-    against 1.6x), so the windowed path casts and accumulates in complex128
-    over chunks of the last axis: same accuracy, bounded scratch.
-    """
-    nt = G.shape[0]
-    phase = np.exp(-2j * np.pi * float(f_idx) * np.arange(nt) / nt)
-    if win is None:
-        # Mirror numpy's own FFT precision rule so the row keeps the dtype the
-        # full transform gave it: single in, single out; anything else double.
-        single = np.result_type(G.dtype, np.complex64) == np.complex64
-        return np.tensordot(
-            phase.astype(np.complex64 if single else np.complex128), G, axes=1)
-    kernel = phase * np.asarray(win, dtype=np.float64)
-    out = np.empty(G.shape[1:], dtype=np.complex128)
-    # ~4e6 complex128 elements (64 MB) of cast cube per block — the scratch
-    # budget the synthesis chunking in acoustic_signal/_synthesis.py
-    # (synthesize_cells) works to.
-    per_column = max(int(np.prod(G.shape[:-1])), 1)
-    step = max(1, 4_000_000 // per_column)
-    for a in range(0, G.shape[-1], step):
-        out[..., a:a + step] = np.tensordot(
-            kernel, G[..., a:a + step].astype(np.complex128), axes=1)
-    return out
-
-
 def snapshot_frequency_component(
     snapshots: np.ndarray,
     times: np.ndarray,
@@ -107,7 +63,8 @@ def snapshot_frequency_component(
     first axis, as SPARC's snapshot mode writes ``Green(Itout, irz, ik)``
     (``sparc.f90:283-289``). The transform along that axis is evaluated
     **at** ``frequency`` (between DFT bins when it falls there, see
-    :func:`_dft_row`), not at the nearest bin: taking the same bin on both
+    :func:`uacpy.core._fourier.dtft_at`), not at the nearest bin: taking the
+    same bin on both
     sides of a deconvolution does not cancel the leakage on a multipath
     channel (+0.06 dB / +6 deg measured at half a bin), and evaluating both
     at the frequency does.
@@ -122,14 +79,22 @@ def snapshot_frequency_component(
 
     Without it the result is the steady-tone amplitude ``2*X_k / sum(win)``
     under a Hann window: the source spectrum times the transfer function,
-    ``S(omega0)*g``, whose absolute level depends on the pulse.
+    ``S(omega0)*g``, whose absolute level depends on the pulse. Its phase is
+    referenced to ``t = 0`` of ``times`` (``X_k = sum_n w_n G_n
+    exp(-2i pi f t_n)``), so a record starting at ``t_0 != 0`` reads the same
+    phase as one starting at 0. The factor 2 is the real-signal convention —
+    a real tone ``A cos(2 pi f t + phi)`` returns ``A exp(i phi)`` — and is
+    applied whatever the dtype: SPARC's ``Green`` is complex-typed
+    (``sparc.f90:42``) but is the response to a real source pulse, and no
+    source states another factor for it.
 
     Parameters
     ----------
     snapshots : ndarray, shape ``(nt, ...)``
         The time-sampled field, time on axis 0.
     times : array_like, shape ``(nt,)``
-        Uniform output times (s); their step sets the Nyquist frequency.
+        Uniform output times (s); their step sets the Nyquist frequency and,
+        without ``source_waveform``, their origin is the phase reference.
     frequency : float
         Hz.
     source_waveform : array_like, shape ``(nt,)``, optional
@@ -164,28 +129,44 @@ def snapshot_frequency_component(
             remediation="Sample the snapshots more finely in time (for a "
                         "SPARC run: raise n_time_samples or shorten "
                         "time_max).")
-    # The bin position of ``frequency`` itself: fftfreq[k] = k / (nt·dt),
-    # so a fractional k evaluates the transform at the frequency, off-bin.
-    bin_at_f0 = frequency * nt * dt
+    # The transform at ``frequency`` itself, off-bin, phase referenced to
+    # t = 0 of ``times``.
     if source_waveform is None:
         win = np.hanning(nt)
-        return 2.0 * _dft_row(snapshots, bin_at_f0, win) / np.sum(win)
+        return (2.0 * dtft_at(snapshots, times, frequency, window=win)
+                / np.sum(win))
     s_t = np.asarray(source_waveform, dtype=float)
     if s_t.shape != (nt,):
         raise ConfigurationError(
             f"{who}: source_waveform has shape {s_t.shape}; it must be the "
             f"source pulse sampled at the {nt} output times.")
-    S_at_f0 = _dft_row(s_t, bin_at_f0)
+    S_at_f0 = dtft_at(s_t, times, frequency)
     if S_at_f0 == 0:
         raise ConfigurationError(
             f"{who}: the source spectrum is zero at {frequency} Hz; cannot "
             "deconvolve (check the source waveform / frequency).")
-    return _dft_row(snapshots, bin_at_f0) / S_at_f0
+    return dtft_at(snapshots, times, frequency) / S_at_f0
+
+
+def _require_ascending_k(k, who: str) -> None:
+    """Refuse a wavenumber grid that is not strictly increasing. The
+    transform's step ``dk = (k[-1] - k[0]) / (n - 1)`` and the taper's
+    grid span read the grid as ascending (fieldsco.m:107 takes the same
+    step); a descending grid would flip the field's sign and turn the
+    alias guards off, silently."""
+    k = np.asarray(k, dtype=float)
+    if k.size > 1 and not np.all(np.diff(k) > 0):
+        raise ConfigurationError(
+            f"{who}: the wavenumber grid k must be strictly increasing "
+            f"(rad/m); got k[0] = {k[0]:g}, k[-1] = {k[-1]:g}.",
+            remediation="A grid built from ascending phase speeds is "
+                        "descending in k: reverse k and the spectrum's "
+                        "wavenumber axis together (k[::-1], G[..., ::-1]).")
 
 
 def wavenumber_taper(k: np.ndarray, frequency: float,
-                     cmin: Optional[float], cmax: Optional[float]) -> np.ndarray:
-    """Build a window that tapers ``G(k)`` outside ``[ω/cmax, ω/cmin]``.
+                     c_low: Optional[float], c_high: Optional[float]) -> np.ndarray:
+    """Build a window that tapers ``G(k)`` outside ``[ω/c_high, ω/c_low]``.
 
     Mirrors ``fieldsco.m:taper`` — symmetric Hanning roll-offs at the
     spectrum edges, ones in the middle. Returns ``ones`` when both bounds
@@ -196,22 +177,24 @@ def wavenumber_taper(k: np.ndarray, frequency: float,
     Parameters
     ----------
     k : ndarray
-        Wavenumber grid (rad/m).
+        Wavenumber grid (rad/m), strictly increasing.
     frequency : float
         Frequency (Hz).
-    cmin, cmax : float or None
-        Phase-speed band (m/s); ``None`` leaves that edge untapered.
+    c_low, c_high : float or None
+        Phase-speed band (m/s), ``fieldsco.m``'s ``cmin`` / ``cmax``;
+        ``None`` leaves that edge untapered.
     """
     Nk = len(k)
     win = np.ones(Nk, dtype=float)
     if Nk == 0:
         return win
+    _require_ascending_k(k, "phase-speed taper")
 
     omega = 2.0 * np.pi * frequency
-    k_left = omega / cmax if (cmax is not None and cmax > 0) else None
-    k_right = omega / cmin if (cmin is not None and cmin > 0) else None
+    k_left = omega / c_high if (c_high is not None and c_high > 0) else None
+    k_right = omega / c_low if (c_low is not None and c_low > 0) else None
 
-    # The pass band is [ω/cmax, ω/cmin]; the grid spans phase speeds
+    # The pass band is [ω/c_high, ω/c_low]; the grid spans phase speeds
     # [ω/k[-1], ω/k[0]]. A band that misses the grid entirely would taper
     # every sample to zero (and the roll-off construction below would build
     # a window longer than the grid).
@@ -219,17 +202,17 @@ def wavenumber_taper(k: np.ndarray, frequency: float,
     c_grid_hi = omega / float(k[0])
     if k_left is not None and k_right is not None and k_left > k_right:
         raise ConfigurationError(
-            f"phase-speed taper: cmin ({cmin:g} m/s) exceeds cmax "
-            f"({cmax:g} m/s); the pass band [ω/cmax, ω/cmin] is empty."
+            f"phase-speed taper: c_low ({c_low:g} m/s) exceeds c_high "
+            f"({c_high:g} m/s); the pass band [ω/c_high, ω/c_low] is empty."
         )
     if (k_left is not None and k_left > k[-1]) or \
             (k_right is not None and k_right < k[0]):
         raise ConfigurationError(
             f"phase-speed taper: the requested band "
-            f"(cmin={cmin!r}, cmax={cmax!r} m/s) has no overlap with the "
+            f"(c_low={c_low!r}, c_high={c_high!r} m/s) has no overlap with the "
             f"file's phase-speed grid [{c_grid_lo:.1f}, {c_grid_hi:.1f}] m/s "
             f"at {frequency:g} Hz — the taper would zero the entire spectrum. "
-            f"Widen or drop cmin/cmax — via Scooter's taper= if that is "
+            f"Widen or drop c_low/c_high — via Scooter's taper= if that is "
             f"how they were set, or directly if this transform was called "
             f"by hand. SPARC has no taper setting; a SPARC .grn reaches this "
             f"path only through GreensFunction.snapshot_to_field."
@@ -341,7 +324,7 @@ def hankel_transform(
     Parameters
     ----------
     G_src : (nrd, nk) complex
-    k     : (nk,) wavenumber grid
+    k     : (nk,) wavenumber grid (rad/m), strictly increasing
     ranges : (nr,) output ranges (m)
     attenuation : stabilising attenuation (added to k along the +i axis)
     source_type, spectrum : see table above
@@ -372,6 +355,9 @@ def hankel_transform(
             remediation="Resample the spectrum onto a uniform wavenumber "
                         "grid (np.interp onto np.linspace(k[0], k[-1], n)) "
                         "before transforming it.")
+    # A uniform grid running the other way passes the line test above with
+    # a negative dk; the step and the guards below read it as ascending.
+    _require_ascending_k(k, who)
     # fieldsco.m:109-111's own guard: the uniform-dk DFT is periodic in range
     # with period 2*pi/dk, and beyond ~10/dk the wrapped tail is amplified
     # exponentially by the exp(+attenuation*r) stabilisation compensation (+70 dB
@@ -398,7 +384,7 @@ def hankel_transform(
             f"{who}: max range {r_max:g} m is at or past the alias period "
             f"2*pi/dk = {alias_period(dk):g} m; the field there includes "
             f"energy folded in from beyond it, which cannot be separated "
-            f"afterwards (ranges_fit_alias_period(dk, rmax_m) is False). "
+            f"afterwards (ranges_fit_alias_period(dk, rmax) is False). "
             f"Refine dk (a longer spectral RMax) or shorten the ranges.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
     ck = k + 1j * attenuation
@@ -495,7 +481,7 @@ def alias_period(delta_k: float) -> float:
     return float('inf') if dk == 0.0 else 2.0 * np.pi / dk
 
 
-def ranges_fit_alias_period(delta_k: float, rmax_m: float) -> bool:
+def ranges_fit_alias_period(delta_k: float, rmax: float) -> bool:
     """Whether the farthest range wanted sits inside ``2*pi/dk``.
 
     **Necessary, not sufficient.** A grid that passes this can still be too
@@ -513,17 +499,17 @@ def ranges_fit_alias_period(delta_k: float, rmax_m: float) -> bool:
     ----------
     delta_k : float
         Wavenumber step of the stored spectrum (rad/m).
-    rmax_m : float
+    rmax : float
         Farthest receiver range wanted (m).
 
     Returns
     -------
     bool
-        ``True`` when ``rmax_m < 2*pi/dk``.
+        ``True`` when ``rmax < 2*pi/dk``.
     """
-    r = float(rmax_m)
+    r = float(rmax)
     if not np.isfinite(r) or r < 0.0:
         raise ConfigurationError(
-            f"ranges_fit_alias_period: rmax_m must be a non-negative, finite "
-            f"range in metres; got {rmax_m!r}.")
+            f"ranges_fit_alias_period: rmax must be a non-negative, finite "
+            f"range in metres; got {rmax!r}.")
     return r < alias_period(delta_k)

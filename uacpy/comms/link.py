@@ -16,7 +16,7 @@ from uacpy.comms.channel import (
 )
 from uacpy.comms.constellations import Modulator
 from uacpy.comms.coding import _encoded
-from uacpy.comms.equalize import DFE, complex_gain
+from uacpy.comms.equalize import complex_gain
 from uacpy.comms.metrics import bit_error_rate, evm
 from uacpy.core._export import CarrierExport
 from uacpy.core._repr import FieldsRepr
@@ -106,7 +106,7 @@ def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
         the symbol grid, so a tap vector at several samples per symbol
         names a different grid and is refused. Build it with the default
         pulse (``'rc'`` at ``sps=1``) or ``'nearest'``; see above. Its
-        ``delays_s`` place tap 0 ``span/2`` symbols ahead of the arrival
+        ``delays`` place tap 0 ``span/2`` symbols ahead of the arrival
         (the pulse's leading skirt), so the received symbols are read from
         the tap at zero delay on. A bare tap array carries no delay axis:
         its tap 0 is taken as the zero-delay tap, so a caller passing
@@ -146,14 +146,14 @@ def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
                 f"Arrivals.channel_taps(symbol_rate, fc=..., sps=1).")
         # The taps start on the pulse's leading skirt, `lead` symbols before
         # the zero-delay tap: that is the offset symbol j reaches the output
-        # at, read here because only the ChannelTaps carries delays_s.
-        lead = int(round(-float(channel.delays_s[0]) * channel.symbol_rate))
+        # at, read here because only the ChannelTaps carries delays.
+        lead = int(round(-float(channel.delays[0]) * channel.symbol_rate))
         channel = channel.taps
     elif (isinstance(channel, tuple)
           and any(np.ndim(part) > 0 for part in channel)):
         raise ConfigurationError(
             f"simulate_link: channel= is a tuple of {len(channel)} arrays — "
-            f"a (times_s, taps) pair, say — not one FIR channel.",
+            f"a (times, taps) pair, say — not one FIR channel.",
             remediation="Pass the taps alone, or a ChannelTaps "
                         "(comms.pulse_shaped_taps, or "
                         "Arrivals.channel_taps(symbol_rate, fc=..., sps=1)).")
@@ -165,7 +165,7 @@ def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
     bits = _encoded(code, info)
     tx = mod.modulate(bits)
 
-    delay = equalizer.n_ff // 2 if isinstance(equalizer, DFE) else 0
+    delay = 0 if equalizer is None else equalizer.output_delay
     if channel is not None:
         rx = apply_channel(tx, channel)[lead:]
     else:
@@ -224,10 +224,11 @@ class BerCurve(PlottedResult, namedtuple("BerCurve", "ebn0_dB ber")):
     ``code`` and ``n_train``, as :func:`simulate_link` took them.
 
     :meth:`plot` draws it with
-    :func:`~uacpy.plot.plot_ber_curve`, which takes the curve whole: it
-    marks zero-error points at ``1/n_bits`` and overlays the closed-form
-    AWGN curve of ``scheme`` only for an uncoded link with no channel, the
-    one link it describes.
+    :func:`~uacpy.plot.plot_ber_curve`, which takes the curve whole and
+    marks zero-error points at ``1/n_bits``. The closed-form AWGN curve of
+    an uncoded link with no channel, the one link it describes, is
+    :func:`~uacpy.comms.ber_theory_curve`, overlaid with
+    ``.plot(ax=ax)``.
     """
 
     _attrs = ("scheme", "n_bits", "channel", "equalizer", "code", "n_train")

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import namedtuple
 
-from scipy.signal import resample
+from scipy.signal import czt
 import numpy as np
 import scipy.signal as _sig
 
@@ -18,7 +18,8 @@ from uacpy.core.exceptions import ConfigurationError
 
 
 #: The default Doppler time-scale search: ``DOPPLER_SCALE_COUNT``
-#: candidates over ``±DOPPLER_SCALE_MAX``.
+#: candidates over ``±DOPPLER_SCALE_MAX`` (±7.5 m/s at 1500 m/s), uacpy
+#: guidance.
 DOPPLER_SCALE_MAX = 5e-3
 DOPPLER_SCALE_COUNT = 601
 
@@ -96,9 +97,10 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
     # requested noise bandwidth and damping to a per-sample loop constant
     # ``theta``, then to the proportional (``kp``) and integral (``ki``) gains.
     # A second-order loop has noise-equivalent bandwidth
-    # ``B_n = (w_n/2)*(damping + 1/(4*damping))`` (Proakis & Salehi eq. 5.2-22
-    # with ``tau2*w_n = 2*damping``), so ``theta = w_n*T/2`` inverts to the line
-    # below for a per-symbol-period normalized ``loop_bw = B_n*T``.
+    # ``B_n = (w_n/2)*(damping + 1/(4*damping))`` (Proakis & Salehi
+    # eq. 5.2-22, with ``tau2*w_n = 2*damping``), so ``theta = w_n*T/2``
+    # inverts to the line below for a per-symbol-period normalized
+    # ``loop_bw = B_n*T``.
     theta = loop_bw / (damping + 0.25 / damping)
     denom = 1 + 2 * damping * theta + theta * theta
     kp = 4 * damping * theta / denom
@@ -229,7 +231,20 @@ def _matched_filter_core(r, p, pe):
     return metric
 
 
-def detect_preamble(received, preamble, threshold=0.5):
+#: Default lowest matched-filter metric taken as a preamble detection, for
+#: :func:`detect_preamble`, :func:`detect_frames` and
+#: :meth:`~uacpy.comms.CommsReceiver.receive` (uacpy guidance; no source sets
+#: it). Measured on the default 64-symbol QPSK preamble with 256 payload
+#: symbols, 2000 trials each: 0.5 finds the start with probability 0.93 at
+#: -3 dB per-symbol SNR, 0.24 at -6 dB and 1.0 from 0 dB, and no 370-symbol
+#: noise-only record of 2000 reached it (their peak metric: median 0.30,
+#: 99.9 % quantile 0.41); 0.4 finds 0.998 at -3 dB and 0.80 at -6 dB, and
+#: 0.45 % of the noise-only records reach it. A false alarm grows with the
+#: record searched, so the default keeps the threshold above the noise peak.
+PREAMBLE_THRESHOLD = 0.5
+
+
+def detect_preamble(received, preamble, threshold=PREAMBLE_THRESHOLD):
     """Index of the best preamble alignment if its metric exceeds ``threshold``.
 
     Returns ``(start_index, metric_array)``; ``start_index`` is ``None`` when no
@@ -242,14 +257,16 @@ def detect_preamble(received, preamble, threshold=0.5):
     preamble : array_like
         The known preamble.
     threshold : float, optional
-        Lowest metric (in ``[0, 1]``) taken as a detection. Default 0.5.
+        Lowest metric (in ``[0, 1]``) taken as a detection. Default
+        :data:`PREAMBLE_THRESHOLD`, 0.5 (uacpy guidance, measured there).
     """
     metric = matched_filter_metric(received, preamble)
     k = int(np.argmax(metric))
     return (k if metric[k] >= threshold else None), metric
 
 
-def detect_frames(received, preamble, threshold=0.5, min_gap=None):
+def detect_frames(received, preamble, threshold=PREAMBLE_THRESHOLD,
+                  min_gap=None):
     """All frame-start indices whose metric clears ``threshold`` (peak-picked).
 
     ``min_gap`` (samples) suppresses detections closer than that to a stronger
@@ -262,7 +279,8 @@ def detect_frames(received, preamble, threshold=0.5, min_gap=None):
     preamble : array_like
         The known preamble.
     threshold : float, optional
-        Lowest metric (in ``[0, 1]``) taken as a detection. Default 0.5.
+        Lowest metric (in ``[0, 1]``) taken as a detection. Default
+        :data:`PREAMBLE_THRESHOLD`, 0.5 (uacpy guidance, measured there).
     min_gap : int, optional
         Samples within which a weaker detection is suppressed; ``None`` is
         the preamble length.
@@ -284,10 +302,10 @@ def detect_frames(received, preamble, threshold=0.5, min_gap=None):
 _MAX_DOPPLER_SCALE = 0.1
 
 
-def doppler_from_speed(speed_mps, sound_speed=DEFAULT_SOUND_SPEED):
+def doppler_from_speed(speed, sound_speed=DEFAULT_SOUND_SPEED):
     """Doppler scale factor ``a = v/c`` (positive when range is closing).
 
-    ``speed_mps`` may be a scalar (returns a float) or an array (returns an
+    ``speed`` may be a scalar (returns a float) or an array (returns an
     array of the same shape); ``sound_speed`` is one scalar.
 
     This is the dimensionless scale a receiver compensates
@@ -297,7 +315,7 @@ def doppler_from_speed(speed_mps, sound_speed=DEFAULT_SOUND_SPEED):
 
     Parameters
     ----------
-    speed_mps : float or array_like
+    speed : float or array_like
         Radial speed (m/s), positive when the range is closing.
     sound_speed : float, optional
         Sound speed (m/s). Default
@@ -306,17 +324,22 @@ def doppler_from_speed(speed_mps, sound_speed=DEFAULT_SOUND_SPEED):
     c = require_positive_finite_scalar(
         sound_speed, "doppler_from_speed", "sound_speed", " m/s",
         why=" a = v/c divides by it.")
-    v = np.asarray(speed_mps, dtype=float)
+    v = np.asarray(speed, dtype=float)
     return float(v) / c if v.ndim == 0 else v / c
 
 
 def compensate_doppler(signal, scale):
-    """Undo a Doppler dilation: resample ``signal`` to ``(1+scale)*N`` samples.
+    """Undo a Doppler dilation: stretch ``signal``'s time base by exactly
+    ``1 + scale``.
 
     ``scale = a = v/c``. A closing geometry (``a > 0``) compresses the received
-    waveform; resampling to ``(1+a)*N`` samples stretches it back to the
-    transmit time base. Returns the resampled signal of the input's own kind:
-    a real record comes back real (float), a complex one complex.
+    waveform; output sample ``m`` is the record's band-limited (Fourier)
+    interpolant at input time ``m/(1+a)`` samples, which stretches it back to
+    the transmit time base by exactly ``1 + a``. The output holds
+    ``round((1+a)*N)`` samples, the stretched record's whole span; a
+    compressed one (``a < 0``) is low-passed to the band its sampling keeps.
+    Returns the resampled signal of the input's own kind: a real record comes
+    back real (float), a complex one complex.
 
     Apply it to the passband (or analytic) record, where the dilation acts
     on the carrier too. After down-conversion the carrier has been removed at
@@ -324,6 +347,12 @@ def compensate_doppler(signal, scale):
     leaves a carrier offset of ``scale * fc`` to remove separately.
     ``|scale| > 0.1`` raises: no underwater platform reaches a tenth of the
     sound speed, and the output length scales as ``(1+scale)*N``.
+
+    The interpolant is the record's discrete Fourier series, so the record
+    is read as one period of a periodic signal: a record that does not start
+    and end in silence has the jump between its ends spread over its edges
+    (Gibbs). The series is evaluated with a chirp z-transform, in
+    ``O(N log N)``.
 
     Parameters
     ----------
@@ -351,7 +380,40 @@ def compensate_doppler(signal, scale):
             f"1 + scale = {1.0 + a:g} leaves {n_out} output sample(s), "
             f"fewer than the 2 the resampler needs; the signal is too "
             f"short for this scale.")
-    return resample(x, n_out)
+    return _dilate(x, a, n_out)
+
+
+def _dilate(x, a, n_out):
+    """``n_out`` samples of ``x``'s discrete Fourier series at input times
+    ``m/(1+a)``, ``m = 0 .. n_out-1``: the series
+    ``(1/N) Σ_k X[k] exp(2πi f_k t)`` over the ``fftfreq`` frequencies
+    ``f_k`` (cycles per sample), split into its non-negative and negative
+    halves, each a chirp z-transform along the output index. An even record's
+    Nyquist bin is shared between ``±1/2`` so a real record stays real.
+    When ``1/(1+a) > 1`` the output samples the input more coarsely, and the
+    frequencies above ``(1+a)/2`` that sampling cannot hold are dropped
+    first."""
+    n = x.size
+    step = 1.0 / (1.0 + a)            # input samples per output sample
+    X = np.fft.fft(x)
+    if step > 1.0:
+        X = np.where(np.abs(np.fft.fftfreq(n)) < 0.5 / step, X, 0.0)
+    half = n // 2
+    positive = X[:half + 1].copy()
+    nyquist = 0.0
+    if n % 2 == 0:
+        nyquist = positive[half] / 2.0
+        positive[half] = nyquist
+    w = np.exp(2j * np.pi * step / n)
+    m = np.arange(n_out)
+    y = czt(positive, m=n_out, w=w, a=1.0)
+    if half + 1 < n:
+        y = y + (np.exp(2j * np.pi * (half + 1 - n) * step * m / n)
+                 * czt(X[half + 1:], m=n_out, w=w, a=1.0))
+    if nyquist:
+        y = y + nyquist * np.exp(-1j * np.pi * step * m)
+    y = y / n
+    return y if np.iscomplexobj(x) else y.real
 
 
 class DopplerEstimate(PlottedResult, namedtuple(
@@ -359,9 +421,9 @@ class DopplerEstimate(PlottedResult, namedtuple(
     """A Doppler-scale estimate and the scan it came from, what
     :func:`estimate_doppler_scale` returns.
 
-    ``best_scale`` is the estimate (``a = v/c``, the centre of the winning
-    plateau), ``scales`` the candidates scanned and ``peak_metric`` the
-    matched-filter metric at each. The tuple unpacks as
+    ``best_scale`` is the estimate (``a = v/c``, the scanned candidate with
+    the highest metric), ``scales`` the candidates scanned and
+    ``peak_metric`` the matched-filter metric at each. The tuple unpacks as
     ``best_scale, scales, peak_metric = estimate_doppler_scale(...)``.
     :meth:`plot` draws the ambiguity curve with
     :func:`~uacpy.plot.plot_doppler_ambiguity`, which marks ``best_scale``.
@@ -382,15 +444,9 @@ def estimate_doppler_scale(received, template, scales=None):
     a value in ``[0, 1]``); the best-scoring scale wins. Returns a
     :class:`DopplerEstimate` ``(best_scale, scales, peak_metric)`` — the last
     two the ambiguity curve its :meth:`~DopplerEstimate.plot` draws.
-
-    ``best_scale`` is the CENTRE of the winning plateau, not the candidate
-    ``argmax`` picks out. The metric is a staircase (see below), so a whole run
-    of candidates shares the top score and ``argmax`` would return that run's
-    low edge — a one-sided bias of up to one plateau width. It is therefore a
-    midpoint of two scanned candidates rather than one of them verbatim, and
-    for a run of even length it falls between grid nodes. A run truncated by
-    the end of the scan gives the midpoint of the scanned part, so the answer
-    never leaves the range the caller asked for.
+    ``compensate_doppler`` applies each candidate exactly, so the metric is a
+    curve in ``a`` and ``best_scale`` is the scanned candidate at its
+    maximum.
 
     The returned ``a`` follows the package convention (``doppler_from_speed`` /
     ``compensate_doppler``): ``a = v/c``, positive for a closing geometry. It is
@@ -409,16 +465,14 @@ def estimate_doppler_scale(received, template, scales=None):
     within +/-(``stride`` - 1) steps of the coarse peak — so only the
     evaluated candidates come back in ``scales``/``peak``.
 
-    ``stride`` is set from the record length. The metric is a plateau
-    staircase in ``a``, not a smooth curve: ``compensate_doppler`` resamples
-    ``received`` to ``int(round(N*(1 + a)))`` samples, so the score takes one value
-    per distinct output length and changes every ``1/N`` in ``a``. A coarse
-    stride wider than that quantum puts several plateaus inside one coarse
-    interval, the surface stops being single-peaked *at the coarse sampling*,
-    and the fine window can close on the wrong plateau. Sampling at most one
-    quantum apart — ``stride <= 1/(N * grid_step)``, capped at 15 — keeps the
-    two-stage answer equal to a full scan's; the stride falls to 1, i.e. a
-    full scan, for the longest records. An explicit ``scales`` array is
+    ``stride`` is set from the record length ``N``: the coarse candidates
+    sit at most ``1/(4N)`` apart in ``a`` (``stride <= 1/(4 N grid_step)``,
+    capped at 15). On a real passband record the metric oscillates in ``a``
+    with a period near ``1/N`` — measured 0.68/N to 1.39/N on four LFM
+    probes (1-5.9 kHz at 12 kHz) — so a coarser pass can land on the wrong
+    fringe; four candidates per ``1/N`` give the two-stage answer the full
+    scan's on those probes (uacpy guidance). The stride falls to 1, a full
+    scan, from ``N = 15 000`` samples. An explicit ``scales`` array is
     scanned in full.
 
     The cost grows with the record passed: every candidate resamples and
@@ -444,7 +498,8 @@ def estimate_doppler_scale(received, template, scales=None):
         scales = np.asarray(scales, dtype=float)
         peak = _metric_scan(r, t, scales)
         _reject_all_zero_metric(peak, r, t, scales)
-        return DopplerEstimate(_plateau_centre(scales, peak), scales, peak)
+        return DopplerEstimate(float(scales[int(np.argmax(peak))]), scales,
+                               peak)
 
     grid = np.linspace(-DOPPLER_SCALE_MAX, DOPPLER_SCALE_MAX,
                        DOPPLER_SCALE_COUNT)
@@ -462,14 +517,13 @@ def estimate_doppler_scale(received, template, scales=None):
         # concluding the surface is all-zero.
         peak = _metric_scan(r, t, grid)
         _reject_all_zero_metric(peak, r, t, grid)
-        return DopplerEstimate(_plateau_centre(grid, peak), grid, peak)
+        return DopplerEstimate(float(grid[int(np.argmax(peak))]), grid, peak)
     centre = int(coarse_idx[int(np.argmax(coarse_peak))])
     fine_idx = np.arange(max(0, centre - (stride - 1)),
                          min(grid.size, centre + stride))
     fine_peak = _metric_scan(r, t, grid[fine_idx])
     # Merge the two stages onto one ascending candidate axis (the centre
-    # candidate appears in both; keep one copy) so the winning plateau's run
-    # is contiguous and its midpoint is the one a full ascending scan finds.
+    # candidate appears in both; keep one copy), the curve the plot draws.
     idx = np.concatenate([coarse_idx, fine_idx])
     vals = np.concatenate([coarse_peak, fine_peak])
     order = np.argsort(idx, kind="stable")
@@ -478,8 +532,8 @@ def estimate_doppler_scale(received, template, scales=None):
     keep[1:] = idx[1:] != idx[:-1]
     idx, vals = idx[keep], vals[keep]
     scales_out = grid[idx]
-    return DopplerEstimate(_plateau_centre(scales_out, vals), scales_out,
-                           vals)
+    return DopplerEstimate(float(scales_out[int(np.argmax(vals))]),
+                           scales_out, vals)
 
 
 _MAX_COARSE_STRIDE = 15
@@ -491,12 +545,11 @@ def _doppler_scan_stretch(received, template):
     template's matched-filter peak at ``a = 0``.
 
     Every candidate is scored over the record passed, so the scan costs time
-    in proportion to its length. What it resolves stops growing at
-    ``1/grid_step`` samples — past that the resample quantum ``1/N`` is finer
-    than the grid and the stride is 1 (:func:`_coarse_stride`) — so the
-    window is that long, and at least the template stretched by the largest
-    scale with one template length either side; a longer capture would cost
-    time without changing the answer's resolution."""
+    in proportion to its length, while the answer's resolution is the grid
+    step. The window is ``1/grid_step`` samples — the length at which ``1/N``,
+    the scale change that moves the record's end by one sample, reaches the
+    grid step — and at least the template stretched by the largest scale
+    with one template length either side (uacpy guidance)."""
     r = np.asarray(received)
     t = np.asarray(template)
     step = 2.0 * DOPPLER_SCALE_MAX / (DOPPLER_SCALE_COUNT - 1)
@@ -509,55 +562,27 @@ def _doppler_scan_stretch(received, template):
     return r[lo:lo + span]
 
 
-def _coarse_stride(n_samples: int, grid_step: float) -> int:
-    """Coarse-pass stride that samples every resample-length plateau.
+#: Coarse candidates per ``1/N`` of Doppler scale in the default two-stage
+#: search (:func:`estimate_doppler_scale`; uacpy guidance, measured there).
+_COARSE_PER_QUANTUM = 4
 
-    ``compensate_doppler`` resamples an ``n_samples`` record to
-    ``int(round(n*(1 + a)))``, so the matched-filter metric is constant over
-    each interval of width ``1/n`` in ``a`` and steps between them. The coarse
-    pass must land at least once in every such interval — ``stride *
-    grid_step <= 1/n`` — or a plateau higher than the coarse peak's neighbours
-    can sit unsampled inside a coarse gap and the fine window closes on the
-    wrong one.
+
+def _coarse_stride(n_samples: int, grid_step: float) -> int:
+    """Coarse-pass stride that keeps the coarse candidates at most
+    ``1/(4n)`` apart in ``a``: ``stride * grid_step <= 1/(4n)``, four per
+    ``1/n``, the scale change that moves the end of an ``n_samples`` record
+    by one sample.
 
     The cap is ``_MAX_COARSE_STRIDE``: the bound is slack for records shorter
-    than ``1/(_MAX_COARSE_STRIDE * grid_step)`` (4000 samples on the default
-    grid), where the widest stride is the cheapest correct one. Above that the
-    stride shrinks with ``n`` and reaches 1 — the coarse pass is then the full
-    grid — for records past ``1/grid_step`` (60000 samples).
+    than ``1/(4 * _MAX_COARSE_STRIDE * grid_step)`` (1000 samples on the
+    default grid), where the widest stride applies. Above that the stride
+    shrinks with ``n`` and reaches 1 — the coarse pass is then the full
+    grid — for records past ``1/(4 * grid_step)`` (15 000 samples).
     """
     return int(min(float(_MAX_COARSE_STRIDE),
-                   max(1.0, np.floor(1.0 / (max(int(n_samples), 1)
+                   max(1.0, np.floor(1.0 / (_COARSE_PER_QUANTUM
+                                            * max(int(n_samples), 1)
                                             * grid_step)))))
-
-
-def _plateau_centre(scales, peak):
-    """Centre of the contiguous run of maximal candidates around the argmax.
-
-    The metric is a plateau staircase, not a peaked curve: ``compensate_doppler``
-    resamples to ``int(round(N*(1 + a)))`` samples, so every candidate inside a
-    ``1/N``-wide interval of ``a`` produces the *same* resampled record and
-    therefore a bit-identical score. ``np.argmax`` returns the first index of
-    that run, i.e. the plateau's LOW EDGE, which is a one-sided bias of up to
-    one plateau width — measured 7/7 on the package's chirp fixture, where a
-    ``1/N`` of 1.72e-4 in ``a`` is 0.26 m/s at c = 1500. Returning the run's
-    midpoint puts the estimate where the metric actually stops distinguishing.
-
-    A run truncated by the end of the scan (the winning plateau straddling the
-    top or bottom candidate) gives the midpoint of the part that was scanned:
-    that is the best available, and unlike the analytic plateau centre
-    ``n_out/N - 1`` it never returns a scale outside the range the caller
-    asked for.
-    """
-    best_index = int(np.argmax(peak))
-    top = peak[best_index]
-    lo = best_index
-    while lo - 1 >= 0 and peak[lo - 1] == top:
-        lo -= 1
-    hi = best_index
-    while hi + 1 < peak.size and peak[hi + 1] == top:
-        hi += 1
-    return float(0.5 * (scales[lo] + scales[hi]))
 
 
 def _metric_scan(r, t, scales):

@@ -48,7 +48,7 @@ class TestOASRFrequencyOverride:
         rcv = Receiver(depths=[50.0], ranges=[1000.0])
         out = tmp_path / "oasr.dat"
         write_oasr_input(str(out), env, src, rcv,
-                         angles=np.linspace(0, 90, 91),
+                         angles_deg=np.linspace(0, 90, 91),
                          freq_min=200.0, freq_max=400.0, n_frequencies=5)
         freq_min, freq_max, nfreq = self._freq_line(out)
         assert (freq_min, freq_max, nfreq) == (200.0, 400.0, 5)
@@ -65,7 +65,7 @@ class TestOASRFrequencyOverride:
         rcv = Receiver(depths=[50.0], ranges=[1000.0])
         out = tmp_path / "oasr.dat"
         write_oasr_input(str(out), env, src, rcv,
-                         angles=np.linspace(0, 90, 91))
+                         angles_deg=np.linspace(0, 90, 91))
         freq_min, freq_max, nfreq = self._freq_line(out)
         assert (freq_min, freq_max, nfreq) == (50.0, 150.0, 3)
 
@@ -174,7 +174,7 @@ class TestOASNWavenumberSampling:
         lines = self._write(
             tmp_path, options='N J', n_wavenumbers=256,
             noise=OasnNoise(discrete_sources=[
-                {'depth': 40.0, 'x': 1000.0, 'y': 0.0, 'level': 180.0}]))
+                {'depth': 40.0, 'x': 1000.0, 'y': 0.0, 'level_dB': 180.0}]))
         assert lines[-1].split() == ['256', '1', '256']
 
 
@@ -326,7 +326,7 @@ class TestTheDefaultSurfaceNoiseDeckConverges:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             cov = OASN(verbose=False, work_dir=tmp_path,
-                       surface_noise_level=50.0, **kwargs).compute_covariance(
+                       surface_noise_level_dB=50.0, **kwargs).compute_covariance(
                 env, uacpy.Source(depths=10.0, frequencies=100.0),
                 uacpy.Receiver(depths=[20.0, 50.0, 80.0], ranges=[1000.0]))
         return 10.0 * np.log10(np.abs(np.diag(np.asarray(cov.covariance)[0])))
@@ -679,7 +679,7 @@ class TestFortranTitleDecoding:
         (b'OASS run 3      ', 'OASS run 3'),
     ])
     def test_nuls_and_blanks_come_off_together(self, raw, expected):
-        from uacpy.io.oases_reader import _decode_fortran_title
+        from uacpy.io._parsers import _decode_fortran_title
         assert _decode_fortran_title(raw) == expected
 
 
@@ -727,3 +727,50 @@ class TestOasesLayerRecordsCarryTheATDecksDigits:
                                 _format_upper_halfspace(env).split()[1:6])
         assert (cp, cs, ap, as_, rho) == (3500.25, 1800.125, 0.0004, 0.0007,
                                           0.9171)
+
+
+class TestOasesWritersRefuseARangeDependentEnvironment:
+    """An OASES deck describes one horizontally stratified waveguide; the
+    public writers refuse a range-dependent Environment rather than write
+    its r = 0 column (a layered seabed would lose its layers)."""
+
+    @staticmethod
+    def _layered_range_dependent_env():
+        from uacpy.core.bottom import Bottom
+        granite = BoundaryProperties(acoustic_type='half-space',
+                                     sound_speed=5750.0, shear_speed=3000.0,
+                                     density=2.65, attenuation=0.1)
+        column = SeabedColumn(
+            layers=[SedimentLayer(thickness=8.0, sound_speed=1650.0,
+                                  density=1.9, attenuation=0.8)],
+            halfspace=granite)
+        return Environment(bathymetry=100.0, ssp=1500.0,
+                           bottom=Bottom(columns=[column, column],
+                                         ranges=[0.0, 5000.0]))
+
+    @pytest.mark.parametrize('writer', ['write_oast_input', 'write_oasn_input',
+                                        'write_oasp_input', 'write_oasr_input'])
+    def test_a_layered_range_dependent_seabed_is_refused(self, writer,
+                                                          tmp_path):
+        from uacpy.io import oases_writer
+        env = self._layered_range_dependent_env()
+        assert env.is_range_dependent
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        rcv = uacpy.Receiver(depths=[50.0],
+                             ranges=np.linspace(100.0, 2000.0, 10))
+        with pytest.raises(ConfigurationError, match='range-dependent'):
+            getattr(oases_writer, writer)(tmp_path / 'deck.dat', env, src,
+                                          rcv)
+        assert not (tmp_path / 'deck.dat').exists()
+
+    def test_a_range_dependent_profile_is_refused(self, tmp_path):
+        from uacpy.io.oases_writer import write_oast_input
+        ssp = uacpy.SoundSpeedProfile(
+            depths=[0.0, 100.0],
+            sound_speed=np.array([[1500.0, 1495.0], [1490.0, 1480.0]]),
+            ranges=[0.0, 5000.0])
+        env = Environment(bathymetry=100.0, ssp=ssp)
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        rcv = uacpy.Receiver(depths=[50.0], ranges=[1000.0])
+        with pytest.raises(ConfigurationError, match='range-dependent'):
+            write_oast_input(tmp_path / 'deck.dat', env, src, rcv)

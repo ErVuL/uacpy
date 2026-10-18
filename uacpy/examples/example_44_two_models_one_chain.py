@@ -1,266 +1,153 @@
 """Two propagation models through one detection chain, and what the beam hears.
 
-One model agreeing with itself proves nothing. Kraken is a full-wave modal
-code and Bellhop a ray/beam one: they approximate different things and fail
-in different places, so where they agree the propagation underneath a sonar
-prediction is worth trusting.
-
-Comparing them fairly is its own small problem. "Both incoherent" is not on
-offer — coupled modes cannot be added incoherently at all — so some
-asymmetry is forced, and the tempting protocol (Kraken coherent and
-smoothed against Bellhop INCOHERENT) is the wrong way to handle it: its
-answer tracks the smoothing kernel, so there is no plateau to quote, and
-smoothing one side cancels part of the real difference. Both fields are
-therefore taken coherent and put through the same boxcar, and the kernel is
-swept to measure what the protocol itself is worth. The spread across
-kernels IS the noise floor, and a comparison without one should not be
-quoted.
-
-Agreeing on transmission loss is not the same as agreeing on the answer, so
-the second model is carried all the way to a detection map of its own. Two
-results come out, pointing opposite ways:
-
-* the realised array gain agrees to well under a decibel. Two methods with
-  nothing in common see the same shortfall against the plane-wave value, so
-  that shortfall is a property of the problem and not of normal-mode
-  theory;
-* the detection MAPS agree while the detection RANGES do not. A model
-  difference of order a decibel barely moves the map and moves the
-  outermost zero crossing by a kilometre, because that crossing is a tail
-  statistic: one constructive fringe past the main boundary owns it. Quote
-  the detectable AREA, not the detection RANGE.
-
-Finally, the same array run over a BAND instead of one line gives the
-reception itself — this array, steered this way, listening to that target
-radiate that pulse. Each bin is steered at its own frequency, because a
-beam delay is a phase that scales with it: one steering vector at the band
-centre mis-steers both edges.
+The detection chain of example_42 run twice, on a Kraken (coupled modes) and a
+Bellhop (beam tracing) field of the same section, with the array gain each
+beamformed field realises. Then the same array over a band: a broadband run,
+each bin steered at its own frequency, and the pulse one beam receives.
+docs/guide/sonar.md §3 reads the two detection maps, docs/guide/arrays.md
+§"Broadband" the per-bin steering.
 
 Uses: Kraken(mode_coupling='coupled') · Bellhop · Field.p over source_depth ·
-RunMode.BROADBAND ·
 beamform_field (narrowband and broadband) · BeamformedField.to_time_trace ·
-compare_models · passive_signal_excess_field(array_gain_dB=<grid>)
+Field.to_time_trace(source_waveform=) · RunMode.BROADBAND · compare_models ·
+passive_signal_excess_field(array_gain_dB=<grid>) · plot_waveform
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.acoustic_signal import (beamform_field, independent_beams,
-                                   shading_taper)
-from uacpy import Field
+                                   shading_taper, tone_burst)
 from uacpy.models import RunMode
-from uacpy.sonar import (detection_threshold_energy,
+from uacpy.plot import compare_models, plot_waveform
+from uacpy.sonar import (detection_ranges_field, detection_threshold_energy,
                          passive_signal_excess_field, per_look_false_alarm,
                          transition_probability_field)
-from uacpy.sonar import detection_ranges_by_depth
-from uacpy.plot import compare_models
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
 OUT.mkdir(parents=True, exist_ok=True)
 
-FREQ, C_REF = 200.0, 1500.0
-HALF = 0.5 * C_REF / FREQ
-SL, NL = 120.0, 75.0          # band-integrated, dB re 1 µPa²
+FREQ, C_REF = 200.0, 1500.0          # Hz, m/s
+N_EL, ARRAY_DEPTH = 24, 120.0        # elements at lambda/2 about this depth (m)
+TARGET_DEPTH = 60.0                  # m
+SL, NL = 120.0, 75.0                 # band-integrated, dB re 1 µPa²
+PD, PF = 0.5, 1e-4                   # Pf of the whole scan
+BW_HZ, INT_S = 10.0, 10.0
+SIGMA_DB = 8.0
+R_SHOT, FS = 5000.0, 2000.0          # broadband reception: range (m), sample rate (Hz)
 
-# ── the scene ───────────────────────────────────────────────────────────
-# The same shoaling section example 42 uses: a shelf under the array, a
-# sill at 130 m, a basin behind it, then a shoaling run.
-BATHY_RANGES = np.linspace(0.0, 20000.0, 41)
-BATHY_DEPTHS = np.interp(BATHY_RANGES,
+# Env definition: the sill-and-basin section of example_42
+bathy_ranges = np.linspace(0.0, 20000.0, 41)
+bathy_depths = np.interp(bathy_ranges,
                          [0.0, 3000.0, 6000.0, 9000.0,
                           11000.0, 13500.0, 16500.0, 20000.0],
                          [200.0, 200.0, 160.0, 130.0,
                           150.0, 175.0, 145.0, 120.0])
 env = uacpy.Environment(
     name='sill-and-basin',
-    bathymetry=list(zip(BATHY_RANGES, BATHY_DEPTHS)),
+    bathymetry=list(zip(bathy_ranges, bathy_depths)),
     ssp=[(0.0, 1520.0), (30.0, 1518.0), (80.0, 1502.0), (200.0, 1498.0)],
     bottom=uacpy.Bottom.from_halfspace(uacpy.BoundaryProperties(
         acoustic_type='half-space', sound_speed=1700.0, density=1.9,
         attenuation=0.5)),
     absorption=uacpy.Thorp(),
 )
-n_el = 24
-elements = 120.0 + HALF * (np.arange(n_el) - (n_el - 1) / 2.0)
-target = uacpy.Source(depths=60.0, frequencies=FREQ, source_level_dB=SL)
-array = uacpy.Receiver(depths=elements, ranges=np.linspace(200.0, 20000.0, 200))
-array_at_origin = uacpy.Receiver(depths=elements, ranges=[0.0])
-plane_depths = np.union1d(np.linspace(5.0, 195.0, 60), [60.0])
-plane = uacpy.Receiver(depths=plane_depths, ranges=array.ranges)
-angles = np.linspace(-45.0, 45.0, 361)
-taper = shading_taper(n_el, 'hann')
-mid = n_el // 2
 
-# A target cannot be inside the sediment; env.bathymetry.eval is the same
-# interpolation the solver uses, so the mask cannot drift from its seafloor.
-seabed = np.asarray(env.bathymetry.eval(range=array.ranges), dtype=float)
-in_water = plane_depths[:, None] <= seabed[None, :]
-i60 = int(np.argmin(np.abs(plane_depths - 60.0)))
-
-# ── the two fields ──────────────────────────────────────────────────────
-# Sources at the array's own element depths, at r = 0 where the array is —
-# reciprocity then makes slab i the field element i would measure from a
-# target at each point, and it holds whatever the bottom does in range.
-# See example 43 for what the mirror arrangement costs.
+# Array at r = 0 and the plane of candidate target positions
+elements = ARRAY_DEPTH + 0.5 * C_REF / FREQ * (np.arange(N_EL) - (N_EL - 1) / 2.0)
 array_as_sources = uacpy.Source(depths=elements, frequencies=FREQ)
-kraken = uacpy.Kraken(verbose=False, mode_coupling='coupled')
-bellhop = uacpy.Bellhop(backend='fortran', verbose=False, n_beams=0, beam_type='G')
-# .p is each source's complex pressure on the source_depth axis: (n_el, n_z, n_r)
-# Within about 0.6 km of the array the plane's deepest cells see paths
-# steeper than Kraken's modes carry, well inside the ranges this example
-# reads off; that notice is printed.
-with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter('always')
-    p_map = kraken.run(env, array_as_sources, plane).p
-    bh_map = bellhop.run(env, array_as_sources, plane,
-                         run_mode=RunMode.COHERENT_TL).p
-for warning in caught:
-    print(f"  noted: {str(warning.message).split(';')[0]}")
+array_at_origin = uacpy.Receiver(depths=elements, ranges=[0.0])
+ranges = np.linspace(600.0, 20000.0, 196)   # past 0.6 km the modes hold every path
+plane_depths = np.union1d(np.linspace(5.0, 195.0, 60), [TARGET_DEPTH])
+plane = uacpy.Receiver(depths=plane_depths, ranges=ranges)
+in_water = plane_depths[:, None] <= np.asarray(env.bathymetry.eval(range=ranges))
+angles = np.linspace(-45.0, 45.0, 361)
+taper = shading_taper(N_EL, 'hann')
 
-# ── propagation, compared symmetrically ─────────────────────────────────
-edge = 5
-for width in (5, 9, 21):
-    k = np.ones(width) / width
-    kr_s = np.apply_along_axis(lambda r: np.convolve(r, k, mode='same'), 1,
-                               np.abs(p_map[mid]) ** 2)
-    bh_s = np.apply_along_axis(lambda r: np.convolve(r, k, mode='same'), 1,
-                               np.abs(bh_map[mid]) ** 2)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        diff = -10.0 * np.log10(kr_s) + 10.0 * np.log10(bh_s)
-    ok = in_water & np.isfinite(diff)
-    ok[:, :edge] = ok[:, -edge:] = False
-    d = diff[ok]
-    print(f"Kraken vs Bellhop, both coherent, {width:2d}-bin boxcar: bias "
-          f"{np.mean(d):+.2f} dB, median |diff| {np.median(np.abs(d)):.2f} dB,"
-          f" p90 {np.percentile(np.abs(d), 90):.2f} dB")
-print("  the answer barely moves across those kernels, and that spread is "
-      "the protocol's\n  own noise floor — a comparison without such a "
-      "plateau should not be quoted")
+# The two fields: sources at the element depths, receivers over the plane
+kraken = uacpy.Kraken(mode_coupling='coupled')
+bellhop = uacpy.Bellhop(backend='fortran')
+pressure = {'Kraken': kraken.run(env, array_as_sources, plane).p,
+            'Bellhop': bellhop.run(env, array_as_sources, plane).p}
 
-# ── the same chain, twice ───────────────────────────────────────────────
-PD, PF = 0.5, 1e-4
-BW_HZ, INT_S = 10.0, 10.0
-# weights= matters: two beams' noise correlates as the array factor of
-# |w|^2, and hann^2 is three DFT bins wide against a rectangular window's
-# one, so this scan holds about a third of the looks the unshaded geometry
-# would give.
-n_looks = independent_beams(elements, angles, FREQ, sound_speed=C_REF, weights=taper)
+# The same detection chain on each
+n_looks = independent_beams(elements, angles, FREQ, sound_speed=C_REF,
+                            weights=taper)
 dt = detection_threshold_energy(pd=PD, pf=per_look_false_alarm(PF, n_looks),
-                                bandwidth_hz=BW_HZ, integration_time_s=INT_S)
-print(f"\nthe {angles.size}-point scan holds {n_looks:.0f} independent "
-      f"looks, so DT = {dt:.2f} dB at a scan Pf of {PF:g}")
-
+                                bandwidth=BW_HZ, integration_time=INT_S)
 se, pd_map, r_by_z = {}, {}, {}
-for label, pressure in (('Kraken', p_map), ('Bellhop', bh_map)):
-    # A grid point whose element samples hold no field gets NaN beams, which
-    # beamform_field notes; that notice is printed, any other is shown as usual.
-    with warnings.catch_warnings(record=True) as caught:
+for label, p_map in pressure.items():
+    with warnings.catch_warnings(record=True) as caught:   # Bellhop's blank cells
         warnings.simplefilter('always')
-        scan = beamform_field(pressure, elements, angles, FREQ,
-                              sound_speed=C_REF, weights=taper)
+        scan = beamform_field(p_map, elements, angles, FREQ, sound_speed=C_REF,
+                              weights=taper)
     for warning in caught:
-        text = ' '.join(str(warning.message).split())
-        if 'non-finite element sample' in text:
-            print(f"  noted ({label}): {text.split(' (a blank')[0]}, "
-                  f"against {int((~in_water).sum())} below the seafloor")
-        else:
-            warnings.showwarning(warning.message, warning.category,
-                                 warning.filename, warning.lineno)
+        print(f"noted ({label}): {str(warning.message).splitlines()[0]}")
     with np.errstate(divide='ignore', invalid='ignore'):
         gain = np.where(in_water, scan.array_gain(), np.nan)
-        loss = np.where(in_water, -10.0 * np.log10(
-            np.maximum(scan.element_power, 1e-300)), np.nan)
-    tl = Field(data=loss, coords={'depth': plane_depths,
-                                  'range': np.asarray(array.ranges,
-                                                      dtype=float)},
-               model=label)
-    se[label] = passive_signal_excess_field(tl, source_level_dB=SL,
-                                            noise_level_dB=NL, array_gain_dB=gain,
-                                            detection_threshold_dB=dt)
-    pd_map[label] = transition_probability_field(se[label], sigma_dB=8.0)
-    _, r_by_z[label] = detection_ranges_by_depth(se[label])
-    print(f"  {label:8s} realised AG median {np.nanmedian(gain):.1f} dB, "
-          f"{100.0 * np.mean(np.asarray(se[label].data)[in_water] > 0.0):.0f} "
-          f"% of the water above threshold")
-
-k_se, b_se = (np.asarray(se[m].data) for m in ('Kraken', 'Bellhop'))
-verdict = 100.0 * np.mean((k_se[in_water] > 0.0) != (b_se[in_water] > 0.0))
+        tl_map = np.where(in_water, -10.0 * np.log10(scan.element_power),
+                          np.nan)
+    tl = uacpy.Field(data=tl_map,
+                     coords={'depth': plane_depths, 'range': ranges},
+                     model=label)
+    se[label] = passive_signal_excess_field(
+        tl, source_level_dB=SL, noise_level_dB=NL, array_gain_dB=gain,
+        detection_threshold_dB=dt)
+    pd_map[label] = transition_probability_field(se[label], sigma_dB=SIGMA_DB)
+    r_by_z[label] = detection_ranges_field(se[label])
+    covered = 100.0 * np.mean(np.asarray(se[label].data)[in_water] > 0.0)
+    print(f"{label:>8}: realised AG median {np.nanmedian(gain):.1f} dB, "
+          f"{covered:.0f} % of the water above threshold, median detection "
+          f"range {np.nanmedian(r_by_z[label]) / 1e3:.1f} km")
 pd_gap = np.nanmean(np.abs(np.asarray(pd_map['Kraken'].data)
                            - np.asarray(pd_map['Bellhop'].data))[in_water])
-print(f"the two MAPS agree: mean |Pd difference| {pd_gap:.02f}, and they "
-      f"disagree on detect /\n  do-not-detect at {verdict:.1f} % of the water")
-print(f"the two RANGES do not: median across target depth "
-      f"{np.nanmedian(r_by_z['Kraken']) / 1e3:.1f} km against "
-      f"{np.nanmedian(r_by_z['Bellhop']) / 1e3:.1f} km")
-print("  -> a 1 dB model difference barely moves the map and moves the "
-      "outermost crossing\n  by a kilometre; the AREA is the statistic to "
-      "quote, not the RANGE")
+print(f"mean |Pd difference| over the water: {pd_gap:.2f}")
 
 fig, _ = compare_models(
     [pd_map['Kraken'], pd_map['Bellhop']],
     labels=['Kraken — coupled modes', 'Bellhop — hat beams'],
     env=env, receiver=array_at_origin, figsize=(13, 4.6), contours=(0.5,),
-    title=f'The same detection chain under two models — maps agree to '
-          f'{pd_gap:.02f} in P_D, headline ranges differ by '
-          f'{abs(np.nanmedian(r_by_z["Kraken"]) - np.nanmedian(r_by_z["Bellhop"])) / 1e3:.1f} km')
+    title=f'One detection chain under two models — mean |ΔPd| {pd_gap:.2f}')
 fig.savefig(OUT / 'example_44_two_models.png', dpi=140, bbox_inches='tight')
 plt.close(fig)
 
-# ── what the beam actually hears ────────────────────────────────────────
-# Everything above is a power budget. The same machinery over a BAND gives
-# the reception itself. Bellhop for this one, for speed rather than
-# capability: Kraken does run a range-dependent band (uacpy loops the
-# multi-profile deck, one mode solve per bin) but that is ~0.3 s a bin.
-# ±60 Hz holds the 25 Hz Gaussian burst below to -50 dB at both edges, so
-# the synthesis has no band edge to ring at.
-BAND = np.linspace(FREQ - 60.0, FREQ + 60.0, 97)
-R_SHOT = float(array.ranges[np.argmin(np.abs(np.asarray(array.ranges) - 5000.0))])
-H = bellhop.run(env, uacpy.Source(depths=60.0, frequencies=BAND),
+# Broadband: one Bellhop run over a band, each bin steered at its own frequency
+band = np.linspace(FREQ - 60.0, FREQ + 60.0, 97)
+H = bellhop.run(env, uacpy.Source(depths=TARGET_DEPTH, frequencies=band),
                 uacpy.Receiver(depths=elements, ranges=[R_SHOT]),
                 run_mode=RunMode.BROADBAND)
-beams = beamform_field(np.asarray(H.data)[:, 0, :], elements, angles, BAND,
+beams = beamform_field(np.asarray(H.data)[:, 0, :], elements, angles, band,
                        sound_speed=C_REF, weights=taper)
-pulse = np.exp(-((BAND - FREQ) / 25.0) ** 2)     # a Gaussian tone burst
-# The window opens at the earliest arrival this MODEL can produce, r over
-# the fastest WATER speed. The seabed's 1700 m/s must not enter it: a ray
-# code has no head wave, and anchoring above the true fastest speed opens
-# the window early, so late multipath wraps into the record.
-t_start = R_SHOT / float(np.max(np.asarray(env.ssp.sound_speed)))
-# power is (n_angles, n_frequencies) here, so the band-averaged winner is
-# the look to use.
-look_best = float(angles[int(np.argmax(beams.power.mean(axis=1)))])
-trace_one = H.to_time_trace(depth=float(elements[mid]), range=R_SHOT,
-                            source_spectrum=pulse, t_start=t_start)
-t_one = np.asarray(trace_one.coords['time'])
-y_one = np.asarray(trace_one.data).ravel()
+_, pulse = tone_burst(FREQ, 10, sample_rate=FS)
+t_start = R_SHOT / float(np.max(env.ssp.sound_speed))   # fastest water path
+look = float(angles[int(np.argmax(beams.power.mean(axis=1)))])
 
-print(f"\nreception at {R_SHOT / 1e3:.1f} km of a {BAND[0]:.0f}-"
-      f"{BAND[-1]:.0f} Hz pulse, peak level re one element:")
+# What one element and two beams receive
 fig, ax = plt.subplots(figsize=(11, 3.4))
-ax.plot(t_one, np.abs(y_one) / np.abs(y_one).max(), color='0.6', lw=1.0,
-        label='one element')
-for (label, look), style in ((('steered to the arrival', look_best), 'C0-'),
-                             (('steered 30 deg off', look_best + 30.0),
-                              'C3--')):
-    tr = beams.to_time_trace(look, range=R_SHOT, source_spectrum=pulse,
-                             t_start=t_start)
-    y = np.asarray(tr.data).ravel()
-    print(f"  {label:24s} ({look:+5.1f} deg): "
-          f"{20.0 * np.log10(np.max(np.abs(y)) / np.max(np.abs(y_one))):+5.1f} dB")
-    ax.plot(np.asarray(tr.coords['time']), np.abs(y) / np.abs(y_one).max(),
-            style, lw=1.2, label=f'{label} ({look:+.1f} deg)')
-ax.set(xlabel='Time (s)', ylabel='|p| (re one element peak)',
-       title=f'What the beam hears: a {BAND[0]:.0f}-{BAND[-1]:.0f} Hz pulse '
-             f'from 60 m at {R_SHOT / 1e3:.1f} km')
+traces = {'one element': H.to_time_trace(
+    depth=float(elements[N_EL // 2]), range=R_SHOT, source_waveform=pulse,
+    sample_rate=FS, t_start=t_start)}
+for label, angle in ((f'beam at {look:+.1f}°', look),
+                     (f'beam at {look + 30.0:+.1f}°', look + 30.0)):
+    traces[label] = beams.to_time_trace(angle, range=R_SHOT,
+                                        source_waveform=pulse, sample_rate=FS,
+                                        t_start=t_start)
+peak_one = np.max(np.abs(np.asarray(traces['one element'].data)))
+for label, trace in traces.items():
+    y = np.asarray(trace.data).ravel()
+    t = np.asarray(trace.coords['time'])
+    print(f"{label:>15}: peak {20.0 * np.log10(np.max(np.abs(y)) / peak_one):+5.1f} "
+          f"dB re one element")
+    plot_waveform(y, 1.0 / float(np.diff(t)[0]), ax, t0=float(t[0]),
+                  value='envelope', label=label,
+                  title=f'A {FREQ:.0f} Hz tone burst from {TARGET_DEPTH:.0f} m '
+                        f'at {R_SHOT / 1e3:.0f} km')
 ax.legend(fontsize=8)
-ax.grid(alpha=0.3)
 fig.tight_layout()
 fig.savefig(OUT / 'example_44_reception.png', dpi=140, bbox_inches='tight')
 plt.close(fig)

@@ -46,7 +46,8 @@ from uacpy.models.scooter._plan import (
     _BROADBAND_MODES, _deck_nk,
     _nk_consequence, check_knobs, deck_max_frequency,
     green_cube_axes, mesh_floor_notice, refuse_nonpositive_range,
-    refuse_too_few_wavenumbers, reject_fluid_below_elastic,
+    refuse_taper_on_too_few_wavenumbers, refuse_too_few_wavenumbers,
+    reject_fluid_below_elastic,
     reject_oversized_green_cube, resolve_rmax_factor, steep_path_notice,
 )
 from uacpy.models.scooter._settings import ScooterSettings
@@ -81,13 +82,15 @@ class Scooter(PropagationModel):
 
     Defaults auto-derived at ``run()`` time:
 
-    - ``c_low=None`` → ``min(env.ssp) × 0.9`` (``scooter.f90:258``'s own
-      factor, :data:`~uacpy.core.engine_defaults.C_LOW_FACTOR`)
+    - ``c_low=None`` → the slowest speed of every medium (water, sediment
+      ``cP``, shear speeds, half-spaces) × 0.85 over an elastic half-space,
+      × 0.90 otherwise: the ``cMin`` rule of ``scooter.f90:193-259``
+      (:func:`~uacpy.core.engine_defaults.default_c_low`)
     - ``c_high=None`` → the unbounded ``DEFAULT_C_MAX_UNBOUNDED`` (1e9 m/s,
       ``k_min = 0``) over every bottom, as Jensen et al. (*Computational
       Ocean Acoustics*, ch. 4 App. 1) recommend
     - Spectral ``RMax = receiver.range_max × rmax_factor``
-    - ``n_mesh=0`` → Scooter picks from frequency / wavelength.
+    - ``n_mesh=None`` → 0, Scooter picks from frequency / wavelength.
     - TopOpt position 4 reads ``env.absorption``.
 
     With ``verbose='info'`` the resolved ``c_low`` / ``c_high`` are logged.
@@ -164,7 +167,7 @@ class Scooter(PropagationModel):
         executable: Optional[Path] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
-        n_mesh: int = SCOOTER_N_MESH,
+        n_mesh: Optional[int] = None,
         rmax_factor: Optional[float] = None,
         interp_ssp: Optional[str] = None,
         wavenumber_spectrum: str = 'positive',
@@ -184,7 +187,11 @@ class Scooter(PropagationModel):
             Path to ``scooter.exe``. Auto-detected if ``None``.
         c_low, c_high : float, optional
             Phase-speed bounds (m/s), each positive and ``c_low < c_high``.
-            ``None`` ⇒ ``0.9 × min SSP`` / the AT "unbounded" sentinel
+            ``None`` ⇒ the slowest speed of every medium, shear speeds
+            included, × 0.85 over an elastic half-space and × 0.90
+            otherwise (``scooter.f90:193-259``;
+            :func:`~uacpy.core.engine_defaults.default_c_low`) / the AT
+            "unbounded" sentinel
             (1e9 m/s, ``doc/bounce.htm``: "CMax to 1.0E9") over every
             bottom, so the integral starts at ``k_min = omega/c_high ≈ 0``:
             Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1
@@ -195,12 +202,13 @@ class Scooter(PropagationModel):
             window capped at 1.05 x the fastest speed on the cases measured —
             and a pinned ``c_high``
             is written as given; one that cuts a direct or surface-reflected
-            path the receivers see warns. The
-            default ``c_low`` reads the water only, so the interface (Scholte)
-            waves an elastic seabed carries below it are left out — the run
-            warns when the geometry reaches within one of their wavelengths
-            of the seabed: set ``c_low`` below the slowest shear speed
-            (``docs/models/scooter.md``, "Layered and elastic seabeds").
+            path the receivers see warns. Over an elastic seabed the
+            default ``c_low`` reaches below the shear speed, so the interface
+            (Scholte) wave is integrated — about 14× the wavenumbers on
+            elastic sand (``1/c_low``: 1341/93.5 m/s; the run is 14× slower,
+            ``docs/models/scooter.md``, "Layered and elastic seabeds"). Over elastic layers on a fluid half-space its 0.90
+            factor can leave the wave out; the run then warns when the
+            geometry reaches within one of its wavelengths of the seabed.
         n_mesh : int, optional
             Total number of mesh points PER MEDIUM used by the finite-element
             spectral solver (AT's ``NG`` column on the SSP mesh line). 0 = let
@@ -210,7 +218,9 @@ class Scooter(PropagationModel):
             automatically"; scaled with frequency and floored at 100 points
             by ``scooter.f90:106-110``).
             Note: this is NOT a "points per wavelength" density — it is a total
-            point count per medium. Default ``0``.
+            point count per medium. Default ``None``: 0, the automatic mesh
+            (``SCOOTER_N_MESH``); a set value, 0 included, is written as
+            given.
         rmax_factor : float, optional
             Multiplier on ``receiver.ranges.max()`` to set Scooter's spectral
             ``RMax``, which fixes the wavenumber sampling:
@@ -420,11 +430,12 @@ class Scooter(PropagationModel):
         # binary would have run.
         freq0 = float(np.atleast_1d(
             np.asarray(source.frequencies, dtype=float))[0])
-        reject_coarse_at_mesh('Scooter', self.n_mesh, env, freq0)
+        n_mesh = SCOOTER_N_MESH if self.n_mesh is None else self.n_mesh
+        reject_coarse_at_mesh('Scooter', n_mesh, env, freq0)
 
         multiplier, multiplier_origin = resolve_rmax_factor(
             rmax_factor=self.rmax_factor)
-        rmax_m = float(receiver.ranges.max()) * multiplier
+        rmax = float(receiver.ranges.max()) * multiplier
         window = resolve_window(env, c_low=self.c_low, c_high=self.c_high,
                                 c_high_unbounded=DEFAULT_C_MAX_UNBOUNDED,
                                 model_name='Scooter')
@@ -444,12 +455,13 @@ class Scooter(PropagationModel):
         # ``bounce._plan.tabulated_angle_count`` and the Nk guard inside
         # ``SPARC._resolve_engine_settings``.
         f_deck = deck_max_frequency(source, deck_frequencies)
-        nk = _deck_nk(rmax_m, f_deck, cl, ch)
-        refuse_too_few_wavenumbers(nk, rmax_m, f_deck, cl, ch)
+        nk = _deck_nk(rmax, f_deck, cl, ch)
+        refuse_too_few_wavenumbers(nk, rmax, f_deck, cl, ch)
+        refuse_taper_on_too_few_wavenumbers(self.taper, nk)
 
         peak, headroom = reject_oversized_green_cube(
             nk, *green_cube_axes(source, receiver, settings),
-            rmax_m=rmax_m, f_deck=f_deck, c_low=cl, c_high=ch,
+            rmax=rmax, f_deck=f_deck, c_low=cl, c_high=ch,
         )
 
         # The conditions the run warns about, decided here once; the
@@ -457,7 +469,7 @@ class Scooter(PropagationModel):
         notices = [
             mesh_floor_notice(
                 freq0, deck_frequencies if broadband else [freq0],
-                n_mesh=self.n_mesh),
+                n_mesh=n_mesh),
             (None if self.c_high is None else
              steep_path_notice(env, source, receiver, ch)),
             (None if self.c_low is not None else
@@ -473,10 +485,10 @@ class Scooter(PropagationModel):
             c_low_origin=window.c_low_origin,
             c_high=ch,
             c_high_origin=window.c_high_origin,
-            rmax_m=rmax_m,
+            rmax=rmax,
             rmax_factor=multiplier,
             rmax_factor_origin=multiplier_origin,
-            n_mesh=int(self.n_mesh),
+            n_mesh=int(n_mesh),
             mesh_reference_frequency=freq0,
             deck_max_frequency=f_deck,
             n_wavenumbers=nk,
@@ -515,7 +527,7 @@ class Scooter(PropagationModel):
             # Scooter keeps Atten=Deltak, the default stabiliser.
             topopt_extra='0' if self.stabilizing_attenuation_off else '',
             n_mesh=engine.n_mesh,
-            rmax_m=engine.rmax_m,
+            rmax=engine.rmax,
             c_low=engine.c_low, c_high=engine.c_high,
         )
         return deck

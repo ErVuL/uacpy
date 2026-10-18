@@ -77,6 +77,16 @@ SSP_INTERP_BY_CODE = {code: name for name, code in SSP_INTERP_CODES.items()}
 #: (``Bellhop/bdryMod.f90``, ``doc/bellhop.htm``).
 GEOMETRY_INTERP_CODES = {'linear': 'L', 'curvilinear': 'C'}
 
+#: Bellhop ``RunType(1:1)``: the letters ReadRunType accepts; anything else is
+#: ``CALL ERROUT( 'READIN', 'Unknown RunType selected' )``
+#: (``Bellhop/ReadEnvironmentBell.f90:361-377``). Case is significant: ``'A'``
+#: is ASCII arrivals, ``'a'`` binary.
+BELLHOP_RUN_TYPES = frozenset('CISAaER')
+
+#: Bellhop ``RunType(5:5)``, the receiver grid: ``'R'`` rectilinear, ``'I'``
+#: irregular (``Bellhop/ReadEnvironmentBell.f90:408-419``).
+BELLHOP_GRID_TYPES = frozenset('RI')
+
 #: ``TOPOPT(4:4)``: the volume-attenuation letter of each absorption model
 #: (``misc/AttenMod.f90`` ``AttenUnit(2:2)``). A :class:`ConstantAbsorption`
 #: is carried in the SSP rows' ``alphaI`` column, so its letter is the blank
@@ -90,7 +100,10 @@ GEOMETRY_INTERP_CODES = {'linear': 'L', 'curvilinear': 'C'}
 #: one-row law on a deck covering several frequencies is written as ``'F'``
 #: (``multi_frequency=True``): the rows would freeze it at the deck
 #: frequency, the letter is exact in frequency and approximate in depth.
-#: Thorp has no depth term, so its letter is exact.
+#: Thorp has no depth term, so its letter is exact in the water; AT also
+#: adds it to the sediment layers and half-spaces (CRCI applies the letter to
+#: every medium's cp and cs, ``misc/AttenMod.f90:84-94``,
+#: ``misc/sspMod.f90:390-393``), a loss far below a sediment's own.
 VOLUME_ATTENUATION_CODES = {
     Thorp: 'T',
     Biological: 'B',
@@ -163,7 +176,7 @@ def biological_records(absorption: Biological
     """The ``Z1 Z2 f0 Q a0`` record of each layer a ``'B'`` deck reads after
     the option line (``misc/AttenMod.f90``), in the layers' order."""
     return [
-        (layer.z_top_m, layer.z_bottom_m, layer.f0_hz, layer.Q, layer.a0)
+        (layer.z_top, layer.z_bottom, layer.f0, layer.Q, layer.a0)
         for layer in absorption.layers
     ]
 

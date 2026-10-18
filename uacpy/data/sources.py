@@ -30,7 +30,7 @@ from typing import List
 from uacpy.core._export import require_extra
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.provenance import (DataProvenance, DataSource, SOURCES,
-                                   fetch_summary_line)
+                                   _fetch_summary_line)
 
 __all__ = ['DataSource', 'DataProvenance', 'SOURCES', 'citations',
            'provenance_table']
@@ -44,9 +44,10 @@ def _resolve(obj, who='citations') -> List[DataProvenance]:
     same type (``.source`` for the dataset, the rest for the fetch). A
     carrier gives its ``.data_sources``; a record a fetcher returns
     (``TSProfile``, ``BathyGrid``, ``SeabedSample``, ...) gives its
-    ``.provenance``, none when that is ``None`` (user-supplied data).
-    Anything else is refused in ``who``'s name, including an object whose
-    ``.provenance`` is not a data record (a model's engine provenance)."""
+    ``.provenance``, none when that is ``None`` (user-supplied data), and an
+    ``AlongTrack`` its tuple of per-waypoint records. Anything else is
+    refused in ``who``'s name, including an object whose ``.provenance`` is
+    not a data record (a model's engine provenance)."""
     def wrap(x):
         if isinstance(x, DataProvenance):
             return x
@@ -66,6 +67,9 @@ def _resolve(obj, who='citations') -> List[DataProvenance]:
         prov = obj.provenance
         if prov is None:
             return []
+        if isinstance(prov, tuple) and all(
+                isinstance(p, DataProvenance) for p in prov):
+            return list(prov)              # an AlongTrack: one per waypoint
         if not isinstance(prov, (DataProvenance, DataSource, str)):
             raise ConfigurationError(
                 f"{who}: a {type(obj).__name__} carries no data sources; its "
@@ -122,7 +126,7 @@ def citations(obj=None) -> str:
         lines = [f"{src.name}  [{src.license}]",
                  f"  Attribution: {src.attribution}",
                  f"  Cite:        {src.citation}"]
-        fetched = fetch_summary_line(records)
+        fetched = _fetch_summary_line(records)
         if fetched is not None:
             lines.append(fetched)
         if not src.commercial_use:
@@ -152,8 +156,9 @@ def provenance_table(*objs):
         Columns ``kind`` (``'data'`` or ``'engine'``), ``id``, ``name``,
         ``license``, ``commercial_use``, ``citation``, then the fetch's
         ``product``, ``data_date``, ``requested_date``, ``data_point``,
-        ``requested_point``, ``offset_km``, ``point_kind``,
-        ``cell_size_deg``, ``from_neighbour_cell`` and ``range_m`` (``None``
+        ``requested_point``, ``offset_km``, ``offset_days`` (requested minus
+        data date, ``None`` for a climatology period), ``point_kind``,
+        ``cell_size_deg``, ``from_neighbour_cell`` and ``range`` (``None``
         for an engine). A transect has one row per column read.
     """
     pandas = require_extra('pandas', 'provenance_table')
@@ -168,8 +173,9 @@ def provenance_table(*objs):
                 'citation': model_source.citation_for(obj.model),
                 'product': None, 'data_date': None, 'requested_date': None,
                 'data_point': None, 'requested_point': None,
-                'offset_km': None, 'point_kind': None, 'cell_size_deg': None,
-                'from_neighbour_cell': None, 'range_m': None})
+                'offset_km': None, 'offset_days': None, 'point_kind': None,
+                'cell_size_deg': None,
+                'from_neighbour_cell': None, 'range': None})
             continue
         for prov in _resolve(obj, who='provenance_table'):
             src = prov.source
@@ -183,9 +189,10 @@ def provenance_table(*objs):
                 'data_point': prov.data_point,
                 'requested_point': prov.requested_point,
                 'offset_km': prov.offset_km,
+                'offset_days': prov.offset_days,
                 'point_kind': prov.point_kind,
                 'cell_size_deg': prov.cell_size_deg,
                 'from_neighbour_cell': prov.from_neighbour_cell,
-                'range_m': prov.range_m})
+                'range': prov.range})
     return pandas.DataFrame(rows)
 

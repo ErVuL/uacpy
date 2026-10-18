@@ -38,7 +38,7 @@ from uacpy.models.sparc._plan import (
     lossless_march_notice, profile_speed_bounds, range_alias_notice,
     refuse_too_few_wavenumbers, reject_halfspace_bottom,
     reject_oversized_snapshot, reject_reflection_table_bottom,
-    refuse_band_pass_overflow, resolve_n_time_samples, resolve_rmax_m,
+    refuse_band_pass_overflow, resolve_n_time_samples, resolve_rmax,
     resolve_run_bases, SPARC_C_HIGH_UNBOUNDED,
 )
 from uacpy.models.sparc._pulse import (
@@ -102,7 +102,7 @@ class SPARC(PropagationModel):
     aliases and emits a ``NumericsWarning`` naming the ``n_time_samples`` that would
     resolve it. ``result.frequencies`` is ``[deck_frequency]`` (SPARC
     marches in time and has no frequency bins); the pulse band
-    ``[freq_min, freq_max]`` the run marched is ``result.band_hz``.
+    ``[freq_min, freq_max]`` the run marched is ``result.band``.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
     Per-model: ``'ssp': 'mean'`` (the layer stack is kept since SPARC
@@ -112,7 +112,10 @@ class SPARC(PropagationModel):
 
     - ``n_mesh=None`` → 20 points per wavelength at ``freq_max``, per
       medium; a pinned ``0`` is AT's own automatic mesh.
-    - ``c_low`` / ``c_high`` → from env SSP and bottom speed.
+    - ``c_low`` → the slowest speed of every medium × 0.90 (shear is
+      collapsed to fluid first; ``scooter.f90:193-259``'s rule,
+      :func:`~uacpy.core.engine_defaults.default_c_low`); ``c_high`` → the unbounded
+      ``SPARC_C_HIGH_UNBOUNDED`` (1e7 m/s).
     - ``rmax`` written as ``r + 1.2·c_fast·time_max`` (``r`` the farthest
       receiver range), or ``receiver.range_max × rmax_factor`` when pinned.
     - ``dt`` / ``dr`` derived from CFL stability and the source pulse.
@@ -220,7 +223,9 @@ class SPARC(PropagationModel):
             Path to ``sparc.exe``. Auto-detected if ``None``.
         c_low, c_high : float, optional
             Phase-speed bounds (m/s), each positive and ``c_low < c_high``.
-            ``None`` (default) ⇒ ``0.9 × min SSP`` / ``1e7`` m/s, the
+            ``None`` (default) ⇒ 0.90 × the slowest speed of every medium
+            (:func:`~uacpy.core.engine_defaults.default_c_low`, on the
+            fluid-collapsed seabed) / ``1e7`` m/s, the
             "no upper limit" every toolbox SPARC deck writes
             (``tests/iso.env:9``), so ``k_min = 0`` as Jensen et al.
             (*Computational Ocean Acoustics*, ch. 4 App. 1) recommend
@@ -629,7 +634,7 @@ class SPARC(PropagationModel):
         """What the result carries: ``[deck_frequency]``, the frequency the
         deck reads — SPARC marches in time, not over frequency bins; the band
         edges are ``settings.engine.freq_min`` / ``freq_max`` and the result's
-        :attr:`~uacpy.core.results.Field.band_hz`."""
+        :attr:`~uacpy.core.results.Field.band`."""
         return np.array([settings.engine.deck_frequency])
 
     def _resolve_engine_settings(self, env, source, receiver, settings, *,
@@ -653,7 +658,7 @@ class SPARC(PropagationModel):
         r_ref = float(receiver.ranges.max())
 
         # Time output window (s), anchored on the travel time to the farthest
-        # receiver (r_ref) — not on rmax_m, a wavenumber-sampling knob
+        # receiver (r_ref) — not on rmax, a wavenumber-sampling knob
         # (Δk ≈ 2π/RMax) derived from this window below.
         #
         # The auto window is 2.5 direct travel times at the slowest speed the
@@ -682,9 +687,9 @@ class SPARC(PropagationModel):
 
         # RMax is the range period of SPARC's direct Δk sum (Δk ≈ 2π/RMax);
         # unpinned, it keeps the range replica out of [0, time_max]
-        # (``resolve_rmax_m``). Every launch of the 'R' / 'D' loops shares
+        # (``resolve_rmax``). Every launch of the 'R' / 'D' loops shares
         # it, so all of them share one output time grid.
-        rmax_m, margin, margin_origin = resolve_rmax_m(
+        rmax, margin, margin_origin = resolve_rmax(
             r_ref, c_fast, time_max, rmax_factor=self.rmax_factor)
 
         # The band the deck marches, measured on the pulse padded to that
@@ -704,7 +709,7 @@ class SPARC(PropagationModel):
         notices.append(short_series_notice(
             pulse, time.source_waveform, time.sample_rate, freq_min,
             freq_max))
-        notices.append(range_alias_notice(rmax_m, r_ref, c_fast, time_max))
+        notices.append(range_alias_notice(rmax, r_ref, c_fast, time_max))
 
         n_time_samples, grid_notice = resolve_n_time_samples(freq_max, time_max,
                                                n_time_samples=self.n_time_samples)
@@ -713,7 +718,7 @@ class SPARC(PropagationModel):
         # Refuse a wavenumber count the binary cannot march. sparc.f90:116
         # computes Nk = INT( 1000.0*RMax_km*(kMax-kMin)/(2π) ) with
         # kMin = 2π·fMin/cHigh and kMax = 2π·fMax/cLow, which reduces to
-        # rmax_m·(fMax/cLow − fMin/cHigh). Nk <= 0 runs the march loop
+        # rmax·(fMax/cLow − fMin/cHigh). Nk <= 0 runs the march loop
         # (sparc.f90:269) zero times, so every output comes back all-zero at
         # exit 0, and :265 reads k(Nk) out of bounds first. Nk = 1 is a
         # single-sample spectrum; require >= 2, the floor bounce.f90's own
@@ -729,8 +734,8 @@ class SPARC(PropagationModel):
             deck_frequency=float(np.atleast_1d(
                 np.asarray(source.frequencies, dtype=float))[0]),
             sts_rows=sts_rows, sample_rate=time.sample_rate)
-        nk = int(rmax_m * (freq_max / c_low_res - freq_min / c_high_res))
-        refuse_too_few_wavenumbers(nk, rmax_m, freq_min, freq_max, c_low_res,
+        nk = int(rmax * (freq_max / c_low_res - freq_min / c_high_res))
+        refuse_too_few_wavenumbers(nk, rmax, freq_min, freq_max, c_low_res,
                                    c_high_res)
         notices.append(reject_oversized_snapshot(
             receiver, nk, n_time_samples, output_mode=self.output_mode))
@@ -748,7 +753,7 @@ class SPARC(PropagationModel):
             freq_min_origin=band.freq_min_origin, freq_max_origin=band.freq_max_origin,
             time_max=time_max, time_max_origin=time_max_origin,
             n_time_samples=int(n_time_samples),
-            rmax_m=rmax_m,
+            rmax=rmax,
             rmax_factor=margin,
             rmax_factor_origin=margin_origin,
             c_low=c_low_res, c_high=c_high_res,
@@ -806,7 +811,7 @@ class SPARC(PropagationModel):
             interp_ssp=self.interp_ssp,
             output_mode=engine.output_mode,
             n_mesh=engine.n_mesh,
-            rmax_m=engine.rmax_m,
+            rmax=engine.rmax,
             c_low=engine.c_low, c_high=engine.c_high,
             pulse_type=engine.pulse_type,
             freq_min=engine.freq_min, freq_max=engine.freq_max,
@@ -889,18 +894,14 @@ class SPARC(PropagationModel):
         (:func:`~uacpy.models.sparc._extract.scale_to_unit_source_level`),
         stamped
         with ``frequencies = [deck_frequency]`` (the frequency the deck
-        reads; SPARC has no frequency bins), the marched band as
-        ``band_hz = (freq_min, freq_max)`` and the metadata every
-        TIME_SERIES engine carries, with depths below the modelled media
-        masked."""
+        reads; SPARC has no frequency bins) and the marched band as
+        ``band = (freq_min, freq_max)``, with depths below the modelled
+        media masked."""
         settings = inputs.settings
         engine = settings.engine
         source = inputs.source
         env = inputs.env
-        band_hz = (engine.freq_min, engine.freq_max)
-        metadata = {}
-        if engine.sts_rows:
-            metadata['source_waveform_sample_rate'] = settings.time.sample_rate
+        band = (engine.freq_min, engine.freq_max)
         if engine.output_mode == 'S':
             result = raw.snapshot_to_time_field(
                 np.atleast_1d(inputs.receiver.ranges),
@@ -911,12 +912,11 @@ class SPARC(PropagationModel):
                 backend='sparc',
                 frequencies=settings.frequencies,
                 phase_reference=settings.output.phase_reference)
-            result.metadata.update(metadata)
-            result = result.replace(band_hz=band_hz)
+            result = result.replace(band=band)
         else:
             # One launch hands over its record, several their list.
             runs = raw if isinstance(raw, list) else [raw]
-            result = stack_traces(inputs, runs, metadata, band_hz=band_hz,
+            result = stack_traces(inputs, runs, band=band,
                                   model_name=self.model_name,
                                   provenance=self.provenance)
         attach_output_paths(

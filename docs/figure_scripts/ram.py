@@ -145,7 +145,7 @@ def pade_order():
 def lytaev_grid():
     """The two knobs the grid optimiser actually responds to.
 
-    Left: widening ``angle_max`` forces a finer march — the PE spectrum has to
+    Left: widening ``angle_max_deg`` forces a finer march — the PE spectrum has to
     stay accurate over a wider angular window. Right: leaving ``c0=None`` lets
     Lytaev Eq. (15) centre that spectrum, which buys a coarser step than
     pinning ``c0`` to the water speed.
@@ -160,7 +160,7 @@ def lytaev_grid():
             tl = model.run(env, source, point)
         return tl.run_settings.engine.grids[0].dr, tl.run_settings.engine.c0
 
-    swept = [grid_of(RAM(angle_max=angle)) for angle in angles]
+    swept = [grid_of(RAM(angle_max_deg=angle)) for angle in angles]
     dr_auto, c0_auto = swept[2]
     dr_pinned, c0_pinned = grid_of(RAM(c0=1500.0))
 
@@ -171,7 +171,7 @@ def lytaev_grid():
                          textcoords='offset points', xytext=(0, -14),
                          ha='center', va='top', fontsize=8, color='0.3')
     axes[0].set_ylim(0.0, max(d for d, _ in swept) * 1.15)
-    axes[0].set_xlabel('angle_max (degrees)')
+    axes[0].set_xlabel('angle_max_deg (degrees)')
     axes[0].set_ylabel('Range step dr (m)')
     axes[0].set_title('Angular window vs march cost', fontweight='bold',
                       fontsize=11)
@@ -184,7 +184,7 @@ def lytaev_grid():
         axes[1].text(x, value, f'{value:.1f} m', ha='center', va='bottom',
                      fontsize=9)
     axes[1].set_ylabel('Range step dr (m)')
-    axes[1].set_title('Reference speed vs march cost (angle_max=30°)',
+    axes[1].set_title('Reference speed vs march cost (angle_max_deg=30°)',
                       fontweight='bold', fontsize=11)
     axes[1].set_ylim(0.0, max(dr_auto, dr_pinned) * 1.25)
     axes[1].grid(True, axis='y', alpha=0.3)

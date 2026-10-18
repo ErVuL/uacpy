@@ -10,6 +10,7 @@ from uacpy.core._carrier import carrier
 from uacpy.core.collapse import DEPTH_COLLAPSE_METHODS, _method_list
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._export import DEPTH_RANGE_XARRAY_FIELDS
 from uacpy.core._grid import _RangeProfile
 from uacpy.core._validate import (
     real_array_or_none, refuse_two_columns, require_positive,
@@ -47,7 +48,7 @@ class Bathymetry(_RangeProfile):
     data_sources: tuple = ()
 
     _VALUE_FIELD = 'depths'
-    _XARRAY_FIELDS = {'depth': 'depths', 'range': 'ranges'}
+    _XARRAY_FIELDS = DEPTH_RANGE_XARRAY_FIELDS
     _VALUE_LABEL = 'depth'
     _AXIS_DOWN = True
 
@@ -72,7 +73,8 @@ class Bathymetry(_RangeProfile):
           toward the shelf; for a range average use
           ``np.trapezoid(depths, ranges) / span``;
         - ``'min'``: the shallowest node;
-        - ``'initial'``: the depth at range 0.
+        - ``'r0'`` / ``'rmax'``: the first / last node's depth, the
+          spelling every other carrier's ``collapse_range`` takes.
 
         >>> Bathymetry(ranges=[0, 5000, 10000],
         ...            depths=[100, 200, 300]).collapse_range('median')
@@ -93,8 +95,10 @@ class Bathymetry(_RangeProfile):
             return float(np.min(depths))
         if method == 'max':
             return float(np.max(depths))
-        if method == 'initial':
+        if method == 'r0':
             return float(depths[0])
+        if method == 'rmax':
+            return float(depths[-1])
         raise ConfigurationError(
             f"Bathymetry.collapse_range: unknown method={method!r}; "
             f"valid: {_method_list(DEPTH_COLLAPSE_METHODS)}.")
@@ -107,10 +111,10 @@ class Bathymetry(_RangeProfile):
 
         ``None`` is rejected (bathymetry is required; there is no default
         seafloor). Two columns ``(ranges, depths)`` are refused with the
-        ``np.column_stack`` remedy, except for two 2-sample columns: a
-        ``2 x 2`` input is read as two ``(range, depth)`` pairs, the
-        documented form, and the two cannot be told apart, so write a
-        two-point seafloor as pairs or as ``Bathymetry(ranges=, depths=)``.
+        ``np.column_stack`` remedy: shape ``(2, N)`` with ``N != 2``, and two
+        1-D arrays or a tuple of two lists at any length. A list of tuples, a
+        ``2 x 2`` nested list or a ``2 x 2`` array is read as two
+        ``(range, depth)`` pairs, the documented form.
 
         Parameters
         ----------
@@ -138,7 +142,7 @@ class Bathymetry(_RangeProfile):
                 f"Bathymetry: must be a positive scalar depth or shape (N, 2) "
                 f"as [(range, depth), ...]; got non-numeric {value!r}.")
         refuse_two_columns(
-            arr, who='Bathymetry', name='bathymetry',
+            value, who='Bathymetry', name='bathymetry',
             columns='ranges, depths', pair='range, depth',
             carrier='a Bathymetry',
             remediation="Pass bathymetry=np.column_stack([ranges, depths]) "
@@ -188,17 +192,12 @@ def mask_below_seafloor(data, depths, ranges, bathymetry, *,
 
     Notes
     -----
-    The cut is uacpy's output convention, not an engine limit: a PE marches
-    through the sediment to its ``zmax`` and computes a field there that
-    agrees with the models which return it. Measured on a 100 m guide over a
-    50 m sediment layer at 100 Hz, receiver at 2 km, with the mask
-    neutralised: |p| at 120 m is 5.4e-4 on mpiramS and 6.8e-4 on ramgeo,
-    against Kraken 6.3e-4 and Scooter 6.2e-4. What the sub-bottom column
-    does *not* carry uniformly is physical meaning: RAM leaves only a few
-    wavelengths of real seabed before its artificial absorbing layer, and
-    where that boundary falls depends on the frequency and the grid.
-    Cutting at the seafloor is the depth that is the same on every engine
-    and every deck.
+    Bellhop's field routes pass their output through it. The engines that
+    compute a field in the seabed return it — Kraken, Scooter, SPARC and
+    the OASES models through their sediment layers, RAM down to the top of
+    its absorbing layer — so this is the call that puts every engine on the
+    water column alone, the depth that is the same on every engine and
+    every deck.
     """
     arr = np.asarray(data)
     dtype = arr.dtype if np.issubdtype(arr.dtype, np.inexact) else np.float64

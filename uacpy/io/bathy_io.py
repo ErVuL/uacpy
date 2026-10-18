@@ -33,6 +33,7 @@ from uacpy.core.altimetry import Altimetry
 from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, FileFormatError, IOWarning,
+    MissingFileError,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.units import km_to_m, m_to_km
@@ -40,18 +41,9 @@ from uacpy.io.at_codes import GEOMETRY_INTERP_CODES
 from uacpy.io.input_checks import _collapsed_pair_index
 from uacpy.io._fortran_helpers import (
     list_directed_int, read_list_directed_values, read_vector,
-    strip_fortran_quotes, typed_format_error,
+    strip_fortran_quotes, summarize_axis as _summarize_axis,
+    typed_format_error,
 )
-
-
-def _summarize_axis(arr, head: int = 10, fmt: str = "{:9.5g}") -> str:
-    """Compact one-line preview of a numeric axis for debug logging."""
-    n = len(arr)
-    if n <= head + 1:
-        return "[" + ", ".join(fmt.format(v).strip() for v in arr) + f"] ({n} pts)"
-    body = ", ".join(fmt.format(v).strip() for v in arr[:head])
-    tail = fmt.format(arr[-1]).strip()
-    return f"[{body}, …, {tail}] ({n} pts)"
 
 
 def _read_boundary_2d(
@@ -69,12 +61,8 @@ def _read_boundary_2d(
     filepath = Path(filepath)
     if not filepath.exists() and not filepath.suffix:
         filepath = filepath.with_suffix(suffix)
-    # A .bty/.ati is a deck the *user* authored — no uacpy model writes one a
-    # uacpy reader reads back — so an absent one is a bad argument, not a
-    # failed run. ``ConfigurationError``/``FileFormatError`` split on exactly
-    # that provenance (see :class:`~uacpy.core.exceptions.FileFormatError`).
     if not filepath.exists():
-        raise ConfigurationError(
+        raise MissingFileError(
             f"{kind.capitalize()} file not found: {filepath}.",
             remediation=f"Check the path passed for the {kind} file; a bare "
                         f"root name without an extension resolves to "
@@ -529,9 +517,8 @@ def read_boundary_3d(
 
     Raises
     ------
-    ~uacpy.core.exceptions.ConfigurationError
-        The file does not exist. A 3-D boundary grid is a deck the *user*
-        authors, so an absent one is a bad argument rather than a failed run.
+    ~uacpy.core.exceptions.MissingFileError
+        The file does not exist.
     ~uacpy.core.exceptions.FileFormatError
         The TYPE record is not one the engine accepts, a declared count is
         non-positive, or the file ends inside the grid.
@@ -584,11 +571,8 @@ def read_boundary_3d(
     95.0
     """
     filepath = Path(filepath)
-    # Same provenance split as the 2-D reader: a boundary deck is authored by
-    # the user, not written by a uacpy model, so an absent one is a
-    # ConfigurationError (see FileFormatError's own docstring for the rule).
     if not filepath.exists():
-        raise ConfigurationError(
+        raise MissingFileError(
             f"3-D boundary file not found: {filepath}.",
             remediation="Pass the path with its extension (.bty bathymetry "
                         "or .ati altimetry); this reader guesses neither, "
@@ -690,18 +674,22 @@ def _validate_interp_type(interp_type: str) -> str:
     Only the first character of TYPE ('L' piecewise linear or 'C'
     curvilinear) is user-selectable; the second character (format flag)
     is chosen by the writer depending on the number of columns it emits
-    (see ``write_bty_file`` vs ``write_bty_long_format``).
+    (see ``write_bty_file`` vs ``write_bty_long_format``). The names the
+    models take (``'linear'``, ``'curvilinear'``,
+    :data:`~uacpy.io.at_codes.GEOMETRY_INTERP_CODES`) map to their letters.
     """
-    t = str(interp_type).strip().upper()
+    text = str(interp_type).strip()
+    t = GEOMETRY_INTERP_CODES.get(text.lower(), text.upper())
     if t not in GEOMETRY_INTERP_CODES.values():
         raise ConfigurationError(
-            f"Invalid interpolation type {interp_type!r}; expected 'L' or 'C'."
+            f"Invalid interpolation type {interp_type!r}; expected 'L' or 'C' "
+            f"(or {sorted(GEOMETRY_INTERP_CODES)})."
         )
     return t
 
 
 def _boundary_rows(label: str, data) -> np.ndarray:
-    """``data`` as a float ``(N, 2)`` array of ``(range_m, value)`` rows, or
+    """``data`` as a float ``(N, 2)`` array of ``(range, value)`` rows, or
     raise :class:`~uacpy.core.exceptions.ConfigurationError` naming the shape.
 
     Runs before the file is opened, so a wrong orientation leaves nothing on
@@ -714,9 +702,9 @@ def _boundary_rows(label: str, data) -> np.ndarray:
                 "its transpose." if rows.ndim == 2 and rows.shape[0] == 2
                 else "")
         raise ConfigurationError(
-            f"{label}: expected an (N, 2) array of (range_m, value) rows, "
+            f"{label}: expected an (N, 2) array of (range, value) rows, "
             f"got shape {rows.shape}.{hint}",
-            remediation="Stack the columns: np.column_stack([ranges_m, "
+            remediation="Stack the columns: np.column_stack([ranges, "
                         "values]). A read_bathymetry/read_altimetry table "
                         "goes back as np.column_stack([table.ranges, "
                         "table.depths]).")
@@ -813,7 +801,7 @@ def _write_boundary_2d(
 
     ``.ati`` and ``.bty`` are the same writer on two units — the counterpart
     of :func:`_read_boundary_2d`. ``data`` is an ``(N, 2)`` array of
-    ``(range_m, value_m)`` or any carrier exposing ``to_pairs()``; ranges are
+    ``(range, value)`` or any carrier exposing ``to_pairs()``; ranges are
     converted to km for the file.
 
     ``bdryMod.f90:98`` (.ati) and ``:195`` (.bty) read the rows list-directed,
@@ -867,17 +855,16 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
         - Column 0: Range in meters
         - Column 1: Depth in meters
     interp_type : str, optional
-        Interpolation type (single character, TYPE(1:1)):
-        - 'C': Curvilinear (with tangents/normals)
-        - 'L': Linear interpolation (default)
+        Interpolation type (TYPE(1:1)), as a letter or a name:
+        - 'C' or 'curvilinear': Curvilinear (with tangents/normals)
+        - 'L' or 'linear': Linear interpolation (default)
 
     Notes
     -----
-    File format (see third_party/Acoustics-Toolbox/doc/ATI_BTY_File.htm):
-    - Line 1: 2-character TYPE in quotes — position 1 is interpolation
-      ('L' or 'C'), position 2 is format ('S' short, bathymetry only)
-    - Line 2: Number of points
-    - Following lines: range (km), depth (m) pairs
+    The file format (third_party/Acoustics-Toolbox/doc/ATI_BTY_File.htm)
+    allows a 2-character TYPE in quotes — position 1 the interpolation
+    ('L' or 'C'), position 2 the format ('S' short, 'L' long) — then the
+    number of points, then range (km), depth (m) pairs.
 
     This writer always emits the short (2-column) format and writes TYPE
     as the bare interpolation character: Bellhop tests the whole
@@ -903,8 +890,8 @@ def write_bty_long_format(
 
     Unlike the 2-column ``write_bty_file`` output, the long format adds
     bottom compressional sound speed, density, attenuation and shear speed
-    per range so Bellhop can use range-dependent bottom properties
-    (``BOTY(:)`` handling in ReadEnvironmentBell.f90).
+    per range so Bellhop can use range-dependent bottom properties (the
+    long-format READ of ``Bellhop/bdryMod.f90:200-201``).
 
     Parameters
     ----------
@@ -918,7 +905,7 @@ def write_bty_long_format(
         ``halfspace_density`` / ``halfspace_attenuation`` /
         ``halfspace_shear_speed`` / ``halfspace_shear_attenuation`` views.
     interp_type : str, optional
-        'L' (linear, default) or 'C' (curvilinear).
+        'L' or 'linear' (default), or 'C' or 'curvilinear'.
 
     Notes
     -----
@@ -1033,7 +1020,9 @@ def write_bty_long_format(
         f.write("\n")
 
 
-def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_type: str = "L") -> None:
+def write_ati_file(filepath: Union[str, Path],
+                   altimetry: Union[np.ndarray, Altimetry],
+                   interp_type: str = "L") -> None:
     """
     Write altimetry (surface) file for acoustic models.
 
@@ -1041,18 +1030,19 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
     ----------
     filepath : str or Path
         Altimetry file path (typically .ati extension)
-    altimetry : ndarray
+    altimetry : ndarray or Altimetry
         Altimetry data, shape (N, 2):
         - Column 0: Range in meters
         - Column 1: Surface position in meters, **positive-down** in
           Bellhop's z-axis convention (i.e. +2 means the surface is 2 m
-          *below* MSL — a wave trough). Wrappers that own the
-          public positive-up convention (``Environment(altimetry=…)``)
-          must negate column 1 before calling this writer.
+          *below* MSL — a wave trough).
+        or an :class:`~uacpy.core.altimetry.Altimetry` (``env.altimetry``),
+        whose heights are positive up and are negated on the way out, so
+        a crest is written as a crest.
     interp_type : str, optional
-        Interpolation type (single character, TYPE(1:1)):
-        - 'C': Curvilinear (with tangents/normals)
-        - 'L': Linear interpolation (default)
+        Interpolation type (TYPE(1:1)), as a letter or a name:
+        - 'C' or 'curvilinear': Curvilinear (with tangents/normals)
+        - 'L' or 'linear': Linear interpolation (default)
 
     Notes
     -----
@@ -1066,6 +1056,12 @@ def write_ati_file(filepath: Union[str, Path], altimetry: np.ndarray, interp_typ
 
     Altimetry describes surface variations (ice keels, surface waves, etc.)
     """
+    if isinstance(altimetry, Altimetry):
+        # The carrier's heights are positive up (core/altimetry.py); the
+        # .ati column is Bellhop's positive-down z.
+        pairs = altimetry.to_pairs()
+        pairs[:, 1] = -pairs[:, 1]
+        altimetry = pairs
     _write_boundary_2d(filepath, altimetry, interp_type)
 
 

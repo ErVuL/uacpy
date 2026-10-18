@@ -14,7 +14,7 @@ from uacpy.core.results.stack import ResultStack
 
 
 def _rays(*, source_depth=50.0, frequencies=100.0, model='Test',
-          model_source=None, n=2):
+          model_source=None, n=2, **identity):
     return Rays(rays=[{'r': np.array([0.0, 3.0, 6.0]),
                        'z': np.array([source_depth, 9.0, 5.0]),
                        'launch_angle': -10.0 + i,
@@ -23,7 +23,7 @@ def _rays(*, source_depth=50.0, frequencies=100.0, model='Test',
                 receiver_depths=[5.0], receiver_ranges=[6.0],
                 frequencies=frequencies, model=model,
                 source_depths=np.array([float(source_depth)]),
-                model_source=model_source)
+                model_source=model_source, **identity)
 
 
 def _arrivals(source_depth=5.0, amplitude=1.0):
@@ -31,8 +31,8 @@ def _arrivals(source_depth=5.0, amplitude=1.0):
             'phases': np.array([0.1, 0.2]),
             'delays': np.array([0.10, 0.12]),
             'delays_imag': np.array([0.0, -1e-6]),
-            'source_angles': np.array([5.0, -7.0]),
-            'receiver_angles': np.array([-5.0, 7.0]),
+            'source_angles_deg': np.array([5.0, -7.0]),
+            'receiver_angles_deg': np.array([-5.0, 7.0]),
             'n_top_bounces': np.array([0, 1], dtype='int32'),
             'n_bot_bounces': np.array([1, 1], dtype='int32'), 'n_arrivals': 2}
     return Arrivals(by_receiver=[[[cell]]], receiver_depths=[10.0],
@@ -171,6 +171,58 @@ class TestResultStackInvariants:
         np.testing.assert_array_equal(stack.source_depths, [10.0, 20.0])
         np.testing.assert_array_equal(stack.frequencies, [100.0])
 
+    @pytest.mark.parametrize('attr,first,other', [
+        ('run_mode', 'rays', 'eigenrays'),
+        ('source_level_dB', None, 150.0),
+        ('source_level_dB', 140.0, 150.0),
+        ('source_weights', np.array([1.0]), np.array([1.0j])),
+        ('phase_reference', None, 'travelling_wave'),
+    ])
+    def test_slabs_that_disagree_on_the_identity_it_states_are_refused(
+            self, attr, first, other):
+        # The stack states one run mode, source level, weights and phase
+        # convention; slabs that differ on one are refused, as stack_fields
+        # refuses such fields, and slabs that agree are kept.
+        a = _rays(source_depth=10.0, **{attr: first})
+        b = _rays(source_depth=10.0, **{attr: other})
+        with pytest.raises(ConfigurationError,
+                           match=f'every slab must share the same {attr}'):
+            ResultStack([a, b], [1.0, 2.0], coordinate_name='n_beams')
+        same = ResultStack([a, _rays(source_depth=10.0, **{attr: first})],
+                           [1.0, 2.0], coordinate_name='n_beams')
+        assert np.all(getattr(same, attr) == first)
+
+    def test_the_run_record_is_the_one_the_slabs_share_or_none(self):
+        # stack_fields' rule: one shared record is kept; one-depth records
+        # over the source depths join into the multi-depth record; records
+        # that differ in a setting (a sweep) describe no one run.
+        from uacpy.core.run_settings import RunMode, RunSettings
+
+        def record(z, **changes):
+            return RunSettings(model='Test', mode=RunMode.RAYS,
+                               frequencies=np.array([100.0]),
+                               source_depths=np.array([z]), **changes)
+
+        shared = record(10.0)
+        kept = ResultStack([_rays(source_depth=10.0, run_settings=shared),
+                            _rays(source_depth=10.0, run_settings=shared)],
+                           [1.0, 2.0], coordinate_name='n_beams')
+        assert kept.run_settings is shared
+        swept = ResultStack(
+            [_rays(source_depth=10.0, run_settings=record(10.0)),
+             _rays(source_depth=10.0,
+                   run_settings=record(10.0, source_type='line'))],
+            [1.0, 2.0], coordinate_name='n_beams')
+        assert swept.run_settings is None
+        assert swept[1].run_settings.source_type == 'line'
+        depths = ResultStack(
+            [_rays(source_depth=10.0, run_settings=record(10.0)),
+             _rays(source_depth=20.0, run_settings=record(20.0))],
+            [10.0, 20.0])
+        np.testing.assert_array_equal(depths.run_settings.source_depths,
+                                      [10.0, 20.0])
+        assert depths.run_settings.depth_loop == 'per_depth'
+
     def test_id_kwargs_carries_the_slabs_run_settings(self):
         """``id_kwargs`` reads the stack's identity, ``run_settings``
         included, which the stack takes from its first slab."""
@@ -287,7 +339,7 @@ class TestAResultStackIsAnExportableResult:
         frame = self._stack().to_dataframe()
         assert list(frame.columns)[0] == 'source_depth'
         assert frame['source_depth'].tolist() == [5.0, 5.0, 15.0, 15.0]
-        np.testing.assert_array_equal(frame['amplitudes'],
+        np.testing.assert_array_equal(frame['amplitude'],
                                       [1.0, 0.5, 2.0, 0.5])
 
     @pytest.mark.parametrize('call', ['values', 'to_xarray'])

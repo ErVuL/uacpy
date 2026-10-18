@@ -70,6 +70,30 @@ class TestBartlett:
         assert np.all(np.isfinite(amb.data))
 
 
+@pytest.mark.parametrize('processor', ['bartlett', 'mvdr'])
+def test_a_surface_carries_the_covariance_runs_identity(processor):
+    # The OASN run's model, backend, run mode and run record reach the
+    # surface it was processed from; a level re its own peak, it carries no
+    # source level, phase reference or covariance metadata.
+    from uacpy.core.run_settings import RunMode, RunSettings
+    cov, rep, _ = _synthetic_mfp()
+    record = RunSettings(model='OASN', mode=RunMode.COVARIANCE,
+                         frequencies=np.array([200.0]),
+                         source_depths=np.array([50.0]))
+    cov = Covariance(covariance=cov.covariance, model='OASN',
+                     backend='oasn', run_mode='covariance',
+                     run_settings=record, source_depths=[50.0],
+                     source_level_dB=170.0, frequencies=200.0,
+                     metadata={'xsm_file': 'run.xsm'})
+    amb = getattr(cov, processor)(rep)
+    assert (amb.model, amb.backend, amb.run_mode) == ('OASN', 'oasn',
+                                                       'covariance')
+    assert amb.run_settings is record
+    np.testing.assert_array_equal(amb.source_depths, [50.0])
+    assert amb.source_level_dB is None and amb.phase_reference is None
+    assert 'xsm_file' not in amb.metadata
+
+
 class TestMVDR:
     def test_peaks_at_true_source(self):
         cov, rep, src = _synthetic_mfp(noise_level=0.01)
@@ -206,16 +230,22 @@ class TestTheTwoMfpEntryPointsAgree:
         np.testing.assert_allclose(si, 1e-12 * upa, rtol=1e-9, atol=0)
         assert si.argmax() == upa.argmax()
 
-    def test_the_two_defaults_are_the_documented_pair(self):
-        """Different on purpose — OASN's covariance is full rank, a measured
-        few-snapshot CSDM is not. Pinned so a change has to be deliberate."""
+    def test_the_two_entry_points_share_one_default(self):
+        """One labelled MVDR loading for the Covariance method and the sonar
+        function, so their default surfaces agree up to each frequency's
+        peak (the test above)."""
         import inspect
+        from uacpy.core._beamforming import MVDR_DIAGONAL_LOADING
         from uacpy.sonar.matched_field import mvdr
         core_default = inspect.signature(
             Covariance.mvdr).parameters['diagonal_loading'].default
         sonar_default = inspect.signature(
             mvdr).parameters['diagonal_loading'].default
-        assert (core_default, sonar_default) == (1e-6, 1e-2)
+        assert core_default == sonar_default == MVDR_DIAGONAL_LOADING == 1e-2
+        K, cov, rep = self._rig()
+        core = _linear(cov.mvdr(rep)).ravel()
+        np.testing.assert_allclose(core / core.max(),
+                                   _linear(mvdr(K, rep)).ravel(), rtol=1e-10)
 
     def _blank(self, rep):
         """``rep`` with candidate point 1 emptied: an unpopulated ``.rpo``

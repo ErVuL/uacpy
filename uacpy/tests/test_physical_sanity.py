@@ -278,7 +278,7 @@ class TestMunkProfile:
         thresholds sit below every windowed measurement so a lost channel
         or an inverted gradient fails while beam-sampling jitter does not.
         """
-        bellhop = Bellhop(verbose=False, n_beams=500, launch_angles=(-25, 25))
+        bellhop = Bellhop(verbose=False, n_beams=500, launch_angles_deg=(-25, 25))
         result = bellhop.run(
             munk_env, munk_source, munk_receiver,
             run_mode=RunMode.COHERENT_TL,

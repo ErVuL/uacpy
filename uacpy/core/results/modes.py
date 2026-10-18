@@ -9,13 +9,14 @@ import numpy as np
 from typing import Optional, Tuple, Union
 
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
+from uacpy.core._export import ExportRecord, read_only
+from uacpy.core._plotting import plotter
 from uacpy.core._records import FrozenRecord
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.acoustics.modal import (
-    _mode_shapes_at, _modal_attenuation, modal_excitation, modal_field,
-    _modal_grazing_angles, modal_phase_speeds,
+    _mode_shapes_at, _modal_attenuation, medium_density_at, modal_excitation,
+    modal_field, _modal_grazing_angles, modal_phase_speeds,
 )
-from uacpy.core.bottom import medium_density_at
 from uacpy.core.boundary import BoundaryProperties
 
 from uacpy.core.results._base import (PhaseReference, Result, _count,
@@ -23,7 +24,7 @@ from uacpy.core.results._base import (PhaseReference, Result, _count,
 from uacpy.core.results.field import Field
 from uacpy.core.results.quantities import coordinate_unit
 from uacpy.core._repr import count
-from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
 
 
 @dataclass(frozen=True, eq=False)
@@ -111,15 +112,28 @@ class MediaTable(FrozenRecord):
 
     @classmethod
     def from_dict(cls, d) -> 'MediaTable':
+        """The table :meth:`to_dict` wrote.
+
+        Parameters
+        ----------
+        d : mapping
+            The table's fields by name.
+        """
         return cls(**d)
 
     def density_at(self, depth: float) -> float:
         """``ρ(z)`` (g/cm³) of the medium holding ``depth`` (m)
-        (:func:`~uacpy.core.bottom.medium_density_at`): :attr:`water_density` down to the
+        (:func:`~uacpy.acoustics.medium_density_at`): :attr:`water_density` down to the
         seafloor, each deeper medium's own density below its top, and
         :attr:`halfspace_density` below the last medium's base. A table with
         no tabulated media (a ``.moa``, or one built by hand) answers the
-        water density for every depth."""
+        water density for every depth.
+
+        Parameters
+        ----------
+        depth : float
+            Depth (m) below the surface.
+        """
         if not self.tops or len(self.tops) < 2:
             return self.water_density
         return medium_density_at(
@@ -127,6 +141,50 @@ class MediaTable(FrozenRecord):
             np.inf if self.bottom_depth is None else self.bottom_depth,
             (self.densities[-1] if self.halfspace_density is None
              else self.halfspace_density))
+
+
+#: The half-spaces a mode set's :attr:`Modes.halfspace_tails` may describe,
+#: and the terms each carries.
+_HALFSPACE_SIDES = ('top', 'bottom')
+_HALFSPACE_TERMS = ('k2', 'gamma', 'phi')
+
+
+def _checked_halfspace_tails(tails, k_shape):
+    """``tails`` as :attr:`Modes.halfspace_tails` holds it (fresh arrays),
+    refused when a side or a term is unknown or missing, or when a
+    per-mode term is not one value per mode."""
+    if tails is None:
+        return None
+    unknown = sorted(set(tails) - set(_HALFSPACE_SIDES))
+    if unknown:
+        raise ConfigurationError(
+            f"Modes.halfspace_tails: {unknown} are not half-spaces; the keys "
+            f"are {list(_HALFSPACE_SIDES)}.")
+    checked = {}
+    for side, tail in tails.items():
+        if set(tail) != set(_HALFSPACE_TERMS):
+            raise ConfigurationError(
+                f"Modes.halfspace_tails[{side!r}] holds {sorted(tail)}; it "
+                f"must hold exactly {list(_HALFSPACE_TERMS)}.")
+        gamma = np.array(tail['gamma'], dtype=complex)
+        phi = np.array(tail['phi'])
+        if gamma.shape != k_shape or phi.shape != k_shape:
+            raise ConfigurationError(
+                f"Modes.halfspace_tails[{side!r}]: 'gamma' {gamma.shape} and "
+                f"'phi' {phi.shape} must each be one value per mode, "
+                f"{k_shape}.")
+        checked[side] = {'k2': complex(tail['k2']), 'gamma': gamma,
+                         'phi': phi}
+    return checked
+
+
+def _copied_tails(tails):
+    """A copy of :attr:`Modes.halfspace_tails` for :meth:`Modes.to_dict`."""
+    if tails is None:
+        return None
+    return {side: {'k2': tail['k2'], 'gamma': tail['gamma'].copy(),
+                   'phi': tail['phi'].copy()}
+            for side, tail in tails.items()}
 
 
 class Modes(Result):
@@ -148,8 +206,9 @@ class Modes(Result):
         KRAKEN's ``zTab``, the merged, sorted, duplicate-free union of the
         run's source and receiver depths (``Kraken/kraken.f90:573`` builds
         it, ``:598`` writes it to the ``.mod``). The modes are known
-        nowhere else, and this object carries no half-space wavenumber from
-        which the evanescent tail below the span could be continued.
+        nowhere else; past the span, a mode set read from a ``.mod``
+        carries the evanescent tail into each acoustic half-space in
+        :attr:`halfspace_tails`.
     media : MediaTable or None
         The densities the modes were normalised in, from which
         :meth:`modal_pressure_field` takes ``ρ(z_s)`` and
@@ -158,7 +217,7 @@ class Modes(Result):
         A ``metadata`` carrying ``water_density``, ``media_depths``,
         ``media_densities``, ``media_bottom_depth`` or ``halfspace_density``
         is refused.
-    group_velocity : ndarray, shape ``(n_modes,)``, or None
+    group_speeds : ndarray, shape ``(n_modes,)``, or None
         Group speed (m/s) each mode was reported at by the solver, from a
         SINGLE run — ``None`` when the binary did not supply one.
 
@@ -173,14 +232,30 @@ class Modes(Result):
         ``kraken.f90:101`` prints ``MAX(1, M/30)``-stride, so a run with
         more than 30 modes reports only about 30 of them.
 
-        Use :meth:`group_velocity_between` instead when this is ``None``, or
+        Use :meth:`group_speeds_between` instead when this is ``None``, or
         when every mode is needed from a large set. The perturbation caveat
         the source states at ``kraken.f90:772`` applies either way: "group
         speeds will be wrong for leaky modes".
+    halfspace_tails : dict or None
+        The analytic continuation of each mode into an acoustic (``'A'``)
+        half-space, as OALIB ``read_modes.m`` computes it for ``evalcm.m``:
+        keys ``'top'`` / ``'bottom'`` for the half-spaces that are acoustic,
+        each a dict of ``'k2'`` (complex, rad²/m², ``(2πf/c_p)²`` with the
+        file's complex ``c_p``), ``'gamma'`` (complex, ``(n_modes,)``,
+        1/m, ``sqrt(k_m² − k2)`` with ``Re ≥ 0``, from ``Re(k)`` for KRAKEN
+        and the full ``k`` for KRAKENC, ``KrakenField/ReadModes.f90:79``,
+        ``:254-272``) and ``'phi'`` (``(n_modes,)``, the mode at the
+        interface: the first or last tabulated row). Below the deepest
+        tabulated depth ``D`` a mode continues as
+        ``phi * exp(-gamma * (z - D))``, and above the shallowest the same
+        way. Set by :func:`~uacpy.io.read_modes` from a ``.mod``, and so on
+        the mode sets :class:`~uacpy.Kraken` returns (an empty dict when no
+        half-space is acoustic); ``None`` otherwise, and on the set
+        :meth:`with_attenuation` returns, whose ``k`` it no longer matches.
     """
 
     #: The plotter that draws this result (``.plot()``).
-    _plotter = '_plot_mode_functions'
+    _plotter = 'plot_mode_shapes'
 
     #: The metadata spellings of the :class:`MediaTable` members: a
     #: ``metadata=`` carrying one is refused.
@@ -196,8 +271,9 @@ class Modes(Result):
         k: np.ndarray,
         phi: np.ndarray,
         depths: np.ndarray,
-        group_velocity: Optional[np.ndarray] = None,
+        group_speeds: Optional[np.ndarray] = None,
         media: Optional[MediaTable] = None,
+        halfspace_tails: Optional[dict] = None,
         **kwargs,
     ):
         carried = sorted(set(kwargs.get('metadata') or {})
@@ -225,17 +301,19 @@ class Modes(Result):
                 f"Modes.phi: shape {self.phi.shape} must equal "
                 f"(len(depths), len(k)) = ({len(self.depths)}, {len(self.k)})"
             )
-        if group_velocity is None:
-            self.group_velocity = None
+        if group_speeds is None:
+            self.group_speeds = None
         else:
-            gv = np.atleast_1d(np.array(group_velocity, dtype=float))
+            gv = np.atleast_1d(np.array(group_speeds, dtype=float))
             if gv.shape != self.k.shape:
                 raise ConfigurationError(
-                    f"Modes.group_velocity: shape {gv.shape} must equal "
+                    f"Modes.group_speeds: shape {gv.shape} must equal "
                     f"k's {self.k.shape} — one group speed per mode, NaN "
                     f"where the binary did not report one."
                 )
-            self.group_velocity = gv
+            self.group_speeds = gv
+        self.halfspace_tails = _checked_halfspace_tails(halfspace_tails,
+                                                        self.k.shape)
 
     @property
     def n_modes(self) -> int:
@@ -247,27 +325,44 @@ class Modes(Result):
         """
         return len(self.k)
 
-    def _repr_bits(self) -> list:
-        # The count splits into trapped and not when the media table knows
-        # the fluid seabed's speed and some mode's phase speed is above it,
-        # '8 modes (7 trapped, 1 above the 1800 m/s seabed)': such a mode
-        # radiates into the seabed rather than being trapped in the duct
-        # (the default window reaches 5 % past that speed, kraken.md §6.1).
-        modes = count(self.n_modes, 'mode')
+    @property
+    def trapped(self) -> Optional[np.ndarray]:
+        """Which modes are trapped in the duct: a boolean mask, one per
+        mode, True where the mode's phase speed is below the fluid seabed's
+        compressional speed :attr:`media` ``.halfspace_sound_speed``
+        (``Re k_r > ω/c_b``, the discrete spectrum, evanescent in the
+        bottom) and False at or above it, a mode in the continuous spectrum
+        that radiates into the seabed (Jensen et al., *Computational Ocean
+        Acoustics*, sect. 2.4.5.1, Fig. 2.26). The default phase-speed
+        window reaches 5 % past that speed (kraken.md §6.1), so a Kraken set
+        can hold such modes. ``None`` when the media table records no such
+        speed (an elastic, vacuum, rigid or tabulated seabed, a ``.moa``, a
+        hand-built set) or the set has no frequency."""
         c_bottom = (None if self.media is None
                     else self.media.halfspace_sound_speed)
-        if c_bottom is not None and self.f0 is not None:
-            above = int(np.sum(self.phase_speeds > c_bottom))
-            if above:
-                modes += (f" ({self.n_modes - above} trapped, {above} above "
-                          f"the {c_bottom:g} m/s seabed)")
+        if c_bottom is None or self.f0 is None:
+            return None
+        return read_only(self.phase_speeds < c_bottom)
+
+    def _repr_bits(self) -> list:
+        # The count splits into trapped and not when some mode is not
+        # trapped (:attr:`trapped`), '8 modes (7 trapped, 1 above the
+        # 1800 m/s seabed)'.
+        modes = count(self.n_modes, 'mode')
+        trapped = self.trapped
+        if trapped is not None and not np.all(trapped):
+            above = int(np.sum(~trapped))
+            modes += (f" ({self.n_modes - above} trapped, {above} above "
+                      f"the {self.media.halfspace_sound_speed:g} m/s "
+                      f"seabed)")
         return [modes, coordinate_axis('depth', self.depths)]
 
     def to_dict(self) -> dict:
         """Serialise these modes to plain arrays: ``k``, ``phi`` (depth ×
-        mode), ``depths``, ``group_velocity`` (``None`` when the solver
+        mode), ``depths``, ``group_speeds`` (``None`` when the solver
         reported none), ``media`` (the :class:`MediaTable` as its plain
-        dict, or ``None``) and the identity, as :meth:`Field.to_dict` writes it.
+        dict, or ``None``), ``halfspace_tails`` (``None`` or its dict of
+        plain arrays) and the identity, as :meth:`Field.to_dict` writes it.
         ``np.savez(f, **d)`` stores it; read it back with
         ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`. That load
         unpickles, so use it only on files you wrote; :meth:`to_netcdf` /
@@ -276,9 +371,10 @@ class Modes(Result):
             'k': self.k.copy(),
             'phi': self.phi.copy(),
             'depths': self.depths.copy(),
-            'group_velocity': (None if self.group_velocity is None
-                               else self.group_velocity.copy()),
+            'group_speeds': (None if self.group_speeds is None
+                             else self.group_speeds.copy()),
             'media': None if self.media is None else self.media.to_dict(),
+            'halfspace_tails': _copied_tails(self.halfspace_tails),
             **self._identity_dict(),
         }
 
@@ -292,9 +388,13 @@ class Modes(Result):
     def _payload(self):
         payload = {'k': (self.k, ('mode',), 'rad/m'),
                    'phi': (self.phi, ('depth', 'mode'), '')}
-        if self.group_velocity is not None:
-            payload['group_velocity'] = (self.group_velocity, ('mode',),
-                                         'm/s')
+        if self.group_speeds is not None:
+            payload['group_speeds'] = (self.group_speeds, ('mode',),
+                                       'm/s')
+        for side, tail in (self.halfspace_tails or {}).items():
+            payload[f'{side}_halfspace_gamma'] = (tail['gamma'], ('mode',),
+                                                  '1/m')
+            payload[f'{side}_halfspace_phi'] = (tail['phi'], ('mode',), '')
         return payload
 
     def _coords(self):
@@ -309,6 +409,15 @@ class Modes(Result):
                 if value is not None:
                     attrs[key] = (np.asarray(value, dtype=float)
                                   if isinstance(value, tuple) else value)
+        if self.halfspace_tails is not None:
+            # NetCDF attributes hold no complex number, so k2 goes as its
+            # two parts; the sides present are listed so an empty dict (no
+            # acoustic half-space) reads back as one.
+            attrs['halfspace_tails'] = ' '.join(sorted(self.halfspace_tails))
+            for side, tail in self.halfspace_tails.items():
+                k2 = complex(tail['k2'])
+                attrs[f'{side}_halfspace_k2_real'] = k2.real
+                attrs[f'{side}_halfspace_k2_imag'] = k2.imag
         return attrs
 
     @classmethod
@@ -320,16 +429,29 @@ class Modes(Result):
                                         else value)
                                for member, value in stated.items()})
                  if stated else None)
+        tails = None
+        tail_attrs = ()
+        if 'halfspace_tails' in attrs:
+            sides = str(attrs['halfspace_tails']).split()
+            tail_attrs = ('halfspace_tails',) + tuple(
+                f'{side}_halfspace_k2_{part}'
+                for side in sides for part in ('real', 'imag'))
+            tails = {side: {
+                'k2': complex(attrs[f'{side}_halfspace_k2_real'],
+                              attrs[f'{side}_halfspace_k2_imag']),
+                'gamma': arrays[f'{side}_halfspace_gamma'],
+                'phi': arrays[f'{side}_halfspace_phi']} for side in sides}
         return cls(k=arrays['k'], phi=arrays['phi'], depths=arrays['depth'],
-                   group_velocity=arrays.get('group_velocity'), media=media,
+                   group_speeds=arrays.get('group_speeds'), media=media,
+                   halfspace_tails=tails,
                    **cls._identity_from_attrs(
-                       attrs, tuple(cls._MEDIA_ATTRS.values())))
+                       attrs, tuple(cls._MEDIA_ATTRS.values()) + tail_attrs))
 
     def _table(self):
         """One row per mode: ``mode`` (1-based), ``k_real`` and ``k_imag``
         (rad/m), ``phase_speed`` (m/s; NaN without a frequency),
         ``group_speed`` (m/s; NaN where the solver reported none, as the
-        default ``kraken`` backend never does — :meth:`group_velocity_between`
+        default ``kraken`` backend never does — :meth:`group_speeds_between`
         gives it from a second solve) and
         ``attenuation_dB_per_km``, the modal decay ``20·log10(e)·|Im(k)|``
         per km: the decay rate :func:`~uacpy.core.acoustics.modal_field`
@@ -339,8 +461,8 @@ class Modes(Result):
         phase_speed = (np.full(self.n_modes, np.nan) if self.f0 is None
                        else self.phase_speeds)
         group_speed = (np.full(self.n_modes, np.nan)
-                       if self.group_velocity is None
-                       else np.asarray(self.group_velocity, dtype=float))
+                       if self.group_speeds is None
+                       else np.asarray(self.group_speeds, dtype=float))
         return {
             'mode': np.arange(1, self.n_modes + 1),
             'k_real': np.real(k).astype(float),
@@ -350,6 +472,11 @@ class Modes(Result):
             'attenuation_dB_per_km': 20.0 * np.log10(np.e)
             * np.abs(np.imag(k)).astype(float) * 1000.0,
         }
+
+    def _table_units(self):
+        return {'mode': '', 'k_real': 'rad/m', 'k_imag': 'rad/m',
+                'phase_speed': 'm/s', 'group_speed': 'm/s',
+                'attenuation_dB_per_km': 'dB/km'}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Modes":
@@ -364,13 +491,15 @@ class Modes(Result):
             :meth:`to_dict` output, or the mapping ``np.load`` returns for it.
         """
         d = cls._unwrap_saved(d, payload=('k', 'phi', 'depths'),
-                              required=('group_velocity', 'media'))
+                              required=('group_speeds', 'media',
+                                        'halfspace_tails'))
         identity = cls._identity_from_dict(d)
         media = d.get('media')
         if media is not None:
             media = MediaTable.from_dict(media)
         return cls(k=d['k'], phi=d['phi'], depths=d['depths'],
-                   group_velocity=d.get('group_velocity'), media=media,
+                   group_speeds=d.get('group_speeds'), media=media,
+                   halfspace_tails=d.get('halfspace_tails'),
                    **identity)
 
     def first_n(self, n: int) -> "Modes":
@@ -394,9 +523,13 @@ class Modes(Result):
             k=new_k,
             phi=new_phi,
             depths=self.depths,
-            group_velocity=(None if self.group_velocity is None
-                            else self.group_velocity[:n]),
+            group_speeds=(None if self.group_speeds is None
+                          else self.group_speeds[:n]),
             media=self.media,
+            halfspace_tails=(None if self.halfspace_tails is None else {
+                side: dict(tail, gamma=tail['gamma'][:n],
+                           phi=tail['phi'][:n])
+                for side, tail in self.halfspace_tails.items()}),
             **self.id_kwargs(),
         )
 
@@ -418,8 +551,8 @@ class Modes(Result):
             )
         return modal_phase_speeds(self.k, self.f0)
 
-    def group_velocity_between(self, other: "Modes") -> np.ndarray:
-        """Approximate group velocity ``v_g = dω/dk`` using a second
+    def group_speeds_between(self, other: "Modes") -> np.ndarray:
+        """Approximate group speed ``v_g = dω/dk`` using a second
         :class:`Modes` instance at a nearby frequency.
 
         Parameters
@@ -430,7 +563,7 @@ class Modes(Result):
         Returns
         -------
         v_g : ndarray, shape ``(min(self.n_modes, other.n_modes),)``
-            Mode-by-mode group velocity in m/s. Modes that exist in only
+            Mode-by-mode group speed in m/s. Modes that exist in only
             one of the two results are dropped (the array is truncated to
             the shared count). The estimate is second-order accurate at the
             **midpoint** frequency ``(f0_self + f0_other)/2``, not at either
@@ -456,23 +589,23 @@ class Modes(Result):
         f0_self, f0_other = self.f0, other.f0
         if f0_self is None or f0_other is None:
             raise ConfigurationError(
-                "Modes.group_velocity_between: both Modes instances must "
+                "Modes.group_speeds_between: both Modes instances must "
                 "have a frequency."
             )
         if f0_self == f0_other:
             raise ConfigurationError(
-                "Modes.group_velocity_between: requires Modes at two distinct "
+                "Modes.group_speeds_between: requires Modes at two distinct "
                 "frequencies."
             )
         n = min(self.n_modes, other.n_modes)
         if n == 0:
             return np.array([])
         # The difference quotient, its storage-resolution notice and its
-        # monotonicity refusal are modal_group_velocity's; what this method
+        # monotonicity refusal are modal_group_speeds's; what this method
         # adds is pairing two Modes and truncating to the shared set.
         #
         # That function REFUSES a k_r that does not rise strictly with
-        # frequency, where this returned nan for a flat step and a silently
+        # frequency, where the quotient would give nan for a flat step and a
         # NEGATIVE speed for a falling one. k_r rises because v_g is an
         # energy-transport speed, so a falling step is bad input and not a
         # cell with no answer; a negative group velocity handed back without
@@ -480,8 +613,8 @@ class Modes(Result):
         lo, hi = ((self, other) if f0_self < f0_other else (other, self))
         # Deferred: acoustic_signal pulls scipy, and uacpy's public
         # surface is imported without it (test_lazy_imports).
-        from uacpy.acoustic_signal.dispersion import modal_group_velocity
-        return modal_group_velocity(
+        from uacpy.acoustic_signal.dispersion import modal_group_speeds
+        return modal_group_speeds(
             np.array([min(f0_self, f0_other), max(f0_self, f0_other)]),
             k_horizontal=np.stack([np.asarray(lo.k)[:n], np.asarray(hi.k)[:n]]))[0]
 
@@ -604,11 +737,175 @@ class Modes(Result):
         return _modal_grazing_angles(self.k, self.f0, sound_speed,
                                     who='Modes.grazing_angles')
 
+    @classmethod
+    def dispersion(cls, modes_by_frequency) -> "ModeDispersion":
+        """Phase and group speed of every mode against frequency — the
+        dispersion diagram's numbers — from mode sets at several
+        frequencies.
+
+        Both speeds start at the seabed speed at a mode's cutoff and tend to
+        the water speed at high frequency, the phase speed falling
+        monotonically while the group speed passes through a minimum — the
+        frequency of that minimum arrives last in a transient, the Airy
+        phase (JKPS Sect. 2.4.5.2).
+
+        The phase speed is each set's :attr:`phase_speeds`. The group speed
+        is a set's own :attr:`group_speeds` where the solver supplied it
+        (``backend='krakenc'``), placed at that set's frequency; elsewhere it
+        is :meth:`group_speeds_between` the set and the next, a finite
+        difference that belongs at the **midpoint** of the pair (that
+        method's own docstring), placed there. Both carry the caveat the
+        KRAKEN source states at ``kraken.f90:772``: group speeds are wrong
+        for leaky modes.
+
+        Parameters
+        ----------
+        modes_by_frequency : sequence of Modes
+            At least two mode sets at distinct frequencies (``f0``), in any
+            order.
+
+        Returns
+        -------
+        ModeDispersion
+            ``.plot()`` draws the diagram.
+        """
+        who = 'Modes.dispersion'
+        sets = list(modes_by_frequency)
+        if len(sets) < 2:
+            raise ConfigurationError(
+                f"{who}: needs Modes at two or more frequencies — got "
+                f"{len(sets)}. Dispersion is a statement about how the modal "
+                f"speeds vary with frequency, so one solve cannot show it.")
+        for m in sets:
+            if not isinstance(m, Modes):
+                raise ConfigurationError(
+                    f"{who}: expected a sequence of Modes, found "
+                    f"{type(m).__name__}.")
+            if m.f0 is None:
+                raise ConfigurationError(
+                    f"{who}: every Modes needs a frequency (f0); one carries "
+                    f"none, so it cannot be placed on the frequency axis.")
+        sets.sort(key=lambda m: float(m.f0))
+        freqs = np.array([float(m.f0) for m in sets])
+        if np.any(np.diff(freqs) <= 0):
+            raise ConfigurationError(
+                f"{who}: frequencies must be distinct, got {freqs}.")
+        n_modes = max(m.n_modes for m in sets)
+        phase = np.full((freqs.size, n_modes), np.nan)
+        points = {}
+        for j, m in enumerate(sets):
+            phase[j, :m.n_modes] = m.phase_speeds
+            reported = getattr(m, 'group_speeds', None)
+            between = (m.group_speeds_between(sets[j + 1])
+                       if j + 1 < len(sets) else np.array([]))
+            for i in range(m.n_modes):
+                if reported is not None and np.isfinite(reported[i]):
+                    points[(freqs[j], i)] = float(reported[i])
+                elif i < between.size:
+                    points[(0.5 * (freqs[j] + freqs[j + 1]), i)] = float(
+                        between[i])
+        group_freqs = np.array(sorted({f for f, _ in points}))
+        group = np.full((group_freqs.size, n_modes), np.nan)
+        for (f, i), v in points.items():
+            group[np.searchsorted(group_freqs, f), i] = v
+        first = sets[0]
+        source = getattr(first.model_source, 'id', None)
+        return ModeDispersion(frequencies=freqs, phase_speeds=phase,
+                              group_frequencies=group_freqs,
+                              group_speeds=group, model=first.model,
+                              backend=first.backend,
+                              model_source_id=(None if source is None
+                                               else str(source)))
+
+    def excitation_pattern(self, source, *, sound_speed=None,
+                           env=None) -> "ExcitationPattern":
+        """What a source array drives, both ways, on one grazing-angle axis:
+        each mode's excitation at its grazing angle, and the array's
+        free-field pattern folded over ±θ.
+
+        The excitation is :meth:`excitation` (``|Σₙ wₙ·φₘ(zₙ)|``, the *mode
+        filter* of Medwin & Clay §11.3.1) at :meth:`grazing_angles`
+        ``θₘ = arccos(c / vₚ,ₘ)``. The pattern is the same array described
+        in free field: its **array beam pattern** ``P(θ) = f(θ)·A(θ)`` when
+        the elements are directional, the bare array factor ``A(θ)`` when
+        they are not (Butler & Sherman §7.1.1;
+        :meth:`~uacpy.Source.array_beam_pattern`), folded as
+        ``max(|P(+θ)|, |P(−θ)|)``: a trapped mode is a standing wave with
+        equal up- and down-going halves, so the free-field quantity
+        comparable to a mode is the larger of the two. The two agree while
+        the pattern is symmetric in ±θ and part company once steering
+        breaks that symmetry.
+
+        Parameters
+        ----------
+        source : Source
+            The array: its ``depths`` and complex ``weights``.
+        sound_speed : float, optional
+            Reference speed (m/s) the grazing angles are measured against.
+            ``None`` reads it from ``env`` at the first source depth — the
+            depth at which the array factor's ``θ`` is a launch angle. With
+            neither, the call is refused: the angle axis is measured
+            against this speed, so defaulting it would move every mode (up
+            to 5.3° on a 1545 m/s environment). A mode whose phase speed is
+            below it has no real grazing angle at that depth: its angle is
+            NaN, with a warning naming how many.
+        env : Environment, optional
+            Supplies ``sound_speed`` at the source depth when it is not
+            given.
+
+        Returns
+        -------
+        ExcitationPattern
+            ``.plot()`` draws both, each in dB re its own maximum.
+        """
+        who = 'Modes.excitation_pattern'
+        if sound_speed is None:
+            if env is None:
+                raise ConfigurationError(
+                    f"{who}: the angle axis is a grazing angle, "
+                    f"arccos(c/v_m), so it needs the speed those angles are "
+                    f"measured against. Pass sound_speed= (the speed at the "
+                    f"source depth), or env= to read it off the profile.",
+                    remediation="sound_speed=env.ssp.sound_speed_at("
+                                "source.depths[0])")
+            z_s = float(np.atleast_1d(source.depths)[0])
+            sound_speed = float(np.atleast_1d(env.ssp.sound_speed_at(z_s))[0])
+        excitation = np.abs(self.excitation(source, sound_speed=sound_speed))
+        angles = self.grazing_angles(sound_speed)
+        dropped = int(np.sum(~np.isfinite(angles)))
+        # Silent when the source carries a pattern: excitation() has already
+        # warned about these same modes against this same reference speed.
+        if dropped and getattr(source, 'beam_pattern', None) is None:
+            warnings.warn(
+                f"{who}: {dropped} of {angles.size} modes have a phase speed "
+                f"below the {float(sound_speed):g} m/s reference, so they "
+                f"have no real grazing angle there; their angle is NaN. Pass "
+                f"sound_speed= (or env=) for the speed at the source depth.",
+                ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        finite = angles[np.isfinite(angles)]
+        span = np.linspace(0.0, max(90.0, float(finite.max())
+                                    if finite.size else 90.0), 721)
+        directional = getattr(source, 'beam_pattern', None) is not None
+        pattern = (source.array_beam_pattern if directional
+                   else source.array_factor)
+        folded = np.maximum(np.abs(pattern(span, sound_speed=sound_speed)),
+                            np.abs(pattern(-span, sound_speed=sound_speed)))
+        depths = np.atleast_1d(source.depths)
+        model_source = getattr(self.model_source, 'id', None)
+        return ExcitationPattern(
+            grazing_angles_deg=angles, excitation=excitation,
+            pattern_angles_deg=span, pattern=folded, directional=directional,
+            sound_speed=float(sound_speed), n_sources=int(depths.size),
+            aperture=float(np.ptp(depths)), model=self.model,
+            backend=self.backend,
+            model_source_id=(None if model_source is None
+                             else str(model_source)))
+
     def with_attenuation(
         self,
         alpha_dB_per_m: Union[float, np.ndarray],
         *,
-        sound_speed_z: Union[float, np.ndarray] = DEFAULT_SOUND_SPEED,
+        sound_speed_z: Optional[Union[float, np.ndarray]] = None,
         density_z: Optional[Union[float, np.ndarray]] = None,
         bottom=None,
         seafloor_depth: Optional[float] = None,
@@ -649,17 +946,9 @@ class Modes(Result):
         range, is over-attenuated the most because its shallow ``γ_m``
         pushes the most energy into the bottom.
 
-        **A barely trapped mode is warned about**, because the same ``γ_m``
-        that makes its tail term large also makes that term rest on the part
-        of ``kr`` a mode solver resolves least well. The trigger is a ratio
-        of the two normalisation integrals — the seabed tail against the
-        water column — and it fires where a converged KRAKEN mesh moved the
-        total modal TL by 0.67-1.98 dB at 200-500 m on a 100 m Pekeris guide
-        and by 7.07 dB at 10 km, against 0.41 dB at the first frequency above
-        the trigger. Near a modal cutoff the mesh also decides *which side*
-        of ``k_b`` the mode lands on, and a mode reported as leaky there gets
-        no bottom term at all; the leaky warning names ``k_b`` so the margin
-        can be read off.
+        A trapped mode gets its tail term however weakly it is bound; a
+        leaky mode (``k_r <= k_b``) gets none, its tail integral diverging,
+        and the leaky warning names ``k_b``.
 
         Parameters
         ----------
@@ -667,21 +956,22 @@ class Modes(Result):
             Per-depth volume attenuation in dB/m, sampled on
             :attr:`depths`. Scalar broadcasts to every depth. Build one
             from an :class:`~uacpy.core.absorption.Absorption` via
-            ``absorption.alpha_dB_per_m(modes.f0, modes.depths)``.
+            ``absorption.table(modes.f0, modes.depths, units='dB/m').data[:, 0]``.
 
             **It need not be the same number the solver used.** A law the
-            SSP rows carry (Francois-Garrison, a table) is the accessor's
+            SSP rows carry (Francois-Garrison, a table) is the law's
             value at each SSP node, interpolated by the solver between
             nodes, so a perturbation sampled between nodes is applied on top
             of a run that absorbed a slightly different alpha there. Both
             routes are correct for what they are; the divergence is worth
             knowing before the two are differenced.
 
-            For :class:`~uacpy.core.absorption.ConstantAbsorption`, the
-            accessor converts dB/wavelength at
-            :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`, while the
-            deck converts at each SSP row's own ``c`` (``AttenMod.f90:73``),
-            a spread of ±3.3 % across sound speeds of 1450-1550 m/s.
+            For :class:`~uacpy.core.absorption.ConstantAbsorption`,
+            ``table`` converts dB/wavelength at its ``sound_speed``
+            (:data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED` unless
+            given), while the deck converts at each SSP row's own ``c``
+            (``AttenMod.f90:73``), a spread of ±3.3 % across sound speeds of
+            1450-1550 m/s.
 
             To make the two agree, pass a scalar alpha you computed at the
             same argument the deck used: the SSP's own sound speed for a
@@ -702,7 +992,15 @@ class Modes(Result):
             support — unlike the ``seafloor_depth`` mismatch below, which
             reads ``psi(D)`` at a depth that is simply not the seabed.
         sound_speed_z : float or ndarray
-            ``c(z)`` in m/s. Defaults to 1500.
+            ``c(z)`` in m/s, sampled on :attr:`depths`: the profile the
+            modes were computed on, a scalar for an isovelocity column or
+            one value per depth (``env.ssp.sound_speed_at(modes.depths)``).
+            Required: the perturbation term is ``2iα(z)ω/c(z)`` (Jensen et
+            al., *Computational Ocean Acoustics*, sect. 5.9.1), so at a
+            fixed ``α(z)`` every ``α_m`` scales as ``1/c`` — a 1480 m/s
+            column read at 1500 m/s is 1.3 % under-attenuated — and a
+            :class:`Modes` records no water sound speed to take it from, so
+            an unset speed is refused rather than guessed.
         density_z : float or ndarray, optional
             ``ρ(z)`` in **g/cm³** (matches :class:`BoundaryProperties`).
             ``None`` reads the water density the producing model recorded
@@ -791,12 +1089,14 @@ class Modes(Result):
             who="Modes.with_attenuation")
         kr = np.real(self.k)
         new_k = kr - 1j * alpha_m
+        # halfspace_tails is not carried: its gamma was formed from the k
+        # this perturbation replaces.
         return Modes(
             k=new_k, phi=self.phi, depths=self.depths,
             # The solver's group speed survives: this perturbation moves the
-            # IMAGINARY part of k, and dropping it here while first_n keeps it
-            # made the attribute disappear depending on which method was called.
-            group_velocity=self.group_velocity,
+            # IMAGINARY part of k, and first_n keeps it too, so the attribute
+            # is there whichever method made the set.
+            group_speeds=self.group_speeds,
             media=self.media,
             **self.id_kwargs(),
         )
@@ -947,3 +1247,130 @@ class Modes(Result):
             coords={'depth': z_r, 'range': r},
             **id_kwargs,
         )
+
+
+@dataclass(frozen=True, eq=False)
+class ModeDispersion(ExportRecord):
+    """Phase and group speed of every mode against frequency, what
+    :meth:`Modes.dispersion` returns; ``.plot()`` draws the dispersion
+    diagram with :func:`uacpy.plot.plot_dispersion`.
+
+    Attributes
+    ----------
+    frequencies : ndarray, shape ``(n_f,)``
+        The mode sets' frequencies (Hz), increasing.
+    phase_speeds : ndarray, shape ``(n_f, n_modes)``
+        Phase speed (m/s) of mode ``m`` (column ``m - 1``) at each
+        frequency; NaN where the set holds no such mode (below its cutoff).
+    group_frequencies : ndarray, shape ``(n_g,)``
+        Where the group speeds sit (Hz): a set's frequency for a speed the
+        solver reported, the midpoint of a pair for a finite difference.
+    group_speeds : ndarray, shape ``(n_g, n_modes)``
+        Group speed (m/s); NaN where none is known.
+    model, backend, model_source_id : str or None
+        The engine the mode sets came from, for the figure's credit.
+    """
+
+    frequencies: np.ndarray
+    phase_speeds: np.ndarray
+    group_frequencies: np.ndarray
+    group_speeds: np.ndarray
+    model: str = ''
+    backend: Optional[str] = None
+    model_source_id: Optional[str] = None
+
+    _ARRAY_FIELDS = ('frequencies', 'phase_speeds', 'group_frequencies',
+                     'group_speeds')
+    _REPR_UNITS = {'phase_speeds': 'm/s', 'group_frequencies': 'Hz',
+                   'group_speeds': 'm/s'}
+    _XARRAY_FIELDS = {'frequency': 'frequencies',
+                      'group_frequency': 'group_frequencies',
+                      'phase_speed': 'phase_speeds',
+                      'group_speed': 'group_speeds'}
+
+    def _payload(self):
+        return {'phase_speed': (self.phase_speeds, ('frequency', 'mode'),
+                                'm/s'),
+                'group_speed': (self.group_speeds, ('group_frequency',
+                                                    'mode'), 'm/s')}
+
+    def _coords(self):
+        return {'frequency': (self.frequencies, 'Hz'),
+                'group_frequency': (self.group_frequencies, 'Hz'),
+                'mode': (np.arange(1, self.phase_speeds.shape[1] + 1), '')}
+
+    @property
+    def n_modes(self) -> int:
+        return int(self.phase_speeds.shape[1])
+
+    def plot(self, **kwargs):
+        """Draw this diagram with :func:`uacpy.plot.plot_dispersion`;
+        ``kwargs`` reach it. Returns ``(fig, ax)``."""
+        return plotter('plot_dispersion')(self, **kwargs)
+
+
+@dataclass(frozen=True, eq=False)
+class ExcitationPattern(ExportRecord):
+    """A source array's modal excitation at each mode's grazing angle, and
+    its free-field pattern folded over ±θ, what
+    :meth:`Modes.excitation_pattern` returns; ``.plot()`` draws both with
+    :func:`uacpy.plot.plot_mode_excitation`.
+
+    Attributes
+    ----------
+    grazing_angles_deg : ndarray, shape ``(n_modes,)``
+        Each mode's grazing angle (deg); NaN for a mode evanescent at the
+        reference speed.
+    excitation : ndarray, shape ``(n_modes,)``
+        ``|Σₙ wₙ·φₘ(zₙ)|`` per mode, in the mode shapes' normalisation.
+    pattern_angles_deg : ndarray
+        Grazing angles (deg) of the free-field pattern, from 0.
+    pattern : ndarray
+        ``max(|P(+θ)|, |P(−θ)|)``: the array beam pattern when
+        ``directional``, the array factor otherwise.
+    directional : bool
+        Whether the elements carry a beam pattern.
+    sound_speed : float
+        The reference speed (m/s) the angles are measured against.
+    n_sources : int
+        Elements in the array.
+    aperture : float
+        The array's vertical extent (m).
+    model, backend, model_source_id : str or None
+        The engine the modes came from, for the figure's credit.
+    """
+
+    grazing_angles_deg: np.ndarray
+    excitation: np.ndarray
+    pattern_angles_deg: np.ndarray
+    pattern: np.ndarray
+    directional: bool
+    sound_speed: float
+    n_sources: int
+    aperture: float
+    model: str = ''
+    backend: Optional[str] = None
+    model_source_id: Optional[str] = None
+
+    _ARRAY_FIELDS = ('grazing_angles_deg', 'excitation', 'pattern_angles_deg',
+                     'pattern')
+    _REPR_UNITS = {'grazing_angles_deg': 'deg', 'pattern_angles_deg': 'deg',
+                   'sound_speed': 'm/s', 'aperture': 'm'}
+    _XARRAY_FIELDS = {'grazing_angle': 'grazing_angles_deg',
+                      'excitation': 'excitation',
+                      'pattern_angle': 'pattern_angles_deg',
+                      'pattern': 'pattern'}
+
+    def _payload(self):
+        return {'grazing_angle': (self.grazing_angles_deg, ('mode',), 'deg'),
+                'excitation': (self.excitation, ('mode',), ''),
+                'pattern': (self.pattern, ('pattern_angle',), '')}
+
+    def _coords(self):
+        return {'mode': (np.arange(1, self.excitation.size + 1), ''),
+                'pattern_angle': (self.pattern_angles_deg, 'deg')}
+
+    def plot(self, **kwargs):
+        """Draw this with :func:`uacpy.plot.plot_mode_excitation`; ``kwargs``
+        reach it. Returns ``(fig, ax)``."""
+        return plotter('plot_mode_excitation')(self, **kwargs)

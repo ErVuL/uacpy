@@ -108,7 +108,8 @@ with closed forms and the published benchmarks, and where it falls short.
   attaches.
 - **[File I/O](guide/io.md)** — the readers and writers behind every model.
 - **[Utilities](guide/utilities.md)** — material presets, TL metrics,
-  sound-speed and density helpers, parallel batch runs.
+  sound-speed and density helpers, recording calibration (volts → Pa → dB,
+  §3), parallel batch runs.
 - **[Reproducibility](guide/reproducibility.md)** — what comes back
   byte-identical, what you have to pin to get it, and what has not been
   measured.
@@ -129,7 +130,11 @@ not a re-typed approximation of it. To paste one, run it with `docs/` on
 `sys.path` and import the shared names it uses from
 [`figure_scripts/_common.py`](figure_scripts/_common.py): the scenarios
 (`shallow_water()`, `layered_elastic()`, …) and the figure sizes `WIDE` and
-`TALL` (`from figure_scripts._common import shallow_water, WIDE, TALL`). The model pages also share a small set of
+`TALL` (`from figure_scripts._common import shallow_water, WIDE, TALL`). A
+scenario only one page uses lives in that page's own script, and imports the
+same way: `shelf_break()` of the environment page from
+`figure_scripts/environment.py`, `_time_series()` and `CUT_DEPTH` of the
+plotting page from `figure_scripts/plotting.py`. The model pages also share a small set of
 canonical environments, so comparing two models' plots compares the same water
 rather than two different setups.
 
@@ -152,10 +157,13 @@ python docs/check_structure.py
 
 ## Conventions
 
-- **Units**: metres, m/s, g/cm³, Hz, dB re 1 µPa.
-  Range and depth are metres — kilometres appear only on plot axes, inside
-  the native file formats, and in the data fetchers' `max_distance_km`
-  offset limit (named for its unit).
+- **Units**: metres, m/s, g/cm³, Hz, dB/λ (attenuation), dB re 1 µPa.
+  A name carries a unit suffix only when its unit is not SI (`_km`, `_kn`,
+  `_deg`, `_dbar`, `_dB`); density, attenuation, latitude/longitude, temperature and
+  salinity keep plain names. Range and depth are metres — kilometres appear
+  only on plot axes, inside the native file formats, and in the data layer's
+  geographic distances (`max_distance_km`, the `offset_km` / `distance_km` a
+  fetch reports, `great_circle_km`).
 - **Depth is positive down**; sea-surface altimetry is positive up.
 - **Range is measured from the source**, which sits at `r = 0`.
 - **Results carry no carriers.** A result knows its model, backend, provenance

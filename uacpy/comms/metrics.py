@@ -3,9 +3,12 @@ magnitude, and the theoretical bit-error rate of each scheme."""
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 from scipy.special import erfc
 import numpy as np
 
+from uacpy.acoustic_signal._results import PlottedResult
 from uacpy.comms.constellations import SCHEMES
 from uacpy.core.exceptions import ConfigurationError
 
@@ -98,7 +101,8 @@ def ber_theory(scheme, ebn0_dB):
     """Theoretical AWGN BER vs Eb/N0 (dB) for a Gray-mapped scheme.
 
     Exact for BPSK/QPSK; standard nearest-neighbour approximations for higher
-    M-PSK and square M-QAM (Proakis & Salehi):
+    M-PSK and square M-QAM (Proakis & Salehi, *Digital
+    Communications*, 5th ed.):
 
     * M-PSK symbol error ``P_M = 2 Q(sqrt(2 k Eb/N0) sin(pi/M))``, eq. (4.3-17).
     * square M-QAM ``P_M ~= 4 (1 - 1/sqrt(M)) Q(sqrt(3 k Eb/N0 / (M-1)))``,
@@ -111,16 +115,15 @@ def ber_theory(scheme, ebn0_dB):
     :func:`uacpy.comms.constellation` is Gray-mapped throughout.
 
     The two non-coherent binary modems the package ships have exact closed
-    forms (standard results, not checked against a source in this
-    project's corpus; they match this package's own demodulators in
-    simulation, pinned in the tests):
+    forms (standard results, uncited here; they match this package's own
+    demodulators in simulation, pinned in the tests):
 
     * ``'dbpsk'`` — binary DPSK with differential detection
       (:func:`dpsk_modulate` / :func:`dpsk_demodulate`, ``M=2``):
       ``P_b = exp(-Eb/N0) / 2``.
     * ``'bfsk'`` — orthogonal binary FSK with non-coherent (tone-energy)
       detection (:func:`fsk_modulate` / :func:`fsk_demodulate` with two
-      tones spaced by a multiple of ``1/symbol_duration_s``):
+      tones spaced by a multiple of ``1/symbol_duration``):
       ``P_b = exp(-Eb/(2 N0)) / 2``.
 
     Parameters
@@ -148,3 +151,48 @@ def ber_theory(scheme, ebn0_dB):
     valid = (*SCHEMES, "dbpsk", "bfsk")
     raise ConfigurationError(
         f"ber_theory: unsupported scheme {scheme!r}; valid: {', '.join(valid)}.")
+
+
+class BerTheory(PlottedResult, namedtuple("BerTheory", "ebn0_dB ber")):
+    """The theoretical AWGN bit-error rate ``ber`` of ``scheme`` at each
+    ``ebn0_dB``, what :func:`ber_theory_curve` returns: :func:`ber_theory`
+    on a grid of the caller's.
+
+    The tuple is the curve, so ``ebn0_dB, ber = ber_theory_curve(...)``
+    unpacks it; ``scheme`` rides on an attribute. :meth:`plot` draws it with
+    :func:`~uacpy.plot.plot_ber_curve` as a dashed theory line, over a
+    measured :class:`BerCurve` through ``ax=``.
+    """
+
+    _attrs = ("scheme",)
+    _plotter = "plot_ber_curve"
+
+    def __new__(cls, ebn0_dB, ber, *, scheme):
+        self = super().__new__(cls, np.asarray(ebn0_dB, dtype=float),
+                               np.asarray(ber, dtype=float))
+        self.scheme = str(scheme)
+        return self
+
+    def _field_units(self):
+        return {"ebn0_dB": "dB", "ber": ""}
+
+
+def ber_theory_curve(scheme, ebn0_dB) -> BerTheory:
+    """The theoretical AWGN BER of ``scheme`` over ``ebn0_dB``, as a curve
+    that draws itself: :func:`ber_theory` evaluated on that grid.
+
+    Parameters
+    ----------
+    scheme : str
+        As :func:`ber_theory` takes it.
+    ebn0_dB : array_like
+        Energy per bit over the noise density (dB), the curve's grid.
+
+    Returns
+    -------
+    BerTheory
+        ``(ebn0_dB, ber)`` with ``.scheme``; ``.plot(ax=ax)`` overlays it on
+        a measured curve.
+    """
+    ebn0_dB = np.atleast_1d(np.asarray(ebn0_dB, dtype=float))
+    return BerTheory(ebn0_dB, ber_theory(scheme, ebn0_dB), scheme=scheme)

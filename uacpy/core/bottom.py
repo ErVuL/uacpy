@@ -12,7 +12,8 @@ from typing import List, Tuple, Optional, Dict
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.boundary import (
-    BoundaryProperties, BoundaryType, SedimentLayer, _columns, _property_row,
+    BoundaryProperties, BoundaryType, SedimentLayer, _PROPERTY_UNITS,
+    _columns, _property_row,
     _HALFSPACE_DELEGATED, _LAYER_ACOUSTIC_FIELDS, _boundary_from_values,
     _delegate_write, _reduce_boundaries, _reduce_uniform_nodes,
 )
@@ -36,32 +37,8 @@ from uacpy.core._carrier import (
 from uacpy.core._export import CarrierExport
 
 __all__ = [
-    'SeabedColumn', 'Bottom', 'medium_density_at',
+    'SeabedColumn', 'Bottom',
 ]
-
-
-def medium_density_at(depth: float, tops, densities, bottom_depth: float,
-                      halfspace_density: float) -> float:
-    """``ρ(z)`` (g/cm³) of the medium holding ``depth`` (m) in a stack of
-    media.
-
-    Medium ``i`` spans ``tops[i]`` to the next top (to ``bottom_depth`` for
-    the last) at ``densities[i]``, and ``halfspace_density`` holds below the
-    stack. A depth on an interface belongs to the upper medium (the
-    convention of :meth:`SeabedColumn.at`). It is the ``ρ(z_s)`` of the
-    point-source modal sum (Jensen et al., *Computational Ocean Acoustics*,
-    eq. 5.14): a model run builds the stack from its environment, and a mode
-    set from the medium table its ``.mod`` recorded
-    (:meth:`~uacpy.core.results.MediaTable.density_at`).
-    """
-    z = float(depth)
-    tops = [float(t) for t in tops]
-    for i in range(len(tops)):
-        bottom = (tops[i + 1] if i + 1 < len(tops)
-                  else float(bottom_depth))
-        if z <= bottom:
-            return float(densities[i])
-    return float(halfspace_density)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -149,6 +126,9 @@ class SeabedColumn(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         """The layers, then the half-space, one row each (see
         :meth:`_rows`)."""
         return _columns(self._rows())
+
+    def _table_units(self):
+        return {**super()._table_units(), **_PROPERTY_UNITS}
 
     def _layers_text(self) -> Optional[str]:
         """``'2 layers 30 m'`` (count and total thickness, and ``elastic``
@@ -289,21 +269,15 @@ class SeabedColumn(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
         ``'halfspace'`` → the deep half-space; ``'top_layer'`` → topmost
         layer's properties (half-space when there are no layers);
-        ``'volume_average'`` → thickness-weighted **arithmetic** mean of
+        ``'volume_average'`` → the thickness-weighted **arithmetic** mean of
         ``sound_speed``, ``density``, ``attenuation``, ``shear_speed`` and
         ``shear_attenuation`` (m/s, g/cm³, dB/λ, averaged as plain numbers)
         over the finite layers **and the half-space**, the half-space carrying
         the deepest layer's thickness as its weight (it has none of its own).
-        It is a bookkeeping quantity with no acoustic basis: no effective-
-        medium theory averages wave speeds linearly, and the half-space has no
-        thickness to weight. Wood's rule — averaging ρ and the compliance
-        1/(ρc²) over the same two metres — gives about 1720 m/s for 1 m of
-        1500 m/s, 1.4 g/cm³ mud over a 5250 m/s, 2.7 g/cm³ basalt half-space,
-        where this method returns 3375 m/s and 2.05 g/cm³: a thin layer over a
-        fast basement lands between the two, not on the layer. Reach for
-        ``'top_layer'`` when the layer is what the field sees, or a model that
-        keeps the stack (``supports_feature('layered_bottom')``). Half-space
-        alone when there are no layers.
+        1 m of 1500 m/s, 1.4 g/cm³ mud over a 5250 m/s, 2.7 g/cm³ basalt
+        half-space gives 3375 m/s and 2.05 g/cm³. A model that keeps the stack
+        is listed by ``supports_feature('layered_bottom')``. Half-space alone
+        when there are no layers.
 
         The half-space is the template for the non-blendable fields, so a
         ``'vacuum'`` / ``'rigid'`` column collapses back to that parameter-free
@@ -351,9 +325,9 @@ class SeabedColumn(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         else:
             # Thickness-weighted mean over the finite layers plus the
             # half-space. The semi-infinite half-space has no finite thickness,
-            # so it is weighted by the deepest layer's thickness — a pragmatic
-            # choice that keeps it comparable to the adjacent layer rather than
-            # dominating (∞ weight) or vanishing (0).
+            # so it takes the deepest layer's thickness as its weight: it
+            # counts as much as the layer above it, rather than dominating
+            # (∞ weight) or vanishing (0).
             weights = np.array([float(la.thickness) for la in self.layers])
             weights = np.append(weights, float(weights[-1]))
 
@@ -486,7 +460,7 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     def data_sources(self) -> tuple:
         """Every column's provenance, exact repeats removed (harmonised with
         the leaf carriers and ``env.data_sources``). On a range-dependent
-        bottom each record carries its column's range as ``range_m``."""
+        bottom each record carries its column's range as ``range``."""
         return dedupe_provenance(
             self.columns,
             ranges=self.ranges if len(self.columns) > 1 else None)
@@ -531,6 +505,9 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         return _columns([{'range': float(r), **row}
                          for r, column in zip(ranges, self.columns)
                          for row in column._rows()])
+
+    def _table_units(self):
+        return {**super()._table_units(), **_PROPERTY_UNITS}
 
     def __repr__(self) -> str:
         if not self.is_range_dependent:
@@ -716,7 +693,7 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         return np.array([c.halfspace.roughness for c in self.columns])
 
     # ── reductions ──────────────────────────────────────────────────────────
-    def collapse_range(self, method: str = 'r0') -> 'Bottom':
+    def collapse_range(self, method: str = 'median') -> 'Bottom':
         """Reduce the range axis to a single column (range-independent result).
 
         ``'r0'`` / ``'rmax'`` pick the first / last column (layers kept).
@@ -738,11 +715,14 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         Parameters
         ----------
         method : {'r0', 'rmax', 'mean', 'median'}, optional
-            The reduction (see above). Default ``'r0'``.
+            The reduction (see above). Default ``'median'``, the reduction
+            every engine applies to a range-dependent seabed by default
+            (``collapse={'bottom_range': 'median'}``), so the method and a
+            run answer the same call the same way.
         """
         # Validated before the early return: a range-independent bottom has
-        # nothing to reduce, and returning first made a typo silent until the
-        # user switched to a range-dependent environment.
+        # nothing to reduce, and returning first would leave a typo silent
+        # until the environment became range-dependent.
         if method not in RANGE_COLLAPSE_METHODS:
             raise ConfigurationError(
                 f"Bottom.collapse_range: unknown method={method!r}; "
@@ -813,13 +793,14 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             b = Bottom(columns=new_cols, ranges=b.ranges)
         return b
 
-    def to_halfspace(self, range_method: str = 'r0') -> BoundaryProperties:
+    def to_halfspace(self, range_method: str = 'median') -> BoundaryProperties:
         """Collapse fully to a single ``BoundaryProperties``.
 
         Parameters
         ----------
         range_method : str, optional
-            The range reduction (:meth:`collapse_range`). Default ``'r0'``.
+            The range reduction (:meth:`collapse_range`). Default
+            ``'median'``, as :meth:`collapse_range`.
         """
         return self.collapse_range(range_method).columns[0].collapse_layers('halfspace')
 
@@ -911,8 +892,8 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         water_sound_speed, water_density : float, optional
             In-situ seawater properties the ratios scale by.
         """
-        from uacpy.core.sediment import canonical_grain_size_selection
-        model, hamilton_fit = canonical_grain_size_selection(
+        from uacpy.core.sediment import _canonical_grain_size_selection
+        model, hamilton_fit = _canonical_grain_size_selection(
             model, hamilton_fit, who='Bottom.from_grain_size')
         return cls.from_halfspace(BoundaryProperties.from_grain_size(
             grain_size_phi, model=model, hamilton_fit=hamilton_fit,

@@ -95,7 +95,7 @@ march actually delivers shrinks as the step grows, so order, step size and
 angle are a single trade rather than three independent ones.
 
 That trade is the single most important thing to understand about RAM's
-numerics, and it is what `angle_max` controls: you declare how wide an angular
+numerics, and it is what `angle_max_deg` controls: you declare how wide an angular
 window the answer needs, and the grid optimiser prices it.
 
 **The validity condition is the one-way assumption**, not `D/λ`. There is no
@@ -131,7 +131,7 @@ asked for.
 | You need the modes | No modal decomposition | [Kraken](kraken.md) |
 | Reference-grade accuracy check | The PE is an approximation; a wavenumber integral is not | [Scooter](scooter.md), [OASES](oases.md) |
 | Fast shear seabed (rock) | `rams` needs `dz ≤ λ_s/14` (the automatic grid refines to it) and diverges on a coarser pinned grid — see [Gotchas](#9-gotchas) | [OASES](oases.md), [Scooter](scooter.md) |
-| Stepped bathymetry over a dense seabed | Every backend keeps the field across a step face, which loses energy in proportion to the density contrast: +4.4 to +5.5 dB too quiet past a corrugation over a density-2.5 seabed — see [Gotchas](#9-gotchas) | No uacpy model is clean here; [Kraken](kraken.md) `mode_coupling='coupled'` lands +1.2 dB on that case |
+| Stepped bathymetry over a dense seabed | Every backend keeps the field across a step face, which loses energy in proportion to the density contrast: +4.4 to +5.8 dB too quiet past a corrugation over a density-2.5 seabed (`mpirams` +4.41 to +5.31 dB over its grids, `ramgeo` +5.82) — see [Gotchas](#9-gotchas) | No uacpy model is clean here; [Kraken](kraken.md) `mode_coupling='coupled'` lands +2.83 dB on that case (+4.02 dB with `n_segments=209`) |
 | Several source depths in one deck | One `(zs, f)` per march; `run()` loops the depths and stacks them | [Bellhop](bellhop.md) marches all depths in one call |
 
 ---
@@ -202,8 +202,8 @@ The five rules, all `ConfigurationError`:
 | `mpirams` / `ramgeo` / `ramsurf` | elastic seabed | fluid PEs; shear would be dropped |
 | `mpirams` / `ramgeo` / `rams` | `env.altimetry` set | they model a flat pressure-release surface |
 | `ramsurf` | flat surface | its defining feature is absent |
-| `rams` | fluid seabed | its shear machinery degenerates and it returns a **null field** — no energy anywhere — rather than failing |
-| `rams` (forced **or** auto-dispatched) | top sediment layer with `shear_speed=0` over an elastic stack | `rams0.5.f:593-600` divides by the shear modulus of the first sediment node below the seafloor, so a fluid top layer makes every sample NaN — no `dz`, `n_pade` or `theta` choice changes it |
+| `rams` | fluid seabed | every sediment node has `mub = rhob·cs² = 0` (`rams0.5.f:204`) and the fluid–solid interface rows divide by it (`:593-600`) |
+| `rams` (forced **or** auto-dispatched) | top sediment layer with `shear_speed=0` over an elastic stack | `rams0.5.f:593-600` divides by the shear modulus of the first sediment node below the seafloor, so a fluid top layer makes every sample NaN — no `dz`, `n_pade` or `rams_rotation_angle_deg` choice changes it |
 
 The fourth is the reason the rule exists in both directions: a backend
 whose defining feature is missing does not fall back gracefully. The fifth
@@ -300,7 +300,7 @@ Leaving `dr` and `dz` unset hands the grid to the **Lytaev (2023) mesh
 optimiser**, which picks the coarsest `(dr, dz)` whose accumulated single-step
 Padé error stays under `accuracy` over the whole marched range. The error is
 scored on the **accuracy band** of the spectral variable `ξ = (k_r/k₀)² − 1`:
-the water column, widened to contain `c0`, out to the wider of `angle_max` and
+the water column, widened to contain `c0`, out to the wider of `angle_max_deg` and
 the seabed's *critical angle* — every component that carries energy to the far
 field. A 2400 m/s rock traps modes out to 51° whatever aperture you named, and
 scored on the 30° aperture alone it read *better* than sand while measuring
@@ -312,8 +312,8 @@ three have defaults:
 
 | Knob | Default | What it means |
 |---|---|---|
-| `accuracy` | `None` | budget on the single-step Padé error accumulated over the march. Unset → the default chooser's target `1e-3` (uacpy guidance), relaxed, floored and capped as below, each a log line; pinned → met as given (no relaxation, floor or cap), or refused when no grid on the ladders meets it |
-| `angle_max` | `None` | the widest propagation angle the spectrum must represent. Unset → Lytaev §5.5's `max(θ_src, θ_bottom)`: 30° (the aperture of Lytaev's §5.1 example) widened to the bathymetry's steepest slope; pinned → used as given, never narrowed (a notice citing §5.5 when it is below the slope) |
+| `accuracy` | `None` | budget on the single-step Padé error accumulated over the march. Unset → the default chooser's target `1e-3` (Lytaev 2023 §5.1: "In all the examples, target accuracy ε is set to 10⁻³"), relaxed, floored and capped as below, each a log line; pinned → met as given (no relaxation, floor or cap), or refused when no grid on the ladders meets it |
+| `angle_max_deg` | `None` | the widest propagation angle the spectrum must represent. Unset → Lytaev §5.5's `max(θ_src, θ_bottom)`: 30° (the aperture of Lytaev's §5.1 example) widened to the bathymetry's steepest slope; pinned → used as given, never narrowed (a notice citing §5.5 when it is below the slope) |
 | `c0` | `None` | the PE reference speed; `None` → Lytaev **Eq. (15)** on the accuracy band |
 
 `c0` deserves a note: it is the *algorithmic* expansion point — the speed
@@ -324,7 +324,7 @@ sand, 2047 m/s over hard rock, where the trapped-mode end of the band binds.
 ![RAM grid optimiser](figures/ram_grid.png)
 
 Both panels come from the same 100 m channel (1490–1500 m/s water over
-1650 m/s sand) at 200 Hz over 5 km. Widening `angle_max` from 10° to 45° costs
+1650 m/s sand) at 200 Hz over 5 km. Widening `angle_max_deg` from 10° to 45° costs
 nearly a factor of five in range step (127 m to 27 m), because the rational
 approximation has to stay accurate over a wider angular window — and `c0`
 moves with it, since Eq. (15) centres the band for the angle you asked for;
@@ -345,15 +345,16 @@ to about **15 range steps** — measured against the same march at an eighth of
 the step, more than 0.1 dB out to 14 steps of 38 m and within 0.01 dB beyond
 22 — nor the
 **seafloor interface**, whose position to a
-fraction of a cell sets the trapped modes on a fast seabed (hard rock at 200 Hz,
-`dz = λ/250`: 3.3 dB rms from Kraken with the seafloor on a node, 1.8 a
-quarter cell below it, 1.3 mid-cell), which is why the grid places it
+fraction of a cell sets the trapped modes on a fast seabed (hard rock, 5500 m/s,
+at 200 Hz, `dz = λ/250`: 3.55 dB rms from Kraken with the seafloor on a node,
+0.96 a quarter cell below it, 1.59 mid-cell, 3.70 three quarters down), which is
+why the grid places it
 (constraint 2 below, and [§9](#9-gotchas)). The grid line
 also reports the stability band's growth (`max |P/Q| − 1` per step outside the
 accuracy band), 1e-15 to 1e-10 on every case tried.
 
 The near field has a geometric warning of its own. When a receiver's direct or
-surface-reflected path is steeper than the band (the wider of `angle_max` and
+surface-reflected path is steeper than the band (the wider of `angle_max_deg` and
 the fastest medium's critical angle), the run gives a `NumericsWarning` naming
 the steepest path and the first range clear of it — the same geometry as
 Kraken's and Scooter's `c_high` notice. On the sand channel at 200 Hz (source
@@ -365,9 +366,11 @@ Kraken's and Scooter's `c_high` notice. On the sand channel at 200 Hz (source
 The optimiser is exported (module `uacpy.models.pe_grid`, re-exported from
 `uacpy.models`), so a pinned `(dr, dz)` can be scored before a run —
 `uacpy.models.grid_error` returns the same `τ·n_steps` the log line quotes, and
-`optimize_grid` the coarsest pair meeting `eps` (it raises
-`GridInfeasibleError`, a `ConfigurationError`, when none does). The accuracy
-band's speeds are the water column's, widened to contain `c0`:
+`optimize_grid` the coarsest pair meeting `eps` as a `GridChoice` (`.dr`,
+`.dz`, `.predicted_error`, …; it raises `GridInfeasibleError`, a
+`ConfigurationError`, when none does). Both score RAM's own Padé order, 8, by
+default (`p=`). The accuracy band's speeds are the water column's, widened to
+contain `c0`:
 
 ```python
 from uacpy.models import optimal_c0, grid_error
@@ -375,7 +378,7 @@ from uacpy.models import optimal_c0, grid_error
 # 100 m of 1500 m/s water over 1600 m/s sand, 200 Hz, out to 5 km
 c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=1600.0)          # 1591 m/s
 kw = dict(frequency=200.0, c_min=min(1500.0, c0), c_max=max(1500.0, c0),
-          x_max=5000.0, c0=c0, angle_max=30.0, c_max_all=1600.0, p=8)
+          x_max=5000.0, c0=c0, angle_max_deg=30.0, c_max_all=1600.0)
 grid_error(dr=38.23, dz=0.5, **kw)     # 1.85 — the λ/15 floor: at or over 1, so RAM refines dz
 grid_error(dr=38.23, dz=0.366, **kw)   # 0.993 — λ/20, the grid RAM picks (verbose='info')
 grid_error(dr=38.23, dz=1.0, **kw)     # 7.39 — about twice the floor
@@ -385,8 +388,8 @@ Compare a pinned pair against the automatic grid's score rather than against
 `eps`: the `dz` floor (constraint 1 below) routinely leaves the automatic grid
 above the budget, and the score is a bound on the steepest component, not the
 field error. For `rams`, `rams_dz_shear_cap(c_s, frequency)` gives the `λ_s/14` cap,
-and `rams_stable_dr` / `rams_stable_theta` / `rams_growth_margin` the
-range-step stability of constraint 3.
+and `rams_stable_dr` / `rams_stable_theta` / `rams_growth_margin` (a
+`GrowthMargin`) the range-step stability of constraint 3.
 
 ### What the optimiser is not allowed to do
 
@@ -397,7 +400,7 @@ error model does not know about them:
    (`write_ram_in.m:18` `nseg_lambda = 15`, `write_env_RAM.m:24`), the
    depth-grid cost floor — where the depth
    search *starts*, not where it stops. When the band's steepest scored
-   component — the seabed's critical-angle mode, or the `angle_max` aperture
+   component — the seabed's critical-angle mode, or the `angle_max_deg` aperture
    edge — scores at or above 1 on the floored grid (see below), `dz` is
    refined from the floor to the coarsest value that scores under 1 (the
    aperture edge binds on most kHz runs: on 100 m of water, 500 Hz over sand
@@ -422,12 +425,15 @@ error model does not know about them:
    the automatic path marches, the node is never the best placement (sand
    at 200 Hz on the λ/15 grid: 1.0 dB rms far-field error on the node, 0.4
    a quarter cell down, 0.7 mid-cell; rock at 200 Hz on its λ/64 grid: 2.2 /
-   0.7 / 3.1). The shallowest column has the fewest water points, so its
-   placement costs most (`env.depth` is the deepest, and only coincides on
-   flat bathymetry);
+   0.7 / 3.1). On slower seabeds another fraction can win (0.375 on an
+   80 m / 150 Hz / c_b 1600 m/s channel, and on the 50 m Pekeris guide of
+   §6); no cited source explains why one placement wins, so the quarter is
+   uacpy guidance. The shallowest column has the fewest water
+   points, so its placement costs most (`env.depth` is the deepest, and only
+   coincides on flat bathymetry);
 3. a **`dr` tightening on `rams`** — `rams_dr_factor` (default 5×), an
    independent `dr ≤ c_min/(5f)` cap, and a **stability rule**, whichever is
-   tightest. With the default `rams_rotation=True`, `rams0.5` does not march the
+   tightest. With the rotation on (the default, `rams_rotation=None`), `rams0.5` does not march the
    split-step Padé exponential the optimiser scores: its `rpade` builds
    Crank-Nicolson coefficients and the march is a Crank-Nicolson step in
    range of the rotated square root — second-order in `dr`, with real
@@ -476,7 +482,7 @@ error model does not know about them:
    to 0.96 ran and every grid from 1.16 up grew, so the rule holds unchanged
    — and the higher order lowers the growth (2 kHz at 0.4 m: ratio 1.26 at
    order 6, 0.05 at 8). Where it exceeds the leak — 1 kHz in 4000 m of
-   water, 20 kHz in 100 m — a `rams_rotation_angle` left `None` (the default) takes
+   water, 20 kHz in 100 m — a `rams_rotation_angle_deg` left `None` (the default) takes
    the widest stable angle on the ladder 45°, 40°, 30°, 25°, 20°, 15°, 10°,
    5° for that frequency, with a warning naming it (and the run is refused
    when no angle on the ladder is stable); a pinned angle is marched as
@@ -542,10 +548,10 @@ pinned `dr` and `dz` it chooses nothing, and the run says so.
 
 If no grid is feasible at all, uacpy triples `ε` while the next rung stays
 below 1 (`EPS_LADDER_CEILING`, where the score saturates; from the default
-`1e-3` the last rung tried is 0.729) and then steps `angle_max` down
+`1e-3` the last rung tried is 0.729) and then steps `angle_max_deg` down
 30° → 20° → 15°, restarting the `ε` ladder each time, before giving up with a
 `ConfigurationError`. All of that is the default chooser: a pinned `accuracy`
-is never relaxed, and a pinned `angle_max` never narrowed. An `ε`-only
+is never relaxed, and a pinned `angle_max_deg` never narrowed. An `ε`-only
 relaxation up to 0.5 is routine at and above ~500 Hz over a few km — the
 marched `dz` is then the floor or its refinement — so it follows the floor's
 policy: a log line. The 0.729 rung always warns, quoting the rescored error and the
@@ -554,7 +560,7 @@ over 50 m of water on a 1700 m/s seabed to 2 km, and 1.5 kHz over 100 m to
 10 km, march in 1 s and 6 s with a refined `dz` and read 0.32 and 0.10 dB
 median |dTL| from Scooter (range-averaged levels within 0.13 dB), where a
 0.5 ceiling refused both; 3 kHz over 50 m to 3 km marches in 0.8 s and reads
-0.26 dB median (0.65 dB rms) from `Scooter(c_high=1e9)`. Narrowing `angle_max` changes the physics you asked for and always
+0.26 dB median (0.65 dB rms) from `Scooter(c_high=1e9)`. Narrowing `angle_max_deg` changes the physics you asked for and always
 warns, naming the step. Either message quotes the returned grid's own
 predicted error; a value at or above 1 is labelled *not resolved by the
 model*, because the score saturates there and ranks nothing. The refusal
@@ -563,7 +569,7 @@ itself tells you how to converge a pinned grid by hand — see
 
 **A fast seabed gets its `dz` refined, and a warning only where the budget
 stops it.** When the accuracy band reaches the critical angle (a seabed faster
-than the water and steeper than `angle_max`), the steepest scored component is
+than the water and steeper than `angle_max_deg`), the steepest scored component is
 a trapped mode that carries the far field, and the λ/15 floor cannot resolve
 it: rock (51°) scores 9.3 at 100 Hz and 18 at 200 Hz on the floored grid,
 measured 1.7 and 6.9 dB rms from Kraken at 1–5 km. On sand at 200 Hz the
@@ -618,7 +624,7 @@ reproduces to 0.014 dB:
 |---|---|---|---|---|
 | default | 458.7 m | 4.06 m (`λ/15` floor, placed) | 3.79 dB | 0.25 s |
 | `accuracy=1e-3` | 458.7 m | 0.256 m (Lytaev's own) | 1.80 dB | 1.1 s |
-| `angle_max=65, accuracy=1e-3` | 45.1 m | 0.051 m | 0.024 dB | 6.1 s |
+| `angle_max_deg=65, accuracy=1e-3` | 45.1 m | 0.051 m | 0.024 dB | 6.1 s |
 | `dr=25, dz=0.25` | 25 m | 0.25 m | 0.011 dB | 0.44 s |
 
 The engine is capable of 0.011 dB on that problem; the default grid is over
@@ -645,15 +651,35 @@ a fast seabed's critical angle, but a lossless soft bottom returns every angle:
 this guide's six modes sit at 8.6–64.2°, the mid-depth source excites the odd
 ones, and mode 5 at 48.6° lies outside the scored band (the default grid scores
 0.17 on the 30° band, 7.5 out to 50° and 16 out to 65°). Lytaev's own grid at
-`accuracy=1e-3` still reads 1.80 dB; **`angle_max=65, accuracy=1e-3`**, the
+`accuracy=1e-3` still reads 1.80 dB; **`angle_max_deg=65, accuracy=1e-3`**, the
 aperture holding every mode the bottom returns, converges it — 0.024 dB median,
-0.096 dB p90. On a guide whose bottom returns steep energy, set `angle_max` to
+0.096 dB p90. On a guide whose bottom returns steep energy, set `angle_max_deg` to
 the steepest mode you need and pin `accuracy`.
 
 The shortfall is not a low-frequency corner: under a geometry scaled by water
 depth the error tracks `f·H`, so 100 Hz in 200 m of water behaves like 25 Hz in
 800 m. In deep refracting water (3000 m, 25 Hz, 60 km) the default sits 0.78 dB
 from a converged grid.
+
+**On a Pekeris guide the error grows with range.** Scored every 25 m from 1 to
+10 km against the closed-form trapped-mode sum (water density 1.0 here and
+below; validation.md §1.1's guide: 100 m, 50 Hz, c_b 1800 m/s, ρ_b 1.8,
+lossless, source 25 m, receivers 30 / 50 / 75 m), the default grid reads 0.48 dB median and 1.88 dB p90 — 0.24 / 0.59 /
+0.80 dB median over 1–4 / 4–7 / 7–10 km
+(`test_benchmarks_analytic.py::test_ram_tl_on_a_dense_range_axis_matches_pekeris_modal_sum`);
+the five ranges the coarser benchmark scores read 0.52. Other guides drift
+further: 50 m / 150 Hz / c_b 1650 / ρ_b 1.8 (source 20 m, receiver 35 m)
+reads 1.02 dB median, 4.27 p90, from 0.59 over 1–4 km to 1.53 over 7–10 km;
+100 m / 50 Hz / c_b 1700 / ρ_b 1.5 (source 50 m, receiver 30 m) reads 0.95 /
+3.71. On the 50 m guide the 1 km mean level agrees with the modal sum to
+0.04 dB median, so it is the interference pattern that drifts, and the
+seafloor's place in its cell sets most of it: at the default `dz` (0.396 m,
+λ/25), 0 / 0.125 / 0.25 (the default) / 0.375 / 0.5 / 0.75 of a cell below
+the node reads 3.18 / 2.29 / 1.02 / 0.18 / 1.35 / 3.23 dB median, while `dr`
+(10 m or 51 m) and `c0` (1500–1591 m/s) change nothing; refining `dz`
+converges it (0.198 / 0.099 / 0.050 m: 0.65 / 0.36 / 0.19 dB). Seabed loss
+shrinks it (against Kraken: 0.1 dB/λ 1.12 dB median, 0.5 dB/λ 0.31 dB with
+no growth). Nothing warns; on a shallow low-loss guide, pin a finer `dz`.
 
 **Where the default really is safe is narrower than a mode count suggests**, and
 it is set by `kH/π = 2fH/c`, the number of trapped modes (median |ΔTL| of the
@@ -723,7 +749,7 @@ override one the selected backend cannot read.
 | `zmax` | `None` | PE domain depth (m). `None` → seafloor + sediment stack (or a deeper source) + a pad of real seabed + absorbing layer; the pad holds the depth the continuous spectrum's bottom field reaches over the track (see *The domain floor absorbs*). On mpiramS the domain sits on the `dz` lattice (`peramx.f90:391, :404` space its output depths `zmax/(icount−1)` while its operator uses `dz`): an automatic `zmax` is snapped onto it, a pinned one keeps its value with the automatic `dz` chosen to divide it, and a pinned pair off the lattice is refused naming the nearest `zmax` on it. |
 | `c0` | `None` | PE reference speed (m/s). `None` → Lytaev Eq. (15); Collins' own sample uses 1600 m/s "to obtain an accurate rational approximation for phase speeds between 1500 and 1700 m/s" (`ram.pdf` p.8). |
 | `accuracy` | `None` | Optimiser error budget. Unset → the default chooser's `1e-3` target (relaxed / floored / capped, logged); pinned → met as given, or refused (§6). |
-| `angle_max` | `None` | Widest propagation angle, degrees. Unset → 30° widened to the steepest bathymetry slope (Lytaev §5.5); pinned → used as given, never narrowed. |
+| `angle_max_deg` | `None` | Widest propagation angle, degrees. Unset → 30° widened to the steepest bathymetry slope (Lytaev §5.5); pinned → used as given, never narrowed. |
 | `n_pade` | `8` | Number of Padé terms, 2–10. 8 is Collins' sample deck (ram.pdf p.12), Lytaev's `[7/8]` and the Acoustics Toolbox RAM writer's order. The binaries find the Padé roots with a Laguerre iteration that stops when it does not converge; at order 8 it did on a few small `k₀·dr` steps a pinned `dr` marched (36.5 Hz at 0.5 m and 75 Hz at 1 m on ramgeo, a 25–75 Hz band at 2 m on mpiramS) — the run raises naming the order and the step, and order 6 ran every one of them (half the step ran the ramgeo pair, not the band). |
 
 **Stability**
@@ -731,9 +757,9 @@ override one the selected backend cannot read.
 | Name | Default | Meaning |
 |---|---|---|
 | `n_stability` | `None` | How many stability constraints, written as given (`0` turns them off). They annihilate the evanescent spectrum (`Re X < −1`) and are what keep the self-starter and the energy-conservation correction well-behaved. `None` → 1: "We have found that ns = 1 or 2 is effective for most problems" (ram.pdf p.3), and Collins' sample deck's `ns = 1`. rams0.5 takes `ns = 1` in its own `epade` call (`rams0.5.f:176`), so a value set there gives a notice. **[mpiramS, ramgeo, ramsurf]** |
-| `stability_range_m` | `None` | Range (m) beyond which those constraints are switched off. They inject a little artificial attenuation — negligible on ordinary problems, but Collins notes it can matter in deep water at very long range, which is the case this knob exists for. On mpiramS with more than one output range the march compares `rs` against the distance to the *next* output range (`mpiramS/src/ram.f90:68,166,251`), so the receiver spacing, not `rs`, decides where the terms switch off and uacpy warns that the pin is largely inert. `None` keeps the constraints at every range on both kinds of backend, the RAM guide's default: "When rs is set to 0, the stability constraints are used for all ranges" (`ram.pdf` p.7). **[mpiramS, ramgeo, ramsurf]** |
-| `rams_rotation_angle` | `None` | Padé rotation angle, degrees. `None` takes 45° unless that angle's own growth on the steepest propagating components outruns the seabed's leak (§6 constraint 3), then the widest stable angle, per frequency, with a warning (refused when no angle is stable). A float pins it (marched as given; a `NumericsWarning` when unstable); a callable `f → θ` varies it across a band (the run record holds it as its repr, so `from_run_settings` refuses that record). 45° is the tuned angle of one Pekeris-elastic case (`tests/test_cross_model_agreement.py`, at order 6; order 8 reads 0.528 against 0.526 dB rms there), in line with the reference at four Padé terms and up in Milinazzo, Zala & Brooke (1997) Fig. 11. Taking the widest stable angle follows the same paper's "the ability of the Padé approximation to accurately represent the nonpropagating mode wave numbers is much improved" at larger angles; it also notes that higher angles need more terms, and NRL's RAMS guide raises theta only "to the point that you don't see NaN" (`ramsurf/readme.orig`) — the widest is uacpy guidance, measured with the stability rule. **[rams]** |
-| `rams_rotation` | `True` | Padé branch-cut rotation. uacpy guidance: no source prefers the rotated coefficients; the 45° tuning and the stability rule were measured with rotation on. **[rams]** |
+| `stability_range` | `None` | Range (m) beyond which those constraints are switched off. They inject a little artificial attenuation — negligible on ordinary problems, but Collins notes it can matter in deep water at very long range, which is the case this knob exists for. On mpiramS with more than one output range the march compares `rs` against the distance to the *next* output range (`mpiramS/src/ram.f90:68,166,251`), so the receiver spacing, not `rs`, decides where the terms switch off and uacpy warns that the pin is largely inert. `None` keeps the constraints at every range on both kinds of backend, the RAM guide's default: "When rs is set to 0, the stability constraints are used for all ranges" (`ram.pdf` p.7). **[mpiramS, ramgeo, ramsurf]** |
+| `rams_rotation_angle_deg` | `None` | Padé rotation angle, degrees. `None` takes 45° unless that angle's own growth on the steepest propagating components outruns the seabed's leak (§6 constraint 3), then the widest stable angle, per frequency, with a warning (refused when no angle is stable). A float pins it (marched as given; a `NumericsWarning` when unstable); a callable `f → θ` varies it across a band (the run record holds it as its repr, so `from_run_settings` refuses that record). 45° is the tuned angle of one Pekeris-elastic case (`tests/test_cross_model_agreement.py`, at order 6; order 8 reads 0.528 against 0.526 dB rms there), in line with the reference at four Padé terms and up in Milinazzo, Zala & Brooke (1997) Fig. 11. Taking the widest stable angle follows the same paper's "the ability of the Padé approximation to accurately represent the nonpropagating mode wave numbers is much improved" at larger angles; it also notes that higher angles need more terms, and NRL's RAMS guide raises theta only "to the point that you don't see NaN" (`ramsurf/readme.orig`) — the widest is uacpy guidance, measured with the stability rule. **[rams]** |
+| `rams_rotation` | `None` | Padé branch-cut rotation. `None` = on, uacpy guidance: no source prefers the rotated coefficients; the 45° tuning and the stability rule were measured with rotation on. A set value (`True` included) on another backend gets the not-used notice. **[rams]** |
 | `rams_dr_factor` | `None` | Divisor of the optimised `dr` (≥ 1), beside the `λ/5` cap and the stability rule; the tightest wins. `None` → 5.0 (uacpy guidance); a set value is used as given, `1.0` leaving the cap and the rule alone. It divides the automatic `dr` only: beside a pinned `dr`, or on another backend, it gives a notice that it is not used. **[rams]** |
 
 **Environment handling**
@@ -741,7 +767,7 @@ override one the selected backend cannot read.
 | Name | Default | Meaning |
 |---|---|---|
 | `absorber_width_wavelengths` | `20.0` | Absorbing layer at the base of the PE domain (below the sediment stack and a pad of real seabed), in wavelengths `c0/f` (`freq_min` on the broadband paths). Sizes `zmax` on every backend. uacpy guidance, measured on lossless seabeds (§9, *The domain floor absorbs*); far thicker than the RAM guide's "the attenuation is increased over the lower few wavelengths of the grid" (`ram.pdf` p.7, about 3 wavelengths in Collins' sample deck) or Jensen et al.'s H/3 (*Computational Ocean Acoustics*, Sect. 6.5.3). |
-| `absorber_attenuation` | `10.0` | Attenuation at the domain floor, dB/wavelength. Drives the attenuation ramp on every backend. `10` is the floor of Collins' sample ramp, `900.0 0.5` / `1000.0 10.0` (`ram.pdf` p.12, Fig. 2); upstream mpiramS used 5 (`third_party/MODIFICATIONS.md:2431-2432`). |
+| `absorber_attenuation` | `None` | Attenuation at the domain floor, dB/wavelength; drives the attenuation ramp on every backend. `None`: 10, the floor of Collins' sample ramp, `900.0 0.5` / `1000.0 10.0` (`ram.pdf` p.12, Fig. 2; upstream mpiramS used 5, `third_party/MODIFICATIONS.md:2431-2432`), raised to the seabed's own attenuation at the top of the absorbing layer where that is higher, so the ramp never decreases (`ram.pdf` p.7, "increased over the lower few wavelengths"). A set value is written as given; one below the seabed half-space's attenuation, which makes the ramp decrease, gives a notice. |
 | `n_sediment_points` | `None` | Sediment-profile control points, written as given (≥ 4). `None` → one per depth cell over the sediment span, `ceil(sedlayer/dz) + 3`, and at least 1000 (uacpy guidance). **[mpiramS]** |
 | `earth_curvature` | `False` | Earth-curvature correction of the water column (depths and speeds), bathymetry, altimetry and source depth (`peramx.f90:268-281`). Off by default so RAM models the flat Earth every other engine does (uacpy guidance; the vendored mpiramS sample deck also runs flat, `mpiramS/in.pe`); turn it on beyond about 56 km, where it moves the first convergence zone about 1 % closer and agrees better with data (Etter §5.5.2). mpiramS applies it inside the binary; the Collins decks get the same formulas from uacpy and their output depth axis is mapped back. **[all backends]** |
 | `collapse` | `None` | Per-feature collapse policy. |
@@ -892,19 +918,22 @@ leaves an amplitude error that grows with the contrast, which an
 energy-conserving or single-scattering face condition removes. Measured on
 Evans & Gilbert's square-wave corrugation (100 m of water, 10 m steps every
 50 m from 5 to 10 km, 25 Hz, 1704.5 m/s seabed) against COUPLE07's two-way
-solution, the mean offset over 10–18 km with only the seabed density changed:
+solution at the reference's water density 1.0, the mean offset over 10–18 km
+with only the seabed density changed (`mpirams` dr 5 m, dz 0.25 m, Padé 6;
+`ramgeo` dr 0.5 m; `rams` on its automatic grid):
 
 | seabed density | `mpirams` | `ramgeo` | `rams` (50 m/s shear) |
 |---|---|---|---|
-| 2.5 | +4.35 dB | +5.47 dB | +5.03 dB |
-| 1.5 | +0.50 dB | +0.71 dB | +0.42 dB |
+| 2.5 | +4.70 dB | +5.82 dB | +5.81 dB |
+| 1.5 | +0.69 dB | +0.94 dB | +0.81 dB |
 
-(`mpirams` at density 1.0: −0.11 dB.) The `rams` energy-flux correction
-does not remove it. Grid and Padé order do not move it (dr 1–10 m, dz
-0.1–0.5 m, Padé 4–8: +4.26 to +4.48 dB for `mpirams`). Kraken's coupled modes land at
-+1.20 dB at density 2.5, the answer of their own one-way method (COUPLE07's
-one-way pressure matching: +1.13 dB), but at density 1.5 the coupled sum runs
-away to −12.9 dB ([Kraken §6.6](kraken.md#66-range-dependence-adiabatic-versus-coupled)
+(`mpirams` at density 1.0: −0.03 dB.) The `rams` energy-flux correction
+does not remove it. Grid and Padé order move it by under a decibel: over
+36 grids — dr 1, 2, 5 and 10 m × dz 0.1, 0.25 and 0.5 m × Padé 4, 6 and 8,
+1 m step faces — `mpirams` lands at +4.41 to +5.31 dB. Kraken's
+coupled modes land at +2.83 dB at density 2.5 (+4.02 dB with
+`n_segments=209`), where COUPLE07's own one-way pressure matching gives
++1.13 dB, and at density 1.5 the coupled sum runs away to −12.9 dB ([Kraken §6.6](kraken.md#66-range-dependence-adiabatic-versus-coupled)
 says how to check a coupled run). Over a gently sloping or a light
 seabed the error is small; over steps onto a dense one, budget for several dB.
 
@@ -1031,16 +1060,16 @@ water-borne component the seabed transmits leaves into it at a grazing angle
 `θ_b` (Snell) and keeps leaking along the track, so at range `r` its bottom
 field reaches `r·tan θ_b`; a grid that cuts it there changes the component in
 the water too. The automatic pad follows every component inside the source
-aperture (`angle_max`; a relief steeper than it widens the Padé bracket, not
+aperture (`angle_max_deg`; a relief steeper than it widens the Padé bracket, not
 the pad) until its leakage (`-20·log10|R|` per bounce) or the seabed's own loss along
 its path has taken it 20 dB down, and never past the farthest receiver
 (`uacpy.models.ram._domain.leaky_field_depth`); it is never thinner than two
 seabed wavelengths. Bucker's waveguide (COA §4.10.2: 240 m of water over a
-lossless 1505 m/s, ρ 2.1 half-space, 100 Hz) is the case it is built on: its
-first leaky mode leaves at 3.6° and loses only 1.24 dB/km, the pad comes to
-about 1.1 km (`zmax` 1659 m) and the field reads 0.12 dB median |dTL| from a
-wavenumber integral over 2–20 km, where a two-wavelength pad (`zmax` 588 m)
-read 2.41 dB. A lossy seabed bounds the pad by its own loss: sand at 100 Hz to
+lossless 1505 m/s, ρ 2.1 half-space, 100 Hz; water density 1.0, the
+reference's) is the case it is built on: its first leaky mode leaves at 3.6°
+and loses only 1.21 dB/km, the pad comes to about 1.1 km (`zmax` 1689 m) and
+the field reads 0.12 dB median |dTL| from a wavenumber integral over 2–20 km,
+where a two-wavelength pad (`zmax` 588 m) read 2.45 dB. A lossy seabed bounds the pad by its own loss: sand at 100 Hz to
 5 km takes `zmax` 544 m (451 m with the two-wavelength pad, same accuracy
 against Kraken), silt at 200 Hz 325 m (275 m). A component that leaks less
 than 1 % of its energy (0.0436 dB) over its reach needs no pad: a near-massless
@@ -1068,8 +1097,23 @@ rather than silently modelling placeholder geoacoustics. Dropping
 `absorber_attenuation` below 1 dB/wavelength lets
 reflections leak back in, and uacpy warns if you do.
 
-**Receivers below `zmax` come back `NaN`.** So do samples below the local
-seafloor, on every backend. `np.nanmedian`, not `np.median`.
+**RAM returns its sediment field, down to the absorbing layer.** The PE
+marches through the seabed, and every backend returns what it computed there:
+on a 100 m guide over a 50 m sediment layer at 100 Hz, |p| at 120 m and 2 km
+is 5.7e-4 on mpiramS and 7.3e-4 on ramgeo, against Kraken 6.1e-4 and Scooter
+6.1e-4. Only the absorbing layer is cut: its attenuation is artificial,
+introduced "in an absorbing layer that is placed deep within the sediment to
+prevent spurious reflections from the boundary" (Collins & Siegmann,
+*Parabolic Wave Equations with Applications*, §1.2.5), so a sample inside it
+(and below `zmax`) comes back `NaN`, with a `NumericsWarning` counting them
+and naming the layer's top. The automatic `zmax` puts that top below the
+deepest modelled layer and a pad of real seabed; a deeper `zmax=` moves it
+down. On mpiramS the layer starts `sedlayer` under the local seafloor; on
+ramgeo / ramsurf at `zmax − width` at the start of each profile section, at
+a depth under the seafloor the binary then keeps as the seafloor moves; on
+rams0.5 at `zmax − width`, fixed — each floored at the base of the modelled
+sediment. For a water-only comparison with Bellhop,
+call `field.mask_below_seafloor(env)`. `np.nanmedian`, not `np.median`.
 
 
 **RAM refuses grids the binaries cannot solve.** The Collins codes have no
@@ -1094,9 +1138,8 @@ sediment rows included (`ramgeo1.5.f:389-393`, `mpiramS/src/ram.f90:110-114`),
 so a buried source — at its own range or under a seafloor that deepens
 downrange — runs, and the automatic `zmax` keeps a pad of real seabed below
 it. Only a source past the last row the binary marches,
-`floor(zmax/dz − 0.5)`, is refused (a pinned `zmax` above it). The output
-convention is unchanged: receivers below the seafloor still come back
-`NaN`.
+`floor(zmax/dz − 0.5)`, is refused (a pinned `zmax` above it). Receivers
+below the seafloor get the PE field there, down to the absorbing layer.
 
 RAM's measured agreement with closed forms and the published benchmarks, and its known limits there, are on the [validation page](validation.md).
 
@@ -1127,7 +1170,7 @@ RAM's measured agreement with closed forms and the published benchmarks, and its
 - Lytaev, M., "Mesh Optimization for the Acoustic Parabolic Equation",
   *Journal of Marine Science and Engineering* 11(3), 496, 2023 — vendored at
   [`docs/other/RAM_optimal_mesh.pdf`](../other/RAM_optimal_mesh.pdf). The
-  source of `c0`, `accuracy` and `angle_max`.
+  source of `c0`, `accuracy` and `angle_max_deg`.
 - Jensen, Kuperman, Porter & Schmidt, *Computational Ocean Acoustics*, 2nd ed.,
   Springer, 2011 — chapter 6 for the parabolic equation.
 - Local modifications to the vendored source, including the complex-envelope

@@ -31,7 +31,7 @@ from uacpy.data._geo import checked_max_distance, checked_offset
 from uacpy.data._http import download_member
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
-from uacpy.data.sediment import SeabedSample, bottom_from_grain_size
+from uacpy.data.sediment import SeabedSample
 
 __all__ = ['download_diesing_db', 'fetch_seafloor_lithology',
            'fetch_bottom_diesing']
@@ -224,17 +224,17 @@ def fetch_seafloor_lithology(point: Coordinate, *,
                                            requested_point=(lat, lon),
                                            point_kind='cell'),
                             who='fetch_seafloor_lithology',
-                            warn_km=(0.0 if cell is None
-                                     else _cell_half_diagonal_km(_model())),
+                            warn_km=_cell_half_diagonal_km(_model()),
                             max_distance_km=limit))
 
 
 def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
                          water_sound_speed: Optional[float] = None,
+                         water_density: Optional[float] = None,
                          model: str = DEFAULT_GRAIN_SIZE_MODEL,
                          hamilton_fit: Optional[str] = None,
                          max_distance_km: Optional[float] = None,
-                         timeout=None, verbose: Union[bool, str] = False
+                         verbose: Union[bool, str] = False
                          ) -> BoundaryProperties:
     """Model-ready bottom from the Diesing 2020 lithology at ``(lat, lon)``.
 
@@ -242,21 +242,23 @@ def fetch_bottom_diesing(point: Coordinate, *, roughness: float = 0.0,
     requested point and the raster cell read as ``data_point``;
     ``max_distance_km`` refuses a cell farther than that (km).
 
-    ``timeout`` is accepted (and ignored — this backend is offline) for signature
-    parity with the network bottom fetchers. ``water_sound_speed`` (m/s) scales
+    ``water_sound_speed`` (m/s) scales
     the grain-size velocity ratio to the in-situ near-seabed water; ``None``
-    uses the Hamilton reference. ``model`` picks the grain-size relations
+    uses the Hamilton reference.
+    ``water_density`` (g/cm³) is the near-seabed water the density
+    ratio is carried against; ``None`` uses the package's one water (1.027).
+    ``model`` picks the grain-size relations
     (``'hamilton'`` or ``'apl-uw'``).
     """
-    from uacpy.core.sediment import canonical_grain_size_selection
-    model, hamilton_fit = canonical_grain_size_selection(
+    from uacpy.core.sediment import _canonical_grain_size_selection
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who='fetch_bottom_diesing')
     lat, lon = as_coordinate(point)
     sub = fetch_seafloor_lithology(point, max_distance_km=max_distance_km)
-    bottom = bottom_from_grain_size(
+    bottom = BoundaryProperties.from_grain_size(
         sub.grain_size_phi, roughness=roughness, model=model,
         hamilton_fit=hamilton_fit,
-        water_sound_speed=water_sound_speed)
+        water_sound_speed=water_sound_speed, water_density=water_density)
     log_message(
         'diesing', f"Diesing {sub.material} at {lat:.2f}, {lon:.2f} → "
         f"ϕ={sub.grain_size_phi}", verbose=verbose)

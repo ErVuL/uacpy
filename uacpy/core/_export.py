@@ -43,7 +43,7 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core.provenance import DataProvenance
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core._repr import FieldsRepr
+from uacpy.core._repr import FieldsRepr, unit_of
 
 __all__ = ['Exportable', 'CarrierExport', 'read_only', 'encode_attrs',
            'decode_attrs', 'units_attrs', 'require_extra', 'FrozenList',
@@ -232,6 +232,20 @@ class Exportable:
     def _table(self) -> Optional[Dict[str, np.ndarray]]:
         return None
 
+    def _table_units(self) -> Dict[str, str]:
+        """The unit of each ``_table`` column that states one: the payload's
+        and the coordinates' units under the same name, then the record's
+        ``_REPR_UNITS``, then the unit the name itself states
+        (:func:`~uacpy.core._repr.unit_of`). A type whose columns are named
+        otherwise adds its own."""
+        units = {name: unit_of(name) for name in (self._table() or {})}
+        units.update(getattr(self, '_REPR_UNITS', {}) or {})
+        units.update({name: entry[1] or ''
+                      for name, entry in self._coords().items()})
+        units.update({name: unit or ''
+                      for name, (_, _, unit) in self._payload().items()})
+        return units
+
     def _export_attrs(self) -> Dict[str, Any]:
         return {}
 
@@ -245,6 +259,12 @@ class Exportable:
         ``.copy()`` gives a writeable array.
         """
         payload = self._payload()
+        if not payload:
+            raise ConfigurationError(
+                f"{type(self).__name__}.values: a {type(self).__name__} "
+                f"holds no array payload; its fields are attributes.",
+                remediation="Read the attribute you need directly, or "
+                            "to_dict() for every field.")
         if name is None:
             name = next(iter(payload))
         elif name not in payload:
@@ -258,6 +278,11 @@ class Exportable:
     def to_dataframe(self):
         """One row per record as a ``pandas.DataFrame`` (optional extra
         ``uacpy[xarray]``), for the types whose data are a table.
+
+        ``df.attrs['units']`` maps every column to its unit, the units
+        :meth:`to_xarray` writes as CF ``units`` (``''`` for a count, a label
+        or a dimensionless quantity), so a table saved to CSV can carry them
+        along.
 
         Raises
         ------
@@ -273,7 +298,11 @@ class Exportable:
                 remediation="Use to_xarray() for the labelled form; "
                             "to_xarray().to_dataframe() flattens it.")
         pandas = require_extra('pandas', who)
-        return pandas.DataFrame(table)
+        frame = pandas.DataFrame(table)
+        units = self._table_units()
+        frame.attrs['units'] = {column: units.get(column, '')
+                                for column in frame.columns}
+        return frame
 
     # ── labelled export ───────────────────────────────────────────────
 
@@ -315,15 +344,15 @@ class Exportable:
         """Write :meth:`to_xarray` to a NetCDF file at ``path``
         (:func:`write_netcdf`): a complex payload or coordinate as its
         real and imaginary parts on a trailing ``_pfnc_complex``
-        dimension, which every backend writes and any netCDF reader
-        opens. ``kwargs`` go to xarray's ``to_netcdf``.
+        dimension (index 0 the real part, 1 the imaginary), which every
+        backend writes and any netCDF reader opens: ``netCDF4.Dataset(path,
+        auto_complex=True)`` (netCDF4 >= 1.7) reads it back as complex.
+        ``kwargs`` go to xarray's ``to_netcdf``.
         """
-        write_netcdf(self.to_xarray(), path,
-                     who=f"{type(self).__name__}.to_netcdf", **kwargs)
+        write_netcdf(self.to_xarray(), path, **kwargs)
 
 
-def write_netcdf(obj, path, *, who: str = "write_netcdf",
-                 **kwargs) -> None:
+def write_netcdf(obj, path, **kwargs) -> None:
     """Write the xarray ``obj`` (a Dataset or a DataArray) to a NetCDF file
     at ``path``: what every ``to_netcdf`` of the export protocol does.
 
@@ -332,19 +361,18 @@ def write_netcdf(obj, path, *, who: str = "write_netcdf",
     complex values as real and imaginary parts on a trailing
     :data:`COMPLEX_DIM` (:func:`split_complex`): both what every
     backend stores and any netCDF reader opens, so no backend is
-    special to a complex result. ``who`` names the caller. ``kwargs``
-    go to xarray's ``to_netcdf``.
+    special to a complex result. ``kwargs`` go to xarray's
+    ``to_netcdf``.
     """
     obj = split_complex(portable_attrs(obj))
     obj.to_netcdf(path, **kwargs)
 
 
-def write_netcdf_groups(parts, path, *, who: str = "write_netcdf",
-                        **kwargs) -> None:
+def write_netcdf_groups(parts, path, **kwargs) -> None:
     """Write several xarray objects to one NetCDF file at ``path``: each of
     ``parts`` is ``(group, obj)``, ``group`` ``None`` for the file's root
     (written first) or a ``/``-separated group path, each written as
-    :func:`write_netcdf` writes one; ``who`` names the caller."""
+    :func:`write_netcdf` writes one."""
     parts = [(group, split_complex(portable_attrs(obj)))
              for group, obj in parts]
     for i, (group, obj) in enumerate(parts):
@@ -396,8 +424,7 @@ def netcdf_holding(dataset) -> Tuple[str, str]:
     A result names its class (``uacpy_class``, on the dataset or on its one
     array) and reads back with ``Result.from_netcdf``; a carrier keeps its
     fields as JSON (``uacpy_fields``, whose ``'__class__'`` names it) and
-    reads back with ``Environment.from_netcdf`` for an Environment, its own
-    ``from_xarray`` of ``xarray.open_dataset`` otherwise; a signal result
+    reads back with its own ``from_netcdf``; a signal result
     lists its fields (``uacpy_result_fields``) and reads back with its
     class's ``from_xarray``. One array naming no class is a Field as
     ``Field.to_xarray`` and xarray alone write it."""
@@ -420,10 +447,9 @@ def netcdf_holding(dataset) -> Tuple[str, str]:
         except (TypeError, ValueError):
             path = None
         name = str(path or 'carrier').rpartition('.')[2]
-        if name == 'Environment':
-            return "an Environment", "Environment.from_netcdf(path)"
-        return (named(name),
-                f"{name}.from_xarray(xarray.open_dataset(path))")
+        if name == 'carrier':
+            return "a carrier", "the from_netcdf of the class that wrote it"
+        return named(name), f"{name}.from_netcdf(path)"
     if 'uacpy_result_fields' in attrs:
         return (f"a signal result (fields {attrs['uacpy_result_fields']})",
                 "the from_xarray(xarray.open_dataset(path)) of its class")
@@ -716,6 +742,12 @@ def _from_json(value):
     return value
 
 
+#: ``to_xarray`` names of the constructor fields ``depths`` and ``ranges``:
+#: a carrier holding a depth and a range vector (a seafloor over range, a
+#: receiver grid) writes them as ``depth`` and ``range``.
+DEPTH_RANGE_XARRAY_FIELDS = {'depth': 'depths', 'range': 'ranges'}
+
+
 class CarrierExport(Exportable):
     """The export protocol on a dataclass carrier.
 
@@ -751,6 +783,36 @@ class CarrierExport(Exportable):
             rest.pop(field, None)
         dataset.attrs[self._FIELDS_ATTR] = json.dumps(_to_json(rest))
         return dataset
+
+    @classmethod
+    def from_netcdf(cls, path, **kwargs):
+        """The carrier :meth:`to_netcdf` wrote to ``path``, rebuilt through
+        its constructor (:meth:`from_xarray` of the file). ``kwargs`` go to
+        ``xarray.open_dataset``.
+
+        Raises
+        ------
+        ConfigurationError
+            The file holds something other than a carrier of this class (a
+            result, another carrier); the refusal names it and the call that
+            reads it.
+        """
+        who = f"{cls.__name__}.from_netcdf"
+        xarray = require_extra('xarray', who)
+        with xarray.open_dataset(path, **kwargs) as dataset:
+            dataset = dataset.load()
+        saved = dataset.attrs.get(cls._FIELDS_ATTR)
+        klass = None
+        if saved is not None:
+            named = _from_json(json.loads(saved)).get('__class__')
+            klass = cls if named is None else _resolve_class(named,
+                                                             CarrierExport)
+        if klass is None or not issubclass(klass, cls):
+            what, reader = netcdf_holding(dataset)
+            raise ConfigurationError(
+                f"{who}: {str(path)!r} holds {what}, not a {cls.__name__}.",
+                remediation=f"Read it with {reader}.")
+        return cls.from_xarray(dataset)
 
     @classmethod
     def from_xarray(cls, obj):

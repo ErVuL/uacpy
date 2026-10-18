@@ -10,14 +10,12 @@ Two visualization helpers driven by real model output:
 
 Uses: RunMode.BROADBAND · acoustic_signal.ricker_wavelet ·
 Field.synthesize_time_series · Field.at() · plot_field(stacked=) ·
-RunMode.MODES · plot_modes_heatmap(mode_range=, normalize=)
+RunMode.MODES · plot_modes_heatmap(mode_numbers=, normalize=)
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -48,13 +46,11 @@ pulse = ricker_wavelet(np.arange(int(0.04 * fs)) / fs,
 # A rigid bottom loses nothing, so the guide rings past any finite record and
 # the synthesis says the 4 s record wraps: the energy past its end lands on its
 # start (the spikes ahead of each range's first arrival). That is this
-# lossless guide, not the plot, and the notice is printed.
-with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter('always')
+# lossless guide, not the plot, so that NumericsWarning is set aside here.
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore', uacpy.NumericsWarning)
     waveform = transfer.synthesize_time_series(source_waveform=pulse,
                                                sample_rate=fs)
-for warning in caught:
-    print(f"  noted: {str(warning.message).split(': the record is')[0]}")
 print(f"  {transfer.data.shape[-1]} frequencies at "
       f"df={frequencies[1] - frequencies[0]:.3f} Hz → p(t) "
       f"{waveform.data.shape}, {waveform.times[-1]:.3f} s")
@@ -87,14 +83,13 @@ modes = uacpy.Kraken(n_modes=50).run(
     run_mode=uacpy.RunMode.MODES)
 print(f"  Kraken found {len(modes.k)} modes")
 
-fig, _ = uacpy.plot.plot_modes_heatmap(modes, mode_range=None, normalize=True,
-                                       figsize=(14, 8))
+fig, _ = uacpy.plot.plot_modes_heatmap(modes, figsize=(14, 8))
 fig.savefig(OUT / 'example_14_modes_heatmap_all.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 
-fig, _ = uacpy.plot.plot_modes_heatmap(modes, mode_range=(0, 4),
-                                       normalize=True, figsize=(12, 8))
+fig, _ = uacpy.plot.plot_modes_heatmap(modes, mode_numbers=range(1, 5),
+                                       figsize=(12, 8))
 fig.savefig(OUT / 'example_14_modes_heatmap_subset.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)

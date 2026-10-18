@@ -14,7 +14,7 @@ from figure_scripts._common import shallow_water
 
 import uacpy
 from uacpy import comms
-from uacpy.acoustic_signal import lfm_chirp
+from uacpy.acoustic_signal import channel_response, lfm_chirp
 from uacpy.models import Bellhop, RunMode
 from uacpy.plot import (
     plot_ber_curve,
@@ -92,10 +92,14 @@ def ber():
 
     fig, ax = plt.subplots(figsize=(7.6, 5.4))
     # A BerCurve plots with its sweep's n_bits, which marks a zero-error point
-    # as an upper bound (1/n_bits) instead of dropping it, and overlays its
-    # scheme's AWGN theory only for an uncoded link.
+    # as an upper bound (1/n_bits) instead of dropping it; the AWGN theory of
+    # each uncoded scheme is its own curve.
+    fine = np.linspace(ebn0.min(), ebn0.max(), 100)
     qpsk.plot(ax=ax, label='QPSK measured')
+    comms.ber_theory_curve('qpsk', fine).plot(ax=ax, label='QPSK theory')
     qam.plot(ax=ax, label='16-QAM measured', color='C1')
+    comms.ber_theory_curve('16qam', fine).plot(ax=ax, label='16-QAM theory',
+                                               linestyle=':')
     # Eb/N0 is per information bit on every sweep (the rate is applied
     # inside), so the coded curve shares the uncoded axis unshifted.
     coded.plot(ax=ax, label='QPSK + R=1/2, K=7 Viterbi', marker='s',
@@ -351,8 +355,10 @@ def dsss():
                    n_bits=20000)
     plot_ber_curve(chip_snr, ber_spread, axes[1], label='despread, N = 31',
                    n_bits=20000, marker='s')
-    axes[1].semilogy(fine, comms.ber_theory('bpsk', fine + gain), 'k--', lw=1,
-                     label=f'theory at SNR + {gain:.1f} dB')
+    # The theory at the despread SNR, drawn against the chip SNR.
+    comms.BerTheory(fine, comms.ber_theory('bpsk', fine + gain),
+                    scheme='bpsk').plot(
+        ax=axes[1], lw=1, label=f'theory at SNR + {gain:.1f} dB')
     axes[1].set_ylim(1e-7, 1.0)          # room under the 1/n_bits carets for the key
     axes[1].set_xlabel('Chip SNR (dB)')
     axes[1].set_ylabel('BER')
@@ -383,7 +389,7 @@ def janus():
     rx = np.concatenate([np.zeros(8000), waveform, np.zeros(4000)])
     rx = comms.awgn(rx, 6.0, rng=rng).real
     start, statistic = comms.janus_detect(rx, fs)
-    decoded, crc_ok = comms.janus_receive(rx, fs)
+    decoded, reception = comms.janus_receive(rx, fs)
 
     fig, axes = plt.subplots(1, 2, figsize=ROW2)
     axes[0].specgram(rx, NFFT=256, Fs=fs, noverlap=224, cmap='viridis')
@@ -402,7 +408,7 @@ def janus():
     axes[1].grid(alpha=0.3)
     axes[1].legend(fontsize=9)
     fig.suptitle(f'JANUS baseline packet at 6 dB SNR — class '
-                 f'{decoded.class_id}, CRC {"OK" if crc_ok else "FAIL"}',
+                 f'{decoded.class_id}, CRC {"OK" if reception.crc_ok else "FAIL"}',
                  fontweight='bold', fontsize=12)
     fig.tight_layout()
     return fig
@@ -415,7 +421,7 @@ def bellhop_channel():
     """Drive the modem with a Bellhop arrival structure instead of a guess."""
     env, source, _ = shallow_water()
     point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-    arrivals = Bellhop(n_beams=4000, launch_angles=(-10.0, 10.0)).run(
+    arrivals = Bellhop(n_beams=4000, launch_angles_deg=(-10.0, 10.0)).run(
         env, source, point, run_mode=RunMode.ARRIVALS)
 
     gains = arrivals.received_amplitudes
@@ -429,8 +435,9 @@ def bellhop_channel():
                                equalizer=dfe, n_train=2000, rng=rng)
 
     fig, axes = plt.subplots(1, 3, figsize=ROW3)
-    plot_channel(channel, BAUD, (axes[0], axes[1]),
+    plot_channel(channel, BAUD, axes[0],
                  title=f'{len(arrivals)} arrivals → {channel.size} taps at 1 kBd')
+    channel_response(channel, BAUD).plot(ax=axes[1])
     plot_scatter(link.rx_symbols[4000:], axes[2],
                  ideal=comms.Modulator('qpsk').constellation,
                  title=f'QPSK after the DFE — BER {link.ber:.1e}')

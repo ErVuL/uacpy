@@ -38,8 +38,6 @@ __all__ = ['download_emodnet_db', 'fetch_emodnet_substrate_local',
            'fetch_bottom_emodnet_local']
 
 INDEX_FILE = 'seabed_substrate.npz'
-#: The pre-npz pickled index, refused by :func:`uacpy.data._cache.require_npz`.
-RETIRED_INDEX_FILE = 'seabed_substrate.pkl'
 _PAGE = 5000                        # WFS GetFeature page size (startIndex/count)
 # The layer has no primary key, so GeoServer needs an explicit sort to page.
 _SORT_BY = 'objectid'
@@ -70,9 +68,8 @@ def download_emodnet_db(cache_dir=None, *, base_url: str = EMODNET_WFS_URL,
     The index is three plain arrays, so it loads with ``allow_pickle=False``:
     ``codes`` (int32, one Folk class per polygon), ``wkb`` (uint8, every
     polygon's WKB concatenated) and ``offsets`` (int64, ``n + 1`` cut points
-    into ``wkb``). WKB is already the compact serialisation shapely reads, so
-    only the container changed; the bytes per polygon are the same ones the
-    pickled index held.
+    into ``wkb``). WKB is the compact serialisation shapely reads, so the
+    polygons need no other encoding.
 
     ``cache_dir`` defaults to the offline cache's ``emodnet`` directory.
 
@@ -175,8 +172,7 @@ def _number_matched(fc):
 def _build_index():
     """Read the cached polygons into an ``(STRtree, Folk-code array)`` pair."""
     shapely = _shapely()
-    # raises if not installed, or if the retired pickled index is still there
-    path = _cache.require_npz('emodnet', INDEX_FILE, RETIRED_INDEX_FILE)
+    path = _cache.require('emodnet', INDEX_FILE)
     with _cache.reading('emodnet', path):
         # allow_pickle=False is passed rather than left to numpy's default:
         # this file is read straight out of the cache directory, and under
@@ -249,9 +245,10 @@ def fetch_emodnet_substrate_local(point: Coordinate, *,
 
 def fetch_bottom_emodnet_local(point: Coordinate, *, roughness: float = 0.0,
                                water_sound_speed: Optional[float] = None,
+                               water_density: Optional[float] = None,
                                model: str = DEFAULT_GRAIN_SIZE_MODEL,
                                hamilton_fit: Optional[str] = None,
-                               timeout=None, verbose: Union[bool, str] = False,
+                               verbose: Union[bool, str] = False,
                                max_distance_km: Optional[float] = None,
                                ) -> BoundaryProperties:
     """Model-ready bottom from the offline EMODnet polygon at ``(lat, lon)``.
@@ -262,20 +259,20 @@ def fetch_bottom_emodnet_local(point: Coordinate, *, roughness: float = 0.0,
     The NCEI grain-size sample provider is
     :func:`uacpy.data.sediment_db.fetch_bottom_grainsize`, a different dataset.
 
-    ``timeout`` is accepted (and ignored — this backend is offline) for signature
-    uniformity with the network bottom fetchers. ``water_sound_speed`` (m/s)
+    ``water_sound_speed`` (m/s)
     scales the grain-size velocity ratio to the in-situ near-seabed water;
-    ``None`` uses the Hamilton reference. ``model`` picks the grain-size
-    relations (``'hamilton'`` or ``'apl-uw'``). ``max_distance_km`` is as in
-    :func:`fetch_emodnet_substrate_local`.
+    ``None`` uses the Hamilton reference. ``water_density`` (g/cm³) is the near-seabed water the density ratio is carried against; ``None`` uses the package's one water (1.027). ``model`` picks
+    the grain-size relations (``'hamilton'`` or ``'apl-uw'``).
+    ``max_distance_km`` is as in :func:`fetch_emodnet_substrate_local`.
     """
-    from uacpy.core.sediment import canonical_grain_size_selection
-    model, hamilton_fit = canonical_grain_size_selection(
+    from uacpy.core.sediment import _canonical_grain_size_selection
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who='fetch_bottom_emodnet_local')
     lat, lon = as_coordinate(point)
     sub = fetch_emodnet_substrate_local(point, max_distance_km=max_distance_km)
     bottom = _bottom_from_folk5(sub.folk_class, lat, lon, roughness=roughness,
                                 water_sound_speed=water_sound_speed,
+                                water_density=water_density,
                                 model=model, hamilton_fit=hamilton_fit)
     log_message(
         'seabed', f"EMODnet (offline) folk_5cl={sub.folk_class} at "

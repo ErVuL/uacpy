@@ -160,6 +160,14 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     weights: Optional[Union[complex, List[complex], np.ndarray]] = None
     source_level_dB: Optional[float] = None
 
+    # The export protocol: the depths and frequencies as coordinates; the
+    # other fields travel as the carriers' JSON attribute.
+    _XARRAY_FIELDS = {'depth': 'depths', 'frequency': 'frequencies'}
+
+    def _coords(self):
+        return {'depth': (self.depths, 'm'),
+                'frequency': (self.frequencies, 'Hz')}
+
     if TYPE_CHECKING:
         # The two roles of a dataclass field annotation, separated: the
         # attributes hold what ``__post_init__`` normalizes them to (float64

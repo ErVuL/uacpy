@@ -52,7 +52,7 @@ class TestReadEnvInvertsTheDeckWriters:
         path = tmp_path / 'k.env'
         write_kraken_env_file(
             path, env, src, rcv, interp_ssp='linear', frequencies=freqs,
-            n_mesh=0, rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+            n_mesh=0, rmax=5000.0, c_low=1400.0, c_high=2000.0)
         got, gsrc, grcv, opt = read_env(path)
         assert opt['model'] == 'kraken' and got.name == 'round trip'
         np.testing.assert_allclose(np.ravel(got.ssp.sound_speed),
@@ -70,7 +70,7 @@ class TestReadEnvInvertsTheDeckWriters:
         np.testing.assert_allclose(gsrc.depths, [20.0, 30.0])
         np.testing.assert_allclose(gsrc.frequencies, freqs)
         np.testing.assert_allclose(grcv.depths, rcv.depths)
-        assert (opt['c_low'], opt['c_high'], opt['rmax_m']) == (
+        assert (opt['c_low'], opt['c_high'], opt['rmax']) == (
             1400.0, 2000.0, 5000.0)
 
     def test_a_bellhop_deck_reads_back_its_geometry_and_beams(self, tmp_path):
@@ -90,7 +90,7 @@ class TestReadEnvInvertsTheDeckWriters:
         path = tmp_path / 'b.env'
         write_bellhop_env_file(path, env, src, rcv, beam_type='C',
                                source_type='X', n_beams=500,
-                               launch_angles=(-60.0, 60.0), r_loop=2000.0)
+                               launch_angles_deg=(-60.0, 60.0), r_loop=2000.0)
         got, gsrc, grcv, opt = read_env(path)
         assert opt['model'] == 'bellhop'
         bathy = np.asarray(got.bathymetry.to_pairs())
@@ -100,7 +100,7 @@ class TestReadEnvInvertsTheDeckWriters:
         np.testing.assert_allclose(grcv.depths, rcv.depths)
         assert gsrc.source_type == 'line'
         assert (opt['beam_type'], opt['source_type'], opt['n_beams'],
-                opt['launch_angles']) == ('C', 'X', 500, (-60.0, 60.0))
+                opt['launch_angles_deg']) == ('C', 'X', 500, (-60.0, 60.0))
         assert opt['r_loop'] == pytest.approx(2000.0)
 
     @staticmethod
@@ -118,7 +118,7 @@ class TestReadEnvInvertsTheDeckWriters:
         write_kraken_env_file(
             path, self._env(), Source(depths=[20.0], frequencies=100.0),
             uacpy.Receiver(depths=[10.0, 50.0], ranges=[1000.0]),
-            interp_ssp='linear', rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+            interp_ssp='linear', rmax=5000.0, c_low=1400.0, c_high=2000.0)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
             _env, _src, rcv, _opt = read_env(path)
@@ -140,7 +140,7 @@ class TestReadEnvInvertsTheDeckWriters:
         first.parent.mkdir(), second.parent.mkdir()
         write_kraken_env_file(first, self._env(), src, rcv,
                               interp_ssp='linear', n_mesh=[60, 12],
-                              rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+                              rmax=5000.0, c_low=1400.0, c_high=2000.0)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             env, gsrc, grcv, opt = read_env(first)
@@ -167,12 +167,142 @@ class TestReadEnvInvertsTheDeckWriters:
         first, second = tmp_path / 'a' / 'b.env', tmp_path / 'b' / 'b.env'
         first.parent.mkdir(), second.parent.mkdir()
         write_bellhop_env_file(first, env, src, rcv, n_beams=500,
-                               launch_angles=(-60.0, 60.0))
+                               launch_angles_deg=(-60.0, 60.0))
         env2, gsrc, grcv, opt = read_env(first)
         assert 'n_mesh' not in opt
         write_bellhop_env_file(second, env2, gsrc, grcv,
                                **self._settings(opt))
         assert second.read_text() == first.read_text()
+
+    def test_a_sparc_deck_reads_its_ranges_and_writes_back_unchanged(
+            self, tmp_path):
+        """SPARC's tail — pulse, band, receiver ranges, output times, time
+        march (sparc.f90:106-168) — reads into the Receiver and the writer's
+        keywords, so write -> read_env -> write is the identity."""
+        from uacpy.io import read_env
+        from uacpy.io.oalib_writer import write_sparc_env_file
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(acoustic_type='rigid'),
+                          name='sparc trip')
+        src = Source(depths=[20.0], frequencies=100.0)
+        rcv = uacpy.Receiver(depths=[10.0, 50.0, 90.0],
+                             ranges=[1000.0, 2000.0, 3000.0])
+        first, second = tmp_path / 'a' / 's.env', tmp_path / 'b' / 's.env'
+        first.parent.mkdir(), second.parent.mkdir()
+        write_sparc_env_file(
+            first, env, src, rcv, output_mode='R', c_low=1400.0,
+            c_high=1e7, pulse_type='P', freq_min=50.0, freq_max=150.0,
+            n_time_samples=101, time_max=3.0, march_start=-0.1,
+            courant_factor=0.999)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            env2, gsrc, grcv, opt = read_env(first)
+        assert not [w for w in caught if 'no ranges' in str(w.message)]
+        np.testing.assert_allclose(grcv.ranges, [1000.0, 2000.0, 3000.0])
+        assert opt['model'] == 'sparc'
+        assert (opt['output_mode'], opt['pulse_type'], opt['freq_min'],
+                opt['freq_max'], opt['n_time_samples'], opt['time_max'],
+                opt['march_start'], opt['courant_factor']) == (
+            'R', 'P', 50.0, 150.0, 101, 3.0, -0.1, 0.999)
+        write_sparc_env_file(second, env2, gsrc, grcv, **self._settings(opt))
+        assert second.read_text() == first.read_text()
+
+    @pytest.mark.parametrize('edit, said', [
+        (('101\n0.0 3.000000 /', '4\n0.0 0.1 0.2 0.5 /'), 'output times'),
+        (('-0.100000 0.999000 0.0 0.0 0.0', '-0.100000 0.999000 0.25 0.0 0.0'),
+         'alpha = 0.25'),
+    ])
+    def test_a_sparc_tail_the_writer_cannot_state_is_refused(
+            self, tmp_path, edit, said):
+        """write_sparc_env_file states the output times as 0 .. time_max
+        evenly spaced and alpha = beta = V = 0 (sparc.f90:159-168), so a deck
+        with uneven times or a non-zero integration record is refused rather
+        than read into settings that would write another deck."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        from uacpy.io import read_env
+        from uacpy.io.oalib_writer import write_sparc_env_file
+        path = tmp_path / 's.env'
+        write_sparc_env_file(
+            path, Environment(bathymetry=100.0, ssp=1500.0,
+                              bottom=BoundaryProperties(acoustic_type='rigid')),
+            Source(depths=[20.0], frequencies=100.0),
+            uacpy.Receiver(depths=[10.0, 50.0], ranges=[1000.0, 2000.0]),
+            output_mode='R', c_low=1400.0, c_high=1e7, pulse_type='P',
+            freq_min=50.0, freq_max=150.0, n_time_samples=101, time_max=3.0,
+            march_start=-0.1, courant_factor=0.999)
+        text = path.read_text()
+        assert text.count(edit[0]) == 1
+        path.write_text(text.replace(*edit))
+        with pytest.raises(UnsupportedFeatureError, match=said):
+            read_env(path)
+
+    def test_a_scooter_decks_topopt_extra_writes_it_back_unchanged(
+            self, tmp_path):
+        """TopOpt(7) '0' (SCOOTER's stabilising attenuation off,
+        scooter.f90:130) is returned as topopt_extra, so the round trip
+        keeps it."""
+        from uacpy.io import read_env
+        from uacpy.io.oalib_writer import write_scooter_env_file
+        src = Source(depths=[20.0], frequencies=100.0)
+        rcv = uacpy.Receiver(depths=[10.0, 50.0, 90.0], ranges=[1000.0])
+        first, second = tmp_path / 'a' / 's.env', tmp_path / 'b' / 's.env'
+        first.parent.mkdir(), second.parent.mkdir()
+        write_scooter_env_file(first, self._env(), src, rcv,
+                               topopt_extra='0', interp_ssp='linear',
+                               n_mesh=[60, 12], rmax=5000.0,
+                               c_low=1400.0, c_high=2000.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            env, gsrc, grcv, opt = read_env(first)
+        assert opt['topopt_extra'] == '0'
+        write_scooter_env_file(second, env, gsrc, grcv,
+                               **self._settings(opt))
+        assert second.read_text() == first.read_text()
+
+    def test_a_kraken_deck_beside_its_field_flp_writes_back_on_its_mode_depths(
+            self, tmp_path):
+        """With a field.exe .flp beside it, the Receiver holds the .flp's
+        receivers and mode_depths the .env's own; the settings without
+        mode_depths and a Receiver on mode_depths write the .env back."""
+        from uacpy.io import read_env, write_kraken_env_file
+        from uacpy.io.oalib_writer import write_fieldflp
+        src = Source(depths=[20.0], frequencies=100.0)
+        rcv = uacpy.Receiver(depths=[10.0, 50.0, 90.0], ranges=[1000.0])
+        first, second = tmp_path / 'a' / 'k.env', tmp_path / 'b' / 'k.env'
+        first.parent.mkdir(), second.parent.mkdir()
+        write_kraken_env_file(first, self._env(), src, rcv,
+                              interp_ssp='linear', n_mesh=[60, 12],
+                              rmax=5000.0, c_low=1400.0, c_high=2000.0)
+        write_fieldflp(first.with_suffix('.flp'), 'RA  ',
+                       source_depths=[20.0], receiver_depths=[30.0, 60.0],
+                       receiver_ranges=[1000.0, 2000.0])
+        env, gsrc, grcv, opt = read_env(first)
+        np.testing.assert_allclose(grcv.depths, [30.0, 60.0])
+        np.testing.assert_allclose(opt['mode_depths'], [10.0, 50.0, 90.0])
+        settings = {k: v for k, v in self._settings(opt).items()
+                    if k != 'mode_depths'}
+        write_kraken_env_file(
+            second, env, gsrc,
+            uacpy.Receiver(depths=opt['mode_depths'], ranges=[1000.0]),
+            **settings)
+        assert second.read_text() == first.read_text()
+
+    def test_a_multi_profile_kraken_deck_is_refused(self, tmp_path):
+        """kraken.f90:42-46 reads one block per profile; reading the first
+        alone would drop the range dependence, so read_env refuses."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        from uacpy.io import read_env
+        from uacpy.io.oalib_writer import write_multi_profile_env
+        near = Environment(bathymetry=100.0, ssp=1500.0, name='p1')
+        far = Environment(bathymetry=150.0, ssp=1490.0, name='p2')
+        path = tmp_path / 'm.env'
+        write_multi_profile_env(
+            path, [(0.0, near), (5000.0, far)],
+            Source(depths=[20.0], frequencies=100.0),
+            uacpy.Receiver(depths=[10.0, 50.0], ranges=[1000.0]),
+            c_low=1400.0, c_high=1700.0)
+        with pytest.raises(UnsupportedFeatureError, match='multi-profile'):
+            read_env(path)
 
     @pytest.mark.parametrize('near', [4999.996, 4999.99999])
     def test_a_medium_ends_on_the_row_at_its_base_by_ats_test(self, tmp_path,
@@ -238,7 +368,7 @@ class TestReadEnvReadsDecksOtherToolsWrite:
         *_, opt = read_env(path)
         assert (opt['ray_step'], opt['z_box'], opt['r_box']) == (5.0, 120.0,
                                                              4000.0)
-        assert opt['launch_angles'] == (-10.0, 10.0)
+        assert opt['launch_angles_deg'] == (-10.0, 10.0)
 
     def test_a_bellhop_deck_with_no_beam_angles_is_refused(self, tmp_path):
         """A ``/`` straight after NBeams gives BELLHOP no fan to trace."""
@@ -251,6 +381,33 @@ class TestReadEnvReadsDecksOtherToolsWrite:
         with pytest.raises(FileFormatError,
                            match='no beam angles after NBeams'):
             read_env(path)
+
+    @pytest.mark.parametrize('n_beams, angles, refused', [
+        (5, '-20 -10 0 10 20', False),         # an evenly spaced list
+        (5, '-20 -15 0 10 20', True),          # explicit, not a fan
+        (5, '20 10 0 -10 -20', False),         # sorted by Bellhop first
+        (7, '-20 -10 0 10 20', True),          # a fan, but not NBeams long
+    ])
+    def test_an_explicit_launch_angle_list_reads_only_as_one_fan(
+            self, tmp_path, n_beams, angles, refused):
+        """angleMod.f90:54-61 keeps an explicit list as given (then sorts
+        it); the carriers hold a fan as its two ends, so a list that is not
+        one evenly spaced fan of NBeams angles is refused rather than
+        approximated."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        from uacpy.io import read_env
+        path = tmp_path / 'b.env'
+        path.write_text("'t'\n100.0\n1\n'CVW'\n0 0.0 100.0\n 0.0 1500.0 /\n"
+                        " 100.0 1500.0 /\n'V' 0.0\n1\n25.0 /\n2\n10.0 50.0 /"
+                        f"\n3\n1.0 3.0 /\n'CG'\n{n_beams}\n{angles} /\n"
+                        "5.0 120.0 4.0   ! STEP ZBOX RBOX\n")
+        if refused:
+            with pytest.raises(UnsupportedFeatureError,
+                               match='explicit launch-angle list'):
+                read_env(path)
+        else:
+            *_, opt = read_env(path)
+            assert opt['launch_angles_deg'] == (-20.0, 20.0)
 
     def test_a_short_row_keeps_the_previous_reads_values(self, tmp_path):
         """AT READs every row into the same variables, so a ``/`` carries
@@ -474,18 +631,41 @@ class TestReadEnvReadsTheToolboxsOwnDecks:
         assert rcv.ranges.size == 501 and rcv.ranges[-1] == 10000.0
         assert src.beam_pattern is not None and opt['model'] == 'kraken'
 
+    def test_a_sparc_deck_reads_its_ranges_and_time_settings(self):
+        _, _, rcv, opt = self._read('iso.env')
+        np.testing.assert_allclose(rcv.ranges, [50.0])
+        assert opt['model'] == 'sparc' and opt['output_mode'] == 'D'
+        assert (opt['pulse_type'], opt['freq_max'], opt['n_time_samples'],
+                opt['time_max']) == ('PN+B', 300.0, 501, 0.1)
+
+    def test_a_sparc_deck_the_writer_cannot_state_is_refused(self):
+        """head.env's output times start at 0.002 s; write_sparc_env_file
+        states them from 0, so the deck could not be written back."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        with pytest.raises(UnsupportedFeatureError, match='output times'):
+            self._read('head/head.env')
+
+    def test_a_multi_profile_deck_is_refused(self):
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        with pytest.raises(UnsupportedFeatureError, match='multi-profile'):
+            self._read('wedge/wedge.env')
+
     def test_a_bellhop3d_deck_is_refused_as_one(self):
         from uacpy.core.exceptions import UnsupportedFeatureError
         with pytest.raises(UnsupportedFeatureError, match='BELLHOP3D'):
             self._read('Bellhop3DTests/Munk/slice2dGaussian.env')
 
     def test_the_readable_share_of_the_shipped_decks(self):
-        """250 of the 409 decks: every one that an Environment can hold and
+        """244 of the 409 decks: every one that an Environment can hold and
         the vendored programs themselves can read. The rest are listed with
         their reasons in the t-io log of 2026-09-26; five of those (VolAtt/
         freeB, freeB_Inc, freeS, free_gbtB, free_gbtB_Inc, a water
-        attenuation varying with depth) now read as a table at the deck
-        frequency."""
+        attenuation varying with depth) read as a table at the deck
+        frequency. Refused besides: the four multi-profile KRAKEN decks
+        (Dickins/March and Dickins/Precalc DickinsK_rd, step/stepK_rd,
+        wedge/wedge), head/head.env, a SPARC tail whose output times
+        start at 0.002 s, and sduct/sductBray.env, an explicit non-uniform
+        launch-angle list (-20:2:-10, -9:1:10, 12:2:20)."""
         from uacpy.io import read_env
         ok = 0
         decks = sorted(_AT_REF_DIR.rglob('*.env'))
@@ -499,7 +679,7 @@ class TestReadEnvReadsTheToolboxsOwnDecks:
                         uacpy.core.exceptions.UnsupportedFeatureError):
                     continue
                 ok += 1
-        assert ok == 250
+        assert ok == 244
 
 
 def test_a_francois_garrison_deck_reads_as_the_law_with_its_water():
@@ -559,6 +739,7 @@ def test_a_depth_varying_attenuation_column_reads_back_as_a_table(tmp_path):
     per row at the deck frequency; the reader takes that column back as a
     measured table at the deck frequency (no model, dB/wavelength) that
     reproduces every row."""
+    from uacpy.core.absorption import AbsorptionCoefficient, _absorption_law
     from uacpy.io import read_env
     from uacpy.io.oalib_writer import write_kraken_env_file
     from uacpy.tests.conftest import (
@@ -570,14 +751,15 @@ def test_a_depth_varying_attenuation_column_reads_back_as_a_table(tmp_path):
                           uacpy.Receiver(depths=[20.0], ranges=[1000.0]),
                           c_low=1400.0, c_high=2000.0)
     rows = at_deck_water_rows(deck.read_text())
-    expected = env.absorption.alpha_dB_per_wavelength(4000.0, rows[:, 0],
-                                                      rows[:, 1])
+    expected = _absorption_law(env.absorption)._alpha_dB_per_wavelength_at_frequency(
+        4000.0, rows[:, 0], rows[:, 1])
     np.testing.assert_allclose(rows[:, 2], expected, rtol=1e-9)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         back = read_env(deck)[0]
-    assert back.absorption.measured.model is None
+    assert type(back.absorption) is AbsorptionCoefficient
+    assert back.absorption.model is None
     np.testing.assert_allclose(
-        back.absorption.alpha_dB_per_wavelength(4000.0, rows[:, 0],
-                                                rows[:, 1]),
+        _absorption_law(back.absorption)._alpha_dB_per_wavelength_at_frequency(
+            4000.0, rows[:, 0], rows[:, 1]),
         rows[:, 2], rtol=1e-12)

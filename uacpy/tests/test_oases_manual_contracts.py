@@ -171,7 +171,7 @@ class TestPinnedWavenumberCountKeepsTheWholeSpectrum:
     def test_oasp_block_vii_is_nw_one_nw_intf(self, tmp_path):
         path = tmp_path / 'oasp_run.dat'
         write_oasp_input(path, make_pekeris(), _SRC, _RCV, n_wavenumbers=1000)
-        assert '1000 1 1000 40' in _deck_lines(path)
+        assert '1000 1 1000 0' in _deck_lines(path)
 
 
 class TestOaspFrequencyRecordDefaults:
@@ -284,13 +284,32 @@ class TestRcoTableFollowsTheManual:
                     self._table(tmp_path, 1, name))
             assert data['sampling_type'] == 'slowness', name
 
+    def test_a_code_oasr_never_writes_is_a_file_error(self, tmp_path):
+        """OASR stamps 1 (slowness) or 2 (angle), unoasr21.f:204-205; any
+        other code is not an OASR table."""
+        from uacpy.core.exceptions import FileFormatError
+        with pytest.raises(FileFormatError, match='header sampling code 3'):
+            _read_oasr_reflection_payload(self._table(tmp_path, 3))
+
+    def test_blocks_on_different_angle_grids_are_a_file_error(self, tmp_path):
+        from uacpy.core.exceptions import FileFormatError
+        path = tmp_path / 'two.dat'
+        rows = [f"      {a:.6f}       {m:.6f}     {p:.6f}"
+                for a, m, p in self._ROWS]
+        lines = ["      50.000      60.000   2   2",
+                 "       50.000     3  # Frequency, # of angles", *rows,
+                 "       60.000     2  # Frequency, # of angles", *rows[:2]]
+        path.write_text('\n'.join(lines) + '\n')
+        with pytest.raises(FileFormatError, match='angle grid mismatch'):
+            read_oasr_reflection_coefficients(path)
+
     def test_the_file_reads_as_the_reflection_coefficient_carrier(
             self, tmp_path):
         from uacpy.core.results import ReflectionCoefficient
         path = self._table(tmp_path, 2)
         rc = read_oasr_reflection_coefficients(path)
         assert isinstance(rc, ReflectionCoefficient) and rc.model == ''
-        np.testing.assert_allclose(rc.angles, [r[0] for r in self._ROWS])
+        np.testing.assert_allclose(rc.angles_deg, [r[0] for r in self._ROWS])
         np.testing.assert_allclose(rc.magnitude, [r[1] for r in self._ROWS])
         np.testing.assert_allclose(rc.phase, np.deg2rad([r[2] for r in self._ROWS]))
         assert rc.frequencies.tolist() == [50.0]
@@ -363,8 +382,8 @@ class TestXsmLayoutFollowsTheManual:
         assert data['n_frequencies'] == self._NFREQ
         assert data['freq_min'] == 20.0 and data['freq_max'] == 30.0
         assert data['freq_delta'] == 10.0
-        assert data['surface_noise_level'] == 70.0
-        assert data['white_noise_level'] == 50.0
+        assert data['surface_noise_level_dB'] == 70.0
+        assert data['white_noise_level_dB'] == 50.0
         cov = data['covariance']
         assert cov.shape == (self._NFREQ, self._NRCV, self._NRCV)
         for ifreq in range(1, self._NFREQ + 1):
@@ -385,7 +404,7 @@ class TestXsmLayoutFollowsTheManual:
         # Depths that do not match the file's receiver count are not used.
         assert read_oasn_covariance(
             path, receiver_depths=[10, 20]).receiver_positions is None
-        assert cov.metadata['white_noise_level'] == 50.0
+        assert cov.metadata['white_noise_level_dB'] == 50.0
 
     def test_the_unit_is_the_one_the_caller_states(self, tmp_path):
         """The ``.xsm`` names no unit and OASN and OASS write it in
@@ -426,7 +445,7 @@ class TestXsmLayoutFollowsTheManual:
             bottom=uacpy.BoundaryProperties(
                 acoustic_type='half-space', sound_speed=1700.0,
                 density=1.8, attenuation=0.5))
-        cov = OASN(surface_noise_level=70.0, verbose=False,
+        cov = OASN(surface_noise_level_dB=70.0, verbose=False,
                    work_dir=str(work), cleanup=False).compute_covariance(
             env, uacpy.Source(depths=10.0, frequencies=[20.0, 30.0]),
             uacpy.Receiver(depths=[10.0, 20.0, 30.0], ranges=[0.0]))
@@ -498,7 +517,7 @@ class TestRpoLayoutFollowsTheManual:
         assert data['receiver_positions'][0].tolist() == [1.5, 0.0, 30.0]
         assert data['receiver_positions'][1].tolist() == [0.0, 0.0, 60.0]
         # The stored linear factor 10.0 is 20 dB; unity is 0 dB.
-        assert np.allclose(data['receiver_gains'], [20.0, 0.0])
+        assert np.allclose(data['receiver_gains_dB'], [20.0, 0.0])
         rep = data['replicas']
         assert rep.shape == (1, self._NZ, self._NX, self._NY, self._NRCV)
         for iz in range(1, self._NZ + 1):

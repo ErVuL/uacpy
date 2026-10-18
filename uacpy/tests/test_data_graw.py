@@ -81,7 +81,12 @@ def test_density_transect(graw_cache):
         (30.5, -40.5), (32.5, -40.5), n_points=4)
     ranges, rho = track.ranges, track.data
     assert (track.quantity, track.unit) == ('seabed_density', 'g/cm3')
-    assert track.provenance.source.id == 'graw'
+    # One record per waypoint, each naming the node its density came from.
+    assert [p.source.id for p in track.provenance] == ['graw'] * 4
+    assert [p.requested_point for p in track.provenance] == \
+        [(la, lo) for la, lo in zip(track.lats, track.lons)]
+    assert all(p.data_point is not None and p.offset_km is not None
+               for p in track.provenance)
     assert track.lats.tolist() == pytest.approx([30.5, 31.1667, 31.8333, 32.5],
                                                 abs=1e-3)
     assert ranges.shape == (4,) and ranges[0] == 0.0
@@ -187,6 +192,31 @@ def test_bottom_transect(graw_cache):
     bottom = data.fetch_bottom_transect(
         (30.5, -40.5), (32.5, -40.5), source='graw', n_points=4)
     assert np.allclose(bottom.halfspace_density, 1.962, atol=1e-3)
+
+
+def test_a_graw_bottom_gives_one_notice_named_after_the_call(graw_cache,
+                                                            monkeypatch):
+    """The node is put through the offset rule once per read, and its notice
+    reaches the user as one summary named after the function called. The
+    fixture's nodes are the requested cells, so the notice is forced."""
+    from uacpy.core.exceptions import ProvenanceWarning
+    from uacpy.data._provenance_notice import provenance_notice
+    real_node = graw_local.graw_node
+
+    def noted(lat, lon, *, who, **rule):
+        provenance_notice(f"{who}: the data come from a neighbour node. "
+                          f"Pass max_distance_km= to refuse them.")
+        return real_node(lat, lon, who=who, **rule)
+
+    monkeypatch.setattr(graw_local, 'graw_node', noted)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        bottom = data.fetch_bottom((30.5, -40.5), source='graw', depth=3000.0)
+    assert bottom.density == pytest.approx(1.962, abs=1e-3)
+    notices = [str(w.message) for w in rec
+               if issubclass(w.category, ProvenanceWarning)]
+    assert len(notices) == 1, notices
+    assert notices[0].startswith('fetch_bottom: 1 note(s)')
 
 
 # ── fetch_environment integration ───────────────────────────────────────────

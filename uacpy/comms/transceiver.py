@@ -23,7 +23,8 @@ from uacpy.comms.phy import (
     downconvert, pulse_shape, rrc_matched_filter, upconvert,
 )
 from uacpy.comms.sync import (
-    _doppler_scan_stretch, compensate_doppler, detect_preamble,
+    PREAMBLE_THRESHOLD, _doppler_scan_stretch, compensate_doppler,
+    detect_preamble,
     estimate_doppler_scale, symbol_sync,
 )
 from uacpy.core._export import ExportRecord
@@ -66,7 +67,7 @@ def _require_passband_fits(sample_rate, fc, sps, rolloff, where):
 _PREAMBLE_SEED = 0xC0FFEE
 
 #: Symbols in the seeded preamble a Transmitter / CommsReceiver pair
-#: shares when ``preamble`` is not given.
+#: shares when ``preamble`` is not given (uacpy guidance).
 DEFAULT_PREAMBLE_SYMBOLS = 64
 
 
@@ -129,7 +130,12 @@ class Transmitter(SettingsRepr):
         return np.concatenate([self.preamble, sym])
 
     def to_passband(self, symbols, sample_rate, fc, sps=8, rolloff=0.25, span=8):
-        """Pulse-shape and up-convert symbols to a real passband signal at ``fc``."""
+        """Pulse-shape and up-convert symbols to a real passband signal at ``fc``.
+
+        ``sps`` samples per symbol, root-raised-cosine ``rolloff`` and
+        ``span`` (symbols): defaults 8, 0.25 and 8, uacpy guidance;
+        :meth:`CommsReceiver.from_passband` has the same defaults, so a pair
+        left unset matches."""
         _require_passband_fits(sample_rate, fc, sps, rolloff, 'to_passband')
         return upconvert(pulse_shape(symbols, sps, rolloff, span), sample_rate, fc)
 
@@ -225,8 +231,14 @@ class CommsReceiver(SettingsRepr):
         mf = rrc_matched_filter(bb, sps, rolloff, span)
         return symbol_sync(mf, sps, loop_bw=loop_bw, start=span * sps)
 
-    def receive(self, symbols, threshold=0.4, *, return_diagnostics=False):
+    def receive(self, symbols, threshold=PREAMBLE_THRESHOLD, *,
+                return_diagnostics=False):
         """Symbols ``[preamble | payload]`` -> information bits.
+
+        ``threshold`` is :func:`~uacpy.comms.detect_preamble`'s, on the same
+        matched-filter metric, with the same default,
+        :data:`~uacpy.comms.sync.PREAMBLE_THRESHOLD` (0.5, uacpy guidance;
+        its detection and false-alarm rates are measured there).
 
         With ``return_diagnostics=True`` the return is a
         :class:`ReceiverDiagnostics` carrying the bits together with the

@@ -10,13 +10,17 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import (Arrivals, Covariance, Field, GreensFunction,
                                 Modes, Rays, ReflectionCoefficient, Replicas)
 
+#: The source identity every fixture carries beside its arrays, complex
+#: weights included, so a round trip that loses a scalar fails.
+_SOURCE = {'source_level_dB': 170.0, 'source_weights': np.array([1.0 + 0.5j])}
+
 
 def _arrivals():
     cell = {'amplitudes': np.array([1.0, 0.5]), 'phases': np.array([0.1, 0.2]),
             'delays': np.array([0.10, 0.12]),
             'delays_imag': np.array([0.0, -1e-6]),
-            'source_angles': np.array([5.0, -7.0]),
-            'receiver_angles': np.array([-5.0, 7.0]),
+            'source_angles_deg': np.array([5.0, -7.0]),
+            'receiver_angles_deg': np.array([-5.0, 7.0]),
             'n_top_bounces': np.array([0, 1], dtype='int32'),
             'n_bot_bounces': np.array([1, 1], dtype='int32'), 'n_arrivals': 2}
     empty = {k: (v[:0] if isinstance(v, np.ndarray) else 0)
@@ -24,7 +28,8 @@ def _arrivals():
     return Arrivals(by_receiver=[[[cell, empty], [empty, cell]]],
                     receiver_depths=[10.0, 20.0],
                     receiver_ranges=[100.0, 200.0], frequencies=1000.0,
-                    source_depths=[5.0], model='Bellhop')
+                    source_depths=[5.0], model='Bellhop', run_mode='arrivals',
+                    **_SOURCE)
 
 
 def _rays():
@@ -34,14 +39,15 @@ def _rays():
                       {'r': np.array([0.0, 4.0]), 'z': np.array([5.0, 2.0]),
                        'launch_angle': 12.0, 'n_top_bounces': 1, 'n_bot_bounces': 0}],
                 receiver_depths=[5.0], receiver_ranges=[6.0],
-                frequencies=1000.0)
+                frequencies=1000.0, run_mode='rays', **_SOURCE)
 
 
 def _field():
     return Field(data=np.arange(6.0).reshape(2, 3) * (1 + 1j),
                  coords={'depth': np.array([10.0, 20.0]),
                          'range': np.array([100.0, 200.0, 300.0])},
-                 frequencies=100.0, model='Kraken', metadata={'note': 'x'})
+                 frequencies=100.0, model='Kraken', metadata={'note': 'x'},
+                 run_mode='coherent_tl', **_SOURCE)
 
 
 def _greens_function(snapshot):
@@ -51,13 +57,15 @@ def _greens_function(snapshot):
             phase_speeds=np.linspace(1700.0, 1400.0, 4),
             receiver_depths=np.array([10.0, 20.0], np.float32),
             source_depths=[5.0], frequencies=50.0, times=[0.0, 0.1, 0.2],
-            title='SPARC- test', model='SPARC')
+            title='SPARC- test', model='SPARC', run_mode='time_series',
+            **_SOURCE)
     return GreensFunction(
         data=np.ones((2, 1, 2, 4), np.complex64) * (1 + 2j),
         phase_speeds=np.linspace(1700.0, 1400.0, 4),
         receiver_depths=np.array([10.0, 20.0], np.float32),
         source_depths=[5.0], frequencies=[50.0, 60.0],
-        stabilizing_attenuation=0.25, title='SCOOTER- test', model='Scooter')
+        stabilizing_attenuation=0.25, title='SCOOTER- test', model='Scooter',
+        run_mode='coherent_tl', **_SOURCE)
 
 
 MAKERS = {
@@ -67,22 +75,24 @@ MAKERS = {
     'Modes': lambda: Modes(k=np.array([0.40 + 1e-5j, 0.39 + 2e-5j]),
                            phi=np.arange(6.0).reshape(3, 2),
                            depths=np.array([1.0, 2.0, 3.0]),
-                           group_velocity=np.array([1490.0, 1480.0]),
-                           frequencies=100.0, model='Kraken'),
+                           group_speeds=np.array([1490.0, 1480.0]),
+                           frequencies=100.0, model='Kraken',
+                           run_mode='modes', **_SOURCE),
     'ReflectionCoefficient': lambda: ReflectionCoefficient(
-        angles=[10.0, 20.0, 30.0], magnitude=[[0.9, 0.8], [0.7, 0.6], [0.5, 0.4]],
+        angles_deg=[10.0, 20.0, 30.0], magnitude=[[0.9, 0.8], [0.7, 0.6], [0.5, 0.4]],
         phase=[[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]], frequencies=[50.0, 60.0],
-        model='Bounce'),
+        model='Bounce', run_mode='reflection', **_SOURCE),
     'Covariance': lambda: Covariance(
         covariance=np.eye(2, dtype=complex)[None] * 2.0,
         receiver_positions=[[0.0, 0.0, 10.0], [0.0, 0.0, 20.0]],
-        frequencies=[50.0], model='OASN', unit='Pa^2/Hz'),
+        frequencies=[50.0], model='OASN', unit='Pa^2/Hz',
+        run_mode='covariance', **_SOURCE),
     'Replicas': lambda: Replicas(
         replicas=np.ones((1, 2, 3, 2), complex),
         candidates={'depth': np.array([10.0, 20.0]),
                     'range': np.array([1.0, 2.0, 3.0])},
         receiver_positions=[[0.0, 0.0, 10.0], [0.0, 0.0, 20.0]],
-        frequencies=[50.0], model='OASN'),
+        frequencies=[50.0], model='OASN', run_mode='replica', **_SOURCE),
     'GreensFunction': lambda: _greens_function(False),
     'GreensFunction snapshot': lambda: _greens_function(True),
 }
@@ -90,16 +100,18 @@ MAKERS = {
 
 def _same(a, b):
     """Two results hold the same arrays and identity: their ``to_dict``s
-    agree entry for entry, arrays by value and dtype."""
+    agree entry for entry, arrays by value, shape and dtype, mappings by
+    key and every other entry (``None`` included) by value."""
     da, db = a.to_dict(), b.to_dict()
     assert da.keys() == db.keys()
     for key in da:
         x, y = da[key], db[key]
         if isinstance(x, np.ndarray):
-            np.testing.assert_array_equal(x, y, err_msg=key)
-            assert np.asarray(x).dtype == np.asarray(y).dtype, key
+            np.testing.assert_array_equal(x, y, err_msg=key, strict=True)
         elif isinstance(x, dict):
             assert x.keys() == y.keys(), key
+        else:
+            assert x == y, (key, x, y)
 
 
 @pytest.mark.parametrize('name', MAKERS)
@@ -146,7 +158,7 @@ class TestUnitsAreWrittenAsCfAttributes:
         ds = MAKERS['Arrivals']().to_xarray()
         assert ds['delays'].attrs['units'] == 's'
         assert ds['phases'].attrs['units'] == 'rad'
-        assert ds['source_angles'].attrs['units'] == 'deg'
+        assert ds['source_angles_deg'].attrs['units'] == 'deg'
         assert ds['depth'].attrs['units'] == 'm'
 
     def test_a_unitless_column_carries_no_units_attribute(self):
@@ -157,7 +169,7 @@ class TestUnitsAreWrittenAsCfAttributes:
     def test_modes_state_the_wavenumber_and_group_speed_units(self):
         pytest.importorskip('xarray')
         ds = MAKERS['Modes']().to_xarray()
-        assert (ds['k'].attrs['units'], ds['group_velocity'].attrs['units']) \
+        assert (ds['k'].attrs['units'], ds['group_speeds'].attrs['units']) \
             == ('rad/m', 'm/s')
 
 
@@ -181,7 +193,7 @@ class TestTablesAreDataFrames:
         df = MAKERS['Arrivals']().to_dataframe()
         assert list(df['receiver_depth']) == [10.0, 10.0, 20.0, 20.0]
         assert list(df['receiver_range']) == [100.0, 100.0, 200.0, 200.0]
-        assert list(df['kinds']) == ['bottom', 'both', 'bottom', 'both']
+        assert list(df['kind']) == ['bottom', 'both', 'bottom', 'both']
 
     def test_the_mode_table_turns_im_k_into_a_decay_rate(self):
         pytest.importorskip('pandas')
@@ -198,6 +210,37 @@ class TestTablesAreDataFrames:
         np.testing.assert_allclose(df['length'], [10.0, 5.0])
         assert list(df['n_vertices']) == [3, 2]
         assert np.isnan(df['miss_distance']).all()
+
+    @pytest.mark.parametrize('name, units', [
+        ('Arrivals', {'delay': 's', 'delay_imag': 's', 'phase': 'rad',
+                      'source_angle': 'deg', 'receiver_angle': 'deg',
+                      'receiver_depth': 'm', 'receiver_range': 'm',
+                      'amplitude': '', 'kind': ''}),
+        ('Rays', {'launch_angle': 'deg', 'length': 'm',
+                  'miss_distance': 'm', 'n_vertices': ''}),
+        ('Modes', {'k_real': 'rad/m', 'k_imag': 'rad/m',
+                   'phase_speed': 'm/s', 'group_speed': 'm/s',
+                   'attenuation_dB_per_km': 'dB/km', 'mode': ''}),
+        ('ReflectionCoefficient', {'angle': 'deg', 'magnitude': '',
+                                   'phase': 'rad'}),
+    ])
+    def test_every_column_carries_its_unit(self, name, units):
+        """``df.attrs['units']`` names every column's unit — the units
+        ``to_xarray`` writes as CF attributes, under the table's names."""
+        pytest.importorskip('pandas')
+        df = MAKERS[name]().to_dataframe()
+        assert set(df.attrs['units']) == set(df.columns)
+        for column, unit in units.items():
+            assert df.attrs['units'][column] == unit, column
+
+    def test_the_seabed_table_carries_the_carriers_units(self):
+        pytest.importorskip('pandas')
+        df = _environment().bottom.to_dataframe()
+        units = df.attrs['units']
+        assert set(units) == set(df.columns)
+        assert (units['sound_speed'], units['density'], units['attenuation'],
+                units['top'], units['roughness']) == (
+                    'm/s', 'g/cm³', 'dB/λ', 'm', 'm')
 
 
 class TestArrivalsKeepOneTable:
@@ -405,6 +448,43 @@ class TestAnEnvironmentSavesAndLoads:
         assert back.surface.acoustic_type == 'vacuum'
 
 
+class TestEveryCarrierReadsBackItsNetcdfFile:
+    """``to_netcdf`` on a carrier has its ``from_netcdf``: the file reads
+    back as the carrier it holds, and a file holding something else is
+    refused naming the call that reads it."""
+
+    @staticmethod
+    def _carriers():
+        import uacpy
+        env = _environment()
+        return [env.ssp, env.bathymetry, env.bottom, env.surface,
+                uacpy.Source(depths=[10.0, 30.0], frequencies=[100.0],
+                             weights=[1.0, -1.0]),
+                uacpy.Receiver(depths=[10.0], ranges=[100.0, 200.0]),
+                uacpy.Thorp(), uacpy.Thorp().table([1000.0, 2000.0])]
+
+    def test_each_carrier_round_trips_through_its_file(self, tmp_path):
+        pytest.importorskip('xarray')
+        for i, carrier in enumerate(self._carriers()):
+            path = tmp_path / f'c{i}.nc'
+            carrier.to_netcdf(path)
+            back = type(carrier).from_netcdf(path)
+            assert type(back) is type(carrier)
+            assert _plain(back.to_dict()) == _plain(carrier.to_dict()), \
+                type(carrier).__name__
+
+    def test_a_file_of_another_class_is_refused_naming_its_reader(
+            self, tmp_path):
+        pytest.importorskip('xarray')
+        import uacpy
+        path = tmp_path / 'r.nc'
+        uacpy.Receiver(depths=[10.0], ranges=[100.0]).to_netcdf(path)
+        with pytest.raises(ConfigurationError,
+                           match='holds a Receiver, not a Source') as err:
+            uacpy.Source.from_netcdf(path)
+        assert 'Receiver.from_netcdf(path)' in str(err.value)
+
+
 class TestGriddedCarriersHaveLabelledForms:
 
     @pytest.mark.parametrize('name, dims, unit', [
@@ -432,6 +512,41 @@ class TestGriddedCarriersHaveLabelledForms:
         back = type(a).from_xarray(ds)
         np.testing.assert_array_equal(back.data, a.data)
         assert not a.values().flags.writeable
+
+    @pytest.mark.parametrize('name, kwargs, coords', [
+        ('Source', dict(depths=[10.0, 30.0], frequencies=[100.0, 200.0, 400.0],
+                        weights=[1.0, -1.0]),
+         {'depth': ('m', [10.0, 30.0]), 'frequency': ('Hz', [100.0, 200.0, 400.0])}),
+        ('Receiver', dict(depths=[10.0, 20.0], ranges=[100.0, 500.0, 900.0]),
+         {'depth': ('m', [10.0, 20.0]), 'range': ('m', [100.0, 500.0, 900.0])}),
+    ])
+    def test_a_source_and_a_receiver_export_their_axes(self, name, kwargs,
+                                                       coords):
+        """The axes are labelled coordinates with their units, and the
+        carrier reads back from them."""
+        pytest.importorskip('xarray')
+        import uacpy
+        carrier = getattr(uacpy, name)(**kwargs)
+        ds = carrier.to_xarray()
+        for coord, (unit, values) in coords.items():
+            np.testing.assert_array_equal(ds[coord].values, values)
+            assert ds[coord].attrs['units'] == unit
+        back = type(carrier).from_xarray(ds)
+        assert _plain(back.to_dict()) == _plain(carrier.to_dict())
+
+    @pytest.mark.parametrize('name, kwargs', [
+        ('Source', dict(depths=[10.0], frequencies=[100.0])),
+        ('Receiver', dict(depths=[10.0], ranges=[100.0])),
+        ('BoundaryProperties', {}),
+        ('Thorp', {}),
+    ])
+    def test_values_of_a_carrier_without_a_payload_is_a_typed_refusal(
+            self, name, kwargs):
+        # Every attribute of these carriers is a field, not a payload
+        # array: values() names that instead of a bare StopIteration.
+        import uacpy
+        with pytest.raises(ConfigurationError, match='holds no array payload'):
+            getattr(uacpy, name)(**kwargs).values()
 
     def test_a_carrier_nested_in_a_mapping_field_round_trips(self):
         """A carrier inside a mapping field — the WaterProfile record a
@@ -544,16 +659,15 @@ class TestSignalResultsExport:
         assert ds['level_edges'].dims == ('level_edges_dim0',)
 
     def test_the_dict_round_trip_keeps_the_attributes(self, tmp_path):
-        # Attributes other than the defaults, so a round trip that dropped
-        # them would not come back equal by accident.
+        # An attribute other than its default, so a round trip that dropped
+        # it would not come back equal by accident.
         from uacpy.acoustic_signal import spectrogram
-        sg = spectrogram(self._x(), 1000.0, nperseg=256, scaling='spectrum',
-                         mode='magnitude')
+        sg = spectrogram(self._x(), 1000.0, nperseg=256, scaling='spectrum')
         np.savez(tmp_path / 's.npz', **sg.to_dict())
         with np.load(tmp_path / 's.npz', allow_pickle=True) as f:
             back = type(sg).from_dict(dict(f))
         np.testing.assert_array_equal(back.power, sg.power)
-        assert (back.scaling, back.mode) == (sg.scaling, sg.mode)
+        assert back.scaling == sg.scaling == 'spectrum'
 
     def test_equal_length_fields_are_a_table(self):
         pytest.importorskip('pandas')
@@ -627,7 +741,7 @@ class TestTheShadeFileRecordExports:
         return ShdFile(
             title='run', plot_type='rectilin  ',
             frequencies=np.array([100.0, 200.0]), source_frequency=100.0,
-            stabilizing_attenuation=0.25, bearings=np.array([0.0]),
+            stabilizing_attenuation=0.25, bearings_deg=np.array([0.0]),
             source_x=np.array([0.0]), source_y=np.array([0.0]),
             source_depths=np.array([50.0]),
             receiver_depths=np.array([10.0, 20.0]),
@@ -705,7 +819,7 @@ class TestTheShadeFileRecordExports:
 
 
 class TestTheTimeSeriesFileRecordExports:
-    """``RtsFile`` (what ``read_rts_file`` / ``read_ts`` return): the
+    """``RtsFile`` (what ``read_rts_file`` returns): the
     pressure on its time and position axes, read-only, with a dict and an
     xarray form that rebuild it."""
 
@@ -887,7 +1001,7 @@ class TestSignalResultsExportTheirAxesByName:
                             np.linspace(900, 1100, 5),
                             grid_coords={'range': np.arange(4.0)})
         ds = bf.to_xarray()
-        assert ds['response'].dims == ('angles', 'range', 'frequencies')
+        assert ds['response'].dims == ('angles_deg', 'range', 'frequencies')
         assert ds['element_power'].dims == ('range', 'frequencies')
         np.testing.assert_array_equal(ds['range'].values, np.arange(4.0))
         back = type(bf).from_xarray(ds)
@@ -895,16 +1009,6 @@ class TestSignalResultsExportTheirAxesByName:
                                       np.arange(4.0))
         np.testing.assert_allclose(back.response, bf.response)
 
-    def test_a_beam_scan_exports_snr_on_angles_and_ranges(self):
-        pytest.importorskip('xarray')
-        from uacpy.acoustic_signal import beamform
-        b = beamform(np.ones((8, 3), dtype=complex), np.arange(8) * 0.75,
-                     np.linspace(-60, 60, 7), 1000.0, source_level_dB=150.0,
-                     noise_level_dB=60.0, ranges=np.array([1.0, 2.0, 3.0]))
-        ds = b.to_xarray()
-        assert ds['snr'].dims == ('angles', 'ranges')
-        assert float(ds['snr'].sel(ranges=2.0, angles=0.0)) == \
-            pytest.approx(float(b.snr[3, 1]))
 
 
 @pytest.mark.parametrize('build, key', [
@@ -954,8 +1058,8 @@ def test_an_empty_arrival_set_round_trips():
 #: Keys a result's ``to_dict`` writes that its ``from_dict`` does not need:
 #: derived on reading (Arrivals' kinds), or arrival columns a hand-built set
 #: may lack (a set needs its delays and amplitudes only).
-_OPTIONAL_KEYS = {'kinds', 'phases', 'delays_imag', 'source_angles',
-                  'receiver_angles', 'n_top_bounces', 'n_bot_bounces',
+_OPTIONAL_KEYS = {'kinds', 'phases', 'delays_imag', 'source_angles_deg',
+                  'receiver_angles_deg', 'n_top_bounces', 'n_bot_bounces',
                   'src_idx', 'depth_idx', 'range_idx'}
 
 

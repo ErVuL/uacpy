@@ -18,7 +18,7 @@ from uacpy.core._validate import (
 from uacpy.core._carrier import (
     DeepCopyMixin, RevalidateOnAssignMixin, carrier,
 )
-from uacpy.core._export import CarrierExport
+from uacpy.core._export import CarrierExport, DEPTH_RANGE_XARRAY_FIELDS
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = [
@@ -104,6 +104,12 @@ class Receiver(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
     depths: np.ndarray
     ranges: np.ndarray = _RANGES_NOT_GIVEN
+
+    # The export protocol: the grid's two axes as coordinates.
+    _XARRAY_FIELDS = DEPTH_RANGE_XARRAY_FIELDS
+
+    def _coords(self):
+        return {'depth': (self.depths, 'm'), 'range': (self.ranges, 'm')}
 
     if TYPE_CHECKING:
         # The two roles of a dataclass field annotation, separated: the

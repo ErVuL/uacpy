@@ -6,22 +6,21 @@ stratified profile (range-independent), so the range dependence is entirely in
 the seabed and the bathymetry — which is RAM's case.
 
 The receiver grid spans 5-145 m while the seafloor runs 100-150 m, so the
-shallow-range columns place receivers inside the sub-bottom. RAM and Bellhop
-return NaN there; Kraken's deck carries the sediment down to 150 m and returns
-its field in it. Every field is cut at the seafloor
+shallow-range columns place receivers inside the sub-bottom. Bellhop returns
+NaN there; RAM returns its PE field down to its absorbing layer, and Kraken's
+deck carries the sediment down to 150 m and returns its field in it. Every
+field is cut at the seafloor
 (Field.mask_below_seafloor), so the numbers below compare water with water and
 say how much of the grid is water.
 
 Uses: Bottom.from_halfspaces (range-dependent seabed) · a bathymetry array ·
 env.is_range_dependent flags · RAM · Kraken(backend='krakenc') ·
 Field.mask_below_seafloor · plot_field(contours=) · compare_models ·
-plot.plot_field_difference
+metrics.tl_difference
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -31,15 +30,9 @@ OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
 OUT.mkdir(parents=True, exist_ok=True)
 
-# Warm stratified water: 20 °C at the surface, ~8 °C deep, through Medwin's
-# simplified c(T, z) — lead constant rounded from 1449.2 and the salinity term
-# dropped at its S = 35 PSU reference value (Stergiopoulos, Advanced Signal
-# Processing Handbook, Table 10.1). For a calibrated seawater equation use
-# SoundSpeedProfile.from_temperature_salinity(depths, temperature, salinity).
+# Warm stratified water: 20 °C at the surface, ~8 °C deep, 35 PSU
 depths = np.array([0., 25, 50, 75, 100, 120, 150])
 temperature = 8 + 12 * np.exp(-depths / 50)
-sound_speed = (1449 + 4.6 * temperature - 0.055 * temperature ** 2
-               + 0.00029 * temperature ** 3 + 0.016 * depths)
 
 # Range-dependent seabed: one half-space per range node, mud → sand.
 bottom = uacpy.Bottom.from_halfspaces(
@@ -47,14 +40,13 @@ bottom = uacpy.Bottom.from_halfspaces(
     sound_speed=np.array([1500, 1580, 1640, 1700]),
     density=np.array([1.2, 1.5, 1.8, 2.0]),
     attenuation=np.array([1.0, 0.7, 0.5, 0.3]),
-    shear_speed=np.zeros(4),
     acoustic_type='half-space',
 )
 
 env = uacpy.Environment(
     name="Sediment transition with sloping shelf",
-    ssp=uacpy.SoundSpeedProfile.from_pairs(
-        np.column_stack([depths, sound_speed])),
+    ssp=uacpy.SoundSpeedProfile.from_temperature_salinity(
+        depths, temperature, 35.0),
     bathymetry=np.array([[0, 100], [1000, 110], [2000, 130], [3000, 150]]),
     bottom=bottom,
 )
@@ -120,8 +112,8 @@ plt.close(fig)
 fig, axes = plt.subplots(1, 3, figsize=(20, 5))
 for ax, (a, b) in zip(axes, [('RAM', 'Bellhop'), ('RAM', 'Kraken'),
                              ('Bellhop', 'Kraken')]):
-    uacpy.plot.plot_field_difference(fields[a], fields[b], ax, env=env,
-                                     title=f'{a} − {b}')
+    uacpy.metrics.tl_difference(fields[a], fields[b]).plot(
+        ax=ax, env=env, title=f'{a} − {b}')
 fig.suptitle('Pairwise differences (signed, dB)', fontsize='large',
              fontweight='bold')
 fig.tight_layout()

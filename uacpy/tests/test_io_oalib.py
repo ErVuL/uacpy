@@ -9,6 +9,8 @@ the vendored source, cited at the assertion.
 """
 
 import io
+import dataclasses
+
 import numpy as np
 import pytest
 import re
@@ -37,6 +39,12 @@ from uacpy.tests.conftest import (
     two_layer_dB_per_m,
 )
 
+
+
+def _flp_positions(pos):
+    """A MATLAB-style ``pos`` dict as :func:`write_fieldflp`'s keywords."""
+    return dict(source_depths=pos['s']['z'], receiver_depths=pos['r']['z'],
+                receiver_ranges=pos['r']['r'])
 
 class TestSSPReadWriteRoundtrip:
     """Round-trip and canonical-file tests for the AT/Bellhop .ssp readers."""
@@ -70,7 +78,7 @@ class TestSSPReadWriteRoundtrip:
         from uacpy.io.oalib_writer import write_ssp
         from uacpy.io.oalib_reader import read_ssp_2d
 
-        ranges_m = np.array([0.0, 5.0, 10.0, 20.0])
+        ranges = np.array([0.0, 5.0, 10.0, 20.0])
         # 5 depths x 4 ranges
         c = np.array([
             [1500.0, 1502.0, 1504.0, 1505.0],
@@ -80,12 +88,12 @@ class TestSSPReadWriteRoundtrip:
             [1487.0, 1488.0, 1489.0, 1490.0],
         ])
         out = tmp_path / "rt.ssp"
-        write_ssp(out, ranges_m, c)
+        write_ssp(out, ranges, c)
         result = read_ssp_2d(out)
         assert result.sound_speed.shape == (5, 4)
         # The range axis goes to disk as km at ``%.6f`` and comes back in
         # metres, so the quantum on this axis is 1 mm.
-        np.testing.assert_allclose(result.ranges, ranges_m, atol=1e-3)
+        np.testing.assert_allclose(result.ranges, ranges, atol=1e-3)
         # Speeds go out at ``%8.4f``; the format quantises at 1e-4 m/s, well
         # inside this bound.
         np.testing.assert_allclose(result.sound_speed, c, atol=0.5)
@@ -207,7 +215,7 @@ class TestArrivalsReaderTokenStream:
         assert a0['phases'][0] == 0.0
         assert a0['delays'][0] == 0.0
         assert a0['delays_imag'][0] == 0.0
-        assert a0['source_angles'][0] == pytest.approx(-5.0)
+        assert a0['source_angles_deg'][0] == pytest.approx(-5.0)
         assert a0['n_bot_bounces'][0] == 1
 
     def test_read_arr_file_with_wrapped_records(self, tmp_path):
@@ -252,19 +260,14 @@ class TestFieldFlpWriter:
         from uacpy.io.oalib_writer import write_fieldflp
 
         out = tmp_path / "test.flp"
-        pos = {
-            's': {'z': np.array([50.0])},
-            'r': {
-                'z': np.array([10.0, 20.0, 30.0, 40.0, 50.0]),
-                # field.f90 wants r in km internally; the writer converts
-                # m -> km by dividing by 1000, so pass meters here.
-                'r': np.array([500.0, 1000.0, 1500.0, 2000.0]),
-            },
-        }
         write_fieldflp(
             filepath=out,
             option='RA  ',
-            pos=pos,
+            source_depths=[50.0],
+            receiver_depths=[10.0, 20.0, 30.0, 40.0, 50.0],
+            # field.f90 wants r in km internally; the writer converts
+            # m -> km by dividing by 1000, so pass meters here.
+            receiver_ranges=[500.0, 1000.0, 1500.0, 2000.0],
             title='unit-test',
             n_modes=999,
         )
@@ -299,10 +302,9 @@ class TestFieldFlpWriter:
 
         out = tmp_path / f"n{n_rz}.flp"
         write_fieldflp(
-            filepath=out, option='RA  ',
-            pos={'s': {'z': np.array([50.0])},
-                 'r': {'z': np.linspace(10.0, 40.0, n_rz),
-                       'r': np.array([1000.0, 2000.0])}},
+            filepath=out, option='RA  ', source_depths=[50.0],
+            receiver_depths=np.linspace(10.0, 40.0, n_rz),
+            receiver_ranges=[1000.0, 2000.0],
             title='unit-test', n_modes=999,
         )
         rro = [ln for ln in out.read_text().splitlines() if 'Rro(' in ln][0]
@@ -311,6 +313,42 @@ class TestFieldFlpWriter:
             f"NRz={n_rz} needs {n_rz} explicit Rro values (SubTab will not "
             f"replicate below 3); got {values}")
         assert all(float(v) == 0.0 for v in values)
+
+    def test_given_range_offsets_are_written_in_full_and_read_back(
+            self, tmp_path):
+        """``receiver_range_offsets`` (m, one per receiver depth) reaches
+        the Rro record digit for digit and ``read_flp`` returns it; a count
+        other than NRz is refused (field.f90:149-152 stops on it); the
+        record read back writes the same deck."""
+        from uacpy.io.oalib_reader import read_flp
+        from uacpy.io.oalib_writer import write_fieldflp
+        offsets = np.array([-2.5, 0.0, 0.1, 7.25])
+        positions = dict(source_depths=[50.0],
+                         receiver_depths=[10.0, 20.0, 30.0, 40.0],
+                         receiver_ranges=[1000.0, 2000.0])
+        write_fieldflp(tmp_path / 'tilt.flp', 'RA  ', **positions,
+                       receiver_range_offsets=offsets, title='tilt')
+        rro = [ln for ln in (tmp_path / 'tilt.flp').read_text().splitlines()
+               if 'Rro(' in ln][0]
+        assert rro.split('!')[0].replace('/', ' ').split() == [
+            '-2.5', '0.0', '0.1', '7.25']
+        deck = read_flp(tmp_path / 'tilt.flp')
+        np.testing.assert_array_equal(deck.receiver_range_offsets, offsets)
+        write_fieldflp(tmp_path / 'again.flp', **dataclasses.asdict(deck))
+        assert ((tmp_path / 'again.flp').read_text()
+                == (tmp_path / 'tilt.flp').read_text())
+        with pytest.raises(ConfigurationError, match='3 range offset'):
+            write_fieldflp(tmp_path / 'bad.flp', 'RA  ', **positions,
+                           receiver_range_offsets=offsets[:3])
+
+    def test_a_component_other_than_the_options_is_refused(self, tmp_path):
+        from uacpy.io.oalib_writer import write_fieldflp
+        with pytest.raises(ConfigurationError,
+                           match=r"component='\*' and option='RA  ' "
+                                 r"disagree"):
+            write_fieldflp(tmp_path / 'c.flp', 'RA  ', source_depths=[50.0],
+                           receiver_depths=[10.0], receiver_ranges=[1000.0],
+                           component='*')
 
 
 class TestShdPressureIsTheFileAsWritten:
@@ -358,7 +396,7 @@ class TestShdPressureIsTheFileAsWritten:
         assert shd.frequencies.tolist() == [100.0]
         assert shd.source_frequency == 100.0
         assert shd.stabilizing_attenuation == 0.0
-        assert shd.bearings.tolist() == [0.0]
+        assert shd.bearings_deg.tolist() == [0.0]
         assert shd.source_x.tolist() == [0.0]
         assert shd.source_y.tolist() == [0.0]
         assert shd.source_depths.tolist() == [50.0]
@@ -538,7 +576,7 @@ class TestSSPLinePinsWaterProperties:
             source=Source(depths=25.0, frequencies=100.0),
             receiver=Receiver(depths=[50.0], ranges=[1000.0]),
             interp_ssp='linear',
-            frequencies=None, n_mesh=0, rmax_m=5000.0,
+            frequencies=None, n_mesh=0, rmax=5000.0,
             c_low=1400.0, c_high=1e9)
         return out
 
@@ -638,7 +676,7 @@ class TestPhaseSpeedBoundsForParameterFreeBottoms:
             out, env, uacpy.Source(depths=50.0, frequencies=100.0),
             uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
             interp_ssp='linear', frequencies=None,
-            n_mesh=0, rmax_m=10000.0, c_low=c_low, c_high=c_high)
+            n_mesh=0, rmax=10000.0, c_low=c_low, c_high=c_high)
         lines = out.read_text().splitlines()
         bounds_line = next(
             ln for ln in lines
@@ -675,7 +713,7 @@ class TestThePhaseSpeedLineIsWrittenExactly:
         import io
         from uacpy.io.oalib_writer import write_phase_speed_and_rmax
         buf = io.StringIO()
-        write_phase_speed_and_rmax(buf, rmax_m=5000.0, c_low=c_low,
+        write_phase_speed_and_rmax(buf, rmax=5000.0, c_low=c_low,
                                    c_high=c_high)
         speeds = buf.getvalue().splitlines()[0].split()
         assert [float(v) for v in speeds] == [c_low, c_high]
@@ -684,7 +722,7 @@ class TestThePhaseSpeedLineIsWrittenExactly:
         import io
         from uacpy.io.oalib_writer import write_phase_speed_and_rmax
         buf = io.StringIO()
-        write_phase_speed_and_rmax(buf, rmax_m=5000.0, c_low=1400.37,
+        write_phase_speed_and_rmax(buf, rmax=5000.0, c_low=1400.37,
                                    c_high=1987.654321)
         assert buf.getvalue().splitlines()[0] == '1400.37 1987.654321'
 
@@ -724,7 +762,7 @@ class TestMultiProfileEnvKeepsLayerThickness:
         receiver = uacpy.Receiver(depths=np.linspace(10, 140, 14),
                                   ranges=np.array([1000.0]))
         write_multi_profile_env(env_file, self._segments(), source, receiver,
-                                n_mesh=500, rmax_m=20000.0, c_low=0.0,
+                                n_mesh=500, rmax=20000.0, c_low=0.0,
                                 c_high=2000.0)
         text = env_file.read_text()
         shallow = text[text.index("'shallow'"):]
@@ -744,7 +782,7 @@ class TestMultiProfileEnvKeepsLayerThickness:
         receiver = uacpy.Receiver(depths=np.linspace(10, 140, 14),
                                   ranges=np.array([1000.0]))
         write_multi_profile_env(env_file, self._segments(), source, receiver,
-                                n_mesh=500, rmax_m=20000.0, c_low=0.0,
+                                n_mesh=500, rmax=20000.0, c_low=0.0,
                                 c_high=2000.0)
         lines = env_file.read_text().splitlines()
         n_media = [int(lines[i + 2]) for i, line in enumerate(lines)
@@ -797,12 +835,14 @@ class TestFlpOptionValidation:
     def test_bad_option_raises_configurationerror(self, tmp_path, option):
         from uacpy.io.oalib_writer import write_fieldflp
         with pytest.raises(ConfigurationError, match='option position'):
-            write_fieldflp(tmp_path / 'bad.flp', option, self._pos())
+            write_fieldflp(tmp_path / 'bad.flp', option,
+                           **_flp_positions(self._pos()))
 
     @pytest.mark.parametrize('option', ['RC C', 'XA*I', 'SC C'])
     def test_valid_options_are_accepted(self, tmp_path, option):
         from uacpy.io.oalib_writer import write_fieldflp
-        write_fieldflp(tmp_path / 'good.flp', option, self._pos())
+        write_fieldflp(tmp_path / 'good.flp', option,
+                       **_flp_positions(self._pos()))
         assert (tmp_path / 'good.flp').exists()
 
     def test_bad_coupling_column_raises_for_multi_profile(self, tmp_path):
@@ -811,24 +851,27 @@ class TestFlpOptionValidation:
         from uacpy.io.oalib_writer import write_fieldflp
         with pytest.raises(ConfigurationError, match='option position 2'):
             write_fieldflp(
-                tmp_path / 'bad2.flp', 'R  C', self._pos(),
-                n_profiles=2, profile_ranges=np.array([0.0, 5000.0]))
+                tmp_path / 'bad2.flp', 'R  C', **_flp_positions(self._pos()),
+                profile_ranges=np.array([0.0, 5000.0]))
 
     def test_blank_coupling_column_is_fine_for_one_profile(self, tmp_path):
         """field.f90 reaches its coupling SELECT CASE only when NProf > 1, so
         a blank column 2 is legal in a single-profile deck."""
         from uacpy.io.oalib_writer import write_fieldflp
-        write_fieldflp(tmp_path / 'one.flp', 'R  C', self._pos())
+        write_fieldflp(tmp_path / 'one.flp', 'R  C',
+                       **_flp_positions(self._pos()))
         assert (tmp_path / 'one.flp').exists()
 
     def test_explicit_suffix_is_kept(self, tmp_path):
         """A caller-supplied suffix is written as given; '.flp' is appended
         only to a bare root (the read_flp resolution convention)."""
         from uacpy.io.oalib_writer import write_fieldflp
-        write_fieldflp(tmp_path / 'case.v2', 'RC C', self._pos())
+        write_fieldflp(tmp_path / 'case.v2', 'RC C',
+                       **_flp_positions(self._pos()))
         assert (tmp_path / 'case.v2').exists()
         assert not (tmp_path / 'case.flp').exists()
-        write_fieldflp(tmp_path / 'bare', 'RC C', self._pos())
+        write_fieldflp(tmp_path / 'bare', 'RC C',
+                       **_flp_positions(self._pos()))
         assert (tmp_path / 'bare.flp').exists()
 
 
@@ -862,7 +905,7 @@ class TestSingleProfileDecksHoldOneProfile:
         rcv = Receiver(depths=[50.0], ranges=[1000.0, 2000.0])
         common = dict(interp_ssp=interp_ssp, c_low=1400.0, c_high=2000.0)
         if writer == 'write_bounce_input_file':
-            w.write_bounce_input_file(path, env, src, n_mesh=0, rmax_m=5000.0,
+            w.write_bounce_input_file(path, env, src, n_mesh=0, rmax=5000.0,
                                       **common)
         elif writer == 'write_sparc_env_file':
             w.write_sparc_env_file(path, env, src, rcv, pulse_type='P   ',
@@ -1047,7 +1090,7 @@ class TestBinaryArrivalsReadAsTheAsciiOnes:
                     assert t['n_arrivals'] == b['n_arrivals']
                     n_cells += t['n_arrivals'] > 0
                     for key in ('amplitudes', 'phases', 'delays',
-                                'source_angles', 'receiver_angles'):
+                                'source_angles_deg', 'receiver_angles_deg'):
                         np.testing.assert_allclose(b[key], t[key],
                                                    rtol=1e-6, atol=1e-12)
                     np.testing.assert_array_equal(b['n_bot_bounces'],
@@ -1093,7 +1136,7 @@ class TestSedimentLayerColumnOrder:
             uacpy.Source(depths=25.0, frequencies=100.0),
             uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
             interp_ssp='linear', frequencies=[100.0],
-            n_mesh=0, rmax_m=1000.0, c_low=0.0, c_high=2000.0,
+            n_mesh=0, rmax=1000.0, c_low=0.0, c_high=2000.0,
         )
         return out.read_text().splitlines()
 
@@ -1247,7 +1290,7 @@ def test_multi_profile_deck_shares_one_bottom_without_slivers(tmp_path):
         str(out), segments,
         uacpy.Source(depths=30.0, frequencies=100.0),
         uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
-        n_mesh=500, rmax_m=6000.0, c_low=0.0, c_high=2000.0,
+        n_mesh=500, rmax=6000.0, c_low=0.0, c_high=2000.0,
     )
     mesh = [float(m.group(1)) for m in
             (re.match(r'^\s*\d+\s+[\d.]+\s+([\d.]+)\s*,?\s*$', ln)
@@ -1319,7 +1362,7 @@ def _write_kraken(path, env, **overrides):
     from uacpy.io.oalib_writer import write_kraken_env_file
     src, rcv = _src_rcv()
     kwargs = dict(interp_ssp='linear', frequencies=None,
-                  n_mesh=0, rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+                  n_mesh=0, rmax=5000.0, c_low=1400.0, c_high=2000.0)
     kwargs.update(overrides)
     write_kraken_env_file(path, env, src, rcv, **kwargs)
     return path
@@ -1329,7 +1372,7 @@ def _write_scooter(path, env, **overrides):
     from uacpy.io.oalib_writer import write_scooter_env_file
     src, rcv = _src_rcv()
     kwargs = dict(interp_ssp='linear', frequencies=None,
-                  topopt_extra='', n_mesh=0, rmax_m=5000.0, c_low=1400.0,
+                  topopt_extra='', n_mesh=0, rmax=5000.0, c_low=1400.0,
                   c_high=2000.0)
     kwargs.update(overrides)
     write_scooter_env_file(path, env, src, rcv, **kwargs)
@@ -1430,7 +1473,7 @@ class TestATEnvTopBlockRecordOrder:
             out, _top_block_env(_bio(),
                                 surface=BoundaryProperties(acoustic_type='vacuum')),
             src, interp_ssp='linear', n_mesh=0, c_low=1400.0,
-            c_high=2000.0, rmax_m=5000.0)
+            c_high=2000.0, rmax=5000.0)
         # BOUNCE's top half-space is the water at the seafloor, not the ice.
         self._assert_bio_then_halfspace(out.read_text(), cp=1500.0)
 
@@ -1441,7 +1484,7 @@ class TestATEnvTopBlockRecordOrder:
         segments = [(0.0, _top_block_env(_bio())),
                     (5000.0, _top_block_env(_bio()))]
         write_multi_profile_env(out, segments, src, rcv, n_mesh=500,
-                                rmax_m=20000.0, c_low=0.0, c_high=2000.0)
+                                rmax=20000.0, c_low=0.0, c_high=2000.0)
         lines = out.read_text().splitlines()
         starts = [i for i, ln in enumerate(lines) if ln.strip() == "'deck'"]
         assert len(starts) == 2
@@ -1492,7 +1535,7 @@ class TestSparcBoundaryRestriction:
         src, rcv = _src_rcv()
         write_sparc_env_file(
             path, env, src, rcv, interp_ssp='linear',
-            output_mode='R', n_mesh=0, rmax_m=5000.0,
+            output_mode='R', n_mesh=0, rmax=5000.0,
             c_low=1400.0, c_high=2000.0, pulse_type='P', freq_min=50.0,
             freq_max=400.0, n_time_samples=20, time_max=1.0, march_start=0.0, courant_factor=1.0)
 
@@ -2094,7 +2137,7 @@ class TestBellhop3DOutputsAreNotSilentlyFlattened:
 
         shd = read_shd_bin(str(self._run(tmp_path, 'tl3d', 'C^   3')
                                .with_suffix('.shd')))
-        assert shd.bearings.tolist() == [0.0, 10.0, 20.0]
+        assert shd.bearings_deg.tolist() == [0.0, 10.0, 20.0]
         assert shd.pressure.shape[0] == 3
 
     def test_read_shd_file_refuses_multi_bearing(self, tmp_path):
@@ -2178,7 +2221,7 @@ class TestInterfaceRoughnessGoesToItsOwnInterface:
             out, env, Source(depths=50, frequencies=100.0),
             Receiver(depths=50, ranges=[5000.0]),
             interp_ssp='linear', frequencies=[100.0],
-            n_mesh=0, rmax_m=5000.0, c_low=0.0, c_high=2000.0)
+            n_mesh=0, rmax=5000.0, c_low=0.0, c_high=2000.0)
         return out.read_text().splitlines()
 
     def test_each_sigma_comes_from_its_own_carrier(self, tmp_path):
@@ -2234,11 +2277,11 @@ class TestFieldFlpProfileRangeCollapse:
                 'r': {'z': np.array([10.0, 30.0, 50.0]),
                       'r': np.array([1000.0, 2000.0, 3000.0])}}
 
-    def _write(self, tmp_path, ranges_m):
+    def _write(self, tmp_path, ranges):
         from uacpy.io.oalib_writer import write_fieldflp
         write_fieldflp(filepath=tmp_path / 'x.flp', option='RA  ',
-                       pos=self._pos(), title='t', n_profiles=len(ranges_m),
-                       profile_ranges=np.asarray(ranges_m, dtype=float))
+                       **_flp_positions(self._pos()), title='t',
+                       profile_ranges=np.asarray(ranges, dtype=float))
         return (tmp_path / 'x.flp').read_text()
 
     def test_a_pair_that_collapses_at_1mm_is_refused(self, tmp_path):
@@ -2348,12 +2391,15 @@ class TestOneEnvironmentOneWaterDepth:
 
 class TestReadPrt:
     """io.md §3: AT binaries dump fatal-error detail to ``<base>.prt``, not
-    stderr; ``read_prt`` returns the text, ``None`` when the file is absent,
-    and only the trailing ``tail_bytes`` when asked for an excerpt."""
+    stderr; ``read_prt`` returns the text, raises ``MissingFileError`` like
+    every reader when the file is absent, and returns only the trailing
+    ``tail_bytes`` when asked for an excerpt."""
 
-    def test_absent_file_returns_none(self, tmp_path):
+    def test_an_absent_file_is_a_missing_file_error(self, tmp_path):
+        from uacpy.core.exceptions import MissingFileError
         from uacpy.io.oalib_reader import read_prt
-        assert read_prt(tmp_path / 'missing.prt') is None
+        with pytest.raises(MissingFileError, match='read_prt: file not found'):
+            read_prt(tmp_path / 'missing.prt')
 
     def test_full_text_round_trips(self, tmp_path):
         from uacpy.io.oalib_reader import read_prt
@@ -2383,6 +2429,39 @@ def test_a_scooter_fields_flp_is_refused_by_its_layout(tmp_path):
     path.write_text("'RP'\n3\n1.0 2.0 3.0 /\n")
     with pytest.raises(FileFormatError, match='Scooter fields.exe layout'):
         read_flp(path)
+
+
+def test_an_unquoted_field_exe_option_reads_as_field_exe(tmp_path):
+    """field.f90:66 reads the option list-directed, so an undelimited
+    ``RA`` is a legal field.exe record 2; the layouts are told apart by an
+    integer range count on record 2 (fields.exe), not by a quote."""
+    from uacpy.io.oalib_reader import read_flp
+    from uacpy.io.oalib_writer import write_fieldflp
+    path = tmp_path / 'bare.flp'
+    write_fieldflp(path, 'RA  ', source_depths=[25.0],
+                   receiver_depths=[10.0, 20.0],
+                   receiver_ranges=[1000.0, 2000.0], title='bare')
+    lines = path.read_text().splitlines()
+    assert lines[1].lstrip().startswith("'")
+    lines[1] = 'RA ' + lines[1].split("'", 2)[2]
+    path.write_text('\n'.join(lines) + '\n')
+    deck = read_flp(path)
+    assert deck.option[:2] == 'RA'
+    assert deck.receiver_ranges.tolist() == [1000.0, 2000.0]
+
+
+def test_a_sparc_source_series_of_maxnt_rows_is_refused(tmp_path):
+    """tslib/sourceMod.f90:105-120: SPARC's normal exit is by end of file
+    inside ``DO it = 1, MaxNt``; a file of MaxNt = 10**7 rows falls through
+    the loop and stops, even at one source depth (Nt·Nsd never passes
+    MaxNST there)."""
+    import uacpy
+    from uacpy.io.oalib_writer import write_sparc_source_time_series
+    src = uacpy.Source(depths=10.0, frequencies=100.0)
+    with pytest.raises(ConfigurationError, match='MaxNt'):
+        write_sparc_source_time_series(tmp_path / 's', src, np.ones(4),
+                                       1000.0, rows=10_000_000)
+    assert not (tmp_path / 's').exists()
 
 
 def test_read_flp_accepts_list_directed_records_and_sorts(tmp_path):
@@ -2448,7 +2527,7 @@ class TestReadFlpBuildsItsDebugPreviewOnlyWhenItCanPrint:
     def test_the_preview_lists_a_short_axis_value_by_value(self, tmp_path):
         messages = self._calls(tmp_path, verbose='debug')
         prof = next(m for m in messages if 'rProf (km)' in m)
-        assert prof.endswith('0.00')
+        assert prof.endswith('[0] (1 pts)')
 
     def test_the_read_returns_the_same_deck_either_way(self, tmp_path):
         from uacpy.io.oalib_reader import _parse_flp
@@ -2462,8 +2541,11 @@ class TestReadFlpBuildsItsDebugPreviewOnlyWhenItCanPrint:
 
 
 class TestPhaseSpeedBoundsStayContractedToRangeZero:
-    """``resolve_phase_speed_bounds`` derives BOTH bounds from
-    ``env.ssp.to_pairs()`` — the range-0 column. That is correct, and correct
+    """``resolve_phase_speed_bounds`` derives ``c_high`` from
+    ``env.ssp.to_pairs()`` — the range-0 column (``c_low`` takes the slowest
+    speed of every medium over every column,
+    :func:`~uacpy.core.engine_defaults.default_c_low`, which a range-0
+    reading could only raise). That is correct, and correct
     for one reason only: the deck it describes is that same column, because
     ``write_ssp_section`` writes ``env.ssp.extend_to(...).to_pairs()`` and the
     half-space is pinned with ``halfspace_at(range=0.0)`` on the very next
@@ -2653,9 +2735,9 @@ class TestAddArrPostMerge:
         assert cell['delays'][0] == pytest.approx(
             0.75 * 0.001 + 0.25 * 0.00105)
         assert cell['delays_imag'][0] == pytest.approx(0.25 * -4e-6)
-        assert cell['source_angles'][0] == pytest.approx(
+        assert cell['source_angles_deg'][0] == pytest.approx(
             0.75 * -5.0 + 0.25 * -4.9)
-        assert cell['receiver_angles'][0] == pytest.approx(
+        assert cell['receiver_angles_deg'][0] == pytest.approx(
             0.75 * 5.0 + 0.25 * 5.1)
         assert cell['phases'][0] == 0.0
         assert cell['n_top_bounces'][0] == 0
@@ -2784,7 +2866,7 @@ class TestReadRtsFileRefusesNonPositiveReceiverCounts:
 
 
 _FIELD_KEYS = ('amplitudes', 'phases', 'delays', 'delays_imag',
-               'source_angles', 'receiver_angles', 'n_top_bounces', 'n_bot_bounces')
+               'source_angles_deg', 'receiver_angles_deg', 'n_top_bounces', 'n_bot_bounces')
 
 
 class TestBoundaryConditionSeabedGetsNoPadMedia:
@@ -2830,7 +2912,7 @@ class TestBoundaryConditionSeabedGetsNoPadMedia:
             uacpy.Source(depths=30.0, frequencies=50.0),
             uacpy.Receiver(depths=np.linspace(0.0, 100.0, 101),
                            ranges=[1000.0]),
-            rmax_m=4000.0, c_low=0.0, c_high=2000.0)
+            rmax=4000.0, c_low=0.0, c_high=2000.0)
         text = out.read_text()
         # The placeholder trio BoundaryProperties defaults to.
         assert '1600' not in text
@@ -3049,8 +3131,9 @@ class TestAnIrregularShdIsStridedByItsOwnLayout:
 
 
 class TestRtsFileParsesEveryFortranRealSpelling:
-    """``read_rts_file`` walks the same free token stream ``read_ts`` does, so
-    it accepts the same reals. Python's ``float()`` rejects two spellings a
+    """``read_rts_file`` walks the free token stream OALIB's ``read_ts.m``
+    reads, with the reals a list-directed READ takes. Python's ``float()``
+    rejects two spellings a
     list-directed READ takes: the 'D' exponent a double-precision WRITE emits,
     and the letterless three-digit exponent a ``Gw.d`` WRITE produces when the
     ``E`` no longer fits (``Scooter/sparc.f90:294``)."""
@@ -3096,7 +3179,7 @@ class TestTheSparcDeckRefusesRoughInterfaces:
             tmp_path / 's.env', env, Source(depths=50.0, frequencies=100.0),
             Receiver(depths=[50.0], ranges=[1000.0]),
             interp_ssp='linear', output_mode='R', n_mesh=200,
-            rmax_m=2000.0, c_low=1400.0, c_high=1700.0, pulse_type='P',
+            rmax=2000.0, c_low=1400.0, c_high=1700.0, pulse_type='P',
             freq_min=50.0, freq_max=200.0, n_time_samples=256, time_max=2.0, march_start=0.0,
             courant_factor=1.0)
 
@@ -3138,10 +3221,10 @@ def test_read_arr_file_accepts_fortran_exponent_tokens(tmp_path):
     assert cell['delays_imag'][0] == 1.0e-101
 
 
-class TestReadFlpPreviewSwitchesAtTenEntries:
-    """``read_flp`` lists an axis value by value while it has fewer than ten
-    entries and prints only its two ends from ten on; both branches format
-    each value with two decimals."""
+class TestReadFlpPreviewSwitchesPastElevenEntries:
+    """``read_flp``'s debug preview is the io package's one axis preview
+    (``_fortran_helpers.summarize_axis``): every value up to eleven entries,
+    the first ten and the last beyond, with the count."""
 
     @staticmethod
     def _deck(tmp_path, n_prof):
@@ -3160,15 +3243,18 @@ class TestReadFlpPreviewSwitchesAtTenEntries:
         return (next(m for m in messages if 'rProf (km)' in m),
                 next(m for m in messages if 'Rro (m)' in m))
 
-    def test_nine_entries_are_listed_one_by_one(self, tmp_path):
-        prof, offsets = self._previews(tmp_path, 9)
-        assert prof.endswith(', '.join(f'{k:.2f}' for k in range(9)))
-        assert offsets.endswith(', '.join(['0.00'] * 9))
+    def test_eleven_entries_are_listed_one_by_one(self, tmp_path):
+        prof, offsets = self._previews(tmp_path, 11)
+        assert prof.endswith(
+            '[' + ', '.join(str(k) for k in range(11)) + '] (11 pts)')
+        assert offsets.endswith('[' + ', '.join(['0'] * 11) + '] (11 pts)')
 
-    def test_ten_entries_show_only_the_two_ends(self, tmp_path):
-        prof, offsets = self._previews(tmp_path, 10)
-        assert prof.endswith('0.00 … 9.00')
-        assert offsets.endswith('0.00 … 0.00')
+    def test_twelve_entries_show_the_first_ten_and_the_last(self, tmp_path):
+        prof, offsets = self._previews(tmp_path, 12)
+        assert prof.endswith(
+            '[' + ', '.join(str(k) for k in range(10)) + ', …, 11] (12 pts)')
+        assert offsets.endswith(
+            '[' + ', '.join(['0'] * 10) + ', …, 0] (12 pts)')
 
 
 class TestScooterExtraTopOptCharacter:
@@ -3214,7 +3300,7 @@ class TestDecksCarryTheWaterDensity:
         write_bounce_input_file(
             out, water_density_env(), Source(depths=10.0, frequencies=100.0),
             interp_ssp='linear', n_mesh=0,
-            c_low=1400.0, c_high=2000.0, rmax_m=1.0)
+            c_low=1400.0, c_high=2000.0, rmax=1.0)
         lines = out.read_text().splitlines()
         top = [ln for ln in lines
                if ln.strip().startswith('0.00') and '1500.000000' in ln]
@@ -3363,9 +3449,9 @@ class TestDepthBlocksTakeACarrierOrAnArray:
             "2\n10.000000 25.500000 /\n")
 
 
-class TestRtsReadersShareOneParser:
-    """``read_rts_file`` and ``read_ts`` read the SPARC ``.rts`` through one
-    parser, and ``rts_to_pressure`` evaluates on the file's own times."""
+class TestTheRtsReader:
+    """``read_rts_file`` reads the SPARC ``.rts``, and ``rts_to_pressure``
+    evaluates on the file's own times."""
 
     @staticmethod
     def _rts(path, times, p, positions=(1000.0,)):
@@ -3375,22 +3461,22 @@ class TestRtsReadersShareOneParser:
         path.write_text("'run'\n" + '\n'.join(rows) + '\n')
         return path
 
-    def test_both_readers_return_the_same_arrays(self, tmp_path):
-        from uacpy.io import read_rts_file, read_ts
+    def test_the_quotes_go_and_the_arrays_are_the_files(self, tmp_path):
+        from uacpy.io import read_rts_file
         t = np.arange(8) * 0.01
-        path = self._rts(tmp_path / 'a.rts', t, np.sin(t), (1.0, 2.0))
-        rts, ts = read_rts_file(path), read_ts(path)
-        assert type(rts) is type(ts)
-        np.testing.assert_array_equal(rts.times, ts.times)
-        np.testing.assert_array_equal(rts.pressure, ts.pressure)
-        np.testing.assert_array_equal(rts.positions, ts.positions)
-        assert (rts.title, ts.title) == ('run', "'run'")
+        p = np.column_stack([np.sin(t), np.cos(t)])
+        path = self._rts(tmp_path / 'a.rts', t, p, (1.0, 2.0))
+        rts = read_rts_file(path)
+        assert rts.title == 'run'
+        np.testing.assert_allclose(rts.times, t)
+        np.testing.assert_array_equal(rts.positions, [1.0, 2.0])
+        np.testing.assert_allclose(rts.pressure, p, rtol=1e-8)
 
-    def test_read_ts_reads_a_title_cut_inside_a_character(self, tmp_path):
-        from uacpy.io import read_ts
+    def test_a_title_cut_inside_a_character_reads(self, tmp_path):
+        from uacpy.io import read_rts_file
         path = tmp_path / 'cut.rts'
         path.write_bytes("'café".encode()[:-1] + b"'\n1\n5.0\n0.0 1.0\n")
-        assert read_ts(path).pressure.tolist() == [[1.0]]
+        assert read_rts_file(path).pressure.tolist() == [[1.0]]
 
     def test_the_tone_keeps_its_phase_when_the_times_start_late(
             self, tmp_path):
@@ -3431,7 +3517,7 @@ class TestKrakenFamilyWritersTakeTheirSettingsFromTheEnvironment:
                               c_low=1425.0, c_high=1785.0)
         got, *_, opt = read_env(tmp_path / 'k.env')
         assert opt['interp_ssp'] == 'linear' and opt['n_mesh'] == [0]
-        assert opt['rmax_m'] == 3000.0
+        assert opt['rmax'] == 3000.0
         assert (opt['c_low'], opt['c_high']) == (1425.0, 1785.0)
         assert got.bottom.halfspace_at(range=0.0).sound_speed == 1700.0
 
@@ -3447,7 +3533,7 @@ class TestKrakenFamilyWritersTakeTheirSettingsFromTheEnvironment:
     def test_a_depth_array_receiver_needs_rmax(self, tmp_path):
         from uacpy.io import write_kraken_env_file
         src, _ = self._geometry()
-        with pytest.raises(ConfigurationError, match='rmax_m'):
+        with pytest.raises(ConfigurationError, match='rmax'):
             write_kraken_env_file(tmp_path / 'k.env', self._env(), src,
                                   np.array([50.0]), c_low=1425.0,
                                   c_high=1785.0)
@@ -3723,7 +3809,7 @@ class TestARowLawIsWrittenIntoEachWaterRow:
 
     def test_the_mid_column_row_warns_past_the_band_rule(self, tmp_path):
         # The single depth is judged by the band rule
-        # (BAND_ABSORPTION_WARN_DB_PER_KM = 0.05) over the band and the
+        # (_BAND_ABSORPTION_WARN_DB_PER_KM = 0.05) over the band and the
         # column: 5-15 kHz, 20 °C water, 500 m misses the formula at depth by
         # 0.046 dB/km (silent), 600 m by 0.055 (warns).
         from uacpy.core.absorption import FrancoisGarrison
@@ -3764,7 +3850,7 @@ class TestAMeshCountSequenceIsOnePerMedium:
             tmp_path / 'k.env', self._two_media(),
             Source(depths=[20.0], frequencies=100.0),
             uacpy.Receiver(depths=[10.0, 50.0], ranges=[1000.0]),
-            n_mesh=counts, rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+            n_mesh=counts, rmax=5000.0, c_low=1400.0, c_high=2000.0)
         if ok:
             call()
         else:

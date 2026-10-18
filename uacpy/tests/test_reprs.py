@@ -40,7 +40,7 @@ def _instances():
     from uacpy.core import run_settings as RS
     from uacpy.acoustic_signal import (bands, beamforming, cqt, detect, frf,
                                        gathers, spectral, timefreq,
-                                       delay_profile)
+                                       delay_profile, dispersion)
     from uacpy.comms import channel, janus, link, sync, transceiver
     from uacpy.noise import ambient
     from uacpy.sonar import bottom_scattering, sonar_equation
@@ -91,10 +91,10 @@ def _instances():
     c['FrancoisGarrison_profile'] = lambda: A.FrancoisGarrison(
         [(0.0, 22.0), (60.0, 12.0), (200.0, 10.0)], 35.0, 8.0)
     c['ConstantAbsorption'] = lambda: A.ConstantAbsorption(0.01)
-    c['BiologicalLayer'] = lambda: A.BiologicalLayer(z_top_m=100.0, z_bottom_m=300.0,
-                                                     f0_hz=5000.0, Q=10.0, a0=0.5)
+    c['BiologicalLayer'] = lambda: A.BiologicalLayer(z_top=100.0, z_bottom=300.0,
+                                                     f0=5000.0, Q=10.0, a0=0.5)
     c['Biological'] = lambda: A.Biological(layers=[A.BiologicalLayer(
-        z_top_m=100.0, z_bottom_m=300.0, f0_hz=5000.0, Q=10.0, a0=0.5)])
+        z_top=100.0, z_bottom=300.0, f0=5000.0, Q=10.0, a0=0.5)])
     c['AbsorptionCoefficient'] = lambda: A.FrancoisGarrison(
         10.0, 35.0, 8.0).table(f12, units='dB/km')
     c['Environment'] = lambda: uacpy.Environment(
@@ -125,7 +125,7 @@ def _instances():
                                    receiver_ranges=np.array([3000.0]),
                                    model='Bellhop', frequencies=100.0)
     c['ReflectionCoefficient_broadband'] = lambda: ReflectionCoefficient(
-        angles=np.array([0.0, 45.0, 90.0]), magnitude=np.full((3, 2), 0.5),
+        angles_deg=np.array([0.0, 45.0, 90.0]), magnitude=np.full((3, 2), 0.5),
         phase=np.zeros((3, 2)), model='OASR', frequencies=np.array([50.0, 100.0]))
     c['GreensFunction'] = lambda: GreensFunction(
         data=np.zeros((1, 1, 2, 256), complex), phase_speeds=np.linspace(1400, 1e4, 256),
@@ -138,7 +138,7 @@ def _instances():
         candidates={'depth': np.linspace(10, 100, 10)}, model='OASN',
         frequencies=100.0)
     c['ReflectionCoefficient'] = lambda: ReflectionCoefficient(
-        angles=np.linspace(0, 90, 91), magnitude=np.ones(91), phase=np.zeros(91),
+        angles_deg=np.linspace(0, 90, 91), magnitude=np.ones(91), phase=np.zeros(91),
         model='Bounce', frequencies=50.0)
     def _stack():
         def slab(z):
@@ -161,7 +161,8 @@ def _instances():
     c['WaveguideSpeeds'] = lambda: RS.WaveguideSpeeds(1495.0, 1650.0)
     c['OutputSpec'] = lambda: RS.OutputSpec('Field', kind='pressure', unit='Pa',
                                             coherent=True)
-    c['Notice'] = lambda: RS.Notice('rays clipped', 'rays clipped at 80 deg')
+    c['Notice'] = lambda: RS.Notice('rays clipped', 'rays clipped at 80 deg',
+                                    uacpy.ValidityWarning)
     # signal
     c['BandLevels'] = lambda: bands.BandLevels(centers=np.array([125.0, 250.0, 500.0, 1000.0, 2000.0]),
                                                 levels=np.array([80.0, 78.0, 75.0, 72.0, 70.0]),
@@ -175,6 +176,9 @@ def _instances():
     c['SpectrogramResult'] = lambda: timefreq.SpectrogramResult(
         frequencies=np.linspace(0, 4000, 129), times=np.linspace(0, 1, 63),
         power=np.zeros((129, 63)))
+    c['STFTResult'] = lambda: timefreq.STFTResult(
+        frequencies=np.linspace(0, 4000, 129), times=np.linspace(0, 1, 63),
+        coefficients=np.zeros((129, 63), dtype=complex))
     c['CWTResult'] = lambda: timefreq.CWTResult(
         frequencies=np.geomspace(100, 4000, 32), times=t64,
         coefficients=np.zeros((32, 64), complex))
@@ -187,7 +191,7 @@ def _instances():
     c['CQSpectrogramResult'] = lambda: cqt.CQSpectrogramResult(
         frequencies=np.geomspace(100, 4000, 48), times=t64, power=np.zeros((48, 64)))
     c['AmbiguityResult'] = lambda: detect.AmbiguityResult(
-        delays_s=np.linspace(-0.01, 0.01, 201), doppler_hz=np.linspace(-50, 50, 101),
+        delays=np.linspace(-0.01, 0.01, 201), doppler_shifts=np.linspace(-50, 50, 101),
         amplitude=np.zeros((101, 201)))
     c['FRFResult'] = lambda: frf.FRFResult(frequencies=f12,
                                            transfer_function=np.ones(12, complex), method='h1')
@@ -199,21 +203,22 @@ def _instances():
         kind='parabolic')
     c['TauPResult'] = lambda: gathers.TauPResult(
         slownesses=np.linspace(0, 1e-3, 21), taus=t64, panel=np.zeros((21, 64)))
-    c['BeamformResult'] = lambda: beamforming.BeamformResult(
-        snr=np.zeros(181), angles=np.linspace(-90, 90, 181), peak_snr=12.5)
     c['BeamformedField'] = lambda: beamforming.BeamformedField(
-        response=np.zeros((181, 12)), angles=np.linspace(-90, 90, 181),
+        response=np.zeros((181, 12)), angles_deg=np.linspace(-90, 90, 181),
         element_power=np.ones(12), frequencies=f12)
     c['Snapshots'] = lambda: beamforming.Snapshots(frequency=500.0,
                                                    data=np.zeros((8, 16), complex))
+    c['Warped'] = lambda: dispersion.Warped(
+        np.linspace(0, 0.5, 64), np.zeros(64), sample_rate=1000.0,
+        range=5000.0, sound_speed=1500.0)
     c['ChannelRegime'] = lambda: delay_profile.ChannelRegime(
-        coherence_bandwidth_hz=250.0, signal_bandwidth_hz=1000.0,
-        rms_delay_spread_s=0.004, symbol_duration_s=0.001,
+        coherence_bandwidth=250.0, signal_bandwidth=1000.0,
+        rms_delay_spread=0.004, symbol_duration=0.001,
         frequency_selective=True, isi_symbols=4.0, convention='0.5')
     # comms
     c['ChannelTaps'] = lambda: channel.ChannelTaps(
-        taps=np.ones(12, complex), delays_s=np.linspace(0.66, 0.6655, 12),
-        symbol_rate=2000.0, fc=12000.0, sps=4, first_arrival_s=0.66)
+        taps=np.ones(12, complex), delays=np.linspace(0.66, 0.6655, 12),
+        symbol_rate=2000.0, fc=12000.0, sps=4, first_arrival=0.66)
     c['BerCurve'] = lambda: link.BerCurve(ebn0_dB=np.arange(0.0, 12.0, 2.0),
                                           ber=np.logspace(-1, -6, 6), scheme='qpsk', n_bits=100000)
     c['JanusReception'] = lambda: janus.JanusReception(bits=np.zeros(64, int), crc_ok=True)
@@ -260,7 +265,7 @@ def _instances():
     z5 = np.array([0.0, 10.0, 50.0, 100.0, 500.0])
     c['AlongTrack'] = lambda: AlongTrack(ranges=r20, lats=np.linspace(43, 43.1, 20),
         lons=np.full(20, 5.0), data=np.linspace(100, 200, 20), unit='m',
-        quantity='depth', provenance=prov)
+        quantity='depth', provenance=(prov,) * 20)
     c['ArgoProfile'] = lambda: ArgoProfile(platform='6902746', cycle=12, direction='A',
         lat=43.0, lon=5.0, distance_km=12.3, time='2024-05-01', data_mode='D',
         pressure_dbar=z5, temperature=np.linspace(20, 13, 5),
@@ -285,12 +290,12 @@ def _instances():
         x=np.array([0.0, 1000.0, 2000.0]), y=np.array([0.0, 1000.0]),
         depths=np.array([[100.0, 90.0, 100.0], [110.0, 95.0, 110.0]]))
     c['BeamPatternTable'] = lambda: BeamPatternTable(
-        angles=np.array([-30.0, 0.0, 30.0]), levels_dB=np.array([-6.0, 0.0, -6.0]))
+        angles_deg=np.array([-30.0, 0.0, 30.0]), levels_dB=np.array([-6.0, 0.0, -6.0]))
     c['WavInfo'] = lambda: WavInfo(encoding='pcm24', bits=24, n_channels=4,
         sample_rate=96000.0, n_frames=345600000)
     c['ShdFile'] = lambda: ShdFile(title='shelf', plot_type='rectilin  ',
         frequencies=np.array([200.0]), source_frequency=200.0,
-        stabilizing_attenuation=0.0, bearings=np.array([0.0]), source_x=None,
+        stabilizing_attenuation=0.0, bearings_deg=np.array([0.0]), source_x=None,
         source_y=None, source_depths=np.array([20.0]), receiver_depths=z12,
         receiver_ranges=r20, pressure=np.zeros((1, 1, 1, 12, 20), complex),
         pressure_frequency=200.0)
@@ -369,7 +374,7 @@ def _instances():
     c['Flp3dFile'] = lambda: Flp3dFile(title='shelf', option='STD', method='GBT',
         tesselation_check=False, sbp_flag='O', n_modes=12, source_x=0.0, source_y=0.0,
         source_depths=np.array([20.0]), receiver_depths=z12, receiver_ranges=r20,
-        bearings=np.linspace(0, 350, 36), node_x=np.zeros(3), node_y=np.zeros(3),
+        bearings_deg=np.linspace(0, 350, 36), node_x=np.zeros(3), node_y=np.zeros(3),
         node_mode_files=('a', 'b', 'c'), elements=np.zeros((1, 3), int))
     c['RtsFile'] = lambda: RtsFile(title='shelf', positions=np.zeros((2, 2)),
         times=np.linspace(0, 1, 1001), pressure=np.zeros((1001, 2)))
@@ -384,11 +389,72 @@ def _instances():
     c['OasnNoise'] = lambda: OasnNoise(surface_level=60.0, white_level=40.0)
     c['OasnReplicaGrid'] = lambda: OasnReplicaGrid(z=(10.0, 100.0, 10), c_low=1400.0,
                                                    c_high=1e8)
+    # records the compute functions behind the plotters return
+    c['ChannelResponse'] = lambda: __import__(
+        'uacpy.acoustic_signal.channel', fromlist=['ChannelResponse']
+    ).ChannelResponse(np.linspace(-500.0, 375.0, 8), np.ones(8, complex))
+    c['BerTheory'] = lambda: __import__(
+        'uacpy.comms.metrics', fromlist=['BerTheory']).BerTheory(
+        np.arange(0.0, 12.0, 2.0), np.logspace(-1, -6, 6), scheme='qpsk')
+    c['RocCurve'] = lambda: __import__(
+        'uacpy.sonar.detection', fromlist=['RocCurve']).RocCurve(
+        np.logspace(-6, -0.01, 16), np.linspace(0.1, 1.0, 16),
+        deflection=2.0)
+    c['CumulativeExposure'] = lambda: __import__(
+        'uacpy.core.acoustics.levels', fromlist=['CumulativeExposure']
+    ).CumulativeExposure(times=np.array([0.25, 0.5, 0.75, 1.0]),
+                         levels=np.array([114.0, 117.0, 118.75, 120.0]),
+                         ref=1e-6)
+    c['FieldStatistics'] = lambda: __import__(
+        'uacpy.core.metrics', fromlist=['FieldStatistics']).FieldStatistics(
+        labels=('Bellhop', 'Kraken'), mean_dB=np.array([62.0, 63.5]),
+        std_dB=np.array([8.0, 7.5]),
+        rms_dB=np.array([[0.0, 4.4], [4.4, 0.0]]), depth=50.0,
+        kinds=('pressure', 'pressure'))
+    c['ModeDispersion'] = lambda: __import__(
+        'uacpy.core.results.modes', fromlist=['ModeDispersion']
+    ).ModeDispersion(frequencies=np.array([50.0, 100.0, 150.0]),
+                     phase_speeds=np.full((3, 4), 1510.0),
+                     group_frequencies=np.array([75.0, 125.0]),
+                     group_speeds=np.full((2, 4), 1490.0), model='Kraken',
+                     backend='kraken', model_source_id='acoustics_toolbox')
+    c['ExcitationPattern'] = lambda: __import__(
+        'uacpy.core.results.modes', fromlist=['ExcitationPattern']
+    ).ExcitationPattern(grazing_angles_deg=np.linspace(2.0, 30.0, 14),
+                        excitation=np.linspace(0.1, 0.8, 14),
+                        pattern_angles_deg=np.linspace(0.0, 90.0, 721),
+                        pattern=np.linspace(0.0, 7.0, 721),
+                        directional=False, sound_speed=1500.0, n_sources=7,
+                        aperture=60.0, model='Kraken', backend='kraken',
+                        model_source_id='acoustics_toolbox')
+    # the records the PE grid scorer and the rams stability rule return
+    from uacpy.models import pe_grid
+    c['GridChoice'] = lambda: pe_grid.GridChoice(
+        dr=5.0, dz=0.25, predicted_error=8e-4, growth=0.0, c0=1500.0,
+        kz_max=0.42, alpha=0.08, p=8, xi_min=-0.2, xi_max=0.0,
+        xi_stab_min=-1.0, xi_stab_max=0.1, trapped_end_binds=False)
+    c['GrowthMargin'] = lambda: pe_grid.GrowthMargin(
+        floor=1e-5, floor_leak=2e-5, floor_xi=-0.6, floor_excess=-1e-5,
+        growth=3e-5, leak=4e-5, xi=-0.5, grazing_deg=45.0, excess=-1e-5)
     return c
 
 
 
 EXPECTED = {
+    'ChannelResponse':
+        'ChannelResponse(8 frequencies -500–375 Hz, response 8 complex)',
+    'BerTheory':
+        'BerTheory(6 ebn0_dB 0–10 dB, 6 ber 1e-06–0.1, scheme=qpsk)',
+    'RocCurve':
+        'RocCurve(16 pfa 1e-06–0.977237, 16 pd 0.1–1, deflection=2)',
+    'CumulativeExposure':
+        'CumulativeExposure(times [0.25, 0.5, 0.75, 1] s, levels [114, 117, 118.75, 120] dB, ref=1e-06)',
+    'FieldStatistics':
+        'FieldStatistics(labels [Bellhop, Kraken], mean_dB [62, 63.5] dB, std_dB [8, 7.5] dB, rms_dB 2×2 dB, depth=50 m, kinds [pressure, pressure])',
+    'ModeDispersion':
+        'ModeDispersion(frequencies [50, 100, 150] Hz, phase_speeds 3×4 m/s, group_frequencies [75, 125] Hz, group_speeds 2×4 m/s, model=Kraken, backend=kraken, model_source_id=acoustics_toolbox)',
+    'ExcitationPattern':
+        'ExcitationPattern(14 grazing_angles_deg 2–30 deg, 14 excitation 0.1–0.8, 721 pattern_angles_deg 0–90 deg, 721 pattern 0–7, directional=False, sound_speed=1500 m/s, n_sources=7, aperture=60 m, model=Kraken, backend=kraken, model_source_id=acoustics_toolbox)',
     'Source':
         'Source(depth 20 m, frequency 200 Hz, point)',
     'Source_multi':
@@ -476,7 +542,7 @@ EXPECTED = {
     'OutputSpec':
         'OutputSpec(Field pressure Pa coherent)',
     'Notice':
-        "Notice('rays clipped', 'rays clipped at 80 deg', UACPYWarning)",
+        "Notice('rays clipped', 'rays clipped at 80 deg', ValidityWarning)",
     'BandLevels':
         'BandLevels(5 centers 125–2000 Hz, 5 levels 70–80 dB re 1 µPa², band_type=octave, ref=1e-06)',
     'SpectralEstimate':
@@ -484,7 +550,9 @@ EXPECTED = {
     'ProbabilisticSpectralEstimate':
         'ProbabilisticSpectralEstimate(257 frequencies 0–4000 Hz, 81 level_edges 40–120 dB re 1 µPa²/Hz, pdf 257×80 1/dB, ref=1e-06, scaling=density, method=welch)',
     'SpectrogramResult':
-        'SpectrogramResult(129 frequencies 0–4000 Hz, 63 times 0–1 s, power 129×63 Pa²/Hz, scaling=density, mode=psd)',
+        'SpectrogramResult(129 frequencies 0–4000 Hz, 63 times 0–1 s, power 129×63 Pa²/Hz, scaling=density)',
+    'STFTResult':
+        'STFTResult(129 frequencies 0–4000 Hz, 63 times 0–1 s, coefficients 129×63 complex Pa/√Hz, scaling=density)',
     'CWTResult':
         'CWTResult(32 frequencies 100–4000 Hz, 64 times 0–0.063 s, coefficients 32×64 complex)',
     'WignerVilleResult':
@@ -498,7 +566,7 @@ EXPECTED = {
     'CQSpectrogramResult':
         'CQSpectrogramResult(48 frequencies 100–4000 Hz, 64 times 0–0.063 s, power 48×64 Pa²/Hz, scaling=density)',
     'AmbiguityResult':
-        'AmbiguityResult(201 delays_s -0.01–0.01 s, 101 doppler_hz -50–50 Hz, amplitude 101×201)',
+        'AmbiguityResult(201 delays -0.01–0.01 s, 101 doppler_shifts -50–50 Hz, amplitude 101×201)',
     'FRFResult':
         'FRFResult(12 frequencies 100–1000 Hz, transfer_function 12 complex, method=h1)',
     'FKResult':
@@ -507,16 +575,16 @@ EXPECTED = {
         'RadonResult(21 moveout 0–0.001 s/m², 64 taus 0–0.063 s, panel 21×64, kind=parabolic)',
     'TauPResult':
         'TauPResult(21 slownesses 0–0.001 s/m, 64 taus 0–0.063 s, panel 21×64)',
-    'BeamformResult':
-        'BeamformResult(181 snr 0 dB, 181 angles -90–90 deg, peak_snr=12.5 dB)',
     'BeamformedField':
-        'BeamformedField(response 181×12, 181 angles -90–90 deg, 12 element_power 1, 12 frequencies 100–1000 Hz)',
+        'BeamformedField(response 181×12, 181 angles_deg -90–90 deg, 12 element_power 1, 12 frequencies 100–1000 Hz)',
     'Snapshots':
         'Snapshots(frequency=500 Hz, data 8×16 complex)',
+    'Warped':
+        'Warped(64 times 0–0.5 s, 64 data 0, sample_rate=1000, range=5000, sound_speed=1500, interpolation=linear)',
     'ChannelRegime':
-        'ChannelRegime(coherence_bandwidth_hz=250 Hz, signal_bandwidth_hz=1000 Hz, rms_delay_spread_s=0.004 s, symbol_duration_s=0.001 s, frequency_selective=True, isi_symbols=4, convention=0.5)',
+        'ChannelRegime(coherence_bandwidth=250 Hz, signal_bandwidth=1000 Hz, rms_delay_spread=0.004 s, symbol_duration=0.001 s, frequency_selective=True, isi_symbols=4, convention=0.5)',
     'ChannelTaps':
-        'ChannelTaps(taps 12 complex, 12 delays_s 0.66–0.6655 s, symbol_rate=2000 Hz, fc=12000 Hz, sps=4, first_arrival_s=0.66 s)',
+        'ChannelTaps(taps 12 complex, 12 delays 0.66–0.6655 s, symbol_rate=2000 Hz, fc=12000 Hz, sps=4, first_arrival=0.66 s)',
     'BerCurve':
         'BerCurve(6 ebn0_dB 0–10 dB, 6 ber 1e-06–0.1, scheme=qpsk, n_bits=100000, n_train=400)',
     'JanusReception':
@@ -542,7 +610,7 @@ EXPECTED = {
     'RAM':
         'RAM()',
     'AlongTrack':
-        'AlongTrack(20 ranges 100–10000 m, 20 lats 43–43.1 °, 20 lons 5 °, 20 data 100–200, unit=m, quantity=depth, provenance=gebco)',
+        'AlongTrack(20 ranges 100–10000 m, 20 lats 43–43.1 °, 20 lons 5 °, 20 data 100–200, unit=m, quantity=depth, 20 provenance)',
     'ArgoProfile':
         'ArgoProfile(platform=6902746, cycle=12, lat=43 °, lon=5 °, time=2024-05-01, 5 pressure_dbar 0–500 dbar, 5 temperature 13–20 °C, 5 salinity 38 psu, provenance=gebco)',
     'BathyGrid':
@@ -562,7 +630,7 @@ EXPECTED = {
     'Boundary3dFile':
         'Boundary3dFile(interpolation=R, x [0, 1000, 2000] m, y [0, 1000] m, depths 2×3 m)',
     'BeamPatternTable':
-        'BeamPatternTable(angles [-30, 0, 30] deg, levels_dB [-6, 0, -6] dB)',
+        'BeamPatternTable(angles_deg [-30, 0, 30] deg, levels_dB [-6, 0, -6] dB)',
     'WavInfo':
         'WavInfo(encoding=pcm24, bits=24, n_channels=4, sample_rate=96000 Hz, n_frames=345600000)',
     'ShdFile':
@@ -602,7 +670,7 @@ EXPECTED = {
     'RamGrid':
         'RamGrid(frequency=200 Hz, dr=57.3403 m, dz=0.2589 m, zmax=321.812 m, n_depth_points=1244)',
     'KrakenLaunch':
-        'KrakenLaunch(deck_frequency=200 Hz, 162 tabulation_depths 0–100 m, c_low=0 m/s, c_high 1732.5 m/s, rmax_m=10000 m, n_mesh=0, field_option=RA C)',
+        'KrakenLaunch(deck_frequency=200 Hz, 162 tabulation_depths 0–100 m, c_low=0 m/s, c_high 1732.5 m/s, rmax=10000 m, n_mesh=0, field_option=RA C)',
     'ModelSpec':
         'ModelSpec(8 modes, 5 supports, source_types [line, point])',
     'Surface_rd':
@@ -632,7 +700,7 @@ EXPECTED = {
     'FlpFile':
         'FlpFile(title=shelf, option=RA, n_modes=12, profile_ranges 0 m, source_depths 20 m, 12 receiver_depths 5–95 m, 20 receiver_ranges 100–10000 m)',
     'Flp3dFile':
-        'Flp3dFile(title=shelf, option=STD, n_modes=12, source_depths 20 m, 12 receiver_depths 5–95 m, 20 receiver_ranges 100–10000 m, 36 bearings 0–350 °)',
+        'Flp3dFile(title=shelf, option=STD, n_modes=12, source_depths 20 m, 12 receiver_depths 5–95 m, 20 receiver_ranges 100–10000 m, 36 bearings_deg 0–350 °)',
     'RtsFile':
         'RtsFile(title=shelf, positions 2×2, 1001 times 0–1 s, pressure 1001×2)',
     'Ssp3dFile':

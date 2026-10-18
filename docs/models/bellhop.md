@@ -46,11 +46,13 @@ not models of a physically propagating beam.
 no a-priori criterion exists; the guideline is that the wavelength be
 substantially smaller than *any* physical scale in the problem — water depth,
 bathymetric relief and duct thickness alike. The `D/λ` bands below are an
-engineering convention on the depth scale only, and the literature brackets them
-loosely on both sides: published guidance puts full confidence as high as
-`D/λ ≳ 100`, while ray models have been validated against PE and
-wavenumber-integral solutions down to 50 Hz in range-dependent shallow water.
-Treat them as a first filter, not a criterion. At `c = 1500 m/s`:
+engineering convention on the depth scale only, uacpy guidance; a run does not
+warn on them. The one source that gives numbers is stricter: "if the depth-to-wavelength ratio is 100 or more, ray
+tracing models are accurate. Below that, corrections must be made to these
+models. In shallow water or low frequencies, i.e., when the depth-to-wavelength
+is about 30 or less, 'mode theory' models are used" (Stergiopoulos, *Advanced
+Signal Processing Handbook*, §10.2.2). Treat the bands as a first filter, not a
+criterion. At `c = 1500 m/s`:
 
 | Depth | 50 Hz | 200 Hz | 1 kHz |
 |---|---|---|---|
@@ -193,8 +195,9 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `n_beams` | `0` | Number of rays. `0` lets Bellhop choose, as `doc/bellhop.htm` advises: "use 0 to have the program calculate a value automatically, but conservatively" (`angleMod.f90:38-51`). |
-| `launch_angles` | `(-80, 80)` | Launch-angle fan, degrees. Narrow it to isolate paths. uacpy guidance (no value in the manual: the Bellhop User Guide leaves the fan to "what part of the field the user is interested in seeing"); a receiver whose direct path needs a steeper launch is warned about. |
+| `n_beams` | `0` | Number of rays. `0` lets Bellhop choose, as `doc/bellhop.htm` advises: "use 0 to have the program calculate a value automatically, but conservatively" (`angleMod.f90:38-51`); the count it chose, read from its `.prt`, is in `result.run_settings.notes`. |
+| `single_beam` | `None` | Trace and sum one beam of the fan, by index (1 = lowest launch angle): `TopOpt(6:6) = 'I'` with the index after `NBeams` (`angleMod.f90:32-33`, `bellhop.f90:265`). Bellhop User Guide §6.2, "Plotting a single beam": "It is sometimes useful to be able to plot an individual beam in the sum." The beam keeps its width in the full fan, which `n_beams=1` does not give. Refused past a pinned `n_beams` (`angleMod.f90:80-83` stops on it). |
+| `launch_angles_deg` | `(-80, 80)` | Launch-angle fan, degrees. Narrow it to isolate paths. uacpy guidance (no value in the manual: the Bellhop User Guide leaves the fan to "what part of the field the user is interested in seeing"); a receiver whose direct path needs a steeper launch is warned about. |
 | `beam_type` | `'G'` | Cross-beam profile. `'G'` geometric hat and `'B'` geometric Gaussian, both Cartesian; `'g'` the ray-centred hat; `'S'` Bucker simple Gaussian; `'C'`/`'R'` Červený beams in Cartesian / ray-centred coordinates. `'G'` is BELLHOP's own default too (`ReadEnvironmentBell.f90:393-395`); pass `'B'` for finite caustics. The Bellhop User Guide finds `'B'` "In general ... more accurate TL plots" and keeps `'G'` the default "since people are usually most familiar with that approach"; uacpy keeps `'G'` for ducts and reciprocity (measured, `Bellhop.beam_type`). |
 | `ray_step` | `None` | Ray step (m), written to the deck as given. `None` → `env.depth / 50` (uacpy guidance: BELLHOP's own `depth/10` under-resolves a near-horizontal refracted ray); `0` asks BELLHOP for that `depth/10` (`bellhop.f90:170-174`). |
 | `z_box`, `r_box` | `None` | Ray-trace bounding box (m); BELLHOP drops a ray once it leaves it (`bellhop.f90:571-572`). `None` → `1.2 × env.depth` and `1.2 ×` the farthest receiver range (10 km when that is 0), uacpy guidance, measured: paths that turn back from beyond the farthest receiver need room to turn (on the ASA ideal wedge at 25 Hz, receivers to 3 km, 0.57 dB median from the analytic field against 3.06 dB with the manual's "say 1%" margin). A pinned box that stops short of the seafloor or of the farthest receiver runs as given, with a `ValidityWarning` naming the paths it drops, on every mode but `RAYS`, where the box sets the extent of the trace. |
@@ -231,6 +234,14 @@ at `α` comes back changed by `10·log10(cos α)` dB; the run says so. As a
 measured illustration, on a 100 m Pekeris guide at 300 Hz the mean TL sits
 0.45 dB from Scooter there and 0.28 dB on the ports.
 
+A line source's level is set to unit amplitude at 1 m in free space by the
+frequency-independent factor `1/(4√π)` (the binary's raw line field is
+`4√π/√R`, `influence.f90:784`, `ArrMod.f90:104`), so each bin of a
+line-source `H(f)` and the `TIME_SERIES` pulse built from it follow the same
+per-frequency 1 m convention as Kraken's and Scooter's `√k0` (JKPS §5.2.2;
+see [Kraken §4](kraken.md#4-run-modes) for JKPS's warning on broadband
+synthesis with it).
+
 | Name | Default | Meaning |
 |---|---|---|
 | `beam_width_type` | `None` | Beam-width law (`ReadEnvironmentBell.f90:178-181`): `'F'` space-filling, `'M'` minimum width, `'W'` WKB. `None` is `'F'`, uacpy guidance measured against KRAKENC: BELLHOP has no built-in width, and the toolbox's Cerveny decks write `'M'`, which with `r_loop` 1 km reads twice the error on a Pekeris guide. |
@@ -239,7 +250,7 @@ measured illustration, on a 100 m Pekeris guide at 300 Hz the mean TL sits
 | `r_loop` | `None` | Range (m) at which the beam width is chosen; read only by the `'M'` width (`bellhop.f90:378-380`). `None` is 1 km, uacpy guidance: BELLHOP has no built-in value (the toolbox's calib decks write 1 km, its 100 km decks 25-100 km). |
 | `n_image` | `None` | Number of images; a whole number ≥ 0 (`ReadEnvironmentBell.f90:217` reads it as an INTEGER), anything else refused. `None` is `1`, BELLHOP's built-in (`bellhopMod.f90:22`). |
 | `ib_win` | `None` | Beam-windowing parameter; a whole number ≥ 0 (read as an INTEGER, `ReadEnvironmentBell.f90:217`), anything else refused. `None` is `5`, BELLHOP's built-in (`bellhopMod.f90:22`). These six are Cerveny knobs (`beam_type` `'C'` / `'R'`): set on any other beam type, one is not used, and the constructor says so. |
-| `component` | `'P'` | BELLHOP's built-in value (`bellhopMod.f90:24`). Reserved: only `'P'` (pressure) returns a field. `'V'`/`'H'` select particle velocity in the ray-centred routine (`influence.f90:120-130`), which a `Field` cannot carry, so they raise `UnsupportedFeatureError` on `beam_type='R'` and are ignored with a warning on `'C'`. |
+| `component` | `'P'` | BELLHOP's built-in value (`bellhopMod.f90:24`). Reserved: only `'P'` (pressure) returns a field. `'V'`/`'H'` select particle velocity in the ray-centred routine (`influence.f90:120-130`), which a `Field` cannot carry, so they raise `UnsupportedFeatureError` on `beam_type='R'` and are ignored with a warning on every other beam type. |
 
 **Broadband synthesis**
 
@@ -324,10 +335,10 @@ receiver grid.
 ### Ray paths
 
 ```python
-rays = Bellhop(n_beams=41, launch_angles=(-20.0, 20.0)).run(
+rays = Bellhop(n_beams=41, launch_angles_deg=(-20.0, 20.0)).run(
     env, source, receiver, run_mode=RunMode.RAYS)
 fig, ax = rays.plot(env=env, show_receivers=False, figsize=WIDE,
-                    title='Bellhop — ray fan, launch_angles=(-20°, +20°)')
+                    title='Bellhop — ray fan, launch_angles_deg=(-20°, +20°)')
 ```
 
 ![Bellhop ray fan](figures/bellhop_rays.png)
@@ -339,7 +350,7 @@ Rays are coloured by what they hit: **red** direct, **green** surface-reflected,
 
 ```python
 point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-eig = Bellhop(n_beams=4000, launch_angles=(-45.0, 45.0)).run(
+eig = Bellhop(n_beams=4000, launch_angles_deg=(-45.0, 45.0)).run(
     env, source, point, run_mode=RunMode.EIGENRAYS)
 fig, ax = eig.top_n_by_miss(12).plot(
     env=env, figsize=WIDE,
@@ -356,7 +367,7 @@ beam-window reason as the arrivals below.
 ### Arrivals — the impulse structure
 
 ```python
-arr = Bellhop(n_beams=4000, launch_angles=(-45.0, 45.0)).run(
+arr = Bellhop(n_beams=4000, launch_angles_deg=(-45.0, 45.0)).run(
     env, source, point, run_mode=RunMode.ARRIVALS)
 fig, ax = arr.plot(figsize=WIDE,
                    title='Bellhop — arrivals at (3 km, 60 m)')
@@ -395,7 +406,8 @@ every contribution unmerged, in thread-completion order — the same run writes
 far more records there, and an incoherent energy sum taken directly over the
 raw records disagrees between backends. The `Bellhop` model applies the Fortran
 merge rule only to files those backends left unmerged — always for `cuda`, for
-`cxx` only when `os.cpu_count() > 1` (`_arrivals_need_merge`), never for
+`cxx` only when `os.cpu_count() > 1` and the binary was not launched
+single-threaded (`-1`, inside a `run_parallel` worker; `arrivals_need_merge`), never for
 `fortran`, whose file is already merged and would not survive a second pass —
 so an `Arrivals` result holds the same *set* of records whichever backend
 produced the file: the `beam_type='G'` run above returns 30 records on
@@ -479,8 +491,8 @@ default beams a wider band costs nothing above, and the half-space here has a fr
 
 The phase panel is aliased, not noisy: at 192 bins over 300 Hz the spacing is
 `Δf ≈ 1.57 Hz`, and a ~2 s bulk delay advances the phase ~20 rad per bin
-against a Nyquist limit of π. Read `|H|` here, and use `plot_impulse_response()`
-for timing.
+against a Nyquist limit of π. Read `|H|` here, and draw the impulse response
+(`H.to_time_trace(sample_rate=fs).plot_impulse_response()`) for timing.
 
 ---
 
@@ -518,7 +530,20 @@ too. Reduce with
 under-sampled field. If the TL image looks grainy, raise `n_beams` and confirm
 the picture stops changing.
 
-**`launch_angles` clips the field, not just the picture.** Narrowing the fan removes
+**An eigenray or arrival set needs a finer fan than a TL map.** BELLHOP
+writes an eigenray, or an arrival, for every beam that passes within a
+beamwidth of the receiver, so the set depends on how densely the fan samples
+the angles that reach it: the User Guide raises its own eigenray example from
+41 rays to 5001 ("The more rays used, the more precise the eigenray
+calculation will be", §3), and computes arrivals the same way (§9.3).
+Converge the set as you converge a TL map, by comparing two counts. On a
+100 m sandy channel at 1 kHz, source 20 m, receiver 50 m at 2 km, the
+default fan gives 44 arrivals and −57.14 dB of received energy, 2000, 8000
+and 16000 beams give 26 arrivals and −56.23 to −56.25 dB, with the same
+earliest arrival; 4000 beams adds one weak surface path. That is why the
+`EIGENRAYS` and `ARRIVALS` snippets on this page pin `n_beams=4000`.
+
+**`launch_angles_deg` clips the field, not just the picture.** Narrowing the fan removes
 steep paths entirely — useful for isolating a path, wrong if you want total
 field.
 

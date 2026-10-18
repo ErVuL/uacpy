@@ -223,7 +223,7 @@ def segment_environment_by_range(
                 f"single profile at r=0. Pass n_segments=None for automatic "
                 f"segmentation at the environment's change points."
             )
-        segment_ranges_m = np.linspace(0, max_range_m, n_segments)
+        segment_ranges = np.linspace(0, max_range_m, n_segments)
     else:
         # Automatic segmentation: union the change-point ranges from
         # bathymetry, 2-D SSP, and RD-bottom axes; insert intermediate
@@ -252,7 +252,7 @@ def segment_environment_by_range(
 
         depth_step = _depth_step_ceiling(env, freq)
         ssp_step = _ssp_change_ceiling(env, freq)
-        segment_ranges_m = [key_ranges_m[0]]
+        segment_ranges = [key_ranges_m[0]]
         for i in range(1, len(key_ranges_m)):
             prev = key_ranges_m[i - 1]
             curr = key_ranges_m[i]
@@ -280,19 +280,19 @@ def segment_environment_by_range(
                                    int(np.ceil(delta_c / ssp_step)))
             if n_subseg > 1:
                 subseg_ranges = np.linspace(prev, curr, n_subseg + 1)[1:-1]
-                segment_ranges_m.extend(subseg_ranges)
-            segment_ranges_m.append(curr)
-        segment_ranges_m = sorted(set(segment_ranges_m))
-        segment_ranges_m = _thin_to_budget(segment_ranges_m, env,
-                                           depth_step)
+                segment_ranges.extend(subseg_ranges)
+            segment_ranges.append(curr)
+        segment_ranges = sorted(set(segment_ranges))
+        segment_ranges = _thin_to_budget(segment_ranges, env,
+                                         depth_step)
 
-    return segments_at_ranges(env, segment_ranges_m)
+    return segments_at_ranges(env, segment_ranges)
 
 
-def segments_at_ranges(env: Environment, segment_ranges_m
+def segments_at_ranges(env: Environment, segment_ranges
                        ) -> List[Tuple[float, Environment]]:
     """The ``(range, Environment)`` profile of ``env`` at each of
-    ``segment_ranges_m`` (m): the range-independent environment a
+    ``segment_ranges`` (m): the range-independent environment a
     multi-profile deck writes for the segment starting there.
     :func:`segment_environment_by_range` chooses the ranges; a caller that
     recorded them rebuilds the same segments with this."""
@@ -301,7 +301,7 @@ def segments_at_ranges(env: Environment, segment_ranges_m
     # the declared list[tuple[float, Environment]] — list is invariant, even
     # though float64 is a float.
     segments: List[Tuple[float, Environment]] = []
-    for r in segment_ranges_m:
+    for r in segment_ranges:
         depth_at_range = float(np.asarray(env.bathymetry.eval(range=r)).flat[0])
 
         bottom_segment = env.bottom.at(range=r)

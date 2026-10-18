@@ -69,7 +69,7 @@ def _nk_consequence(nk: int) -> str:
     )
 
 
-def _deck_nk(rmax_m: float, freq_max: float, c_low: float, c_high: float) -> int:
+def _deck_nk(rmax: float, freq_max: float, c_low: float, c_high: float) -> int:
     """The ``Nk`` ``scooter.f90:69`` will derive from this deck.
 
     ``Nk = INT( 2000.0 * RMax * ( kMax - kMin ) / pi )`` with ``RMax`` in km
@@ -81,7 +81,7 @@ def _deck_nk(rmax_m: float, freq_max: float, c_low: float, c_high: float) -> int
     writes RMax as ``%.6f`` km and the phase-speed pair exactly — so this
     reproduces the binary's count rather than an unrounded neighbour of it.
     """
-    rmax_km = round(float(rmax_m) / 1000.0, 6)
+    rmax_km = round(float(rmax) / 1000.0, 6)
     return int(4000.0 * rmax_km * float(freq_max)
                * (1.0 / float(c_low) - 1.0 / float(c_high)))
 
@@ -193,7 +193,7 @@ def deck_max_frequency(source, frequencies):
     return float(source.frequencies[0])
 
 
-def refuse_too_few_wavenumbers(nk: int, rmax_m: float, f_deck: float,
+def refuse_too_few_wavenumbers(nk: int, rmax: float, f_deck: float,
                                c_low: float, c_high: float) -> None:
     """Refuse a deck whose wavenumber count ``scooter.f90`` cannot space:
     ``Nk < 2`` runs to completion at exit 0 (:func:`_nk_consequence`)."""
@@ -202,7 +202,7 @@ def refuse_too_few_wavenumbers(nk: int, rmax_m: float, f_deck: float,
     raise ConfigurationError(
         f"This deck asks Scooter for Nk = {nk} wavenumber sample(s): "
         f"scooter.f90:69 derives Nk = INT(2000 * RMax_km * "
-        f"(kMax - kMin) / pi) from RMax = {rmax_m:g} m at "
+        f"(kMax - kMin) / pi) from RMax = {rmax:g} m at "
         f"{f_deck:.6g} Hz with "
         f"c_low = {c_low:.1f} and c_high = {c_high:.1f} m/s. "
         f"{_nk_consequence(nk)}",
@@ -214,6 +214,26 @@ def refuse_too_few_wavenumbers(nk: int, rmax_m: float, f_deck: float,
             "the receiver ranges also raises RMax; shortening them "
             "lowers it."
         ),
+    )
+
+
+def refuse_taper_on_too_few_wavenumbers(taper: float, nk: int) -> None:
+    """Refuse a ``taper > 0`` on a deck of fewer than 4 wavenumbers before
+    it is written: the Green's function's phase-speed grid holds ``Nk``
+    values (``scooter.f90:67-69``, one ``cVec`` per ``k``), and the taper
+    needs four to place a roll-off at each edge
+    (:func:`~uacpy.models.scooter._extract.taper_bounds`), which would
+    otherwise refuse it after the launch."""
+    if not taper > 0.0 or nk >= 4:
+        return
+    raise ConfigurationError(
+        f"Scooter(taper={taper:.4g}): this deck asks for Nk = {nk} "
+        f"wavenumber sample(s), too few to place a roll-off at each edge "
+        f"(the taper needs 4), so the taper cannot be applied.",
+        remediation=("Pass taper=0 to transform the Green's function "
+                     "untapered, or give the deck more wavenumbers (a wider "
+                     "c_low/c_high window or a longer RMax), so a roll-off "
+                     "fits at each edge."),
     )
 
 
@@ -241,7 +261,7 @@ def green_cube_axes(source, receiver,
 
 def green_cube_detail(nk: int, n_frequencies: int, n_source_depths: int,
                       n_receiver_depths: int, n_ranges: int, *,
-                      rmax_m: float, f_deck: float, c_low: float,
+                      rmax: float, f_deck: float, c_low: float,
                       c_high: float) -> Tuple[int, int, str]:
     """``(cube, peak, detail)``: the bytes of the complex64
     Green's-function cube and of the peak the read and transform reach,
@@ -279,7 +299,7 @@ def green_cube_detail(nk: int, n_frequencies: int, n_source_depths: int,
         f"({int(nk)} x {int(n_ranges)} ranges), about "
         f"{peak / 1024 ** 3:.1f} GiB at peak. scooter.f90:69 derives "
         f"Nk = INT(2000 * RMax_km * (kMax - kMin) / pi) from "
-        f"RMax = {rmax_m:g} m at {f_deck:.6g} Hz with "
+        f"RMax = {rmax:g} m at {f_deck:.6g} Hz with "
         f"c_low = {c_low:.1f} and c_high = {c_high:.1f} m/s."
     )
     return cube, peak, detail
@@ -287,7 +307,7 @@ def green_cube_detail(nk: int, n_frequencies: int, n_source_depths: int,
 
 def reject_oversized_green_cube(
     nk: int, n_frequencies: int, n_source_depths: int,
-    n_receiver_depths: int, n_ranges: int, *, rmax_m: float,
+    n_receiver_depths: int, n_ranges: int, *, rmax: float,
     f_deck: float, c_low: float, c_high: float,
 ) -> Tuple[int, Optional[Notice]]:
     """``(peak, headroom)``: the deck's peak memory in bytes
@@ -298,7 +318,7 @@ def reject_oversized_green_cube(
     """
     cube, peak, detail = green_cube_detail(
         nk, n_frequencies, n_source_depths, n_receiver_depths, n_ranges,
-        rmax_m=rmax_m, f_deck=f_deck, c_low=c_low, c_high=c_high)
+        rmax=rmax, f_deck=f_deck, c_low=c_low, c_high=c_high)
     return peak, memory_budget(
         peak, model_name='Scooter', what='peak memory',
         detail=f"This deck asks for {detail}",
@@ -310,9 +330,9 @@ def reject_oversized_green_cube(
 
 
 def mesh_floor_notice(freq0, freqs, *,
-                      n_mesh) -> Optional[Tuple[str, str]]:
-    """``(note, warning)`` when ``scooter.f90`` replaces a pinned
-    ``n_mesh`` at some of ``freqs``, else ``None``.
+                      n_mesh) -> Optional[Notice]:
+    """The :class:`~uacpy.core.run_settings.Notice` when ``scooter.f90``
+    replaces a pinned ``n_mesh`` at some of ``freqs``, else ``None``.
 
     ``scooter.f90:106-111`` meshes each medium with
     ``N = MAX(INT(freq/freq0 * NG), 100)``, so wherever the scaled count
@@ -344,9 +364,10 @@ def mesh_floor_notice(freq0, freqs, *,
 
 
 def steep_path_notice(env, source, receiver,
-                      c_high: float) -> Optional[Tuple[str, str]]:
-    """``(note, warning)`` when a receiver's direct or surface-reflected
-    path is steeper than a pinned ``c_high`` integrates, else ``None``
+                      c_high: float) -> Optional[Notice]:
+    """The :class:`~uacpy.core.run_settings.Notice` when a receiver's direct
+    or surface-reflected path is steeper than a pinned ``c_high``
+    integrates, else ``None``
     (:func:`~uacpy.models._window.steep_path_notice`); an unpinned
     ``c_high`` is unbounded and keeps every path.
 

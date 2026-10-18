@@ -10,13 +10,11 @@ OAST needs OASES (./install.sh --oases yes); without it the example runs
 the other models and says so.
 
 Uses: SoundSpeedProfile.from_pairs · five model classes with one .run signature ·
-env.plot · compare_models · plot.compare · plot.plot_field_statistics
+env.plot · compare_models · plot.compare · metrics.field_statistics
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -79,6 +77,6 @@ fig.tight_layout()
 fig.savefig(OUT / 'example_03_curves.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fig, _ = uacpy.plot.plot_field_statistics(fields, depth=15.0)
+fig, _ = uacpy.metrics.field_statistics(fields, depth=15.0).plot()
 fig.savefig(OUT / 'example_03_stats.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

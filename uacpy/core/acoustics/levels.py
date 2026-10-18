@@ -1,12 +1,12 @@
 """From volts to pascals to decibels.
 
-The three steps a recording takes to become a level: :func:`pressure` turns
+The three steps a recording takes to become a level: :func:`pressure_from_recording` turns
 the recorded voltage (or ADC counts) into pascals given the hydrophone
 sensitivity and preamplifier gain, :func:`spl` turns a pressure waveform into
 a sound pressure level, and :func:`power_to_dB` turns a spectral estimate —
 already a power — into decibels against the same reference.
 
-Two seams to watch. :func:`pressure` returns **pascals**, and the sensitivity
+Two seams to watch. :func:`pressure_from_recording` returns **pascals**, and the sensitivity
 it takes is dB re 1 V/µPa, so the µPa→Pa factor lives inside it and not in the
 caller. The two dB doors then default to ``ref=1e-6`` Pa
 (:data:`~uacpy.core.constants.REFERENCE_PRESSURE_WATER`, the underwater
@@ -25,17 +25,23 @@ unless ``complex_record=`` names it:
   mean square ``|x|²/2`` (``10·log10(mean|x|²/2 / ref²)``) and peak ``|x|``.
 """
 
+import warnings
+from dataclasses import dataclass
+
 import numpy as np
 from typing import Optional, Tuple
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
+from uacpy.core._export import ExportRecord
+from uacpy.core._plotting import plotter
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.constants import (NO_ENERGY_DB, PRESSURE_FLOOR,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.acoustics.seawater import _sequence_as_array
 from uacpy.core.acoustics.weighting import _real_pressure, _weighted_blocks
+from uacpy.core._weighting_inputs import warn_in_air_group_in_water
 from uacpy.core._validate import (
-    refuse_non_finite_samples, require_positive_finite_scalar,
-    warn_in_air_group_in_water)
+    normalize_axis, refuse_non_finite_samples, require_positive_finite_scalar)
 
 
 #: Relative slack on a band edge's comparison with a grid end, which
@@ -50,6 +56,7 @@ __all__ = [
     'peak_level',
     'sound_exposure_level',
     'cumulative_sound_exposure_level',
+    'CumulativeExposure',
     'track_exposure',
     'transmission_loss_dB',
     'received_level_dB',
@@ -65,6 +72,7 @@ def pressure_from_recording(
     sensitivity: float,
     gain: float,
     volt_params: Optional[Tuple[int, float]] = None,
+    x_scale: str = 'counts',
 ) -> np.ndarray:
     """
     Convert a recorded signal to acoustic pressure in **pascals**.
@@ -84,20 +92,25 @@ def pressure_from_recording(
         Signal in voltage or bit depth
     sensitivity : float
         Receiving sensitivity SH in dB re 1 V/µPa (hydrophone data sheets
-        quote it this way; a typical value is -180)
+        quote it this way; a typical value is -180). A positive value (more
+        than 1 V per µPa) gives a ``ValidityWarning``: it is usually a sign
+        slip.
     gain : float
         Preamplifier gain in dB
     volt_params : tuple of (int, float), optional
         If provided, (nbits, v_ref) where nbits is number of bits per sample
-        and v_ref is reference voltage. Used to convert bits to voltage —
-        a WAV of signed integers goes straight through: counts are divided
-        by ``2**(nbits-1)``, the ADC convention. :func:`uacpy.io.read_wav`
-        returns integer samples already divided by the symmetric full scale
-        ``2**(bits-1) - 1`` (so ±1.0 round-trips through
-        :func:`~uacpy.io.write_wav`), not counts: pass such a signal as
-        ``x * v_ref`` with no ``volt_params``, or recover the counts as
-        ``x * (2**(bits-1) - 1)`` with the bit depth
-        ``uacpy.io.read_wav_info(path).bits``. The two full scales differ by
+        and v_ref is the ADC's full-scale (0-peak) voltage, the voltage of
+        count ``2**(nbits-1)``. Used to convert bits to voltage: counts are
+        divided by ``2**(nbits-1)``, the ADC convention.
+    x_scale : {'counts', 'read_wav'}, optional
+        What ``x`` holds when ``volt_params`` is given. ``'counts'``
+        (default): ADC counts, the signed integers of a PCM WAV.
+        ``'read_wav'``: the output of :func:`uacpy.io.read_wav`, which
+        divides those integers by the symmetric full scale
+        ``2**(nbits-1) - 1`` (so ±1.0 round-trips through
+        :func:`~uacpy.io.write_wav`); they are multiplied back before the
+        ADC conversion, so the pressure is exact. Pass ``nbits =
+        uacpy.io.read_wav_info(path).bits``. The two full scales differ by
         ``20·log10(2**(b-1) / (2**(b-1) - 1))``, 0.00027 dB at 16 bits.
 
     Returns
@@ -121,13 +134,49 @@ def pressure_from_recording(
     >>> x_bits = np.array([0, 16384, -16384])
     >>> pressure_from_recording(x_bits, sensitivity=0, gain=0, volt_params=(16, 1.0))
     array([ 0.e+00,  5.e-07, -5.e-07])
+
+    A 16-bit WAV as :func:`uacpy.io.read_wav` returns it, straight in:
+
+    >>> x_wav = x_bits / (2**15 - 1)
+    >>> pressure_from_recording(x_wav, sensitivity=0, gain=0,
+    ...                         volt_params=(16, 1.0), x_scale='read_wav')
+    array([ 0.e+00,  5.e-07, -5.e-07])
     """
+    if x_scale not in ('counts', 'read_wav'):
+        raise ConfigurationError(
+            f"pressure_from_recording: x_scale={x_scale!r} is not one of "
+            f"'counts' (ADC counts) or 'read_wav' (uacpy.io.read_wav's "
+            f"output).",
+            remediation="Pass x_scale='counts' or x_scale='read_wav'.")
+    if x_scale == 'read_wav' and volt_params is None:
+        raise ConfigurationError(
+            "pressure_from_recording: x_scale='read_wav' converts read_wav's "
+            "fractions of full scale back to counts, which needs the bit "
+            "depth, and no volt_params was given.",
+            remediation="Pass volt_params=(uacpy.io.read_wav_info(path).bits, "
+                        "v_ref).")
     x = _sequence_as_array(x)
+    if sensitivity > 0:
+        # RVS = 20 log10 |M|, M in V/µPa (Butler & Sherman, *Transducers
+        # and Arrays for Underwater Sound*, §6.1.1): a positive value is
+        # more than 1 V per µPa, a million volts for a 1 Pa wave. A sign
+        # slip (+165 for -165) reads the pressure 330 dB low.
+        warnings.warn(
+            f"pressure_from_recording: sensitivity={sensitivity:g} dB re "
+            f"1 V/µPa means {10 ** (sensitivity / 20):.3g} V per µPa; "
+            f"hydrophone sensitivities are negative (e.g. -201 dB re 1 "
+            f"V/µPa, Istepanian & Stojanovic, *Underwater Acoustic Digital "
+            f"Signal Processing and Communication Systems*, §3.2). Check its "
+            f"sign: the pressure returned is {2 * sensitivity:g} dB below "
+            f"what -{sensitivity:g} gives.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     nu = 10 ** (sensitivity / 20)
     G = 10 ** (gain / 20)
 
     if volt_params is not None:
         nbits, v_ref = volt_params
+        if x_scale == 'read_wav':
+            x = x * (2 ** (nbits - 1) - 1)
         x = x * v_ref / (2 ** (nbits - 1))
 
     # 1e-6: SH is quoted per micropascal, so the division lands in µPa and
@@ -176,7 +225,7 @@ def _peak_amplitude(x, complex_record, who):
 
 
 def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER,
-        *, axis=None, floor: float = PRESSURE_FLOOR,
+        *, axis=None, floor: float = PRESSURE_FLOOR ** 2,
         complex_record: Optional[str] = None):
     """
     Calculate Sound Pressure Level (SPL) of acoustic pressure signal.
@@ -184,7 +233,7 @@ def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER,
     Parameters
     ----------
     x : ndarray
-        Acoustic pressure signal in pascals, as :func:`pressure` returns. A
+        Acoustic pressure signal in pascals, as :func:`pressure_from_recording` returns. A
         complex record needs ``complex_record=``.
     ref : float, optional
         Reference pressure in the same unit as ``x`` (default:
@@ -195,9 +244,10 @@ def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER,
         returns a scalar; ``-1`` gives one level per row of a block of
         records, which is what a gridded result needs.
     floor : float, optional
-        Lower bound on the MEAN-SQUARE pressure before the log, read the
-        same way :func:`power_to_dB` and :func:`peak_level` read it (in
-        ``ref**2`` units). Default :data:`PRESSURE_FLOOR`.
+        Lower bound on the ratio of the MEAN-SQUARE pressure to ``ref**2``
+        before the log, read the same way :func:`power_to_dB` and
+        :func:`peak_level` read it. Default ``PRESSURE_FLOOR**2`` (1e-60):
+        a silent record reads -600 dB, the no-energy marker.
     complex_record : {'analytic', 'baseband'}, optional
         Required for a complex record, ignored for a real one: what the
         complex numbers are (see the module docstring). A complex record
@@ -228,29 +278,33 @@ def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER,
     >>> print(f"SPL: {spl_dB:.2f} dB re 1 µPa")
     SPL: 39.81 dB re 1 µPa
 
-    The mean-square pressure is floored at ``floor`` (default
-    ``PRESSURE_FLOOR``) before the log, so a silent (all-zero) signal returns
-    a finite ``20*log10(sqrt(PRESSURE_FLOOR)/ref)`` instead of ``-inf`` — -180 dB re
-    1 µPa at the default reference, the same level :func:`power_to_dB` floors
-    a silent signal at, because both read the same constant against the same
-    reference.
+    The ratio ``mean(x²) / ref²`` is floored at ``floor`` (default
+    ``PRESSURE_FLOOR**2``) before the log, so a silent (all-zero) signal
+    returns -600 dB for every ``ref`` instead of ``-inf``: the level view of
+    the no-energy marker (:func:`no_energy_mask`), the level
+    :func:`power_to_dB`, :func:`peak_level` and :func:`sound_exposure_level`
+    give a silent record too.
+
+    >>> float(spl(np.zeros(16)))
+    -600.0
     """
     rmsx = np.sqrt(np.mean(_squared_pressure(x, complex_record, 'spl'),
                            axis=axis))
     _refuse_a_non_finite_record(rmsx, x, 'spl', axis)
-    return 20 * np.log10(np.maximum(rmsx, np.sqrt(floor)) / ref)
+    return 20 * np.log10(np.maximum(rmsx / ref, np.sqrt(floor)))
 
 
 def power_to_dB(power, ref: float = REFERENCE_PRESSURE_WATER, *,
-                floor: float = PRESSURE_FLOOR):
+                floor: float = PRESSURE_FLOOR ** 2):
     """Mean-square / power-like pressure quantity → level in dB re ``ref``.
 
     For a *squared* quantity (PSD in Pa²/Hz, SEL in Pa²·s, mean-square
     pressure, an f-k spectrum, …) the level is ``10·log10(power / ref²)``. The
-    single conversion every spectral estimator should use: ``power`` is floored
-    at ``floor`` before the log so a silent (zero) sample yields a finite, very
-    negative level instead of ``-inf`` (which would otherwise poison a
-    subsequent ``mean`` / ``histogram``).
+    single conversion every spectral estimator should use: ``power / ref²`` is
+    floored at ``floor`` before the log, so a silent (zero) sample yields
+    -600 dB, the level view of the no-energy marker that
+    :func:`no_energy_mask` finds, instead of ``-inf`` (which would otherwise
+    poison a subsequent ``mean`` / ``histogram``).
 
     Parameters
     ----------
@@ -261,14 +315,13 @@ def power_to_dB(power, ref: float = REFERENCE_PRESSURE_WATER, *,
         Reference pressure (default: 1 µPa, water). Use
         ``REFERENCE_PRESSURE_AIR`` for air.
     floor : float, optional
-        Lower bound applied to ``power`` before the log (default
-        :data:`PRESSURE_FLOOR`), guarding ``log10(0)``. Read in ``power``'s
-        own units (``ref**2``), so the level a fully-silent input floors at
-        depends on ``ref``: ``10*log10(1e-30 / 1e-12) = -180`` dB re 1 µPa
-        at the default ``ref`` — the same level :func:`spl` floors a silent
-        signal at, since it floors the rms pressure at
-        ``sqrt(PRESSURE_FLOOR)`` = 1e-15 Pa and ``20*log10(1e-15 / 1e-6)``
-        is -180 dB as well (``spl(0) == power_to_dB(0) == -180.0``).
+        Lower bound applied to the ratio ``power / ref²`` before the log,
+        guarding ``log10(0)``. The default ``PRESSURE_FLOOR**2`` (1e-60) puts
+        a silent input at ``10*log10(1e-60) = -600`` dB whatever ``ref`` is:
+        :data:`~uacpy.core.constants.NO_ENERGY_DB` with a level's sign, the
+        same level :func:`spl`, :func:`peak_level` and
+        :func:`sound_exposure_level` give a silent record
+        (``spl(0) == power_to_dB(0) == -600.0``).
 
     Returns
     -------
@@ -276,11 +329,11 @@ def power_to_dB(power, ref: float = REFERENCE_PRESSURE_WATER, *,
         Level in dB re ``ref``.
     """
     power = np.asarray(power, dtype=float)
-    return 10.0 * np.log10(np.maximum(power, floor) / (ref ** 2))
+    return 10.0 * np.log10(np.maximum(power / (ref ** 2), floor))
 
 
 def peak_level(x, ref: float = REFERENCE_PRESSURE_WATER, *, axis=None,
-               floor: float = PRESSURE_FLOOR,
+               floor: float = PRESSURE_FLOOR ** 2,
                complex_record: Optional[str] = None):
     """Peak pressure level of a record — ``20·log10(max|x| / ref)``.
 
@@ -306,10 +359,10 @@ def peak_level(x, ref: float = REFERENCE_PRESSURE_WATER, *, axis=None,
         Axes to take the maximum over. ``None`` reduces everything to a
         scalar; ``-1`` gives one level per record of a block.
     floor : float, optional
-        Lower bound on the SQUARED peak before the log, read the same way
-        :func:`power_to_dB` reads it, so a silent record returns
-        ``-180`` dB re 1 µPa rather than ``-inf`` — which would poison any
-        mean taken over a map of them.
+        Lower bound on the ratio of the SQUARED peak to ``ref**2`` before the
+        log, read the same way :func:`power_to_dB` reads it, so a silent
+        record returns -600 dB (the no-energy marker) rather than ``-inf`` —
+        which would poison any mean taken over a map of them.
     complex_record : {'analytic', 'baseband'}, optional
         Required for a complex record, ignored for a real one; as on
         :func:`spl`.
@@ -329,12 +382,12 @@ def peak_level(x, ref: float = REFERENCE_PRESSURE_WATER, *, axis=None,
     peak = np.max(_peak_amplitude(x, complex_record, 'peak_level'),
                   axis=axis)
     _refuse_a_non_finite_record(peak, x, 'peak_level', axis)
-    return 20 * np.log10(np.maximum(peak, np.sqrt(floor)) / ref)
+    return 20 * np.log10(np.maximum(peak / ref, np.sqrt(floor)))
 
 
 def sound_exposure_level(pressure, sample_rate: float,
                          ref: float = REFERENCE_PRESSURE_WATER, *,
-                         axis: int = -1, floor: float = PRESSURE_FLOOR,
+                         axis: int = -1, floor: float = PRESSURE_FLOOR ** 2,
                          complex_record: Optional[str] = None,
                          weighting=None):
     """Sound exposure level of a pressure record —
@@ -464,7 +517,7 @@ def cumulative_sound_exposure_level(pressure, sample_rate: float,
                                     step: float = 1.0,
                                     reset: Optional[float] = None,
                                     weighting=None, axis: int = -1,
-                                    floor: float = PRESSURE_FLOOR,
+                                    floor: float = PRESSURE_FLOOR ** 2,
                                     complex_record: Optional[str] = None):
     """The sound exposure level accumulated over a record, at the end of
     every ``step`` seconds.
@@ -509,10 +562,10 @@ def cumulative_sound_exposure_level(pressure, sample_rate: float,
 
     Returns
     -------
-    times : ndarray
-        End of each step (s from the first sample).
-    levels : ndarray
-        The accumulated SEL at each time, dB re ``ref²``·s.
+    CumulativeExposure
+        ``(times, levels)`` — it unpacks as the two arrays: the end of each
+        step (s from the first sample) and the accumulated SEL at each time,
+        dB re ``ref²``·s, the curve on ``axis``; ``.plot()`` draws it.
 
     Raises
     ------
@@ -578,8 +631,44 @@ def cumulative_sound_exposure_level(pressure, sample_rate: float,
                                  running[..., :-1]), axis=-1)
         running = running - before[..., (k // per_period) * per_period]
     times = np.minimum((np.arange(n_steps) + 1) * step, n / fs)
-    return times, np.moveaxis(power_to_dB(running, ref, floor=floor), -1,
-                              axis)
+    return CumulativeExposure(
+        times=times,
+        levels=np.moveaxis(power_to_dB(running, ref, floor=floor), -1, axis),
+        ref=float(ref), axis=int(axis))
+
+
+@dataclass(frozen=True, eq=False)
+class CumulativeExposure(ExportRecord):
+    """The sound exposure level accumulated over a record, what
+    :func:`cumulative_sound_exposure_level` returns: ``levels`` (dB re
+    ``ref²``·s) at each of ``times`` (s), the curve on ``axis`` of
+    ``levels``. ``times, levels = ...`` unpacks it; ``.plot()`` draws it
+    with :func:`uacpy.plot.plot_cumulative_exposure`.
+    """
+
+    times: np.ndarray
+    levels: np.ndarray
+    ref: float
+    axis: int = -1
+
+    _ARRAY_FIELDS = ('times', 'levels')
+    _REPR_UNITS = {'levels': 'dB'}
+
+    def __iter__(self):
+        return iter((self.times, self.levels))
+
+    def _payload(self):
+        dims = ['channel_dim%d' % i for i in range(self.levels.ndim)]
+        dims[self.axis] = 'time'
+        return {'levels': (self.levels, tuple(dims), 'dB')}
+
+    def _coords(self):
+        return {'time': (self.times, 's')}
+
+    def plot(self, **kwargs):
+        """Draw the running SEL with :func:`uacpy.plot.plot_cumulative_exposure`;
+        ``kwargs`` reach it. Returns ``(fig, ax)``."""
+        return plotter('plot_cumulative_exposure')(self, **kwargs)
 
 
 #: Samples per channel the unweighted cumulative sum reads at a time.
@@ -769,12 +858,13 @@ def transmission_loss_dB(pressure, *, floor: float = PRESSURE_FLOOR):
         reference the pressure already carries, so there is nothing to
         divide by.
     floor : float, optional
-        Lower bound on ``|p|`` ITSELF before the log — not on ``|p|²`` as
-        the ``floor`` of :func:`spl`, :func:`peak_level` and
-        :func:`power_to_dB` is — so the default :data:`PRESSURE_FLOOR`
-        caps a loss at 600 dB (:data:`NO_ENERGY_DB`, the no-energy marker)
-        where the level helpers floor at -180 dB re 1 µPa. Pass ``0.0`` for
-        the unclamped ``+inf``.
+        Lower bound on ``|p|`` ITSELF before the log — not on the squared
+        ratio ``|p|²/ref²`` as the ``floor`` of :func:`spl`,
+        :func:`peak_level` and :func:`power_to_dB` is — so the default
+        :data:`PRESSURE_FLOOR` caps a loss at 600 dB (:data:`NO_ENERGY_DB`,
+        the no-energy marker), the loss view of the -600 dB the level
+        helpers give a silent record. Pass ``0.0`` for the unclamped
+        ``+inf``.
 
     Returns
     -------
@@ -839,8 +929,15 @@ def sum_levels_dB(*levels_dB, axis=None):
                 f"sum_levels_dB: axis={axis!r} is not an axis of levels "
                 f"shaped {levels.shape}.") from exc
     else:
-        arrs = np.broadcast_arrays(*[np.asarray(x, dtype=float)
-                                     for x in levels_dB])
+        arrs = [np.asarray(x, dtype=float) for x in levels_dB]
+        try:
+            arrs = np.broadcast_arrays(*arrs)
+        except ValueError:
+            raise ConfigurationError(
+                f"sum_levels_dB: the levels do not broadcast together; got "
+                f"shapes {[a.shape for a in arrs]}.",
+                remediation="Pass levels of one shape, or scalars with "
+                            "arrays.") from None
         stack = np.stack(arrs, axis=0)
     ln10 = np.log(10.0)
     # A NaN level is a cell with no value; it stays NaN, and numpy's reduce
@@ -855,7 +952,8 @@ def sum_levels_dB(*levels_dB, axis=None):
     return float(total) if np.ndim(total) == 0 else total
 
 
-def integrate_psd(psd, frequencies, freq_min=None, freq_max=None) -> float:
+def integrate_psd(psd, frequencies, freq_min=None, freq_max=None, *,
+                  axis: int = -1):
     """The power a one-sided power spectral density carries in the band
     ``[freq_min, freq_max]`` Hz: ``∫ psd df``, in ``psd`` units × Hz (Pa²/Hz →
     Pa²).
@@ -871,18 +969,34 @@ def integrate_psd(psd, frequencies, freq_min=None, freq_max=None) -> float:
     Parameters
     ----------
     psd : array_like
-        One-sided power spectral density, non-negative.
+        One-sided power spectral density, non-negative: one spectrum, or
+        one per cell of the other axes (a spectrogram, a PSD per depth).
     frequencies : array_like
-        Strictly increasing frequencies (Hz).
+        Strictly increasing frequencies (Hz), one per sample of ``psd``
+        along ``axis``.
     freq_min, freq_max : float, optional
         The band (Hz); an unset edge is the grid's own end.
+    axis : int, default -1
+        The frequency axis of ``psd``.
+
+    Returns
+    -------
+    float or ndarray
+        The band power: a float for one spectrum, ``psd``'s shape without
+        ``axis`` otherwise.
     """
     psd = np.asarray(psd, dtype=float)
     f = np.asarray(frequencies, dtype=float)
-    if psd.ndim != 1 or psd.shape != f.shape:
+    if psd.ndim == 0 or f.ndim != 1:
         raise ConfigurationError(
-            f"integrate_psd: psd and frequencies are one spectrum of equal "
-            f"length; got shapes {psd.shape} and {f.shape}.")
+            f"integrate_psd: psd holds spectra along axis= and frequencies "
+            f"is one 1-D axis; got shapes {psd.shape} and {f.shape}.")
+    axis = normalize_axis(psd, axis, "integrate_psd")
+    if psd.shape[axis] != f.size:
+        raise ConfigurationError(
+            f"integrate_psd: psd has {psd.shape[axis]} samples along "
+            f"axis={axis} (shape {psd.shape}) but frequencies has {f.size}; "
+            f"one value of psd per frequency along axis=.")
     if f.size < 2 or np.any(np.diff(f) <= 0):
         raise ConfigurationError(
             "integrate_psd: frequencies must be at least two strictly "
@@ -906,11 +1020,18 @@ def integrate_psd(psd, frequencies, freq_min=None, freq_max=None) -> float:
                         "inside it.")
     interior = f[(f > lo) & (f < hi)]
     nodes = np.unique(np.concatenate(([lo], interior, [hi])))
-    return float(np.trapezoid(np.interp(nodes, f, psd), nodes))
+    # Linear interpolation of every spectrum onto the nodes, along axis.
+    right = np.clip(np.searchsorted(f, nodes, side='right'), 1, f.size - 1)
+    left = right - 1
+    weight = np.clip((nodes - f[left]) / (f[right] - f[left]), 0.0, 1.0)
+    x = np.moveaxis(psd, axis, -1)
+    on_nodes = x[..., left] * (1.0 - weight) + x[..., right] * weight
+    power = np.trapezoid(on_nodes, nodes, axis=-1)
+    return float(power) if power.ndim == 0 else power
 
 
 def band_level(level_density_dB, frequencies, freq_min=None,
-               freq_max=None) -> float:
+               freq_max=None, *, axis: int = -1):
     """Band level (dB re ref²) of a level density (dB re ref²/Hz) over
     ``[freq_min, freq_max]`` Hz: ``10·log10 ∫ 10^(L/10) df``, integrated by
     :func:`integrate_psd`.
@@ -921,17 +1042,27 @@ def band_level(level_density_dB, frequencies, freq_min=None,
     Parameters
     ----------
     level_density_dB : array_like
-        Level density (dB re ref²/Hz).
+        Level density (dB re ref²/Hz): one spectrum, or one per cell of the
+        other axes.
     frequencies : array_like
-        Strictly increasing frequencies (Hz).
+        Strictly increasing frequencies (Hz), one per sample along ``axis``.
     freq_min, freq_max : float, optional
         The band (Hz); an unset edge is the grid's own end.
+    axis : int, default -1
+        The frequency axis of ``level_density_dB``.
+
+    Returns
+    -------
+    float or ndarray
+        The band level: a float for one spectrum, the input's shape without
+        ``axis`` otherwise.
     """
     power = integrate_psd(
         10.0 ** (np.asarray(level_density_dB, dtype=float) / 10.0),
-        frequencies, freq_min, freq_max)
+        frequencies, freq_min, freq_max, axis=axis)
     with np.errstate(divide='ignore'):
-        return float(10.0 * np.log10(power))
+        level = 10.0 * np.log10(power)
+    return float(level) if np.ndim(level) == 0 else level
 
 
 def received_level_dB(source_level_dB, tl_dB):
@@ -977,7 +1108,9 @@ def no_energy_mask(levels_dB):
     uacpy writes a cell no energy reached as an exact zero and lets
     :data:`~uacpy.core.constants.PRESSURE_FLOOR` speak for it, so its loss is
     600 dB (:data:`~uacpy.core.constants.NO_ENERGY_DB`) and its level -600
-    dB. That number is finite, so a reduction that masks only NaN/inf would
+    dB; a silent record's level is -600 dB too, through :func:`spl`,
+    :func:`peak_level`, :func:`sound_exposure_level` and
+    :func:`power_to_dB`. That number is finite, so a reduction that masks only NaN/inf would
     average it in as a real 600 dB loss — one such cell in 50 turns a 0.8 dB
     model agreement into 75 dB. Every metric and plotter excludes cells with
     this one predicate.
@@ -990,9 +1123,10 @@ def no_energy_mask(levels_dB):
     Anything that turns a loss into another level has to carry the marker
     across, or this predicate stops seeing it: ``SL - TL`` puts a
     no-energy cell at ``SL - 600``. :func:`received_level_dB` does, and
-    :meth:`~uacpy.Field.at_source_level` goes through it; the signal-excess
-    budgets (:func:`uacpy.sonar.passive_signal_excess_field`,
-    :func:`uacpy.sonar.active_signal_excess_field`) mask on the one-way TL.
+    :meth:`~uacpy.Field.at_source_level` goes through it; the sonar budgets
+    (:func:`uacpy.sonar.echo_level`, :func:`uacpy.sonar.passive_signal_excess`,
+    :func:`uacpy.sonar.active_signal_excess` and the two signal-excess
+    ``*_field`` forms) mask on the one-way TL.
 
     Parameters
     ----------

@@ -65,7 +65,7 @@ def _write_kraken(path, env, **overrides):
     from uacpy.io.oalib_writer import write_kraken_env_file
     src, rcv = _src_rcv()
     kwargs = dict(interp_ssp='linear', frequencies=None,
-                  n_mesh=0, rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+                  n_mesh=0, rmax=5000.0, c_low=1400.0, c_high=2000.0)
     kwargs.update(overrides)
     write_kraken_env_file(path, env, src, rcv, **kwargs)
     return path
@@ -149,7 +149,7 @@ class TestAttenuationUnitLetterIsW:
         out = tmp_path / 's.env'
         write_scooter_env_file(
             out, _measured_env(), src, rcv, interp_ssp='linear',
-            frequencies=None, topopt_extra='', n_mesh=0, rmax_m=5000.0,
+            frequencies=None, topopt_extra='', n_mesh=0, rmax=5000.0,
             c_low=1400.0, c_high=2000.0)
         assert _topopt(out.read_text().splitlines()[3])[2] == 'W'
 
@@ -163,7 +163,7 @@ class TestAttenuationUnitLetterIsW:
         out = tmp_path / 'b.env'
         write_bounce_input_file(
             out, _measured_env(), src, interp_ssp='linear', n_mesh=0,
-            c_low=1400.0, c_high=2000.0, rmax_m=5000.0)
+            c_low=1400.0, c_high=2000.0, rmax=5000.0)
         assert _topopt(out.read_text().splitlines()[3])[2] == 'W'
 
     def test_bellhop_deck(self, tmp_path):
@@ -186,13 +186,13 @@ class TestBiologicalLorentzianFormula:
         a0, f0, Q, f = 0.1, 400.0, 5.0, 500.0
         bio = Biological(layers=[(10.0, 20.0, f0, Q, a0)])
         expected_dB_per_km = a0 / ((1.0 - f0**2 / f**2)**2 + 1.0 / Q**2)
-        got = bio.alpha_dB_per_m(f, [15.0])[0] * 1000.0
+        got = bio._alpha_dB_per_m_at_frequency(f, [15.0])[0] * 1000.0
         assert got == pytest.approx(expected_dB_per_km, rel=1e-12)
 
     def test_outside_the_layer_is_zero(self):
         from uacpy.core.absorption import Biological
         bio = Biological(layers=[(10.0, 20.0, 400.0, 5.0, 0.1)])
-        assert bio.alpha_dB_per_m(500.0, [25.0])[0] == 0.0
+        assert bio._alpha_dB_per_m_at_frequency(500.0, [25.0])[0] == 0.0
 
     def test_stacked_layers_sum_on_a_shared_boundary(self):
         # AttenMod.f90:102-109 tests z >= Z1 .AND. z <= Z2 per layer and
@@ -201,8 +201,8 @@ class TestBiologicalLorentzianFormula:
         one = Biological(layers=[(10.0, 20.0, 400.0, 5.0, 0.1)])
         two = Biological(layers=[(10.0, 20.0, 400.0, 5.0, 0.1),
                                  (20.0, 30.0, 400.0, 5.0, 0.1)])
-        assert (two.alpha_dB_per_m(500.0, [20.0])[0]
-                == pytest.approx(2.0 * one.alpha_dB_per_m(500.0, [20.0])[0]))
+        assert (two._alpha_dB_per_m_at_frequency(500.0, [20.0])[0]
+                == pytest.approx(2.0 * one._alpha_dB_per_m_at_frequency(500.0, [20.0])[0]))
 
 
 class TestKrakenDeckBlockOrder:
@@ -278,7 +278,7 @@ class TestBroadbandFrequencyVectorTail:
         write_scooter_env_file(
             out, _measured_env(), src, rcv, interp_ssp='linear',
             frequencies=self.FREQS, topopt_extra='', n_mesh=0,
-            rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+            rmax=5000.0, c_low=1400.0, c_high=2000.0)
         self._assert_tail(out.read_text().splitlines())
 
 
@@ -289,11 +289,9 @@ class TestFieldFlpFirstProfileRangeMustBeZero:
 
     def test_nonzero_first_profile_range_is_refused(self, tmp_path):
         from uacpy.io.oalib_writer import write_fieldflp
-        pos = {'s': {'z': np.array([25.0])},
-               'r': {'z': np.array([50.0]), 'r': np.array([1000.0])}}
         with pytest.raises(ConfigurationError, match='First profile range'):
-            write_fieldflp(tmp_path / 'f.flp', 'RA', pos,
-                           n_profiles=2,
+            write_fieldflp(tmp_path / 'f.flp', 'RA', source_depths=[25.0],
+                           receiver_depths=[50.0], receiver_ranges=[1000.0],
                            profile_ranges=np.array([1000.0, 5000.0]))
 
 
@@ -361,7 +359,7 @@ def _write_sparc(path):
         surface=BoundaryProperties(acoustic_type='vacuum'),
         bottom=BoundaryProperties(acoustic_type='rigid'))
     write_sparc_env_file(
-        path, env, src, rcv, interp_ssp='linear', output_mode='S', n_mesh=0, rmax_m=5000.0, c_low=1400.0,
+        path, env, src, rcv, interp_ssp='linear', output_mode='S', n_mesh=0, rmax=5000.0, c_low=1400.0,
         c_high=2000.0, pulse_type='P', freq_min=50.0, freq_max=400.0,
         n_time_samples=100, time_max=2.0, march_start=-0.1, courant_factor=0.9)
     return path
@@ -405,8 +403,8 @@ class TestReflectionTableDocExample:
                          "45.0  0.95  175.0\n"
                          "90.0  0.90  170.0\n")
         rc = read_reflection_coefficient(table)
-        assert len(rc.angles) == 3
-        np.testing.assert_allclose(rc.angles, [0.0, 45.0, 90.0])
+        assert len(rc.angles_deg) == 3
+        np.testing.assert_allclose(rc.angles_deg, [0.0, 45.0, 90.0])
         np.testing.assert_allclose(rc.magnitude, [1.00, 0.95, 0.90])
         np.testing.assert_allclose(rc.phase,
                                    np.deg2rad([180.0, 175.0, 170.0]))

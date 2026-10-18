@@ -53,7 +53,7 @@ def dispatch():
     """Carriers and results, one convention: every object has ``.plot()``."""
     env, source, receiver = shallow_water()
     tl = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
-    rays = Bellhop(n_beams=25, launch_angles=(-12.0, 12.0)).run(
+    rays = Bellhop(n_beams=25, launch_angles_deg=(-12.0, 12.0)).run(
         env, source, receiver, run_mode=RunMode.RAYS)
 
     fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.4))

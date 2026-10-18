@@ -32,7 +32,7 @@ CARRIERS = {
     'LinkResult': _link,
     'OasnNoise': lambda: OasnNoise(surface_level=50.0, white_level=10.0,
                                    discrete_sources=[{'depth': 10.0, 'x': 100.0,
-                                                      'y': 0.0, 'level': 120.0}]),
+                                                      'y': 0.0, 'level_dB': 120.0}]),
     'OasnReplicaGrid': lambda: OasnReplicaGrid(z=(10.0, 90.0, 9), c_low=1400.0),
     'BottomParameters': lambda: BottomParameters(
         density_ratio=1.8, speed_ratio=1.1, loss_parameter=0.01,
@@ -72,16 +72,16 @@ def test_a_regime_equals_the_record_it_was_saved_from():
 
 def _taps():
     return ChannelTaps(taps=np.array([1 + 0j, 0.5j]),
-                       delays_s=np.array([0.0, 1e-3]), symbol_rate=1000.0,
-                       fc=12000.0, sps=1, first_arrival_s=0.5)
+                       delays=np.array([0.0, 1e-3]), symbol_rate=1000.0,
+                       fc=12000.0, sps=1, first_arrival=0.5)
 
 
 def _same_taps(a, b):
     assert type(b) is ChannelTaps
     np.testing.assert_array_equal(b.taps, a.taps)
-    np.testing.assert_array_equal(b.delays_s, a.delays_s)
-    assert (b.symbol_rate, b.fc, b.sps, b.first_arrival_s) == \
-        (a.symbol_rate, a.fc, a.sps, a.first_arrival_s)
+    np.testing.assert_array_equal(b.delays, a.delays)
+    assert (b.symbol_rate, b.fc, b.sps, b.first_arrival) == \
+        (a.symbol_rate, a.fc, a.sps, a.first_arrival)
     assert type(b.sps) is int and type(b.fc) is float
 
 
@@ -97,8 +97,8 @@ class TestChannelTaps:
     def test_the_taps_sit_on_the_delay_axis(self):
         pytest.importorskip('xarray')
         ds = _taps().to_xarray()
-        assert ds['taps'].dims == ('delays_s',)
-        assert ds['delays_s'].attrs['units'] == 's'
+        assert ds['taps'].dims == ('delays',)
+        assert ds['delays'].attrs['units'] == 's'
         _same_taps(_taps(), ChannelTaps.from_xarray(ds))
 
 

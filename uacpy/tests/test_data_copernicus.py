@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from uacpy.core.environment import SoundSpeedProfile
+from uacpy.core.geo import great_circle_km
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data.sources import DataProvenance
 from uacpy.data import copernicus
@@ -89,28 +90,60 @@ def test_fetch_ssp_transect_operational(monkeypatch):
     assert ssp.ranges[0] == 0.0
 
 
+class _GriddedDSStub(_DSStub):
+    """A single-column dataset on the 1/12° grid of the physics products:
+    1-D ``latitude``/``longitude`` axes with a node on every whole degree."""
+    def __init__(self, depth, thetao, so):
+        super().__init__(depth, thetao, so)
+        self._vars['latitude'] = _DAStub(np.arange(-80 * 12, 90 * 12 + 1) / 12.0)
+        self._vars['longitude'] = _DAStub(np.arange(-180 * 12, 180 * 12) / 12.0)
+
+
 def test_the_operational_transect_takes_the_woa23_sampling_keywords(
         monkeypatch):
-    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
-    auto = copernicus.fetch_ssp_transect_operational(
-        (30.0, -40.0), (31.0, -40.0), date='2020-06-15')
-    assert auto.sound_speed.shape[1] == copernicus.AUTO_TRANSECT_COLUMNS
-    capped = copernicus.fetch_ssp_transect_operational(
-        (30.0, -40.0), (31.0, -40.0), date='2020-06-15', max_points=3)
-    assert capped.sound_speed.shape[1] == 3
-    with pytest.warns(UserWarning, match='max_points'):
-        over = copernicus.fetch_ssp_transect_operational(
-            (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=4,
-            max_points=3)
-    assert over.sound_speed.shape[1] == 3
+    _install_fake_toolbox(monkeypatch, _GriddedDSStub(_DEPTH, _T, _S))
+    a, b = (30.0, -40.0), (31.0, -40.0)
+    # 'auto': one column per 1/12° cell crossed — a 1° meridian from node to
+    # node crosses 13 latitude nodes — endpoints anchored.
+    auto = copernicus.fetch_ssp_transect_operational(a, b, date='2020-06-15')
+    assert auto.sound_speed.shape[1] == 13
+    assert auto.ranges[0] == 0.0
+    assert auto.ranges[-1] == pytest.approx(great_circle_km(*a, *b) * 1000.0)
+    # A budget of 3 probes 3 waypoints, each in its own cell.
+    budget = copernicus.fetch_ssp_transect_operational(
+        a, b, date='2020-06-15', max_points=3)
+    assert budget.sound_speed.shape[1] == 3
     at_cap = copernicus.fetch_ssp_transect_operational(
-        (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=3,
-        max_points=3)
+        a, b, date='2020-06-15', n_points=3, max_points=3)
     assert at_cap.sound_speed.shape[1] == 3
+    many = copernicus.fetch_ssp_transect_operational(
+        a, b, date='2020-06-15', n_points=40)
+    assert many.sound_speed.shape[1] == 40          # used as given
     for bad in (2.5, 1, 'x'):
         with pytest.raises(ConfigurationError, match='n_points'):
             copernicus.fetch_ssp_transect_operational(
                 (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=bad)
+
+
+def test_an_operational_count_above_max_points_is_refused_before_any_read(
+        monkeypatch):
+    opened = []
+    fake = types.ModuleType('copernicusmarine')
+    fake.open_dataset = lambda **kwargs: opened.append(kwargs)
+    monkeypatch.setitem(sys.modules, 'copernicusmarine', fake)
+    with pytest.raises(ConfigurationError,
+                       match=r'n_points=4 exceeds max_points=3'):
+        copernicus.fetch_ssp_transect_operational(
+            (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=4,
+            max_points=3)
+    assert opened == []
+
+
+def test_an_auto_operational_transect_needs_the_dataset_axes(monkeypatch):
+    _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
+    with pytest.raises(DataFetchError, match='latitude/longitude axes'):
+        copernicus.fetch_ssp_transect_operational(
+            (30.0, -40.0), (31.0, -40.0), date='2020-06-15')
 
 
 def test_mackenzie_reads_the_model_depths_directly(monkeypatch):
@@ -344,7 +377,7 @@ def test_fetch_ssp_transect_operational_stamps_provenance(monkeypatch):
     ssp = copernicus.fetch_ssp_transect_operational(
         (30.0, -40.0), (31.0, -40.0), date='2020-06-15', n_points=4)
     assert [p.source.id for p in ssp.data_sources] == ['copernicus'] * 4
-    assert [p.range_m for p in ssp.data_sources] == list(ssp.ranges)
+    assert [p.range for p in ssp.data_sources] == list(ssp.ranges)
 
 
 @pytest.mark.parametrize('dataset_id', [
@@ -571,7 +604,7 @@ def test_fetchers_expose_no_timeout(name):
 
 
 def test_assemble_range_dependent_aggregates_provenance():
-    from uacpy.data.sound_speed import assemble_range_dependent
+    from uacpy.data.sound_speed import _assemble_range_dependent
     from uacpy.data.sources import SOURCES, DataProvenance
     provs = (DataProvenance(source=SOURCES['copernicus'],
                             requested_point=(30.0, -40.0)),
@@ -580,8 +613,8 @@ def test_assemble_range_dependent_aggregates_provenance():
              DataProvenance(source=SOURCES['woa23']))
     cols = [SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, 1490.0],
                               data_sources=(p,)) for p in provs]
-    out = assemble_range_dependent(cols, [0.0, 1000.0, 2000.0])
-    assert [(p.source.id, p.range_m) for p in out.data_sources] == [
+    out = _assemble_range_dependent(cols, [0.0, 1000.0, 2000.0])
+    assert [(p.source.id, p.range) for p in out.data_sources] == [
         ('copernicus', 0.0), ('copernicus', 1000.0), ('woa23', 2000.0)]
 
 
@@ -875,3 +908,40 @@ def test_a_monthly_ph_field_warns_from_another_month(monkeypatch, requested,
     msgs = _date_warnings(lambda: copernicus.fetch_ph_operational(
         (30.0, -40.0), date=requested, max_days=30))
     assert len(msgs) == int(warns)
+
+
+@pytest.mark.parametrize('fetch, install, requested', [
+    ('fetch_ssp_operational', lambda mp: _install_fake_toolbox(
+        mp, _DSStub(_DEPTH, _T, _S, time='2021-01-15')), '2021-01-19'),
+    ('fetch_ts_profile_operational', lambda mp: _install_fake_toolbox(
+        mp, _DSStub(_DEPTH, _T, _S, time='2021-01-15')), '2021-01-19'),
+    ('fetch_ph_operational', lambda mp: _install_fake_toolbox(
+        mp, _BGCStub([8.05, 8.00, 7.90], time='2021-01-15')), '2021-02-01'),
+    ('fetch_waves_operational', lambda mp: _install_operational_dataset(
+        mp, _wave_xr_dataset()), '2020-06-20'),
+])
+def test_a_point_fetch_folds_its_distance_and_date_notices_into_one(
+        monkeypatch, fetch, install, requested):
+    """One summary warning per fetch call. The stubs' node is the requested
+    cell, so the distance notice is forced through the offset rule; the date
+    notice is the product's own rule."""
+    import warnings
+    from uacpy.core.exceptions import ProvenanceWarning
+    from uacpy.data._provenance_notice import provenance_notice
+
+    def far(prov, *, who, **_rule):
+        provenance_notice(f"{who}: the data come from a neighbour cell. "
+                          f"Pass max_distance_km= to refuse them.")
+        return prov
+
+    install(monkeypatch)
+    monkeypatch.setattr(copernicus, 'checked_offset', far)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        getattr(copernicus, fetch)((30.4, -40.4), date=requested, max_days=30)
+    notices = [str(w.message) for w in rec
+               if issubclass(w.category, ProvenanceWarning)]
+    assert len(notices) == 1, notices
+    assert notices[0].startswith(f'{fetch}: 2 note(s)')
+    assert 'neighbour cell' in notices[0]
+    assert 'the data are dated' in notices[0]

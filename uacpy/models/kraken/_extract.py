@@ -87,7 +87,7 @@ def evaluated_receiver(inputs) -> Receiver:
                     ranges=inputs.receiver.ranges)
 
 
-def assemble_field_from_shd(raw, source, receiver, is_rd,
+def assemble_field_from_shd(raw, source, receiver,
                              n_profiles, run_mode,
                              line_c_source=None, source_rho=None, *,
                              backend, mode_coupling, model_name,
@@ -155,7 +155,7 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
             float(line_c[i_source if line_c.size > 1 else 0]), freqs)
     if 'frequencies' in raw:
         freqs_read = raw['frequencies']
-        # New layout: (n_d, n_r, n_f).
+        # (n_d, n_r, n_f): frequency is the trailing axis.
         p_stack = np.zeros(
             (len(receiver.depths), len(receiver.ranges), len(freqs_read)),
             dtype=np.complex128,
@@ -188,9 +188,6 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
                 model_name, provenance, source,
                 backend=backend,
                 frequencies=freqs_read,
-                mode_coupling=mode_coupling if is_rd else 'none',
-                n_profiles=n_profiles,
-                native_broadband=True,
             ),
         )
     elif 'pressure' in raw:
@@ -206,8 +203,6 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
                 model_name, provenance, source,
                 backend=backend,
                 frequencies=float(np.atleast_1d(source.frequencies)[0]),
-                mode_coupling=mode_coupling if is_rd else 'none',
-                n_profiles=n_profiles,
             ),
         )
         # Same negated-Hankel convention as the COHERENT_TL / broadband
@@ -240,7 +235,7 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
             # real, positive scalar, so it commutes with both the magnitude
             # sum and the ``phase_corr`` rotation, and it is exactly 1 for a
             # point/scaled source. Without it the narrowband line-source
-            # result sat 10·log10(k0) dB away from this engine's own
+            # result would sit 10·log10(k0) dB away from this engine's own
             # broadband branch, from Scooter and from Bellhop — an offset
             # that changes with frequency (and changes sign at
             # k0 = 1, f = c(z_s)/2π), so it could not be read as a constant
@@ -266,7 +261,7 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
                 # above). Apply ``phase_corr`` here too, upcast to
                 # complex128, and tag travelling_wave so the COHERENT_TL
                 # complex pressure carries the SAME phase convention and
-                # dtype as the broadband / return_pressure branches and as
+                # dtype as the broadband (``'pressure' in raw``) branches and as
                 # Scooter (|TL| is unchanged; this only fixes the complex
                 # phase).
                 field.data = phase_corr * np.asarray(
@@ -277,8 +272,5 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
                 frequencies=float(np.atleast_1d(source.frequencies)[0]),
                 phase_reference=phase_reference,
             )
-            field.metadata['mode_coupling'] = (mode_coupling if is_rd
-                                               else 'none')
-            field.metadata['n_profiles'] = n_profiles
         field = restack_source_depths(slabs, read, who='Kraken.run')
     return field

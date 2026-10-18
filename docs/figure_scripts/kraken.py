@@ -19,7 +19,7 @@ from figure_scripts._common import (
 import uacpy
 from uacpy.models import Kraken, RunMode
 from uacpy.plot import shared_colorbar
-from uacpy.plot import plot_modes_heatmap
+from uacpy.plot import plot_mode_attenuation, plot_modes_heatmap
 
 
 def mode_functions():
@@ -114,25 +114,14 @@ def leaky_modes():
     env, source, _ = shallow_water()
     trapped = Kraken().compute_modes(env, source)
     leaky = Kraken(leaky_modes=True).compute_modes(env, source)
-    c_bottom = float(env.bottom.halfspace_at(range=0.0).sound_speed)
 
     fig, ax = plt.subplots(figsize=SQUARE)
     for modes, label, marker, colour in (
             (leaky, f'leaky_modes=True — {leaky.n_modes} modes', 's', 'C1'),
             (trapped, f'default — {trapped.n_modes} modes', 'o', 'C0')):
-        ax.plot(modes.phase_speeds, np.abs(np.imag(modes.k)),
-                marker, color=colour, markersize=5, label=label)
-    ax.axvline(c_bottom, color='0.4', linestyle='--', linewidth=1.0)
-    ax.text(c_bottom * 1.02, 2e-5, f'bottom speed ({c_bottom:.0f} m/s)',
-            fontsize=8, color='0.3', rotation=90)
-    ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_xlabel('Phase speed $c_p$ (m/s)')
-    ax.set_ylabel('Modal attenuation $|\\mathrm{Im}(k_m)|$ (1/m)')
-    ax.set_title('Kraken — trapped modes and the leaky tail, 200 Hz',
-                 fontweight='bold', fontsize=12)
-    ax.legend(fontsize=8, loc='upper left')
-    ax.grid(True, which='both', alpha=0.3)
+        plot_mode_attenuation(
+            modes, ax=ax, label=label, color=colour, marker=marker,
+            title='Kraken — trapped modes and the leaky tail, 200 Hz')
     fig.tight_layout()
     return fig
 
@@ -154,7 +143,8 @@ def range_dependent():
                 env, source, receiver)
         tl.plot(env=env, source=source, ax=ax, show_colorbar=False)
         ax.set_title(f"mode_coupling='{coupling}' — "
-                     f"{tl.metadata['n_profiles']} range segments",
+                     f"{tl.run_settings.engine.launches[0].n_profiles} "
+                     f"range segments",
                      fontweight='bold', fontsize=11)
         if ax is not axes[-1]:
             ax.set_xlabel('')

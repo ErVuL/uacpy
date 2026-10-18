@@ -16,11 +16,11 @@ Everywhere uacpy takes ``weighting=`` it accepts one of three forms:
 * a ``(frequencies_Hz, W_dB)`` table: interpolated linearly in
   log-frequency; frequencies outside the table carry no weight, and a table
   that leaves more than half of a record's energy outside its span warns
-  (:func:`~uacpy.core._validate.warn_table_leaves_energy_out`: a table typed
+  (:func:`~uacpy.core._weighting_inputs.warn_table_leaves_energy_out`: a table typed
   in kHz).
 
 The in-air groups ``'PCA'`` and ``'OCA'`` weight a level at the underwater
-reference (1 µPa) with a warning (:func:`~uacpy.core._validate.warn_in_air_group_in_water`).
+reference (1 µPa) with a warning (:func:`~uacpy.core._weighting_inputs.warn_in_air_group_in_water`).
 
 DC carries no weight in any form.
 
@@ -58,11 +58,13 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._validate import (
-    refuse_non_finite_samples, require_positive_finite_scalar,
-    warn_table_leaves_energy_out)
+    refuse_non_finite_samples, require_positive_finite_scalar)
+from uacpy.core._weighting_inputs import warn_table_leaves_energy_out
 
 __all__ = ['EXPOSURE_THRESHOLDS', 'HEARING_GROUPS', 'WEIGHTING_PARAMS',
            'auditory_weighting', 'frequency_weighting', 'weighted_pressure']
+
+
 
 # Southall et al. (2019) Table 5: a, b, f1 [kHz], f2 [kHz], C [dB] (weighting)
 # and K [dB]. Only a/b/f1/f2/C enter :func:`auditory_weighting`.
@@ -100,7 +102,8 @@ HEARING_GROUPS = {
 }
 
 #: Southall et al. (2019) TTS- and PTS-onset exposure criteria per hearing
-#: group: Table 6 (``'non_impulsive'`` noise, weighted SEL) and Table 7
+#: group, keyed by Southall's group names (``"HF"`` is NMFS (2018)'s MF,
+#: ``"VHF"`` NMFS's HF; :data:`HEARING_GROUPS`): Table 6 (``'non_impulsive'`` noise, weighted SEL) and Table 7
 #: (``'impulsive'`` noise, weighted SEL and unweighted ``'peak'`` SPL), as
 #: ``EXPOSURE_THRESHOLDS[group][kind][onset][metric]`` in dB. SEL is re
 #: 1 µPa²·s and peak re 1 µPa under water; the in-air groups ``'PCA'`` and

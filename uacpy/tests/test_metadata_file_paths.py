@@ -116,7 +116,7 @@ def test_bounce_paths_present_when_work_dir_pinned(tmp_path):
     env = _elastic_env()
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
-    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0,
+    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0,
                 work_dir=tmp_path)
     res = bn.run(env, src, rcv)
     assert 'brc_file' in res.metadata
@@ -128,9 +128,9 @@ def test_bounce_paths_absent_when_no_work_dir():
     env = _elastic_env()
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
-    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0)
+    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0)
     res = bn.run(env, src, rcv)
-    assert res.angles is not None and len(res.angles) > 0
+    assert res.angles_deg is not None and len(res.angles_deg) > 0
     assert 'brc_file' not in res.metadata
 
 
@@ -302,10 +302,10 @@ def test_bounce_pinned_work_dir_with_cleanup_true_is_wiped(tmp_path):
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
     work = tmp_path / 'bounce_pinned'
-    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0,
+    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0,
                 work_dir=work, cleanup=True)
     res = bn.run(env, src, rcv)
-    assert res.angles is not None and len(res.angles) > 0
+    assert res.angles_deg is not None and len(res.angles_deg) > 0
     assert 'brc_file' not in res.metadata
     assert not work.exists()
 
@@ -389,14 +389,14 @@ def _drift_cases():
     )
     raw = [
         ('Bellhop', Bellhop, {}, {}),
-        ('Bounce',  Bounce,  dict(c_low=1400.0, c_high=10000.0, rmax_m=10000.0), {}),
+        ('Bounce',  Bounce,  dict(c_low=1400.0, c_high=10000.0, rmax=10000.0), {}),
         ('Kraken',  Kraken,  {}, dict(run_mode=uacpy.RunMode.MODES)),
         ('Kraken', Kraken, {}, {}),
         ('RAM',     RAM,     {}, {}),
         ('Scooter', Scooter, {}, {}),
         ('SPARC',   SPARC,   dict(n_time_samples=256), {}),
         ('OAST',    OAST,    {}, {}),
-        ('OASN',    OASN,    dict(surface_noise_level=70.0),
+        ('OASN',    OASN,    dict(surface_noise_level_dB=70.0),
          dict(run_mode=uacpy.RunMode.COVARIANCE)),
         ('OASR',    OASR,    {}, dict(run_mode=uacpy.RunMode.REFLECTION)),
         ('OASP',    OASP,    {}, dict(run_mode=uacpy.RunMode.BROADBAND)),
@@ -487,6 +487,51 @@ def test_metadata_keys_are_all_documented(
         f"Add an entry per (model, key) in uacpy/core/results/_base.py or fix the "
         f"wrapper to drop the unregistered key."
     )
+
+
+#: Facts of a run the result's own record states — the Field's time axis
+#: (``dt``, ``sample_rate``, ``n_times``, ``times``) and ``run_settings`` —
+#: which ``result.metadata`` does not copy. The drift gate above cannot see a
+#: copy coming back with its registry row, so these runs pin the absence.
+#: Bellhop's ray-trace ``fc`` is not one of them and stays.
+_RUN_FACTS_NOT_IN_METADATA = (
+    'dt', 'fs', 'nt', 't_start', 'n_frequencies',
+    'source_waveform_sample_rate', 'n_modes_requested', 'leaky_modes',
+    'mode_coupling', 'n_profiles', 'native_broadband', 'broadband_assembly',
+)
+
+
+@pytest.mark.requires_binary
+@pytest.mark.filterwarnings("ignore::UserWarning")
+@pytest.mark.parametrize('case', ['Bellhop TIME_SERIES', 'Kraken BROADBAND',
+                                  'Kraken MODES'])
+def test_run_facts_are_read_from_the_record_not_metadata(case, tmp_path):
+    from uacpy.acoustic_signal import lfm_chirp
+    env = make_pekeris(sound_speed=1600.0, density=1.5)
+    src = uacpy.Source(depths=36.0, frequencies=100.0)
+    rcv = uacpy.Receiver(depths=[50.0], ranges=[5000.0])
+    if case == 'Bellhop TIME_SERIES':
+        fs = 2000.0
+        _, chirp = lfm_chirp(50.0, 150.0, 0.1, sample_rate=fs)
+        result = Bellhop(work_dir=tmp_path, verbose=False).run(
+            env, src, rcv, run_mode=uacpy.RunMode.TIME_SERIES,
+            source_waveform=chirp, sample_rate=fs)
+        assert result.dt == pytest.approx(1.0 / fs, rel=1e-9)
+        assert 'fc' in result.metadata
+    elif case == 'Kraken BROADBAND':
+        result = Kraken(work_dir=tmp_path, verbose=False).run(
+            env, src, rcv, run_mode=uacpy.RunMode.BROADBAND,
+            frequencies=np.arange(90.0, 110.5, 1.0))
+        assert result.run_settings.engine.route == 'band'
+        assert result.n_frequencies == 21
+    else:
+        result = Kraken(work_dir=tmp_path, verbose=False).compute_modes(
+            env, src)
+        assert result.run_settings.engine.n_modes is None
+    copied = sorted(set(result.metadata) & set(_RUN_FACTS_NOT_IN_METADATA))
+    assert not copied, (
+        f"{case}: result.metadata copies {copied}, which the result's "
+        f"time axis / run_settings state")
 
 
 def test_documented_metadata_has_no_dead_rows():

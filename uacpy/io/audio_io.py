@@ -4,18 +4,18 @@ One writer, :func:`write_wav`, covering the encodings underwater work
 actually uses:
 
 * ``pcm16`` / ``pcm24`` — what passive-acoustic recorders write and what
-  every player and analysis tool reads. Integer encodings are bounded, so
-  they carry a signal's *shape*, not its level.
+  every player and analysis tool reads. Integer encodings are bounded to
+  ±1 full scale.
 * ``pcm32`` — the same, at the widest integer depth.
 * ``float32`` / ``float64`` — unbounded, so a **calibrated** signal keeps its
-  absolute values (µPa, or whatever units the caller is in). This is the
-  encoding to export a modelled received level in: normalising to full scale
-  is exactly what throws the level away.
+  absolute values (µPa, or whatever units the caller is in) whatever its
+  size. This is the encoding to export a modelled received level in.
 
-That difference is why ``normalize`` defaults to *auto* — on for the integer
-encodings, which cannot represent a signal outside ±1, and off for the float
-encodings, which can. Say ``normalize=True`` or ``normalize=False`` to decide
-it yourself.
+The samples are written as given (``normalize=False``): a signal inside ±1
+keeps its level in any encoding, and a sample a ``pcm*`` encoding cannot hold
+is clipped with a warning. ``normalize=True`` scales the peak to full scale,
+which is what a waveform meant for playback wants and what throws a
+calibrated level away.
 
 ``metadata`` writes a standard ``LIST``/``INFO`` chunk, the metadata block
 players and audio editors display. The broadcast-WAV ``bext`` chunk that
@@ -41,9 +41,11 @@ from typing import NamedTuple, Optional, Union
 import numpy as np
 
 from uacpy.core._export import ExportRecord
+from uacpy.core._validate import _MAX_CHANNELS_GUESSED
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, FileFormatError, IOWarning,
+    MissingFileError,
 )
 
 #: ``encoding`` → (WAVE format tag, bits per sample). Tag 1 is PCM, 3 is
@@ -77,10 +79,10 @@ def _refuse_past_riff_limit(n_bytes: int, encoding: str) -> None:
                         "fewer channels, or a narrower encoding ('pcm16', "
                         "'float32').")
 
-#: Above this many channels, a signal with more channels than frames is read
-#: as a channel-first ``(n_channels, n)`` array rather than written as a file
-#: of thousands of channels a few samples long.
-_MAX_CHANNELS_GUESSED = 64
+# Above _MAX_CHANNELS_GUESSED channels (core._validate, shared with the
+# estimators' time-axis guard), a signal with more channels than frames is
+# read as a channel-first ``(n_channels, n)`` array rather than written as a
+# file of thousands of channels a few samples long.
 
 #: ``metadata`` key → its four-character ``INFO`` chunk id.
 _INFO_TAGS = {
@@ -132,7 +134,7 @@ def write_wav(
     sample_rate: float,
     *,
     encoding: str = 'pcm16',
-    normalize: Optional[bool] = None,
+    normalize: bool = False,
     metadata: Optional[dict] = None,
 ) -> None:
     """Write a real signal to a ``.wav`` file.
@@ -151,11 +153,15 @@ def write_wav(
         Sample format. The integer encodings map ±1.0 to full scale; the
         float encodings write the values themselves. Default ``'pcm16'``.
     normalize : bool, optional
-        Divide by the peak absolute value before writing. Default ``None``
-        selects by encoding: ``True`` for ``pcm*`` (which cannot hold a
-        sample outside ±1) and ``False`` for ``float*`` (which can, so a
-        calibrated signal keeps its absolute level). An all-zero signal is
-        written as silence rather than divided.
+        Divide by the peak absolute value before writing, so the peak
+        lands on full scale. Default ``False``: the samples are written as
+        given, so a calibrated signal keeps its level (full scale is ±1 in
+        its units under ``pcm*``). A ``pcm*`` encoding cannot hold a sample
+        outside ±1, so such samples are clipped with a warning naming
+        ``normalize=True``; a ``float*`` encoding holds any value. With
+        ``normalize=True`` a signal whose peak is ``p`` is scaled by
+        ``-20·log10(p)`` dB. An all-zero signal is written as silence rather
+        than divided.
     metadata : dict, optional
         Any of ``title``, ``artist``, ``comment``, ``date``, ``software``,
         ``copyright``, ``engineer``, ``source``, ``subject``, ``keywords``,
@@ -172,13 +178,14 @@ def write_wav(
 
     Notes
     -----
-    Writing an un-normalised signal to a ``pcm*`` encoding clips anything
-    past full scale and warns with the number of samples affected.
+    Writing a signal to a ``pcm*`` encoding without ``normalize=True``
+    clips anything past full scale and warns with the number of samples
+    affected.
 
     Examples
     --------
-    A 10 ms tone at 48 kHz, written to a temporary directory so running the
-    example leaves nothing behind:
+    A 10 ms tone at 48 kHz (peak 1, full scale under ``pcm16``), written to
+    a temporary directory so running the example leaves nothing behind:
 
     >>> import os, tempfile
     >>> t = np.arange(0, 0.01, 1 / 48000)
@@ -258,8 +265,6 @@ def write_wav(
             f"{abs(rate - float(sample_rate)) / float(sample_rate):.3g}.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
-    if normalize is None:
-        normalize = format_tag == 1
     if normalize:
         peak = float(np.max(np.abs(samples)))
         # No epsilon in the divisor: a fixed one under-scales a quiet signal
@@ -325,13 +330,15 @@ def write_wav(
 def _wav_path(filepath: Union[str, Path], who: str) -> Path:
     """The ``.wav`` the caller names, as a :class:`~pathlib.Path`.
 
-    A path that does not exist is the argument's fault, so it raises
-    :class:`ConfigurationError` naming ``who``; a file that is there but
-    wrong raises :class:`FileFormatError` from the walk below.
+    A path that names no file raises
+    :class:`~uacpy.core.exceptions.MissingFileError` (a
+    :class:`ConfigurationError` and a :class:`FileNotFoundError`) naming
+    ``who``; a file that is there but wrong raises :class:`FileFormatError`
+    from the walk below.
     """
     path = Path(filepath)
     if not path.is_file():
-        raise ConfigurationError(
+        raise MissingFileError(
             f"{who}: no file at {str(path)!r}.",
             remediation="Check the path and its extension.")
     return path
@@ -569,7 +576,10 @@ def read_wav(filepath: Union[str, Path], *, start=0, frames=None):
         ±1 whatever its bit depth and a round trip through ``pcm16`` and
         ``pcm24`` gives the same numbers to within their quantisation. A float
         encoding comes back as written — that is the point of it, so nothing
-        rescales a calibrated signal on the way in.
+        rescales a calibrated signal on the way in. The time axis is the
+        first, as in scipy and soundfile: pass ``axis=0`` to the spectral
+        functions (``uacpy.welch`` …), whose default is the last axis and
+        which refuse a multichannel ``(n, n_channels)`` array without it.
     sample_rate : float
         Hz. The argument order mirrors ``write_wav(filepath, signal, sample_rate)``.
 
@@ -650,16 +660,15 @@ def read_wav_info(filepath: Union[str, Path]) -> WavInfo:
 
     The bit depth is what turns :func:`read_wav`'s output back into ADC
     counts. ``read_wav`` divides an integer encoding by its symmetric full
-    scale ``2**(bits-1) - 1``; ``uacpy.acoustics.pressure_from_recording(x,
-    sensitivity, gain, volt_params=(nbits, v_ref))`` takes counts and divides
-    them by ``2**(nbits-1)``. So a recording calibrated by its ADC reference
-    reads as::
+    scale ``2**(bits-1) - 1``; ``uacpy.acoustics.pressure_from_recording``
+    takes that output with ``x_scale='read_wav'`` and the bit depth, and
+    applies the ADC convention exactly. So a recording calibrated by its ADC
+    reference reads as::
 
-        info = read_wav_info(path)
         x, fs = read_wav(path)
-        counts = x * (2 ** (info.bits - 1) - 1)
         p = uacpy.acoustics.pressure_from_recording(
-            counts, sensitivity, gain, volt_params=(info.bits, v_ref))
+            x, sensitivity, gain,
+            volt_params=(read_wav_info(path).bits, v_ref), x_scale='read_wav')
 
     A float encoding (``info.encoding`` ``'float32'`` / ``'float64'``)
     carries the values themselves and has no counts: pass its samples to

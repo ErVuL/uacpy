@@ -189,6 +189,37 @@ class TestField:
             with pytest.raises(ConfigurationError, match="method='slinear'"):
                 call()
 
+    def test_resample_to_carries_every_other_axis(self):
+        """A field over frequency (or source depth) regrids as each of its
+        planes would: the method is ``resample_depth_range`` with the depth
+        and range axes named, every other axis carried through, the array
+        function the same on any axis order."""
+        from uacpy.acoustics import resample_depth_range
+        depths = np.linspace(0.0, 100.0, 3)
+        ranges = np.linspace(0.0, 1000.0, 5)
+        f = np.array([100.0, 200.0])
+        data = ((depths[:, None, None] + 1j * ranges[None, :, None])
+                * np.array([1.0, 2.0]))
+        field = Field(data=data,
+                      coords={'depth': depths, 'range': ranges,
+                              'frequency': f},
+                      frequencies=f, phase_reference='travelling_wave')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')    # coarse against the carrier
+            out = field.resample_to(depths=[25.0, 75.0], ranges=[250.0])
+        assert out.axes == ['depth', 'range', 'frequency']
+        np.testing.assert_allclose(out.data[..., 1],
+                                   [[50.0 + 500.0j], [150.0 + 500.0j]])
+        np.testing.assert_array_equal(out.data, resample_depth_range(
+            data, depths, ranges, [25.0, 75.0], [250.0], axis=(0, 1)))
+        np.testing.assert_array_equal(
+            resample_depth_range(np.moveaxis(data, 2, 0), depths, ranges,
+                                 [25.0, 75.0], [250.0], axis=(1, 2)),
+            np.moveaxis(out.data, 2, 0))
+        with pytest.raises(ConfigurationError, match="no 'range'"):
+            Field(data=np.ones(3), coords={'depth': depths}).resample_to(
+                depths=[25.0], ranges=[250.0])
+
     @staticmethod
     def _coherent_field(dr, dz=1.0, f0=200.0, c=1500.0):
         """Complex pressure with carrier e^{ikr}, grid spaced ``dz`` x ``dr``."""
@@ -1325,6 +1356,28 @@ class TestSpectrumAndToneExtraction:
         with pytest.raises(ConfigurationError, match="'time' axis"):
             self._tone_field().extract_tone(self.F0).extract_tone(self.F0)
 
+    def test_one_frequency_taken_off_a_band_is_not_captioned_a_band(self):
+        # A SPARC trace records the band it marched (band); a tone at one
+        # frequency, the spectrum on its own frequency axis and one sample
+        # off that axis are not a band average, and say so.
+        trace = self._tone_field().replace(band=(10.0, 60.0))
+        tone = trace.extract_tone(self.F0)
+        H = trace.to_transfer_function()
+        line = H.at(frequency=self.F0)
+        assert tone.band is None and H.band is None
+        assert line.band is None and line.pinned['frequency'] == self.F0
+        assert 'band centroid' not in repr(tone)
+        assert 'band centroid' not in repr(line)
+        # The band-captioned spectrum, sliced to one of its frequencies by
+        # label, by index or by interpolation, is that frequency's value.
+        banded = H.replace(band=(10.0, 60.0))
+        k = int(np.argmin(np.abs(banded.coords['frequency'] - self.F0)))
+        assert banded.at(frequency=self.F0).band is None
+        assert banded.isel(frequency=k).band is None
+        assert banded.eval(frequency=self.F0).band is None
+        # A selection that keeps the frequency it stands for keeps the band.
+        assert trace.isel(depth=0).band == (10.0, 60.0)
+
 
 class TestFieldDomainAccessorContracts:
     """The documented unit/domain guards on the value accessors
@@ -1443,7 +1496,7 @@ class TestSynthesisWarnsWhenNoSpeedStamped:
     def _trace_warnings(self, speeds, **kwargs):
         with recorded_warnings() as caught:
             trace = self._broadband(speeds).to_time_trace(
-                depth=50.0, range=3000.0, **kwargs)
+                depth=50.0, range=3000.0, sample_rate=1000.0, **kwargs)
         return trace, [str(w.message) for w in caught
                        if 'to_time_trace' in str(w.message)]
 
@@ -1678,7 +1731,7 @@ class TestSliceLabelsMustBeFiniteScalars:
 
     def test_reflection_at_nan_angle_raises_a_typed_label_error(self):
         rc = ReflectionCoefficient(
-            angles=np.linspace(0.0, 90.0, 5),
+            angles_deg=np.linspace(0.0, 90.0, 5),
             magnitude=np.linspace(0.0, 1.0, 5),
             phase=np.zeros(5),
             model='Test', frequencies=100.0,
@@ -2283,18 +2336,21 @@ class TestTimeTraceLabelsFollowTheNearestCellRule:
         tf = self._broadband()
         with pytest.raises(ConfigurationError, match='same distance'):
             tf.at(**{axis: label})
+        cell = {'depth': 20.0, 'range': 1000.0, axis: label}
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             with pytest.raises(ConfigurationError, match='same distance'):
-                tf.to_time_trace(**{axis: label})
+                tf.to_time_trace(sample_rate=1000.0, **cell)
 
     @pytest.mark.parametrize('axis, label, expected',
                              [('depth', 1e6, 30.0), ('range', -1e6, 1000.0)])
     def test_far_but_rankable_label_lands_on_the_end_sample(
             self, axis, label, expected):
+        cell = {'depth': 20.0, 'range': 1000.0, axis: label}
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            trace = self._broadband().to_time_trace(**{axis: label})
+            trace = self._broadband().to_time_trace(sample_rate=1000.0,
+                                                    **cell)
         assert trace.pinned[axis] == expected
 
 
@@ -2427,12 +2483,22 @@ class TestFieldSpellsEachArgumentOnce:
             params = inspect.signature(method).parameters
             assert 'source_waveform' in params, method.__name__
             assert 'waveform' not in params and 'spectrum' not in params
-        for method in (Field.to_time_trace, Field.broadband_loss):
-            assert 'source_spectrum' in inspect.signature(method).parameters
+        assert 'source_spectrum' in inspect.signature(
+            Field.broadband_loss).parameters
+        # The trace is one cell's impulse_response or synthesize_time_series:
+        # a waveform, or none.
+        assert 'source_spectrum' not in inspect.signature(
+            Field.to_time_trace).parameters
 
-    def test_the_rectangular_window_is_none_on_truncate_response(self):
-        params = inspect.signature(Field.truncate_response).parameters
-        assert params['window'].default is None
+    def test_the_rectangular_window_is_boxcar_on_every_synthesis(self):
+        # 'boxcar' is the one spelling of no taper (None takes it as the
+        # documented default), on the gate and on every synthesis.
+        for method in (Field.truncate_response, Field.to_time_trace,
+                       Field.impulse_response, Field.synthesize_time_series,
+                       Field.sound_exposure_level,
+                       Field.peak_sound_pressure_level):
+            params = inspect.signature(method).parameters
+            assert params['window'].default == 'boxcar', method.__name__
 
     def test_the_beamformed_trace_takes_range(self):
         from uacpy.acoustic_signal.beamforming import BeamformedField
@@ -2664,14 +2730,14 @@ class TestCoherenceIsOneDecisionOnTheField:
 
 class TestASlicedCellSynthesisesLikeItsGridCell:
     """``to_time_trace`` and ``synthesize_time_series`` take a cell sliced out
-    of a grid; its pinned depth and range stand in for the axes (RES-3)."""
+    of a grid; its pinned depth and range stand in for the axes."""
 
     def test_the_trace_of_a_sliced_cell_is_the_grids_trace(self):
         H = _two_path_grid()
         cell = H.at(depth=10.0, range=300.0)
         assert list(cell.coords) == ['frequency']
-        a = cell.to_time_trace(window=None, t_start=0.0)
-        b = H.to_time_trace(depth=10.0, range=300.0, window=None,
+        a = cell.to_time_trace(sample_rate=2000.0, t_start=0.0)
+        b = H.to_time_trace(depth=10.0, range=300.0, sample_rate=2000.0,
                             t_start=0.0)
         np.testing.assert_array_equal(a.data, b.data)
         assert a.pinned == b.pinned == {'depth': 10.0, 'range': 300.0}
@@ -2696,9 +2762,9 @@ class TestASlicedCellSynthesisesLikeItsGridCell:
         H = _two_path_grid()
         pair = stack_fields([H, H.replace(data=2.0 * H.data)], [30.0, 60.0])
         pair.source_weights = np.array([1.0, -1.0])
-        trace = pair.to_time_trace(depth=10.0, range=300.0, window=None,
-                                   t_start=0.0)
-        one = H.to_time_trace(depth=10.0, range=300.0, window=None,
+        trace = pair.to_time_trace(depth=10.0, range=300.0,
+                                   sample_rate=2000.0, t_start=0.0)
+        one = H.to_time_trace(depth=10.0, range=300.0, sample_rate=2000.0,
                               t_start=0.0)
         assert list(trace.coords) == ['source_depth', 'time']
         np.testing.assert_array_equal(trace.coords['time'],
@@ -2713,19 +2779,19 @@ class TestASlicedCellSynthesisesLikeItsGridCell:
         spectrum = Field(data=np.ones(f.size, complex),
                          coords={'frequency': f})
         with pytest.raises(ConfigurationError, match='no pinned range'):
-            spectrum.to_time_trace()
+            spectrum.to_time_trace(sample_rate=2000.0)
 
     def test_a_placeholder_depth_is_not_reported(self):
         f = np.arange(100.0, 300.0, 1.0)
         spectrum = Field(data=np.ones(f.size, complex),
                          coords={'frequency': f}, pinned={'range': 150.0})
-        trace = spectrum.to_time_trace(window=None, t_start=0.0)
+        trace = spectrum.to_time_trace(sample_rate=2000.0, t_start=0.0)
         assert trace.pinned == {'range': 150.0}
 
 
 class TestTheSynthesisWindowIsAnchoredOnTheNearestRange:
     """One record for every cell, placed from the range nearest the source
-    whichever way the axis runs (RES-12). 150 m and 1500 m at 1500 m/s on a
+    whichever way the axis runs. 150 m and 1500 m at 1500 m/s on a
     1 s record: anchored on 1500 m the window opened at 0.5 s and the 150 m
     arrival wrapped a whole record."""
 
@@ -2752,8 +2818,8 @@ class TestTheSynthesisWindowIsAnchoredOnTheNearestRange:
 class TestTheSynthesisReadsTheWaveguideTheRunResolved:
     """A Field from a model run carries ``run_settings.waveguide``; with no
     other speed stated, the synthesis anchors its window on the
-    waveguide's c_max and measures the range span's travel time at its c_min
-    (ARCH-7). Waveguide here: 1480 m/s water over a 1700 m/s half-space."""
+    waveguide's c_max and measures the range span's travel time at its c_min.
+    Waveguide here: 1480 m/s water over a 1700 m/s half-space."""
 
     @staticmethod
     def _settings():
@@ -2773,7 +2839,8 @@ class TestTheSynthesisReadsTheWaveguideTheRunResolved:
         assert H.run_settings.waveguide.c_max == 1700.0
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            trace = H.to_time_trace(depth=10.0, range=3000.0)
+            trace = H.to_time_trace(depth=10.0, range=3000.0,
+                                    sample_rate=2000.0)
         assert float(trace.coords['time'][0]) == pytest.approx(
             3000.0 / 1700.0 - 0.1, abs=1e-9)
 
@@ -2787,14 +2854,16 @@ class TestTheSynthesisReadsTheWaveguideTheRunResolved:
                 back.speeds.waveguide_max) == (1480.0, 1700.0)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            trace = back.to_time_trace(depth=10.0, range=3000.0)
+            trace = back.to_time_trace(depth=10.0, range=3000.0,
+                                       sample_rate=2000.0)
         assert float(trace.coords['time'][0]) == pytest.approx(
             3000.0 / 1700.0 - 0.1, abs=1e-9)
 
     def test_without_settings_the_window_falls_back_to_the_default(self):
         H = _two_path_grid(ranges=(3000.0, 3100.0))
         with pytest.warns(UserWarning, match='stamped no sound speed'):
-            trace = H.to_time_trace(depth=10.0, range=3000.0)
+            trace = H.to_time_trace(depth=10.0, range=3000.0,
+                                    sample_rate=2000.0)
         assert float(trace.coords['time'][0]) == pytest.approx(
             3000.0 / 1500.0 - 0.1, abs=1e-9)
 
@@ -2819,7 +2888,7 @@ class TestTheSynthesisReadsTheWaveguideTheRunResolved:
 
 class TestAZeroHertzBinIsCountedOnce:
     """The synthesis doubles its one-sided sum for the negative
-    frequencies; a 0 Hz bin has no negative twin (RES-19)."""
+    frequencies; a 0 Hz bin has no negative twin."""
 
     def test_a_unit_spectrum_from_zero_hertz_integrates_to_one(self):
         f = np.arange(0.0, 100.0, 1.0)
@@ -2827,7 +2896,7 @@ class TestAZeroHertzBinIsCountedOnce:
                   coords={'depth': np.array([1.0]), 'range': np.array([1.0]),
                           'frequency': f},
                   phase_reference=PhaseReference.TRAVELLING_WAVE)
-        h = H.to_time_trace(window=None, t_start=0.0)
+        h = H.to_time_trace(sample_rate=800.0, t_start=0.0)
         assert float(np.sum(h.data) * h.dt) == pytest.approx(1.0, rel=1e-12)
 
     def test_a_negative_frequency_is_refused(self):
@@ -2836,32 +2905,31 @@ class TestAZeroHertzBinIsCountedOnce:
                   coords={'depth': np.array([1.0]), 'range': np.array([1.0]),
                           'frequency': f})
         with pytest.raises(ConfigurationError, match='one-sided'):
-            H.to_time_trace(window=None, t_start=0.0)
-
-    def test_a_source_spectrum_off_the_axis_is_refused_by_name(self):
-        with pytest.raises(ConfigurationError, match='source_spectrum'):
-            _two_path_grid().to_time_trace(source_spectrum=np.ones(5))
+            H.to_time_trace(sample_rate=800.0, t_start=0.0)
 
 
 class TestTheTransformOfATraceKeepsItsTag:
     """``to_transfer_function`` keeps ``TIME_DOMAIN_NATIVE`` on purpose (its
     spectrum still carries the synthesis's source spectrum or window), and
-    the refusal says so rather than naming SPARC alone (RES-1, RES-2)."""
+    the refusal says so rather than naming SPARC alone."""
+
+    _CELL = {'depth': 10.0, 'range': 150.0, 'sample_rate': 2000.0,
+             't_start': 0.0}
 
     def test_the_refusal_names_the_tag_and_both_producers(self):
-        trace = _two_path_grid().to_time_trace(window=None, t_start=0.0)
+        trace = _two_path_grid().to_time_trace(**self._CELL)
         back = trace.to_transfer_function()
         assert back.phase_reference == 'time_domain_native'
         with pytest.raises(ConfigurationError,
                            match='to_transfer_function of a synthesised'):
-            back.to_time_trace()
+            back.to_time_trace(sample_rate=2000.0)
 
     def test_a_windowed_trace_warns_that_its_transform_is_windowed(self):
-        trace = _two_path_grid().to_time_trace(t_start=0.0)
+        trace = _two_path_grid().to_time_trace(window='hann', **self._CELL)
         assert trace.synthesis_window == 'hann'
         with pytest.warns(UserWarning, match="'hann' band window"):
             trace.to_transfer_function()
-        plain = _two_path_grid().to_time_trace(window=None, t_start=0.0)
+        plain = _two_path_grid().to_time_trace(**self._CELL)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             plain.to_transfer_function()
@@ -2929,7 +2997,7 @@ class TestCountsAndIndicesAreIntegers:
 
 class TestMetadataSurvivesXarray:
     """Complex metadata (the Source weights), tuples (``span_m``) and the
-    collapsed band (``band_hz``) are
+    collapsed band (``band``) are
     written in a form a NetCDF attribute holds and restored, and the field
     of several sources reads back whole."""
 
@@ -2942,7 +3010,7 @@ class TestMetadataSurvivesXarray:
                        phase_reference=PhaseReference.TRAVELLING_WAVE,
                        source_weights=np.array([1.0, 2.0 + 0j]),
                        metadata={'span_m': (100.0, 300.0)},
-                       band_hz=(100.0, 300.0))
+                       band=(100.0, 300.0))
                  for z in (5.0, 15.0)]
         return stack_fields(slabs, [5.0, 15.0])
 
@@ -2952,7 +3020,7 @@ class TestMetadataSurvivesXarray:
         back = Field.from_xarray(pair.to_xarray())
         np.testing.assert_array_equal(back.source_weights, [1.0, 2.0 + 0j])
         assert back.metadata['span_m'] == (100.0, 300.0)
-        assert back.band_hz == (100.0, 300.0)
+        assert back.band == (100.0, 300.0)
         assert back.phase_reference is PhaseReference.TRAVELLING_WAVE
 
     def test_complex_weights_come_back_through_a_netcdf_file(self, tmp_path):
@@ -2962,14 +3030,14 @@ class TestMetadataSurvivesXarray:
         tl = _field(data=np.full((4, 3), 60.0),
                     source_weights=np.array([1.0, 2.0 + 0.5j]),
                     metadata={'span_m': (100.0, 300.0)},
-                    band_hz=(100.0, 300.0))
+                    band=(100.0, 300.0))
         path = tmp_path / 'tl.nc'
         tl.to_xarray().to_netcdf(path, engine='scipy')
         with xr.open_dataarray(path, engine='scipy') as loaded:
             back = Field.from_xarray(loaded.load())
         np.testing.assert_array_equal(back.source_weights, [1.0, 2.0 + 0.5j])
         assert back.metadata['span_m'] == (100.0, 300.0)
-        assert back.band_hz == (100.0, 300.0)
+        assert back.band == (100.0, 300.0)
 
     def test_the_field_of_several_sources_sums_the_same_after_the_round_trip(
             self):
@@ -3366,7 +3434,8 @@ class TestTheSynthesisInputsAreAttributes:
         field = self._stated()
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            trace = field.to_time_trace(depth=10.0, range=150.0)
+            trace = field.to_time_trace(depth=10.0, range=150.0,
+                                        sample_rate=2000.0)
         for derived in (field.at(frequency=200.0), field.to_dB(), trace):
             assert derived.speeds == field.speeds
             assert derived.synthesis_floor == 512

@@ -10,15 +10,19 @@ Albersheim, W.J. (1981). A closed-form approximation to Robertson's
     detection characteristics. Proc. IEEE 69(7), 839.
 Richards, M.A. (2014). "Alternative Forms of Albersheim's Equation" —
     states eq. (1) and its accuracy/validity ranges verbatim.
+Abraham, D.A. (2019). *Underwater Acoustic Signal Processing*, §2.3.5.2 —
+    the Tufts & Cann accuracy envelope.
 """
 
 from __future__ import annotations
 
 import warnings
+from collections import namedtuple
 
 import numpy as np
 from scipy.stats import gamma, norm
 
+from uacpy.acoustic_signal._results import PlottedResult
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import (
     ConfigurationError, NumericsWarning, ValidityWarning,
@@ -108,17 +112,17 @@ def probability_of_detection(deflection, pf):
     """
     pf = np.asarray(pf, dtype=float)
     # Negated admissible interval so NaN is refused: both ``nan <= 0`` and
-    # ``nan >= 1`` are False, and a NaN false-alarm rate otherwise returned a
-    # silent NaN P_D. (:func:`_check_prob`, used by the Albersheim/Shnidman
-    # entry points, is already written this way.)
+    # ``nan >= 1`` are False, and a NaN false-alarm rate would otherwise give
+    # a silent NaN P_D. (:func:`_check_prob`, used by the Albersheim/Shnidman
+    # entry points, is written the same way.)
     admissible = (pf > 0.0) & (pf < 1.0)
     if np.any(~admissible):
         raise ConfigurationError(
             f"pf must be in (0, 1); got "
             f"{np.unique(pf[~admissible]).tolist()}.")
     d = np.asarray(deflection, dtype=float)
-    # The guard above refuses a NaN ``pf`` because it returned a silent NaN
-    # P_D; a NaN ``deflection`` returns that same silent NaN through the other
+    # The guard above refuses a NaN ``pf`` because it would give a silent NaN
+    # P_D; a NaN ``deflection`` gives that same silent NaN through the other
     # argument, so it is refused at the same door. ``inf`` and ``-inf`` return
     # a perfectly valid-looking probability — exactly 1.0 and 0.0 — which is
     # the degenerate limit of a detector rather than one, and is what
@@ -131,10 +135,34 @@ def probability_of_detection(deflection, pf):
     return norm.sf(norm.isf(pf) - d)
 
 
-def roc_curve(deflection: float, n_points: int = 200):
+class RocCurve(PlottedResult, namedtuple("RocCurve", "pfa pd")):
+    """A receiver operating characteristic: the detection probability
+    ``pd`` at each false-alarm probability ``pfa``, what :func:`roc_curve`
+    returns.
+
+    The tuple is the curve, so ``pfa, pd = roc_curve(2.0)`` unpacks it; the
+    ``deflection`` ``d'`` it was computed for rides on an attribute.
+    :meth:`plot` draws it with :func:`~uacpy.plot.plot_roc` (``P_D`` against
+    a log ``P_F`` axis); several curves share one axes through ``ax=``.
+    """
+
+    _attrs = ("deflection",)
+    _plotter = "plot_roc"
+
+    def __new__(cls, pfa, pd, *, deflection=None):
+        self = super().__new__(cls, np.asarray(pfa, dtype=float),
+                               np.asarray(pd, dtype=float))
+        self.deflection = None if deflection is None else float(deflection)
+        return self
+
+    def _field_units(self):
+        return {"pfa": "", "pd": ""}
+
+
+def roc_curve(deflection: float, n_points: int = 200) -> RocCurve:
     """ROC ``(P_F, P_D)`` for a Gaussian detector of the given deflection.
 
-    Returns two arrays sampling ``P_F`` logarithmically over ``[1e-6, ~1]``.
+    Samples ``P_F`` logarithmically over ``[1e-6, ~1]``.
 
     Parameters
     ----------
@@ -142,6 +170,12 @@ def roc_curve(deflection: float, n_points: int = 200):
         Deflection ``d'``.
     n_points : int, optional
         Points on the curve. Default 200.
+
+    Returns
+    -------
+    RocCurve
+        ``(pfa, pd)``, the deflection as ``.deflection``; ``.plot()`` draws
+        it.
     """
     # Negated admissible condition so a NaN deflection is refused instead of
     # returning an all-NaN curve. ``isfinite`` is the other half of the
@@ -156,7 +190,7 @@ def roc_curve(deflection: float, n_points: int = 200):
             f"{deflection!r}.")
     pf = np.logspace(-6.0, np.log10(0.99), int(n_points))
     pd = probability_of_detection(deflection, pf)
-    return pf, pd
+    return RocCurve(pf, pd, deflection=deflection)
 
 
 def albersheim_snr(pd: float, pf: float, n_pulses: int = 1) -> float:
@@ -167,10 +201,14 @@ def albersheim_snr(pd: float, pf: float, n_pulses: int = 1) -> float:
 
     ``A = ln(0.62/P_F)``, ``B = ln(P_D/(1-P_D))`` and
     ``SNR_dB = -5·log10(N) + (6.2 + 4.54/sqrt(N+0.44))·log10(A + 0.12·A·B + 1.7·B)``
-    (Richards 2014, eq. 1). Accurate to ~0.2 dB over ``0.1 <= P_D <= 0.9``,
-    ``1e-7 <= P_F <= 1e-3`` and ``1 <= N <= 8096``; outside that envelope a
-    ``ValidityWarning`` is issued and the value is an unvalidated extrapolation
-    of the fit.
+    (Richards 2014, eq. 1). Two accuracy
+    envelopes are published: Richards gives ~0.2 dB over
+    ``0.1 <= P_D <= 0.9``, ``1e-7 <= P_F <= 1e-3`` and ``1 <= N <= 8096``,
+    the box outside which a ``ValidityWarning`` is issued and the value is
+    an extrapolation of the fit; Abraham (*Underwater Acoustic Signal
+    Processing*, §2.3.5.2), after Tufts & Cann (1983), gives 0.2 dB "for at
+    least" ``0.3 <= P_D <= 0.95``, ``1e-8 <= P_F <= 1e-4`` and
+    ``1 <= N <= 16``.
 
     Parameters
     ----------
@@ -319,7 +357,7 @@ def scan_false_alarm(pf_look: float, n_looks: float) -> float:
 
 
 def detection_threshold_energy(
-    pd: float, pf: float, bandwidth_hz: float, integration_time_s: float,
+    pd: float, pf: float, bandwidth: float, integration_time: float,
     *, exact: bool = True,
 ) -> float:
     """Detection threshold (dB) for an incoherent energy detector.
@@ -373,9 +411,9 @@ def detection_threshold_energy(
         Probability of detection.
     pf : float
         Probability of false alarm.
-    bandwidth_hz : float
+    bandwidth : float
         Processing bandwidth ``w`` (Hz).
-    integration_time_s : float
+    integration_time : float
         Integration time ``t`` (s).
     exact : bool, optional
         ``True`` (default): the exact threshold. ``False``: eq. (2.77),
@@ -387,16 +425,16 @@ def detection_threshold_energy(
     # test admits ``+inf``, and an infinite bandwidth or integration time drove
     # ``d/(w*t)`` to zero for a ``DT`` of -inf — "no signal at all is needed",
     # the most dangerous direction for a threshold to be wrong in.
-    if (not np.isfinite(bandwidth_hz) or not (bandwidth_hz > 0.0)
-            or not np.isfinite(integration_time_s)
-            or not (integration_time_s > 0.0)):
+    if (not np.isfinite(bandwidth) or not (bandwidth > 0.0)
+            or not np.isfinite(integration_time)
+            or not (integration_time > 0.0)):
         raise ConfigurationError(
-            f"detection_threshold_energy: bandwidth_hz and integration_time_s"
-            f" must be > 0 and finite; got bandwidth_hz={bandwidth_hz!r}, "
-            f"integration_time_s={integration_time_s!r}."
+            f"detection_threshold_energy: bandwidth and integration_time"
+            f" must be > 0 and finite; got bandwidth={bandwidth!r}, "
+            f"integration_time={integration_time!r}."
         )
     d = detection_index(pd, pf)
-    m = float(bandwidth_hz) * float(integration_time_s)
+    m = float(bandwidth) * float(integration_time)
     value = 5.0 * np.log10(d / m)
     # The envelope is policed against the exact threshold at *this* operating
     # point rather than against a bound fitted over the (Pd, Pf, M) space. Two
@@ -435,7 +473,7 @@ def detection_threshold_energy(
         warnings.warn(
             f"detection_threshold_energy: DT = 5*log10(d/M) is Abraham's "
             f"large-M approximation (eq. 2.77) and at M = "
-            f"bandwidth_hz*integration_time_s = {m:g} (pd={pd:g}, pf={pf:g}) "
+            f"bandwidth*integration_time = {m:g} (pd={pd:g}, pf={pf:g}) "
             f"{detail} — more than the "
             f"{_DT_APPROXIMATION_TOLERANCE_DB:g} dB it claims. The error is "
             f"optimistic at every operating point, so it reports signal "

@@ -86,10 +86,12 @@ ROUTINE_EPS_RELAXATION = 0.5
 #: 3.99 / 0.97 / 2.14 / 4.61 and at λ/250 2.19 / 0.71 / 0.82 / 1.87; hard
 #: rock 200 Hz at λ/148 3.32 / 0.66 / 3.30 / 5.16 and at λ/250 3.55 / 0.96 /
 #: 1.59 / 3.70. On these seabeds the node is never the best placement and
-#: a quarter cell wins in every case — the consistent-mass Galerkin depth
-#: operator overestimates ``kz²`` (a guide that reads too shallow), which
-#: an interface a quarter cell deeper than mid-element compensates.
-#: rams0.5 is different: ``iz = int(h/dz)`` and the fluid–solid interface
+#: a quarter cell wins in every case; on slower seabeds another fraction
+#: can win (0.375 on an 80 m / 150 Hz / cb 1600 channel, see
+#: :data:`SEAFLOOR_QUARTER_TOLERANCE`, and on a 50 m / 150 Hz / cb 1650
+#: lossless guide, docs/models/ram.md §6). The value is uacpy guidance read
+#: off these measurements; no cited source explains why one placement
+#: wins. rams0.5 is different: ``iz = int(h/dz)`` and the fluid–solid interface
 #: conditions are applied at node ``iz+1``, on the seafloor node itself,
 #: so it keeps the on-node placement (:func:`snap_dz_to_seafloor`).
 SEAFLOOR_CELL_OFFSET = 0.25
@@ -122,6 +124,10 @@ SURFACE_ALIGN_WINDOW = 0.25
 MIN_SURFACE_RELIEF_CELLS = 4.0
 
 
+#: Steps per wavelength a rams0.5 range step is held to,
+#: ``dr ≤ c_min/(RAMS_DR_LAMBDA_CAP·f)`` ≈ 0.2 λ: the truncation requirement
+#: of the rotated-Padé march's O(dr²) step, uacpy guidance, measured — τ·n ≈
+#: 0.1 there against 14.6 at the Lytaev ``dr`` (:func:`tighten_rams_dr`).
 RAMS_DR_LAMBDA_CAP = 5.0
 #: Divisor an unset ``rams_dr_factor`` applies to the Lytaev ``dr`` on rams
 #: (:func:`tighten_rams_dr`): uacpy guidance, chosen with the λ/5 cap and
@@ -142,8 +148,8 @@ def collins_output_spacing(beat_wavenumber: float) -> float:
 # default here; the 15° floor is uacpy's own choice: under 15° the
 # operator is essentially paraxial and "wide-angle" stops meaning
 # anything, so a caller who genuinely wants narrow-angle physics has to
-# say so via ``angle_max=`` rather than reach it by relaxation. A pinned
-# ``angle_max`` is never narrowed.
+# say so via ``angle_max_deg=`` rather than reach it by relaxation. A pinned
+# ``angle_max_deg`` is never narrowed.
 _THETA_MAX_FLOOR = 15.0
 
 
@@ -171,10 +177,10 @@ def optimize_grid_relaxing(*, frequency, c_min, c_max, max_range,
        rescored error reported (the field error is 3-10× under the
        bound; at 2 kHz over 50 m of water to 2 km the 0.729 rung marches
        0.16-0.38 dB median from Scooter where the 0.243 ceiling refused);
-    2. only if the whole ε ladder failed and ``angle_max`` is unset,
+    2. only if the whole ε ladder failed and ``angle_max_deg`` is unset,
        ``θ_max`` steps down through 20° and :data:`_THETA_MAX_FLOOR`,
        restarting the ε ladder each time; steps at or above ``theta0`` are
-       skipped. A pinned ``angle_max`` is the caller's aperture and is
+       skipped. A pinned ``angle_max_deg`` is the caller's aperture and is
        never narrowed.
 
     Returns ``(result, eps_used, theta_used)`` — the optimizer payload
@@ -209,7 +215,7 @@ def optimize_grid_relaxing(*, frequency, c_min, c_max, max_range,
     tau_cache = {}
     eps_used, theta_used, res, last_exc = eps0, theta0, None, None
     eps_last = eps0
-    trials = ((theta0,) if knobs.angle_max is not None
+    trials = ((theta0,) if knobs.angle_max_deg is not None
               else (theta0, 20.0, _THETA_MAX_FLOOR))
     for theta_trial in trials:
         if theta_trial > theta0:
@@ -224,7 +230,7 @@ def optimize_grid_relaxing(*, frequency, c_min, c_max, max_range,
                     c_min=c_min, c_max=c_max,
                     x_max=float(max_range),
                     c0=c0_pe,
-                    angle_max=float(theta_used),  # degrees
+                    angle_max_deg=float(theta_used),  # degrees
                     eps=eps_used,
                     p=int(knobs.n_pade),
                     alpha=0.0,
@@ -279,7 +285,7 @@ def optimize_grid_relaxing(*, frequency, c_min, c_max, max_range,
                 "same way. Check against Kraken or OASES; leave c0 at "
                 "its default. Or pin accuracy= at the error bound you "
                 "accept: a pinned accuracy is met as given, on the "
-                "aperture you name with angle_max."),
+                "aperture you name with angle_max_deg."),
         ) from last_exc
     return res, eps_used, theta_used
 
@@ -302,7 +308,7 @@ def snap_dz_to_seafloor(h: float, n_layers: int) -> float:
     spelling differs; the alignment requirement does not.
     ``dz = h/n`` alone does not survive the trip
     through the deck: the Collins deck carries 12 significant digits
-    (:func:`~uacpy.io.ramsurf_writer.write_ramin`) and even a full-``repr``
+    (:func:`~uacpy.io.ramsurf_writer.write_ram_in`) and even a full-``repr``
     value can parse to a double a fraction of an ulp *above* the exact
     rational ``h/n`` (e.g. ``double(0.4) > 2/5``), which puts ``h/dz``
     just under ``n`` and the seafloor a whole cell up. Flooring onto the
@@ -310,8 +316,8 @@ def snap_dz_to_seafloor(h: float, n_layers: int) -> float:
     above read-back noise, far below any physical scale — and the loop
     re-checks every spelling pair the decks can carry: the *depth* rides
     through the deck at the same precision as ``dz`` (``%.12g`` in
-    :func:`~uacpy.io.ramsurf_writer.write_ramin`, full ``repr`` in
-    ``write_inpe``), so the binaries' ``iz = int(1 + zb/dz)`` divides the
+    :func:`~uacpy.io.ramsurf_writer.write_ram_in`, full ``repr`` in
+    ``write_mpirams_inpe``), so the binaries' ``iz = int(1 + zb/dz)`` divides the
     read-back ``h`` by the read-back ``dz`` — both quotients must clear
     ``n`` (all binaries are built with ``-fdefault-real-8``).
     """
@@ -466,7 +472,7 @@ def tighten_rams_dr(env: 'Environment', freq: float, dr_opt: float,
     When the rotation itself amplifies faster than the seabed leaks, no
     step holds the march: uacpy's default angle (no stable angle on the
     ladder, :func:`_stability.resolve_rams_rotation_angle`) is refused,
-    naming what to change, and a pinned ``rams_rotation_angle`` is marched
+    naming what to change, and a pinned ``rams_rotation_angle_deg`` is marched
     as given with a notice carrying the same remedy."""
     # With ``rams_rotation=True`` rams0.5 does not march the split-step Padé
     # exponential the optimiser scores: ``rpade`` (``rams0.5.f:859-892``,
@@ -508,11 +514,11 @@ def tighten_rams_dr(env: 'Environment', freq: float, dr_opt: float,
             env, freq, dr_max=dr_opt, theta=theta, knobs=knobs)
         dr_stab = None if stab is None else stab['dr']
         if stab is not None and dr_stab is None:
-            if knobs.rams_rotation_angle is None:
+            if knobs.rams_rotation_angle_deg is None:
                 raise ConfigurationError(
                     f"RAM:rams at f={freq:.1f} Hz: "
                     + rams_rotation_remedy(stab, knobs=knobs),
-                    remediation="rams_rotation_angle is a constructor knob (a "
+                    remediation="rams_rotation_angle_deg is a constructor knob (a "
                                 "float, or a callable f -> degrees across a "
                                 "band); see docs/models/ram.md §6 "
                                 "constraint 3.",
@@ -748,7 +754,7 @@ def grid_for_pinned_accuracy(
     theta = resolve_angle_max(env, knobs=knobs)
     score_kw = dict(
         frequency=float(freq), c_min=c_min, c_max=c_max,
-        x_max=float(max_range), c0=c0_pe, angle_max=float(theta),
+        x_max=float(max_range), c0=c0_pe, angle_max_deg=float(theta),
         p=int(knobs.n_pade), alpha=0.0,
         c_min_all=c_min_all, c_max_all=c_max_all,
     )
@@ -783,7 +789,7 @@ def grid_for_pinned_accuracy(
                 "grid chosen (its relaxation is reported), or pin dr and "
                 "dz and converge them yourself."),
         ) from exc
-    dr, dz = float(res['dr']), float(res['dz'])
+    dr, dz = float(res.dr), float(res.dz)
     if knobs.dr is None:
         dr = tighten_rams_dr(
             env, freq, dr, kind, c0_pe=c0_pe, c_min=c_min,
@@ -808,7 +814,7 @@ def grid_for_pinned_accuracy(
                 f"{MAX_DEPTH_POINTS} at which the automatic grid stops; "
                 f"expect a slow run.",
                 NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    err = optimize_grid(grid=(dr, dz), **score_kw)['predicted_error']
+    err = optimize_grid(grid=(dr, dz), **score_kw).predicted_error
     log(
         f"{kind}: Lytaev grid for the pinned accuracy={knobs.accuracy:g} → "
         f"dr={dr:.4g} m, dz={dz:.4g} m (predicted error {err:.2e}, "
@@ -896,7 +902,7 @@ def compute_grid_lytaev(
     # the ε reported here belonged to a grid that never runs.
     relaxed = (eps_used > eps0 or theta_used < theta0)
 
-    dr_opt, dz_opt = float(res['dr']), float(res['dz'])
+    dr_opt, dz_opt = float(res.dr), float(res.dz)
 
     dr_opt = tighten_rams_dr(
         env, freq, dr_opt, kind, c0_pe=c0_pe, c_min=c_min,
@@ -922,7 +928,7 @@ def compute_grid_lytaev(
     # marched; every score below is recomputed on the grid in hand.
     score_kw = dict(
         frequency=float(freq), c_min=c_min, c_max=c_max,
-        x_max=float(max_range), c0=c0_pe, angle_max=float(theta_used),
+        x_max=float(max_range), c0=c0_pe, angle_max_deg=float(theta_used),
         p=int(knobs.n_pade), alpha=0.0,
         c_min_all=c_min_all, c_max_all=c_max_all,
     )
@@ -943,9 +949,9 @@ def compute_grid_lytaev(
         env, dz_opt, kind, knobs=knobs, log=log)
 
     scores = optimize_grid(grid=(dr_opt, dz_opt), **score_kw)
-    err, growth = scores['predicted_error'], scores['growth']
+    err, growth = scores.predicted_error, scores.growth
     theta_c = (np.degrees(np.arccos(c_min / c_max_all))   # steepest mode
-               if scores['trapped_end_binds'] else 0.0)
+               if scores.trapped_end_binds else 0.0)
 
     if dz_opt > dz_pre_floor:
         if cs_min > 0:
@@ -1027,7 +1033,7 @@ def compute_grid_lytaev(
         past_routine = eps_used > ROUTINE_EPS_RELAXATION
         if past_routine:
             edge = (f"critical angle {theta_c:.0f}°"
-                    if scores['trapped_end_binds']
+                    if scores.trapped_end_binds
                     else f"θ_max={theta_used:.0f}°")
             msg += (f" That bound is on the steepest scored component "
                     f"(the {edge} edge of the band).")
@@ -1047,14 +1053,14 @@ def compute_grid_lytaev(
                  f"at ≤ λ/{RAMS_DR_LAMBDA_CAP:.0f} for that")
     else:
         score = f"predicted error {err:.2e}"
-    band = (f"critical angle {theta_c:.0f}°" if scores['trapped_end_binds']
+    band = (f"critical angle {theta_c:.0f}°" if scores.trapped_end_binds
             else f"θ_max={theta_used:.0f}°")
     log(
         f"{kind}: Lytaev grid → dr={dr_opt:.2f} m, "
         f"dz={dz_opt:.3f} m ({score} on the water band "
-        f"ξ∈[{scores['xi_min']:.3f}, {scores['xi_max']:.3f}] out to "
+        f"ξ∈[{scores.xi_min:.3f}, {scores.xi_max:.3f}] out to "
         f"the {band}; stability-band growth {growth:.1e} per step on "
-        f"ξ∈[{scores['xi_stab_min']:.3f}, {scores['xi_min']:.3f}); "
+        f"ξ∈[{scores.xi_stab_min:.3f}, {scores.xi_min:.3f}); "
         f"c₀={c0_pe:.1f} m/s [{c0_origin}], ε={knobs.accuracy:.0e})."
     )
     return dr_opt, dz_opt
@@ -1096,7 +1102,7 @@ def refine_dz_for_the_steepest_component(env, kind, dr, dz, h,
                                           score_kw, *, knobs, log):
     """``(dz, note)``: ``dz`` refined below the floored value so the
     band's steepest scored component — the seabed's critical-angle mode
-    or the ``angle_max`` aperture edge, whichever binds — scores under
+    or the ``angle_max_deg`` aperture edge, whichever binds — scores under
     :data:`TRAPPED_MODE_SCORE_LIMIT` at this ``dr``, aligned with the
     seafloor and held to :data:`MAX_DEPTH_POINTS` over the ``h`` m water
     column, with a clause for the status line saying which; ``None`` when
@@ -1119,7 +1125,7 @@ def refine_dz_for_the_steepest_component(env, kind, dr, dz, h,
     2.5 dB median |dTL| from Scooter there.
     """
     scores = optimize_grid(grid=(float(dr), float(dz)), **score_kw)
-    if scores['predicted_error'] < TRAPPED_MODE_SCORE_LIMIT:
+    if scores.predicted_error < TRAPPED_MODE_SCORE_LIMIT:
         return None
     need = dz_for_trapped_modes(dr, dz, score_kw)
     if need is None:
@@ -1145,7 +1151,7 @@ def refine_dz_for_the_steepest_component(env, kind, dr, dz, h,
         f"RAM:{kind}: refined dz from {dz:.4g} m (λ/{lam / dz:.0f}, the "
         f"cost floor) to {dz_out:.4g} m (λ/{lam / dz_out:.0f}) so the "
         f"band's steepest component scores {score_need:.2g} instead of "
-        f"{scores['predicted_error']:.2g} at dr={dr:.3g} m.", level="info")
+        f"{scores.predicted_error:.2g} at dr={dr:.3g} m.", level="info")
     return dz_out, (f", then refined to λ/{lam / dz_out:.0f} so the band's "
                     f"steepest component scores under "
                     f"{TRAPPED_MODE_SCORE_LIMIT:g}")
@@ -1172,12 +1178,12 @@ def warn_if_trapped_modes_unresolved(env, freq, kind, dr, dz,
         env, knobs=knobs)
     kw = dict(frequency=float(freq), c_min=c_min, c_max=c_max,
               x_max=float(max_range), c0=c0,
-              angle_max=resolve_angle_max(env, knobs=knobs),
+              angle_max_deg=resolve_angle_max(env, knobs=knobs),
               p=int(knobs.n_pade),
               alpha=0.0, c_min_all=c_min_all, c_max_all=c_max_all)
     scores = optimize_grid(grid=(float(dr), float(dz)), **kw)
-    err = scores['predicted_error']
-    if not scores['trapped_end_binds'] or err < TRAPPED_MODE_SCORE_LIMIT:
+    err = scores.predicted_error
+    if not scores.trapped_end_binds or err < TRAPPED_MODE_SCORE_LIMIT:
         return
     need = dz_for_trapped_modes(dr, dz, kw)
     theta_c = np.degrees(np.arccos(c_min / c_max_all))
@@ -1223,7 +1229,7 @@ def warn_if_receivers_see_paths_steeper_than_the_band(
     path is steeper than the PE's angular band reaches, naming the first
     range clear of it.
 
-    The band is the wider of the ``angle_max`` aperture
+    The band is the wider of the ``angle_max_deg`` aperture
     (:func:`~uacpy.models.ram._domain.resolve_angle_max`) and the critical
     angle of the fastest medium against the fastest water — the band the
     grid is scored on. A steeper component is damped or garbled at the
@@ -1236,7 +1242,7 @@ def warn_if_receivers_see_paths_steeper_than_the_band(
     _, c_water = water_speed_bounds(env)
     c_fast = float(speed_bounds(env)[1])
     aperture = resolve_angle_max(env, knobs=knobs)
-    origin = f"angle_max={aperture:g}°"
+    origin = f"angle_max_deg={aperture:g}°"
     if c_fast > c_water:
         critical = float(np.degrees(np.arccos(c_water / c_fast)))
         if critical > aperture:
@@ -1266,22 +1272,22 @@ def warn_if_receivers_see_paths_steeper_than_the_band(
 def warn_if_pinned_angle_max_is_below_the_slope(env: Environment, *,
                                                  notices=None,
                                                  knobs) -> None:
-    """One notice when a pinned ``angle_max`` is narrower than the
+    """One notice when a pinned ``angle_max_deg`` is narrower than the
     steepest bathymetry slope: Lytaev (2023) §5.5 bounds the spectrum by
     ``θ_max = max(θ_max^src, θ_max^bottom)``, the bottom term being that
     slope, which the unset default takes (:func:`_domain.resolve_angle_max`);
     the pinned value is used as given."""
-    if knobs.angle_max is None:
+    if knobs.angle_max_deg is None:
         return
     slope = steepest_slope_deg(env)
-    if slope <= float(knobs.angle_max):
+    if slope <= float(knobs.angle_max_deg):
         return
     give_notice(notices,
-        f"RAM: the pinned angle_max={float(knobs.angle_max):g}° is narrower "
+        f"RAM: the pinned angle_max_deg={float(knobs.angle_max_deg):g}° is narrower "
         f"than the bathymetry's steepest slope, {slope:.3g}°. Lytaev (2023) "
         f"§5.5 bounds the Padé spectrum by θ_max = max(θ_src, θ_bottom), the "
-        f"bottom term being that slope, which angle_max=None takes; "
-        f"{float(knobs.angle_max):g}° is used as given.",
+        f"bottom term being that slope, which angle_max_deg=None takes; "
+        f"{float(knobs.angle_max_deg):g}° is used as given.",
         NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 

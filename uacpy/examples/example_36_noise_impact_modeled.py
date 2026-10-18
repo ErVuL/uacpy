@@ -20,9 +20,7 @@ env.ssp.plot
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -72,7 +70,7 @@ tl = np.array([
 
 received = monopole - tl
 groups = {"LF": "baleen whale", "VHF": "harbour porpoise"}
-weighted = {group: apply_weighting(received, frequency=bands, group=group) for group in groups}
+weighted = {group: apply_weighting(received, frequency=bands, weighting=group) for group in groups}
 print(f"  received level at {animal_range / 1000:.0f} km, "
       f"{animal_depth:.0f} m: peak {received.max():.1f} dB re 1 µPa")
 # Southall et al. (2019) state non-impulsive criteria as weighted SEL; a

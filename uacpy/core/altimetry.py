@@ -77,8 +77,9 @@ class Altimetry(_RangeProfile):
         """Coerce ``None`` / ``Altimetry`` / ``(N, 2)`` ``(range, height)``
         pairs into an :class:`Altimetry` (``None`` passes through — a flat
         z = 0 surface). Two columns ``(ranges, heights)`` are refused with
-        the ``np.column_stack`` remedy, except for two 2-sample columns,
-        which a ``2 x 2`` input cannot be told apart from: it is read as two
+        the ``np.column_stack`` remedy: shape ``(2, N)`` with ``N != 2``, and
+        two 1-D arrays or a tuple of two lists at any length. A list of
+        tuples, a ``2 x 2`` nested list or a ``2 x 2`` array is read as two
         ``(range, height)`` pairs.
 
         Parameters
@@ -91,25 +92,25 @@ class Altimetry(_RangeProfile):
         arr = real_array_or_none(value)
         if arr is None:
             raise ConfigurationError(
-                f"Altimetry: must be shape (N, 2) as [(range, height_m), ...]; "
+                f"Altimetry: must be shape (N, 2) as [(range, height), ...]; "
                 f"got non-numeric {value!r}.")
         refuse_two_columns(
-            arr, who='Altimetry', name='altimetry',
+            value, who='Altimetry', name='altimetry',
             columns='ranges, heights', pair='range, height',
             carrier='an Altimetry',
             remediation="Pass altimetry=np.column_stack([ranges, heights]) "
                         "or Altimetry(ranges=ranges, heights=heights).")
         if arr.ndim != 2 or arr.shape[1] != 2:
             raise ConfigurationError(
-                f"Altimetry: must have shape (N, 2) as [(range, height_m), "
+                f"Altimetry: must have shape (N, 2) as [(range, height), "
                 f"...]; got shape {arr.shape}.")
         return cls(ranges=arr[:, 0], heights=arr[:, 1])
 
     @classmethod
     def from_sea_state(
         cls,
-        rmax_m: float,
-        wind_speed_kn: Optional[float] = None,
+        rmax: float,
+        wind_speed_19_5m_kn: Optional[float] = None,
         n_points: Optional[int] = None,
         *,
         rng: Optional[np.random.Generator] = None,
@@ -121,20 +122,19 @@ class Altimetry(_RangeProfile):
 
         Parameters
         ----------
-        rmax_m : float
+        rmax : float
             Range extent (m).
-        wind_speed_kn : float, optional
-            Wind speed (knots) at 19.5 m. Default
-            :data:`DEFAULT_SEA_SURFACE_WIND_KN` (10 m/s).
+        wind_speed_19_5m_kn : float, optional
+            Wind speed (knots) at 19.5 m. ``None`` (default) is
+            :data:`DEFAULT_SEA_SURFACE_WIND_KN` (10 m/s), as on
+            :func:`generate_sea_surface`.
         n_points : int, optional
             Range samples; ``None`` sizes them from the sea state.
         rng : numpy.random.Generator, optional
             The generator the realization is drawn from.
         """
-        if wind_speed_kn is None:
-            wind_speed_kn = DEFAULT_SEA_SURFACE_WIND_KN
         return cls.coerce(generate_sea_surface(
-            rmax_m, wind_speed_kn, n_points, rng=rng))
+            rmax, wind_speed_19_5m_kn, n_points, rng=rng))
 
 
 #: Range samples per Pierson-Moskowitz nominal peak wavelength
@@ -161,19 +161,19 @@ SEA_SURFACE_CALM_WIND_MPS = 0.5
 DEFAULT_SEA_SURFACE_WIND_KN = 10.0 * KNOTS_PER_M_PER_S
 
 
-def sea_surface_n_points(rmax_m: float, wind_speed_kn: float) -> Tuple[int, int]:
+def sea_surface_n_points(rmax: float, wind_speed_19_5m_kn: float) -> Tuple[int, int]:
     """``(n_points, needed)`` for a Pierson-Moskowitz realization.
 
     ``needed`` is the count that puts SEA_SURFACE_SAMPLES_PER_PEAK samples
-    on the nominal peak wavelength ``2*pi*U**2/g`` over ``rmax_m``;
+    on the nominal peak wavelength ``2*pi*U**2/g`` over ``rmax``;
     ``n_points`` is that count clipped to [SEA_SURFACE_MIN_POINTS,
     SEA_SURFACE_MAX_POINTS], or SEA_SURFACE_MIN_POINTS for a calm sea. The
     one sizing rule behind :func:`generate_sea_surface` and
     :func:`uacpy.data.fetch_sea_surface`.
     """
-    wind_ms = float(knots_to_ms(wind_speed_kn))    # the PM spectrum's U, in m/s
+    wind_ms = float(knots_to_ms(wind_speed_19_5m_kn))    # the PM spectrum's U, in m/s
     lambda_p = 2.0 * np.pi * wind_ms ** 2 / STANDARD_GRAVITY_M_S2
-    needed = int(np.ceil(SEA_SURFACE_SAMPLES_PER_PEAK * float(rmax_m)
+    needed = int(np.ceil(SEA_SURFACE_SAMPLES_PER_PEAK * float(rmax)
                          / lambda_p)) + 1
     if wind_ms <= SEA_SURFACE_CALM_WIND_MPS:
         return SEA_SURFACE_MIN_POINTS, needed
@@ -182,8 +182,8 @@ def sea_surface_n_points(rmax_m: float, wind_speed_kn: float) -> Tuple[int, int]
 
 
 def generate_sea_surface(
-    rmax_m: float,
-    wind_speed_kn: float = DEFAULT_SEA_SURFACE_WIND_KN,
+    rmax: float,
+    wind_speed_19_5m_kn: Optional[float] = None,
     n_points: Optional[int] = None,
     *,
     rng: Optional[np.random.Generator] = None,
@@ -193,9 +193,9 @@ def generate_sea_surface(
 
     Parameters
     ----------
-    rmax_m : float
-        Range extent of the surface in metres (the grid spans ``0..rmax_m``).
-    wind_speed_kn : float
+    rmax : float
+        Range extent of the surface in metres (the grid spans ``0..rmax``).
+    wind_speed_19_5m_kn : float, optional
         Wind speed at 19.5 m height in knots, converted at entry to the
         m/s ``U`` of the Pierson-Moskowitz convention. The fully developed
         significant wave height is Hs = 4*sqrt(alpha/beta)*U^2/(2g) =
@@ -204,12 +204,13 @@ def generate_sea_surface(
         - 20 kn (10.3 m/s): Hs ~ 2.2 m
         - 30 kn (15.4 m/s): Hs ~ 5.0 m
         - 40 kn (20.6 m/s): Hs ~ 8.9 m
-        Default :data:`DEFAULT_SEA_SURFACE_WIND_KN` (10 m/s, Hs ~ 2.1 m).
+        ``None`` (default) is :data:`DEFAULT_SEA_SURFACE_WIND_KN` (10 m/s,
+        Hs ~ 2.1 m).
     n_points : int, optional
         Number of range points in the output altimetry array. The surface is
         resolved with ``SEA_SURFACE_SAMPLES_PER_PEAK`` (8) samples per
         nominal peak wavelength ``lambda_p = 2*pi*U**2/g``, i.e.
-        ``n_points >= 8 * rmax_m / lambda_p + 1`` (1251 points for 10 km at
+        ``n_points >= 8 * rmax / lambda_p + 1`` (1251 points for 10 km at
         10 m/s, 19.4 kn). ``None`` (default) picks that count, at least 500 and at
         most ``SEA_SURFACE_MAX_POINTS`` (200 000) — past the cap it warns
         rather than allocating — and 500 for a calm sea (U <= 0.5 m/s, about
@@ -236,19 +237,30 @@ def generate_sea_surface(
     JGR 69(24), 5181-5190. Spectrum and rms height as given by Medwin & Clay,
     *Fundamentals of Acoustical Oceanography*, eqs. (13.1.11) and (13.1.12).
     """
-    if not np.isfinite(rmax_m) or rmax_m <= 0:
+    if not np.isfinite(rmax) or rmax <= 0:
         raise ConfigurationError(
-            f"generate_sea_surface: rmax_m must be a positive distance (m); "
-            f"got {rmax_m}."
+            f"generate_sea_surface: rmax must be a positive distance (m); "
+            f"got {rmax}."
         )
-    if not np.isfinite(wind_speed_kn) or wind_speed_kn <= 0:
+    if wind_speed_19_5m_kn is None:
+        wind_speed_19_5m_kn = DEFAULT_SEA_SURFACE_WIND_KN
+    if not np.isfinite(wind_speed_19_5m_kn) or wind_speed_19_5m_kn <= 0:
         raise ConfigurationError(
-            f"generate_sea_surface: wind_speed_kn must be a positive speed in "
-            f"knots; got {wind_speed_kn}."
+            f"generate_sea_surface: wind_speed_19_5m_kn must be a positive speed in "
+            f"knots; got {wind_speed_19_5m_kn}."
         )
-    wind_ms = float(knots_to_ms(wind_speed_kn))    # the PM spectrum's U, in m/s
-    auto_n_points, needed = sea_surface_n_points(rmax_m, wind_speed_kn)
-    n_points = auto_n_points if n_points is None else int(n_points)
+    wind_ms = float(knots_to_ms(wind_speed_19_5m_kn))    # the PM spectrum's U, in m/s
+    auto_n_points, needed = sea_surface_n_points(rmax, wind_speed_19_5m_kn)
+    if n_points is not None:
+        # A count is used as given: 600.9 is refused, not truncated to 600.
+        if (isinstance(n_points, bool) or np.ndim(n_points) != 0
+                or not float(n_points).is_integer()):
+            raise ConfigurationError(
+                f"generate_sea_surface: n_points must be a whole number of "
+                f"points; got {n_points!r}.")
+        n_points = int(n_points)
+    else:
+        n_points = auto_n_points
     if n_points < 2:
         raise ConfigurationError(
             f"generate_sea_surface: n_points must be >= 2; got {n_points}."
@@ -256,7 +268,7 @@ def generate_sea_surface(
     rng = require_generator(rng, "generate_sea_surface")
     g = STANDARD_GRAVITY_M_S2
 
-    ranges = np.linspace(0, rmax_m, n_points)
+    ranges = np.linspace(0, rmax, n_points)
     dx = ranges[1] - ranges[0]
 
     # Spatial frequency grid (cycles/m)
@@ -286,20 +298,20 @@ def generate_sea_surface(
     # the spectrum away and returns a surface flatter than the wind's Hs.
     if wind_ms > SEA_SURFACE_CALM_WIND_MPS and n_points < needed:
         lambda_p = 2.0 * np.pi * wind_ms ** 2 / g
-        remedy = (f"Shorten rmax_m: resolving it needs {needed} samples, "
+        remedy = (f"Shorten rmax: resolving it needs {needed} samples, "
                   f"past the {SEA_SURFACE_MAX_POINTS} cap"
                   if needed > SEA_SURFACE_MAX_POINTS
                   and n_points >= SEA_SURFACE_MAX_POINTS else
                   f"Pass n_points >= {needed}, or n_points=None to size the "
                   f"realization from the wind")
         warnings.warn(
-            f"generate_sea_surface: {n_points} samples over {rmax_m:.0f} m "
+            f"generate_sea_surface: {n_points} samples over {rmax:.0f} m "
             f"give dx = {dx:.1f} m, coarser than the "
             f"{lambda_p / SEA_SURFACE_SAMPLES_PER_PEAK:.1f} m that resolves "
             f"the {lambda_p:.1f} m wavelength of the *nominal* "
             f"Pierson-Moskowitz peak (omega_p = g/W, M&C 13.1.11) at "
-            f"U = {wind_ms:g} m/s ({float(wind_speed_kn):g} kn). The realization aliases the wave "
-            f"spectrum away and its significant wave height falls short of "
+            f"U = {wind_ms:g} m/s ({float(wind_speed_19_5m_kn):g} kn). "
+            f"The realization aliases the wave spectrum away and its significant wave height falls short of "
             f"the fully developed {0.021 * wind_ms ** 2:.2f} m. "
             f"{remedy}.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,

@@ -21,7 +21,7 @@ from uacpy.io.bellhop_writer import (
     validate_beam_type,
 )
 from uacpy.core._validate import equally_spaced
-from uacpy.models._knobs import is_whole_number
+from uacpy.models._knobs import is_real_number, is_whole_number, whole_count
 from uacpy.io.refl_io import read_source_beam_pattern
 from uacpy.models.bellhop._plan import _STEP_PER_DEPTH
 from uacpy.models.bellhop._tables import (
@@ -32,12 +32,16 @@ from uacpy.models.bellhop._tables import (
 
 
 def check_knobs(*, beam_type, beam_width_type, beam_curvature, component,
-                n_beams, grid_type, launch_angles, ray_step, z_box, r_box,
-                n_frequencies, bandwidth_factor) -> None:
+                eps_multiplier, r_loop, n_image, ib_win,
+                n_beams, grid_type, launch_angles_deg, ray_step, z_box, r_box,
+                n_frequencies, bandwidth_factor, single_beam=None) -> None:
     """Refuse a constructor knob no run could use: an unknown beam type
-    or beam shape letter, a beam count that is not a whole number >= 0,
-    a grid type other than 'R'/'I', a launch fan that is not an
-    ascending pair of numbers, a negative or non-finite step, a ray box
+    or beam shape letter, a Cerveny ``eps_multiplier`` / ``r_loop`` that is
+    not one real number, an ``n_image`` / ``ib_win`` that is not a whole
+    number >= 0, a particle-velocity ``component`` on the ray-centred
+    beam (:func:`check_component`), a beam count that is not a whole
+    number >= 0, a grid type other than 'R'/'I', a launch fan that is not
+    an ascending pair of numbers, a negative or non-finite step, a ray box
     that is not a positive number, a band of fewer than two bins (or a
     fractional count) or a width outside (0, 2).
 
@@ -45,6 +49,20 @@ def check_knobs(*, beam_type, beam_width_type, beam_curvature, component,
     attributes can be reassigned in between.
     """
     validate_beam_type(beam_type, 'Bellhop')
+    for name, value in (('eps_multiplier', eps_multiplier),
+                        ('r_loop', r_loop)):
+        if value is not None and not (is_real_number(value)
+                                      and np.isfinite(value)):
+            raise ConfigurationError(
+                f"Bellhop({name}={value!r}) must be one finite real number, "
+                f"or None for its default.")
+    # Bellhop reads both list-directed into INTEGERs
+    # (ReadEnvironmentBell.f90:217), so a fraction is not a value it can take.
+    for name, value in (('n_image', n_image), ('ib_win', ib_win)):
+        if value is not None:
+            whole_count(f'Bellhop: {name}', value, 0)
+    if str(beam_type).upper() == 'R':
+        check_component(component=component, beam_type=beam_type)
     shape = cerveny_knobs(beam_width_type=beam_width_type,
                           beam_curvature=beam_curvature, component=component)
     validate_beam_shape(shape['beam_width_type'], shape['beam_curvature'],
@@ -63,26 +81,37 @@ def check_knobs(*, beam_type, beam_width_type, beam_curvature, component,
             f"auto-estimates the beam count only on an exact 0; a "
             f"negative value reaches ALLOCATE unchecked."
         )
+    # angleMod.f90:80-83 stops unless 1 <= iSingle_alpha <= Nalpha; with a
+    # pinned count the bound is known before the run, with n_beams=0 the
+    # binary's own count is, and its stop is the run's error.
+    if single_beam is not None:
+        whole_count('Bellhop: single_beam', single_beam, 1)
+        if n_beams and single_beam > n_beams:
+            raise ConfigurationError(
+                f"Bellhop(single_beam={single_beam}) is past the fan of "
+                f"n_beams={n_beams}: angleMod.f90:80-83 stops with 'Selected "
+                f"beam, iSingle_alpha not in [ 1, Angles%Nalpha ]'.",
+                remediation=f"Pick a beam in 1..{n_beams}, or raise n_beams.")
     if grid_type not in ('R', 'I'):
         raise ConfigurationError(
             f"Bellhop(grid_type={grid_type!r}) is not valid. Use "
             f"'R' (rectilinear) or 'I' (irregular paired depth/range)."
         )
-    if not isinstance(launch_angles, (tuple, list, np.ndarray)) or len(launch_angles) != 2:
+    if not isinstance(launch_angles_deg, (tuple, list, np.ndarray)) or len(launch_angles_deg) != 2:
         raise ConfigurationError(
-            f"Bellhop(launch_angles={launch_angles!r}) must be a 2-element sequence "
+            f"Bellhop(launch_angles_deg={launch_angles_deg!r}) must be a 2-element sequence "
             f"(min_deg, max_deg) of launch-angle limits."
         )
     try:
-        alpha_lo, alpha_hi = float(launch_angles[0]), float(launch_angles[1])
+        alpha_lo, alpha_hi = float(launch_angles_deg[0]), float(launch_angles_deg[1])
     except (TypeError, ValueError):
         raise ConfigurationError(
-            f"Bellhop(launch_angles={launch_angles!r}) entries must be numbers "
+            f"Bellhop(launch_angles_deg={launch_angles_deg!r}) entries must be numbers "
             f"(min_deg, max_deg) of launch-angle limits."
         ) from None
     if not (alpha_lo < alpha_hi):
         raise ConfigurationError(
-            f"Bellhop(launch_angles={launch_angles!r}) limits must satisfy "
+            f"Bellhop(launch_angles_deg={launch_angles_deg!r}) limits must satisfy "
             f"min_deg < max_deg: give the lower limit first. Both backends "
             f"sort the fan after sub-tabulating it (angleMod.f90:60-61; "
             f"bellhopcuda rayangles.hpp:89-90), so a reversed pair would "
@@ -426,8 +455,8 @@ def reject_unequal_paired_grid(receiver, *, grid_type) -> None:
         )
 
 
-def check_beam_pattern_spans_the_fan(pattern, *, launch_angles) -> None:
-    """Require the beam pattern to cover every launch angle in ``launch_angles``.
+def check_beam_pattern_spans_the_fan(pattern, *, launch_angles_deg) -> None:
+    """Require the beam pattern to cover every launch angle in ``launch_angles_deg``.
 
     ``bellhop.f90:269-270`` clamps the table index but **not** the
     interpolation weight at ``:273``, so ``Amp0`` at ``:274`` extrapolates
@@ -441,15 +470,15 @@ def check_beam_pattern_spans_the_fan(pattern, *, launch_angles) -> None:
     which makes this the only available guard.
     """
     if isinstance(pattern, (str, Path)):
-        angles = read_source_beam_pattern(pattern).angles
+        angles = read_source_beam_pattern(pattern).angles_deg
     else:
         angles = np.asarray(pattern, dtype=float)[:, 0]
     lo, hi = float(np.min(angles)), float(np.max(angles))
-    fan_lo, fan_hi = float(min(launch_angles)), float(max(launch_angles))
+    fan_lo, fan_hi = float(min(launch_angles_deg)), float(max(launch_angles_deg))
     if lo > fan_lo + 1e-9 or hi < fan_hi - 1e-9:
         raise ConfigurationError(
             f"Bellhop: the source beam pattern spans "
-            f"[{lo:g}, {hi:g}]° but the launch fan launch_angles spans "
+            f"[{lo:g}, {hi:g}]° but the launch fan launch_angles_deg spans "
             f"[{fan_lo:g}, {fan_hi:g}]°. Bellhop extrapolates the pattern "
             f"past its ends on linear amplitude "
             f"(Bellhop/bellhop.f90:273), which inverts the amplitude of "
@@ -458,7 +487,7 @@ def check_beam_pattern_spans_the_fan(pattern, *, launch_angles) -> None:
             remediation=(
                 f"Extend the pattern to cover [{fan_lo:g}, {fan_hi:g}]° — "
                 f"repeat the edge level to hold it flat — or narrow "
-                f"launch_angles= to the pattern's own span."
+                f"launch_angles_deg= to the pattern's own span."
             ),
         )
 

@@ -23,7 +23,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from uacpy.core.exceptions import (
-    ConfigurationError, FileFormatError, IOWarning,
+    FileFormatError, IOWarning, MissingFileError,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
@@ -232,14 +232,13 @@ def typed_format_error(reader):
     already-typed ``FileFormatError``/``ConfigurationError`` pass through
     unchanged.
 
-    An *absent* file is not in that set. Which exception a missing path
-    deserves depends on who was supposed to produce it — ``ConfigurationError``
-    when the user named it, ``FileFormatError`` when a model should have
-    written it (:class:`~uacpy.core.exceptions.FileFormatError` states the
-    rule) — and a decorator wrapped around fourteen readers of both kinds
-    knows neither. Each reader therefore states its own provenance:
+    An *absent* file is not in that set: every reader raises
+    :class:`~uacpy.core.exceptions.MissingFileError` for it, and its
+    remediation depends on who was supposed to produce the file, which a
+    decorator wrapped around fourteen readers of both kinds knows neither.
+    Each reader therefore states its own provenance:
     :func:`require_model_output` for the readers of model output,
-    :func:`require_user_input` or an explicit ``ConfigurationError`` for the
+    :func:`require_user_input` or an explicit ``MissingFileError`` for the
     readers of user-authored decks.
     """
     @functools.wraps(reader)
@@ -259,17 +258,23 @@ def typed_format_error(reader):
     return wrapper
 
 
-def require_model_output(filepath, reader: str) -> None:
-    """Raise :class:`FileFormatError` when a model output file is absent.
+def summarize_axis(arr, head: int = 10, fmt: str = "{:9.5g}") -> str:
+    """Compact one-line preview of a numeric axis for debug logging."""
+    n = len(arr)
+    if n <= head + 1:
+        return "[" + ", ".join(fmt.format(v).strip() for v in arr) + f"] ({n} pts)"
+    body = ", ".join(fmt.format(v).strip() for v in arr[:head])
+    tail = fmt.format(arr[-1]).strip()
+    return f"[{body}, …, {tail}] ({n} pts)"
 
-    The counterpart to the explicit ``ConfigurationError`` the readers of
-    user-authored decks raise: this is the provenance statement for the
-    readers whose file is one a model should have written, so an absent path
-    means the run failed before writing it rather than that the caller named
-    the wrong file.
-    """
+
+def require_model_output(filepath, reader: str) -> None:
+    """Raise :class:`~uacpy.core.exceptions.MissingFileError` when a model
+    output file is absent, saying the run may have failed before writing
+    it; :func:`require_user_input` is the same check for a file a user
+    writes."""
     if not Path(filepath).exists():
-        raise FileFormatError(
+        raise MissingFileError(
             f"{reader}: file not found: {filepath}.",
             remediation="Check the path; for a model output, the run "
                         "may have failed before writing this file.",
@@ -277,15 +282,14 @@ def require_model_output(filepath, reader: str) -> None:
 
 
 def require_user_input(filepath, reader: str) -> None:
-    """Raise :class:`~uacpy.core.exceptions.ConfigurationError` when a
+    """Raise :class:`~uacpy.core.exceptions.MissingFileError` when a
     user-authored input file is absent.
 
     The counterpart to :func:`require_model_output` for the readers of files
-    a user writes and an engine reads (``.ssp``, ``.flp``): an absent path is
-    a wrong argument, not a failed run.
+    a user writes and an engine reads (``.ssp``, ``.flp``).
     """
     if not Path(filepath).exists():
-        raise ConfigurationError(
+        raise MissingFileError(
             f"{reader}: no file at {str(filepath)!r}.",
             remediation="Check the path; an input deck is read exactly as "
                         "named.",
@@ -610,7 +614,7 @@ class DirectAccessFile:
     ``n * record_bytes``.
 
     The ``.shd``/``.grn`` (``misc/RWSHDFile.f90:100-102``) and ``.mod``
-    (``Kraken/kraken.f90:587``) formats open with ``RECL = 4 * LRecl``, the
+    (``Kraken/kraken.f90:587-589``) formats open with ``RECL = 4 * LRecl``, the
     record length counted in 4-byte words, and store that word count first.
     The byte order is read from those first 4 bytes by the rule of
     :func:`detect_endian` (whose notices name ``source``); :attr:`record_words`

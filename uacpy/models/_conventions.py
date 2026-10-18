@@ -4,20 +4,33 @@ source."""
 
 import numpy as np
 
-from uacpy.core.bottom import medium_density_at
+from uacpy.core.acoustics.modal import medium_density_at
 
 
 def _line_source_unit_at_1m(c_source: float, frequencies) -> np.ndarray:
     """Factor ``√k0``, ``k0 = 2πf / c(z_s)``, per frequency, that brings an
     engine's 2-D line-source field normalised as ``Σ ψψ e^{ikx} / k_x``
-    (Kraken ``KrakenField/EvaluateMod.f90:36``, Scooter's ``'X'`` branch of
-    ``TransformG.f90``) to UNIT AMPLITUDE AT 1 m in free space — JKPS
+    (Kraken ``KrakenField/EvaluateMod.f90:36``, Scooter's ``'X'`` branch
+    ``Scooter/fields.f90:278``, which calls ``FourierTransform`` in
+    ``TransformG.f90:72-122``) to UNIT AMPLITUDE AT 1 m in free space — JKPS
     §5.2.2's ``p/p0(1)`` reference, the same convention the package uses for
     a point source (``TL(1 m) = 0``). JKPS states that no line-source
     normalisation is established; this one is chosen so every engine reports
     one level. Bellhop's raw line field is ``4√π/√R`` (``influence.f90:784``,
     ``ArrMod.f90:104``) and takes ``1/(4√π)`` instead (:data:`Bellhop
-    ._LINE_SOURCE_LEVEL`)."""
+    ._LINE_SOURCE_LEVEL`).
+
+    The factor depends on frequency, and it is applied per bin on the
+    BROADBAND and TIME_SERIES paths too, so every bin of a line-source
+    ``H(f)`` is relative to its own free-field level at 1 m and a
+    synthesised pulse is the one whose 1 m free-field spectrum is the
+    ``source_waveform``'s. JKPS §5.2.2 warns that "the scale factor is
+    frequency dependent and if it is not removed during the frequency
+    synthesis, the pulse will be distorted": against a pulse synthesised
+    from the un-normalised line field, this one is tilted by ``√k0``,
+    3.01 dB per octave on pressure. Bellhop's ``1/(4√π)`` does not depend on
+    frequency, so its line-source pulse follows the same per-bin 1 m
+    convention."""
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     return np.sqrt(2.0 * np.pi * f / float(c_source))
 
@@ -39,7 +52,7 @@ def _source_density(env, depth: float) -> float:
 
     The water density in the water column (a source on the seafloor counts
     as water); below it, the seabed column's material at that sub-bottom
-    depth. The rule is :func:`uacpy.core.bottom.medium_density_at`
+    depth. The rule is :func:`uacpy.acoustics.medium_density_at`
     on the range-0 profile's stack of media, the one
     :meth:`~uacpy.core.results.Modes.modal_pressure_field` applies to the
     medium table of a mode set."""

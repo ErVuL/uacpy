@@ -20,31 +20,33 @@ from uacpy.visualization.plots.fields import (
     compare, compare_models, plot_field_difference,
     plot_field_statistics, shared_colorbar,
     plot_transfer_function, plot_impulse_response, plot_track_exposure,
+    plot_source_depth_panels,
 )
 from uacpy.visualization.plots.animation import (
     animate_field, save_animation, plot_time_snapshots,
 )
 from uacpy.visualization.plots.rays_modes import (
     plot_mode_wavenumbers,
-    plot_mode_speeds, plot_dispersion, plot_greens_function,
+    plot_mode_speeds, plot_mode_attenuation, plot_dispersion,
+    plot_greens_function,
     plot_wavenumber_sampling,
     plot_modes_heatmap,
     plot_beam_pattern,
     plot_beam_power,
     plot_mode_excitation,
+    plot_rays, plot_arrivals, plot_mode_shapes,
+    plot_reflection_coefficient, plot_covariance, plot_replicas,
 )
-# The private views a result names in ``_plotter`` / ``_plotter_name()``,
-# looked up here by name (:func:`_draw_result`).
+# The labelled twins of plot_field and plot_source_depth_panels a Field
+# names in ``_plotter_name()``: their refusals name the call the user made
+# (``Field.plot``, ``plot_result``), looked up here by name
+# (:func:`_draw_result`).
 from uacpy.visualization.plots.fields import (  # noqa: F401
     _plot_field_as, _plot_source_depth_panels,
 )
-from uacpy.visualization.plots.rays_modes import (  # noqa: F401
-    _plot_rays, _plot_arrivals, _plot_mode_functions,
-    _plot_reflection_coefficient, _plot_covariance, _plot_replicas,
-)
 from uacpy.visualization.plots.environment import (
     plot_environment, plot_ssp, plot_range_profile,
-    plot_bottom_properties, plot_bottom_loss, plot_absorption,
+    plot_bottom_properties, plot_absorption,
 )
 from uacpy.visualization.plots.maps import (
     plot_bathymetry_map, plot_overview, plot_sea_ice_map,
@@ -52,21 +54,23 @@ from uacpy.visualization.plots.maps import (
 from uacpy.visualization.plots.signal import (
     draw_slowness_line, draw_sound_cone, plot_fk, plot_radon, plot_taup,
     plot_waveform,
-    plot_psd, plot_ppsd, plot_sel,
+    plot_psd, plot_ppsd,
     plot_spectrogram, plot_cwt, plot_wigner_ville, plot_cepstrum,
     plot_constant_q_transform, plot_constant_q_spectrogram,
     plot_constant_q_psd, plot_constant_q_ppsd,
-    plot_band_levels, plot_angular_spectrum, plot_ambiguity,
+    plot_band_levels, plot_ambiguity,
     plot_matched_field,
     plot_frf, plot_coherence, plot_lsfir_diagnostics,
 )
 from uacpy.visualization.plots.comms import (
-    plot_channel, plot_doppler_ambiguity, plot_convergence, plot_sync_metric,
+    plot_channel, plot_channel_response, plot_doppler_ambiguity,
+    plot_convergence, plot_sync_metric,
     plot_subcarriers, plot_scatter, plot_constellation, plot_eye_diagram,
     plot_ber_curve,
 )
 from uacpy.visualization.plots.noise import (
     plot_wenz, plot_weighting, plot_source_level, plot_roc,
+    plot_cumulative_exposure,
 )
 
 
@@ -176,6 +180,13 @@ __all__ = [
     'plot_transfer_function',
     'plot_impulse_response',
     'plot_field',
+    'plot_source_depth_panels',
+    'plot_rays',
+    'plot_arrivals',
+    'plot_mode_shapes',
+    'plot_reflection_coefficient',
+    'plot_covariance',
+    'plot_replicas',
     'plot_signal_excess',
     'plot_detection_probability',
     'plot_track_exposure',
@@ -185,13 +196,13 @@ __all__ = [
     'plot_field_statistics',
     'shared_colorbar',
     'plot_bottom_properties',
-    'plot_bottom_loss',
     'plot_absorption',
     'plot_bathymetry_map',
     'plot_overview',
     'plot_sea_ice_map',
     'plot_mode_wavenumbers',
     'plot_mode_speeds',
+    'plot_mode_attenuation',
     'plot_greens_function',
     'plot_wavenumber_sampling',
     'plot_dispersion',
@@ -207,7 +218,6 @@ __all__ = [
     'plot_waveform',
     'plot_psd',
     'plot_ppsd',
-    'plot_sel',
     'plot_spectrogram',
     'plot_constant_q_transform',
     'plot_constant_q_spectrogram',
@@ -217,13 +227,13 @@ __all__ = [
     'plot_wigner_ville',
     'plot_cepstrum',
     'plot_band_levels',
-    'plot_angular_spectrum',
     'plot_ambiguity',
     'plot_matched_field',
     'plot_frf',
     'plot_coherence',
     'plot_lsfir_diagnostics',
     'plot_channel',
+    'plot_channel_response',
     'plot_doppler_ambiguity',
     'plot_convergence',
     'plot_sync_metric',
@@ -236,6 +246,7 @@ __all__ = [
     'plot_weighting',
     'plot_source_level',
     'plot_roc',
+    'plot_cumulative_exposure',
     'animate_field',
     'save_animation',
     'plot_time_snapshots',

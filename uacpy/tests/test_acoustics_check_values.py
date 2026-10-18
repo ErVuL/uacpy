@@ -22,7 +22,8 @@ from uacpy.core.units import ms_to_knots
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, ValidityWarning)
 
 from uacpy.core.acoustics import (
     bubble_resonance,
@@ -30,8 +31,13 @@ from uacpy.core.acoustics import (
     spl,
     bubble_sound_speed,
     bubble_surface_loss,
+    cumulative_sound_exposure_level,
     density,
+    no_energy_mask,
+    peak_level,
     power_to_dB,
+    sound_exposure_level,
+    sum_levels_dB,
     sound_speed_mackenzie,
     sound_speed_delgrosso,
     sound_speed_teos10,
@@ -133,12 +139,21 @@ class TestSeawaterDensityEOS80CheckValues:
     def test_standard_seawater_check_values(self):
         # UNESCO (1983) / Millero & Poisson one-atmosphere check values. They
         # are stated at IPTS-68 temperatures and ``density`` takes ITS-90, so
-        # each is called at t90 = t68 / 1.00024.
+        # each is called at t90 = t68 / 1.00024. The check values are kg/m³;
+        # density returns g/cm³.
         t90 = 1.0 / 1.00024
-        assert density(25.0 * t90, 35.0) == pytest.approx(1023.343, abs=1e-3)
-        assert density(0.0, 35.0) == pytest.approx(1028.106, abs=1e-3)
+        assert density(25.0 * t90, 35.0) == pytest.approx(1.023343, abs=1e-6)
+        assert density(0.0, 35.0) == pytest.approx(1.028106, abs=1e-6)
         # Pure-water limit (S = 0) at 5 °C.
-        assert density(5.0 * t90, 0.0) == pytest.approx(999.96675, abs=1e-4)
+        assert density(5.0 * t90, 0.0) == pytest.approx(0.99996675, abs=1e-7)
+
+    def test_density_goes_to_water_density_as_it_comes(self):
+        """g/cm³, the unit Environment(water_density=) takes: no / 1000."""
+        from uacpy.core.environment import Environment
+        rho = float(density(12.0, 34.0))
+        assert 1.0 < rho < 1.03
+        assert Environment(bathymetry=100.0,
+                           water_density=rho).water_density == rho
 
 
 class TestBubbleResonance:
@@ -155,10 +170,17 @@ class TestBubbleResonance:
         assert bubble_resonance(1e-4) == pytest.approx(
             10.0 * bubble_resonance(1e-3), rel=1e-12)
 
-    def test_water_density_is_a_kg_per_m3_keyword(self):
-        # Fresh water at 1000 kg/m³ gives the 3283 Hz of the comment above.
-        assert bubble_resonance(1e-3, water_density_kg_m3=1000.0) == \
+    def test_water_density_is_in_g_per_cm3_like_every_density(self):
+        # Fresh water at 1.0 g/cm³ gives the 3283 Hz of the comment above.
+        assert bubble_resonance(1e-3, water_density=1.0) == \
             pytest.approx(3283.0, abs=0.5)
+
+    def test_a_kg_per_m3_water_density_is_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match='water_density=1000 reads as kg/m³') as err:
+            bubble_resonance(1e-3, water_density=1000.0)
+        assert 'water_density=1' in str(err.value)
+        assert np.isfinite(bubble_resonance(1e-3, water_density=20.0))
 
     def test_depth_raises_frequency_as_sqrt_ambient_pressure(self):
         # p_A = p0 + ρ g z, so f(z)/f(0) = √(p_A(z)/p0): 1.4106 at 10 m.
@@ -220,23 +242,29 @@ class TestBubbleSurfaceLoss:
 
 
 class TestPowerToDb:
-    """``power_to_dB`` floors ``power`` at :data:`PRESSURE_FLOOR` before the
-    log, so a silent sample yields a finite very negative level, never
+    """``power_to_dB`` floors ``power / ref²`` at ``PRESSURE_FLOOR²`` before
+    the log, so a silent sample yields the -600 dB no-energy marker, never
     ``-inf`` (DOCUMENTATION.md §14)."""
 
-    def test_zero_power_is_finite_at_the_floor_level(self):
+    def test_zero_power_is_the_no_energy_marker(self):
         out = power_to_dB(0.0)
         assert np.isfinite(out)
-        assert out == pytest.approx(
-            10.0 * np.log10(PRESSURE_FLOOR / REFERENCE_PRESSURE_WATER ** 2))
-        assert out == pytest.approx(-180.0)      # 1e-30 / (1e-6)² = 1e-18
+        assert out == pytest.approx(10.0 * np.log10(PRESSURE_FLOOR ** 2))
+        assert out == pytest.approx(-600.0)
+        assert no_energy_mask(out)
 
     def test_reference_power_reads_zero_dB(self):
         assert power_to_dB(REFERENCE_PRESSURE_WATER ** 2) == pytest.approx(0.0)
 
-    def test_custom_floor_is_honoured(self):
-        assert power_to_dB(0.0, floor=1e-12) == pytest.approx(
-            10.0 * np.log10(1e-12 / REFERENCE_PRESSURE_WATER ** 2))
+    def test_custom_floor_bounds_the_ratio_to_the_reference(self):
+        assert power_to_dB(0.0, floor=1e-12) == pytest.approx(-120.0)
+
+    def test_the_smallest_power_above_the_floor_is_a_level(self):
+        # power / ref² = 1e-59 sits one decade above the floor: -590 dB, a
+        # level the mask keeps.
+        out = power_to_dB(1e-59 * REFERENCE_PRESSURE_WATER ** 2)
+        assert out == pytest.approx(-590.0)
+        assert not no_energy_mask(out)
 
 
 class TestDelGrossoValidityWarnings:
@@ -320,19 +348,18 @@ class TestBubbleSurfaceLossAcceptsSequences:
 
 
 class TestSplFloorsSilentSignal:
-    """``spl`` floors the rms pressure at ``sqrt(PRESSURE_FLOOR)`` before the
-    log, so an all-zero signal returns a finite level and no runtime warning.
+    """``spl`` floors the rms pressure over ``ref`` at ``PRESSURE_FLOOR``
+    before the log, so an all-zero signal returns a finite level and no
+    runtime warning.
 
-    Both this and ``power_to_dB`` work in pascals against the same default
-    reference, so the level they give a silent signal is the same number
-    without either being told a reference — which is the point of the module
-    speaking one unit.
+    ``power_to_dB`` floors the squared ratio at ``PRESSURE_FLOOR²``, the same
+    floor on the other side of the square, so the level they give a silent
+    signal is the same number whatever reference either is told.
     """
 
     def test_all_zero_signal_returns_the_pressure_floor_level(self):
         assert spl(np.zeros(64)) == pytest.approx(
-            20.0 * np.log10(np.sqrt(PRESSURE_FLOOR)
-                            / REFERENCE_PRESSURE_WATER))
+            20.0 * np.log10(PRESSURE_FLOOR))
 
     def test_zero_signal_level_matches_power_to_dB_of_zero_power(self):
         assert spl(np.zeros(64)) == pytest.approx(float(power_to_dB(0.0)))
@@ -370,6 +397,23 @@ class TestPressureCalibratesVoltsToPascals:
         got = pressure_from_recording(np.array([0.0, 0.5, -0.5]), sensitivity=0, gain=0)
         np.testing.assert_allclose(got, [0.0, 0.5e-6, -0.5e-6])
 
+    @pytest.mark.parametrize('sensitivity, warns', [(0.0, False), (1e-9, True),
+                                                    (165.0, True),
+                                                    (-165.0, False)])
+    def test_a_positive_sensitivity_is_named_as_a_likely_sign_slip(
+            self, sensitivity, warns):
+        # +165 for -165 read 330 dB low with no word; 0 (the unit factor the
+        # docstring uses) and every negative value stay silent. The value is
+        # used as given either way.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            got = pressure_from_recording(np.array([1.0]),
+                                          sensitivity=sensitivity, gain=0)
+        named = [w for w in caught if issubclass(w.category, ValidityWarning)
+                 and 'Check its sign' in str(w.message)]
+        assert bool(named) == warns
+        np.testing.assert_allclose(got, 1e-6 / 10 ** (sensitivity / 20))
+
     def test_a_data_sheet_sensitivity_lands_in_pascals(self):
         got = pressure_from_recording(np.array([1e-3]), sensitivity=self.SENSITIVITY,
                        gain=self.GAIN)
@@ -389,6 +433,27 @@ class TestPressureCalibratesVoltsToPascals:
         np.testing.assert_allclose(counts, volts)
         assert float(counts[0]) == pytest.approx(
             1e-6 * 0.5 * self._micropascals_per_volt(), rel=1e-12)
+
+    def test_read_wav_fractions_take_the_counts_pressure_exactly(self):
+        # read_wav divides a 16-bit code by 2**15 - 1; x_scale='read_wav'
+        # multiplies it back before the ADC's 2**15, so the code 16384 gives
+        # the same pressure from either form, to rounding.
+        counts = pressure_from_recording(
+            np.array([16384, -32768, 32767]), sensitivity=self.SENSITIVITY,
+            gain=self.GAIN, volt_params=(16, 1.0))
+        fractions = pressure_from_recording(
+            np.array([16384, -32768, 32767]) / (2 ** 15 - 1),
+            sensitivity=self.SENSITIVITY, gain=self.GAIN,
+            volt_params=(16, 1.0), x_scale='read_wav')
+        np.testing.assert_allclose(fractions, counts, rtol=1e-12, atol=0)
+
+    def test_an_unknown_x_scale_or_one_without_the_bit_depth_is_refused(self):
+        with pytest.raises(ConfigurationError, match="x_scale='volts'"):
+            pressure_from_recording(np.array([0.5]), 0, 0, x_scale='volts')
+        with pytest.raises(ConfigurationError,
+                           match="needs the bit depth, and no volt_params"):
+            pressure_from_recording(np.array([0.5]), 0, 0,
+                                    x_scale='read_wav')
 
     def test_the_chain_to_spl_needs_no_reference_argument(self):
         # dB re 1 µPa is 20*log10 of the µPa count, so the expected level
@@ -424,7 +489,12 @@ class TestBubbleSurfaceLossValidatesItsInputs:
         assert 'wind_speed_kn' in surface and 'windspeed' not in surface
         assert 'grazing_deg' in surface and 'angle' not in surface
         assert 'sound_speed' in mixture and 'c' not in mixture
+        assert ('gas_sound_speed' in mixture and 'gas_density_ratio' in mixture
+                and 'c_gas' not in mixture)
         assert bubble_sound_speed(1e-5, sound_speed=1500.0) == \
+            bubble_sound_speed(1e-5)
+        assert bubble_sound_speed(1e-5, gas_sound_speed=340.0,
+                                  gas_density_ratio=1000.0) == \
             bubble_sound_speed(1e-5)
 
     @pytest.mark.parametrize('frequency', [0.0, -1.0, float('nan'),
@@ -539,28 +609,37 @@ class TestArrayCapableHelpersAnnotateArrayReturns:
             f"{returns}")
 
 
-class TestPressureFloorLevelsMatchTheirDocstrings:
-    """``spl`` floors rms pressure at ``sqrt(PRESSURE_FLOOR)`` pascals and
-    ``power_to_dB`` floors ``power`` at ``PRESSURE_FLOOR`` Pa², which is the
-    same floor on either side of the square. Both read pascals against the
-    same default reference, so a silent signal takes the same -180 dB re
-    1 µPa through either door, and both docstrings state that level."""
+class TestASilentRecordIsTheNoEnergyMarker:
+    """``spl``, ``peak_level``, ``sound_exposure_level`` and ``power_to_dB``
+    floor the squared ratio to ``ref`` at ``PRESSURE_FLOOR²``, so a silent
+    record reads -600 dB for every reference — the level view of the
+    no-energy marker ``no_energy_mask`` finds — and the docstrings state
+    that level."""
 
-    def test_spl_floors_a_silent_signal_at_minus_180_dB(self):
-        assert spl(np.zeros(16)) == pytest.approx(-180.0, rel=1e-12)
+    @pytest.mark.parametrize('ref', [1e-6, 20e-6, 1.0])
+    def test_every_level_door_gives_minus_600_dB_whatever_the_reference(
+            self, ref):
+        zeros = np.zeros(16)
+        levels = np.array([spl(zeros, ref), peak_level(zeros, ref),
+                           sound_exposure_level(zeros, 1e3, ref),
+                           float(power_to_dB(0.0, ref))])
+        np.testing.assert_allclose(levels, -600.0, rtol=1e-12)
+        assert np.all(no_energy_mask(levels))
 
-    def test_power_to_dB_default_ref_floors_at_minus_180_dB(self):
-        assert float(power_to_dB(0.0)) == pytest.approx(-180.0, rel=1e-12)
+    def test_the_cumulative_curve_of_a_silent_record_is_the_marker(self):
+        _, curve = cumulative_sound_exposure_level(np.zeros(4000), 1e3,
+                                                   step=1.0)
+        np.testing.assert_allclose(curve, -600.0, rtol=1e-12)
 
-    def test_the_two_floors_coincide_at_the_default_reference(self):
-        assert spl(np.zeros(16)) == pytest.approx(float(power_to_dB(0.0)),
-                                                  rel=1e-12)
+    def test_two_silent_records_sum_to_the_marker(self):
+        silent = spl(np.zeros(16))
+        assert sum_levels_dB(silent, silent) == pytest.approx(-600.0)
 
     def test_spl_docstring_states_the_floor_level(self):
-        assert '-180 dB' in spl.__doc__
+        assert '-600 dB' in spl.__doc__
 
     def test_power_to_dB_docstring_states_its_own_floor_level(self):
-        assert '-180' in power_to_dB.__doc__
+        assert '-600' in power_to_dB.__doc__
 
 
 def test_unesco_reproduces_the_canonical_high_pressure_check_value():
@@ -682,8 +761,8 @@ class TestEveryDefaultDescribesOneReferenceWater:
     functions, so a default that drifts off the shared state fails here."""
 
     def test_the_density_default_is_the_package_water_density(self):
-        assert density() == pytest.approx(
-            DEFAULT_WATER_DENSITY_G_CM3 * 1000.0, abs=0.05)
+        assert density() == pytest.approx(DEFAULT_WATER_DENSITY_G_CM3,
+                                          abs=5e-5)
 
     def test_the_four_sound_speed_equations_agree_at_their_defaults(self):
         speeds = [sound_speed_mackenzie(), sound_speed_unesco(),
@@ -803,6 +882,62 @@ class TestAnalyticReferenceFields:
         assert np.isfinite(getattr(analytic, closed_form)(flat, src, rx).tl).all()
 
 
+class TestThePekerisModesAreTheTextbookEigenvalues:
+    """``analytic.pekeris_modes``: the trapped modes of JKPS §2.4.5 as a
+    Modes — roots of the characteristic equation, phase speeds between the
+    water's and the bottom's, the field of :func:`analytic.pekeris` from
+    their modal sum, and the cutoff of JKPS Eq. 2.191."""
+
+    C_W, C_B, RHO_W, RHO_B, D = 1500.0, 1800.0, 1.0, 1.8, 100.0
+
+    def _env(self):
+        from uacpy import Environment
+        from uacpy.core.boundary import BoundaryProperties
+        return Environment(
+            bathymetry=self.D, ssp=self.C_W, water_density=self.RHO_W,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=self.C_B,
+                                      density=self.RHO_B, attenuation=0.0))
+
+    def test_each_wavenumber_solves_the_characteristic_equation(self):
+        from uacpy import analytic
+        modes = analytic.pekeris_modes(self._env(), 50.0)
+        k = np.real(modes.k)
+        k_w = 2 * np.pi * 50.0 / self.C_W
+        k_b = 2 * np.pi * 50.0 / self.C_B
+        kz = np.sqrt(k_w ** 2 - k ** 2)
+        gamma = np.sqrt(k ** 2 - k_b ** 2)
+        residual = (self.RHO_W * gamma * np.sin(kz * self.D)
+                    + self.RHO_B * kz * np.cos(kz * self.D))
+        assert np.all(np.abs(residual) < 1e-10 * self.RHO_B * kz)
+        speeds = modes.phase_speeds
+        assert np.all((speeds > self.C_W) & (speeds < self.C_B))
+        assert modes.n_modes == 4    # cutoffs 6.8, 20.4, 33.9, 47.5 Hz
+        assert np.all(modes.trapped)
+
+    def test_the_modal_sum_is_the_pekeris_field_far_out(self):
+        from uacpy import Receiver, Source, analytic
+        z, r = np.array([20.0, 60.0, 90.0]), np.array([5000.0, 8000.0])
+        # Tabulated where the sum reads them, so no interpolation enters.
+        modes = analytic.pekeris_modes(self._env(), 50.0,
+                                       depths=[20.0, 36.0, 60.0, 90.0])
+        mine = modes.modal_pressure_field(source_depth=36.0,
+                                          receiver_depths=z, ranges=r)
+        ref = analytic.pekeris(self._env(),
+                               Source(depths=36.0, frequencies=50.0),
+                               Receiver(depths=z, ranges=r))
+        np.testing.assert_allclose(mine.data, ref.data,
+                                   rtol=1e-3, atol=0.0)
+
+    def test_below_the_first_cutoff_no_mode_is_trapped(self):
+        from uacpy import analytic
+        cutoff = self.C_W * self.C_B / (
+            4 * self.D * np.sqrt(self.C_B ** 2 - self.C_W ** 2))
+        assert analytic.pekeris_modes(self._env(), cutoff * 1.001).n_modes == 1
+        with pytest.raises(ConfigurationError, match='no mode is trapped'):
+            analytic.pekeris_modes(self._env(), cutoff * 0.999)
+
+
 class TestTheIdealWaveguideNamesItsCutoffResonances:
     """At a mode's cutoff ``k_r = 0`` and ``H_0(k_r r)`` is infinite: the
     lossless guide's resonance, left in place and named. 100 m rigid guide,
@@ -869,7 +1004,8 @@ class TestEveryIpts68FitReceivesAnIpts68Temperature:
         want = (999.842594 + 6.793952e-2 * t - 9.095290e-3 * t ** 2
                 + 1.001685e-4 * t ** 3 - 1.120083e-6 * t ** 4
                 + 6.536332e-9 * t ** 5)
-        np.testing.assert_allclose(density(self.t90, 0.0), want, rtol=1e-14)
+        np.testing.assert_allclose(density(self.t90, 0.0), want / 1000.0,
+                                   rtol=1e-14)
 
 
 class TestEveryLevelReadsAComplexRecordAsItIsNamed:
@@ -924,16 +1060,17 @@ class TestEveryLevelReadsAComplexRecordAsItIsNamed:
 
 
 class TestEveryLevelFloorIsOnTheSquaredQuantity:
-    """``floor`` bounds the squared pressure on ``spl``, ``peak_level`` and
-    ``power_to_dB`` alike; ``transmission_loss_dB``'s bounds ``|p|`` and says
-    so."""
+    """``floor`` bounds the squared ratio to ``ref`` on ``spl``,
+    ``peak_level`` and ``power_to_dB`` alike; ``transmission_loss_dB``'s
+    bounds ``|p|`` and says so."""
 
     def test_one_floor_value_gives_one_level_on_the_three_level_helpers(self):
         from uacpy.core.acoustics import peak_level, power_to_dB, spl
         zeros = np.zeros(8)
         levels = [spl(zeros, floor=1e-20), peak_level(zeros, floor=1e-20),
-                  float(power_to_dB(0.0, floor=1e-20))]
-        np.testing.assert_allclose(levels, -80.0, atol=1e-9)
+                  float(power_to_dB(0.0, floor=1e-20)),
+                  spl(zeros, 20e-6, floor=1e-20)]
+        np.testing.assert_allclose(levels, -200.0, atol=1e-9)
 
     def test_the_loss_floor_is_on_the_pressure_itself(self):
         from uacpy.core.acoustics import transmission_loss_dB
@@ -995,6 +1132,22 @@ class TestTheHankelTransformAnnouncesTheAliasPeriod:
         else:
             hankel_transform(self.G, k, np.array([100.0]), attenuation=0.0)
 
+    @pytest.mark.parametrize('call', ['hankel_transform', 'wavenumber_taper'])
+    def test_a_descending_grid_is_refused(self, call):
+        """k = omega/c from ascending phase speeds runs downward. Read as
+        ascending it would return -1 x the field with the alias guards off
+        (dk < 0); both functions refuse it, and the reversed grid computes."""
+        import uacpy.core.acoustics as acoustics
+        k = self.k[::-1]
+        run = {'hankel_transform': lambda kk, G: acoustics.hankel_transform(
+                   G, kk, np.array([100.0]), attenuation=0.0),
+               'wavenumber_taper': lambda kk, G: acoustics.wavenumber_taper(
+                   kk, 100.0, 1400.0, 1600.0)}[call]
+        with pytest.raises(ConfigurationError,
+                           match='must be strictly increasing'):
+            run(k, self.G[:, ::-1])
+        run(self.k, self.G)
+
     def test_a_grid_uniform_in_phase_speed_is_refused(self):
         from uacpy.core.acoustics import hankel_transform
         omega = 2.0 * np.pi * 100.0
@@ -1030,6 +1183,20 @@ class TestSnapshotFrequencyComponentRefusesInItsOwnName:
                 snapshot_frequency_component(snaps, times, frequency)
         else:
             snapshot_frequency_component(snaps, times, frequency)
+
+    @pytest.mark.parametrize('t0', [0.0, 0.5])
+    def test_the_tone_phase_is_referenced_to_time_zero(self, t0):
+        """A real tone cos(2 pi f t + 0.4) at an off-bin 37.3 Hz returns
+        exp(0.4i) (amplitude 1, the real-signal factor 2) whether the record
+        starts at 0 or 0.5 s; counted from the first sample, the 0.5 s record
+        read -0.226-0.974j, 2.2 rad off."""
+        from uacpy.core.acoustics.wavenumber import (
+            snapshot_frequency_component)
+        f = 37.3
+        times = t0 + np.arange(400) / 1000.0
+        x = np.cos(2.0 * np.pi * f * times + 0.4)[:, None]
+        got = snapshot_frequency_component(x, times, f)[0]
+        assert abs(got - np.exp(0.4j)) < 1e-2, got
 
 
 def test_doppler_and_the_comms_scale_factor_are_one_relation():
@@ -1144,19 +1311,19 @@ class TestReceivedLevelKeepsTheNoEnergyMarker:
 
 def test_the_wavenumber_helpers_use_the_package_argument_names():
     """``wavenumber_taper(k, frequency, …)`` and
-    ``ranges_fit_alias_period(delta_k, rmax_m)``: the spellings every other
+    ``ranges_fit_alias_period(delta_k, rmax)``: the spellings every other
     public function uses for a frequency and a range extent."""
     import inspect
     from uacpy.core.acoustics import ranges_fit_alias_period, wavenumber_taper
     taper = inspect.signature(wavenumber_taper).parameters
     fit = inspect.signature(ranges_fit_alias_period).parameters
     assert 'frequency' in taper and 'freq' not in taper
-    assert 'rmax_m' in fit and 'r_max' not in fit
+    assert 'rmax' in fit and 'r_max' not in fit
     k = np.linspace(0.3, 0.5, 64)
     np.testing.assert_array_equal(
-        wavenumber_taper(k, frequency=100.0, cmin=1450.0, cmax=1650.0),
+        wavenumber_taper(k, frequency=100.0, c_low=1450.0, c_high=1650.0),
         wavenumber_taper(k, 100.0, 1450.0, 1650.0))
-    assert ranges_fit_alias_period(0.01, rmax_m=600.0)
+    assert ranges_fit_alias_period(0.01, rmax=600.0)
 
 
 def test_adiabatic_gradient_matches_the_unesco_check_value():
@@ -1173,15 +1340,32 @@ def test_potential_temperature_matches_the_unesco_check_value():
         36.89073, abs=1e-5)
 
 
+@pytest.mark.parametrize('theta', [[[2.0], [3.0]], [[0.0, 2.0], [100.0, 3.0]]])
+def test_insitu_from_potential_follows_the_water_property_rule(theta):
+    # A (2, 1) theta broadcast against 3 pressures into a (2, 3) answer, and
+    # (depth, value) pairs into a raw numpy error; both are refused typed,
+    # while one value per pressure and a scalar compute.
+    from uacpy.core.acoustics.seawater import insitu_from_potential
+    p = [0.0, 1000.0, 2000.0]
+    with pytest.raises(ConfigurationError,
+                       match=r'^insitu_from_potential: theta'):
+        insitu_from_potential(salinity=35.0, theta=theta, pressure_dbar=p)
+    assert insitu_from_potential(salinity=35.0, theta=[2.0, 2.0, 2.0],
+                                 pressure_dbar=p).shape == (3,)
+
+
 def test_insitu_from_potential_round_trips_over_the_ocean_range():
     from uacpy.core.acoustics.seawater import (_shift_adiabatically,
                                                insitu_from_potential)
     sal = np.array([33.0, 34.7, 35.5, 37.0])
     for theta in (-1.5, 1.2, 2.5, 10.0, 30.0):
         for pres in (500.0, 2000.0, 5000.0, 11000.0):
+            # One pressure per salinity: a water array is never broadcast
+            # against its coordinate.
+            p = np.full_like(sal, pres)
             insitu = insitu_from_potential(salinity=sal, theta=theta,
-                                           pressure_dbar=pres)
-            back = _shift_adiabatically(sal, insitu, pres, 0.0)
+                                           pressure_dbar=p)
+            back = _shift_adiabatically(sal, insitu, p, 0.0)
             assert np.allclose(back, theta, atol=2e-4)
 
 
@@ -1254,6 +1438,53 @@ def test_integrate_psd_takes_a_band_ending_on_the_grid_edge():
     assert integrate_psd(np.ones(11), f, 900.0, 1000.0) == pytest.approx(100.0)
 
 
+class TestTheBandIntegratorsTakeAnAxis:
+    """``integrate_psd`` and ``band_level`` integrate every spectrum of an
+    N-D array along ``axis`` (a spectrogram, a PSD per depth), each cell the
+    number its own 1-D call gives, an empty band ``-inf`` per cell."""
+
+    F = np.linspace(0.0, 1000.0, 11)
+
+    def _psd(self):
+        rng = np.random.default_rng(7)
+        return rng.uniform(0.5, 2.0, size=(3, 4, 11))
+
+    def test_every_spectrum_is_its_own_one_dimensional_call(self):
+        from uacpy.core.acoustics import band_level, integrate_psd
+        psd = self._psd()
+        got = integrate_psd(psd, self.F, 123.0, 456.0)
+        assert got.shape == (3, 4)
+        want = [[integrate_psd(psd[i, j], self.F, 123.0, 456.0)
+                 for j in range(4)] for i in range(3)]
+        np.testing.assert_allclose(got, want, rtol=1e-13)
+        moved = integrate_psd(np.moveaxis(psd, -1, 0), self.F, 123.0, 456.0,
+                              axis=0)
+        np.testing.assert_allclose(moved, got, rtol=1e-13)
+        levels = 10.0 * np.log10(psd)
+        np.testing.assert_allclose(band_level(levels, self.F, 100.0, 900.0),
+                                   10.0 * np.log10(integrate_psd(
+                                       psd, self.F, 100.0, 900.0)),
+                                   rtol=1e-12)
+
+    def test_an_empty_band_is_minus_infinity_in_its_cell_only(self):
+        from uacpy.core.acoustics import band_level
+        levels = np.full((2, 11), 20.0)
+        levels[1] = -np.inf
+        out = band_level(levels, self.F, 100.0, 200.0)
+        assert out[0] == pytest.approx(40.0, abs=1e-9) and out[1] == -np.inf
+
+    def test_one_spectrum_returns_a_float(self):
+        from uacpy.core.acoustics import band_level, integrate_psd
+        assert isinstance(integrate_psd(np.ones(11), self.F), float)
+        assert isinstance(band_level(np.zeros(11), self.F), float)
+
+    def test_a_frequency_axis_of_another_length_is_refused(self):
+        from uacpy.core.acoustics import integrate_psd
+        with pytest.raises(ConfigurationError,
+                           match='psd has 4 samples along axis=1'):
+            integrate_psd(np.ones((11, 4)), self.F)
+
+
 def test_the_sum_of_no_energy_markers_is_the_marker():
     """Two -600 dB markers sum to -596.99 by the formula, which no_energy_mask
     reads as a level; the sum keeps the marker. A real level beside a marker
@@ -1297,6 +1528,14 @@ def test_sum_levels_dB_takes_axis_with_one_argument_only():
     from uacpy.core.acoustics import sum_levels_dB
     with pytest.raises(ConfigurationError, match='got 2 arguments'):
         sum_levels_dB([1.0, 2.0], [3.0, 4.0], axis=0)
+
+
+@pytest.mark.parametrize('levels', [([1.0, 2.0], []), ([1.0, 2.0], [1.0, 2.0, 3.0])])
+def test_sum_levels_dB_refuses_levels_that_do_not_broadcast_typed(levels):
+    # numpy's bare "shape mismatch" ValueError named no input.
+    from uacpy.core.acoustics import sum_levels_dB
+    with pytest.raises(ConfigurationError, match='do not broadcast together'):
+        sum_levels_dB(*levels)
 
 
 # ── the one water-property rule ───────────────────────────────────────────
@@ -1736,10 +1975,10 @@ def test_a_pressure_equation_takes_depth_profiles_and_converts_them(name):
         for lat in (None, 70.0):
             p = sw.depth_to_pressure_dbar(_AT, 45.0 if lat is None else lat)
             want = eq(_T_AT, _S_AT, pressure_dbar=p)
-            got = eq(t_profile, s_profile, depth=_AT, latitude_deg=lat)
+            got = eq(t_profile, s_profile, depth=_AT, latitude=lat)
             np.testing.assert_array_equal(got, want)
         # Below the surface the latitude moves the pressure, so the speed.
-        assert np.all(eq(_T_AT, _S_AT, depth=_AT, latitude_deg=70.0)[1:]
+        assert np.all(eq(_T_AT, _S_AT, depth=_AT, latitude=70.0)[1:]
                       != eq(_T_AT, _S_AT, depth=_AT)[1:])
 
 
@@ -1750,12 +1989,29 @@ def test_a_pressure_equation_refuses_ambiguous_coordinates(name):
     eq = getattr(sw, name)
     with pytest.raises(ConfigurationError, match='not both'):
         eq(10.0, 35.0, depth=100.0, pressure_dbar=100.0)
-    with pytest.raises(ConfigurationError, match='no depth= was given'):
-        eq(10.0, 35.0, pressure_dbar=100.0, latitude_deg=45.0)
+    # A latitude with pressure_dbar= contradicts nothing; it is unused, and
+    # announced as such (ruling 23a), the answer that of pressure alone.
+    with pytest.warns(FallbackWarning, match='latitude=45.0 is not used'):
+        got = eq(10.0, 35.0, pressure_dbar=100.0, latitude=45.0)
+    assert got == eq(10.0, 35.0, pressure_dbar=100.0)
     with pytest.raises(ConfigurationError, match='pass depth='):
         eq(_T_PAIRS, 35.0, pressure_dbar=100.0)
     with pytest.raises(TypeError, match='positional'):  # keyword-only
         eq(10.0, 35.0, 100.0)
+
+
+def test_an_unused_latitude_is_announced_by_mackenzie_too():
+    # Mackenzie is stated in depth: the latitude changes nothing, and the
+    # call says so; the pressure equations use it.
+    from uacpy.core.acoustics.seawater import sound_speed_at_depth
+    with pytest.warns(FallbackWarning, match='latitude=80.0 is not used'):
+        got = sound_speed_at_depth(2.0, 34.7, 3000.0, formula='mackenzie',
+                                   latitude=80.0)
+    assert got == sound_speed_at_depth(2.0, 34.7, 3000.0, formula='mackenzie')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', FallbackWarning)
+        sound_speed_at_depth(2.0, 34.7, 3000.0, formula='unesco',
+                             latitude=80.0)
 
 
 def test_sound_speed_at_depth_requires_its_depth():
@@ -2054,6 +2310,27 @@ class TestAFrequencyWeightingScalesEachFrequencysEnergy:
 
 
 class TestTheCumulativeExposureIsTheRunningEnergy:
+    def test_the_curve_is_a_record_that_unpacks_and_draws(self):
+        """``times, levels = ...`` unpacks it; it exports, and ``.plot()``
+        draws it with plot_cumulative_exposure, a criterion as a rule."""
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from uacpy.core.acoustics import (CumulativeExposure,
+                                          cumulative_sound_exposure_level)
+        p = np.sqrt(2) * np.sin(2 * np.pi * 100.0 * np.arange(8000) / 8000)
+        curve = cumulative_sound_exposure_level(p, 8000.0, step=0.25)
+        assert isinstance(curve, CumulativeExposure)
+        t, sel = curve
+        np.testing.assert_array_equal(t, curve.times)
+        again = CumulativeExposure.from_dict(curve.to_dict())
+        np.testing.assert_array_equal(again.levels, curve.levels)
+        fig, ax = curve.plot(criterion_dB=119.0)
+        np.testing.assert_array_equal(ax.lines[0].get_ydata(), sel)
+        assert ax.lines[1].get_ydata()[0] == 119.0
+        assert ax.get_ylabel() == 'Cumulative SEL (dB re 1 µPa²·s)'
+        plt.close(fig)
+
     def test_equal_energy_steps_rise_as_the_log_of_their_count(self):
         from uacpy.core.acoustics import cumulative_sound_exposure_level
         p = np.sqrt(2) * np.sin(2 * np.pi * 100.0 * np.arange(8000) / 8000)
@@ -2271,7 +2548,7 @@ class TestEveryLevelRefusesARecordWithAMissingSample:
     @pytest.mark.parametrize('name', NAMES)
     def test_a_finite_record_passes(self, name):
         levels = self._call(name, np.ones((3, 3000)))
-        levels = levels[1] if isinstance(levels, tuple) else levels
+        levels = getattr(levels, 'levels', levels)      # a cumulative curve
         assert np.all(np.isfinite(levels))
 
 

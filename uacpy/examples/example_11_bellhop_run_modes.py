@@ -26,10 +26,8 @@ top_n_by_miss / truncate_at_receiver · Rays.plot · Arrivals.plot · Arrivals.d
 """
 
 import os
-import sys
 import time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -50,8 +48,7 @@ receiver = uacpy.Receiver(depths=np.linspace(100, 4900, 49),
 
 # The first Bellhop call in a process pays binary and library load, which
 # would be charged entirely to whichever mode ran first.
-uacpy.Bellhop(backend='fortran').run(munk, source, receiver,
-                    run_mode=uacpy.RunMode.COHERENT_TL)
+uacpy.Bellhop(backend='fortran').run(munk, source, receiver)
 
 fields, elapsed = {}, {}
 for mode in (uacpy.RunMode.COHERENT_TL, uacpy.RunMode.INCOHERENT_TL,
@@ -84,13 +81,13 @@ fig.savefig(OUT / 'example_11a_tl_modes.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 # ── B. Ray paths through the channel ────────────────────────────────────────
-ray_model = uacpy.Bellhop(backend='fortran', launch_angles=(-15.0, 15.0), n_beams=31)
+ray_model = uacpy.Bellhop(backend='fortran', launch_angles_deg=(-15.0, 15.0), n_beams=31)
 rays = ray_model.run(munk, source,
                      uacpy.Receiver(depths=np.array([1000]),
                                     ranges=np.linspace(0, 100000, 100)),
                      run_mode=uacpy.RunMode.RAYS)
-print(f"  {ray_model.n_beams} rays over "
-      f"{ray_model.launch_angles[0]:.0f}° to {ray_model.launch_angles[1]:.0f}°, out to 100 km")
+print(f"  {ray_model.n_beams} rays over {ray_model.launch_angles_deg[0]:.0f}° "
+      f"to {ray_model.launch_angles_deg[1]:.0f}°, out to 100 km")
 
 fig, axes = plt.subplots(2, 1, figsize=(14, 10))
 rays.plot(env=munk, ax=axes[0],
@@ -122,15 +119,15 @@ target = uacpy.Receiver(depths=[30.0], ranges=[2000.0])
 # coarse fan the per-angle vertical spacing at 2 km already exceeds the miss
 # tolerance.
 wavelength = 1500.0 / float(shelf_source.frequencies[0])
-eigenrays = uacpy.Bellhop(backend='fortran', launch_angles=(-20.0, 20.0), n_beams=2001).compute_eigenrays(
+eigenrays = uacpy.Bellhop(backend='fortran', launch_angles_deg=(-20.0, 20.0), n_beams=2001).compute_eigenrays(
     shelf, shelf_source, target).filter_by_miss_distance(
     wavelength / 4).top_n_by_miss(12).truncate_at_receiver()
-context = uacpy.Bellhop(backend='fortran', launch_angles=(-20.0, 20.0), n_beams=21).run(
+context = uacpy.Bellhop(backend='fortran', launch_angles_deg=(-20.0, 20.0), n_beams=21).run(
     shelf, shelf_source,
     uacpy.Receiver(depths=np.array([30.0]),
                    ranges=np.linspace(100.0, 2200.0, 50)),
     run_mode=uacpy.RunMode.RAYS)
-arrivals = uacpy.Bellhop(backend='fortran', launch_angles=(-20.0, 20.0), n_beams=201).run(
+arrivals = uacpy.Bellhop(backend='fortran', launch_angles_deg=(-20.0, 20.0), n_beams=201).run(
     shelf, shelf_source, uacpy.Receiver(depths=np.array([30.0]),
                                         ranges=np.array([2000.0])),
     run_mode=uacpy.RunMode.ARRIVALS)
@@ -160,7 +157,8 @@ pekeris = uacpy.Environment(
                                     attenuation=0.5))
 pekeris_source = uacpy.Source(depths=20.0, frequencies=200.0)
 target_range, target_depth = 3000.0, 80.0
-paths = uacpy.Bellhop(backend='fortran', launch_angles=(-30, 30), n_beams=2001).compute_eigenrays(
+paths = uacpy.Bellhop(backend='fortran', launch_angles_deg=(-30, 30),
+                      n_beams=2001).compute_eigenrays(
     pekeris, pekeris_source,
     uacpy.Receiver(depths=[target_depth], ranges=[target_range])
 ).top_n_by_miss(8).truncate_at_receiver()
@@ -168,10 +166,8 @@ paths = uacpy.Bellhop(backend='fortran', launch_angles=(-30, 30), n_beams=2001).
 # The multipath structure reads straight off the table: launch angle, how close
 # it came, and how many times it touched each boundary.
 print(f"  Pekeris guide, {len(paths.rays)} eigenrays at 3 km / 80 m:")
-print(f"    {'α (deg)':>10s} {'miss (m)':>9s} {'top':>4s} {'bot':>4s}")
-for ray in paths.rays:
-    print(f"    {ray['launch_angle']:>10.3f} {ray['miss_distance_m']:>9.3f} "
-          f"{ray['n_top_bounces']:>4d} {ray['n_bot_bounces']:>4d}")
+print(paths.to_dataframe()[['launch_angle', 'miss_distance', 'n_top_bounces',
+                            'n_bot_bounces']].to_string(index=False))
 
 fig, ax = paths.plot(env=pekeris,
                      title=f'{len(paths.rays)} eigenrays at 3 km / 80 m')

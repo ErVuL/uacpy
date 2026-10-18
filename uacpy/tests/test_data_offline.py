@@ -427,11 +427,11 @@ def test_fetch_ssp_transect_passes_over_a_source_with_no_transect(cache):
                                        date='2024-06-01')
 
 
-def test_the_transect_plans_are_exported():
+def test_the_transect_samplings_are_exported():
     from uacpy.data import bathymetry
-    assert data.ssp_transect_plan is sound_speed.ssp_transect_plan
-    assert data.bathy_transect_plan is bathymetry.bathy_transect_plan
-    assert {'ssp_transect_plan', 'bathy_transect_plan'} <= set(data.__all__)
+    assert data.ssp_transect_sampling is sound_speed.ssp_transect_sampling
+    assert data.bathy_transect_sampling is bathymetry.bathy_transect_sampling
+    assert {'ssp_transect_sampling', 'bathy_transect_sampling'} <= set(data.__all__)
 
 
 def test_woa_local_ts_column(cache):
@@ -631,7 +631,7 @@ def test_a_direct_crust1_fetch_cites_crust1_and_globsed(seismic_cache):
         (30.5, -40.5), (30.5, -39.5), n_points=2)
     assert [p.source.id for p in point.data_sources] == ['crust1', 'globsed']
     # A transect keeps each column's pair, at its range.
-    assert [(p.source.id, p.range_m) for p in transect.data_sources] == [
+    assert [(p.source.id, p.range) for p in transect.data_sources] == [
         (s, r) for r in transect.ranges for s in ('crust1', 'globsed')]
     bare = crust1_local.fetch_bottom_crust1((30.5, -40.5), use_globsed=False)
     assert [p.source.id for p in bare.data_sources] == ['crust1']
@@ -711,7 +711,7 @@ def test_fetch_environment_sea_ice_transect_classifies_each_zone(monkeypatch):
         ['half-space', 'half-space', 'vacuum', 'vacuum']
     assert env.surface.at(range=0.0).shear_speed == 1800.0
     assert {s.source.id for s in env.data_sources} == {'seaice'}
-    assert [s.range_m for s in env.data_sources] == list(env.surface.ranges)
+    assert [s.range for s in env.data_sources] == list(env.surface.ranges)
 
 
 def test_fetch_environment_sea_ice_straddles_the_ice_edge_threshold(monkeypatch):
@@ -733,6 +733,57 @@ def test_fetch_environment_sea_ice_straddles_the_ice_edge_threshold(monkeypatch)
                                  surface_sources='seaice')
     assert env.surface.acoustic_type == 'vacuum'
     assert 'seaice' not in [s.source.id for s in env.data_sources]
+
+
+@pytest.mark.parametrize('threshold, conc, kind', [
+    (0.5, 0.49, 'vacuum'), (0.5, 0.5, 'half-space'),
+    (None, 0.2, 'half-space'), (None, 0.149, 'vacuum')])
+def test_fetch_environment_takes_the_users_ice_threshold(
+        monkeypatch, threshold, conc, kind):
+    # surface_threshold= moves the switch both ways around the user's value;
+    # unset, it is the 15 % ice edge.
+    from uacpy.data import seaice_local
+    monkeypatch.setattr(seaice_local, '_sea_ice_reading',
+                        _ice_reading(lambda pt: conc))
+    env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
+                                 bathymetry=3000.0, ssp=1500.0,
+                                 surface_sources='seaice',
+                                 surface_threshold=threshold)
+    assert env.surface.acoustic_type == kind
+
+
+def test_the_ice_threshold_reaches_every_transect_waypoint(monkeypatch):
+    # 0.9 north of 83°N, 0.4 south of it: the default edge makes all four
+    # waypoints canopy; surface_threshold=0.5 keeps the northern two only.
+    from uacpy.data import seaice_local
+    monkeypatch.setattr(seaice_local, '_sea_ice_reading',
+                        _ice_reading(lambda pt: 0.9 if pt[0] >= 83.0 else 0.4))
+    kinds = {}
+    for threshold in (None, 0.5):
+        env = data.fetch_environment(
+            (85.0, 0.0), transect_to=(80.0, 0.0), date='2026-03-15',
+            bathymetry=3000.0, ssp=1500.0, surface_sources='seaice',
+            surface_n_points=4, surface_threshold=threshold)
+        kinds[threshold] = [bp.acoustic_type for bp in env.surface.nodes]
+    assert kinds[None] == ['half-space'] * 4
+    assert kinds[0.5] == ['half-space', 'half-space', 'vacuum', 'vacuum']
+
+
+def test_an_ice_threshold_with_no_surface_fetched_is_announced():
+    from uacpy.core.exceptions import FallbackWarning
+    with pytest.warns(FallbackWarning,
+                      match='surface_threshold=0.3 was not used'):
+        data.fetch_environment((30.5, -40.5), bathymetry=3000.0, ssp=1500.0,
+                               bottom='sand', surface_threshold=0.3)
+
+
+@pytest.mark.parametrize('bad', [15, -0.01, 1.01, float('nan'), True, '0.2'])
+def test_an_ice_threshold_that_is_no_fraction_is_refused(bad):
+    with pytest.raises(ConfigurationError, match='surface_threshold'):
+        data.fetch_environment((30.5, -40.5), date='2026-03-15',
+                               bathymetry=3000.0, ssp=1500.0,
+                               surface_sources='seaice',
+                               surface_threshold=bad)
 
 
 def test_fetch_environment_sea_ice_canopy_full_property_set(monkeypatch):
@@ -1096,20 +1147,8 @@ class TestCorruptNetcdfCacheRaisesTheTypedError:
         _cache.invalidate_grids()
 
 
-@pytest.mark.parametrize('module_name,func_name', [
-    ('uacpy.data.crust1_local', 'fetch_bottom_crust1_transect'),
-    ('uacpy.data.diesing_local', 'fetch_bottom_diesing'),
-    ('uacpy.data.emodnet_local', 'fetch_bottom_emodnet_local'),
-    ('uacpy.data.sediment_db', 'fetch_bottom_grainsize'),
-], ids=['crust1', 'diesing', 'emodnet', 'sediment_db'])
-def test_offline_bottom_fetchers_document_their_ignored_parameters(
-        module_name, func_name):
-    mod = importlib.import_module(module_name)
-    assert 'accepted (and ignored' in getattr(mod, func_name).__doc__
-
-
 def test_the_per_layer_defaults_are_cache_first(cache, monkeypatch):
-    """DATA-10: fetch_bathy / fetch_ssp default to the catalogue ids 'gebco' /
+    """fetch_bathy / fetch_ssp default to the catalogue ids 'gebco' /
     'woa23', which read the installed grids before any network call — the
     same resolution fetch_environment makes."""
     from uacpy.data import bathymetry
@@ -1267,15 +1306,21 @@ def _dict_argo(monkeypatch):
 def _dict_substrate(monkeypatch):
     import json
     from uacpy.data import seabed
+    from uacpy.data._cache import UnreadableCacheError
     body = json.dumps({'features': [{'properties': {
         'folk_5cl': 2, 'folk_5cl_txt': '2. Sand'}}]})
     monkeypatch.setattr(seabed, 'http_get', lambda url, **kw: body)
+    # The installed polygons unreadable, so the live WFS record is the one read.
+    monkeypatch.setattr(
+        emodnet_local, 'fetch_emodnet_substrate_local',
+        lambda *a, **kw: (_ for _ in ()).throw(UnreadableCacheError('x')))
     return vars(data.fetch_emodnet_substrate((56.0, 3.0))), 'emodnet'
 
 
 def _dict_seabed_local(monkeypatch):
     pytest.importorskip('shapely')
-    return vars(data.fetch_emodnet_substrate_local((55.0, 2.5))), 'emodnet'
+    return vars(data.fetch_emodnet_substrate((55.0, 2.5),
+                                             source='local')), 'emodnet'
 
 
 def _dict_sediment_sample(monkeypatch):
@@ -1284,8 +1329,11 @@ def _dict_sediment_sample(monkeypatch):
 
 def _dict_lithology(monkeypatch):
     from uacpy.data import diesing_local
+    # What the real lookup returns: the class and the centre of the cell read.
     monkeypatch.setattr(diesing_local, '_class_code',
-                        lambda lat, lon: (1, None))
+                        lambda lat, lon: (1, (0.0, -150.0)))
+    monkeypatch.setattr(diesing_local, '_model',
+                        lambda: {'sx': 1000.0, 'sy': 1000.0})
     return vars(data.fetch_seafloor_lithology((0.0, -150.0))), 'diesing'
 
 
@@ -1319,15 +1367,17 @@ def test_every_dict_fetcher_carries_a_data_provenance(fetch, cache,
     assert 'source' not in result and 'dataset' not in result
 
 
-@pytest.mark.parametrize('bottom_fetch, dict_fetch, point', [
-    ('fetch_bottom_grainsize', 'fetch_sediment_sample', (30.51, -40.51)),
-    ('fetch_bottom_emodnet_local', 'fetch_emodnet_substrate_local', (55.0, 2.5)),
+@pytest.mark.parametrize('module_name, bottom_fetch, dict_fetch, point', [
+    ('uacpy.data.sediment_db', 'fetch_bottom_grainsize',
+     'fetch_sediment_sample', (30.51, -40.51)),
+    ('uacpy.data.emodnet_local', 'fetch_bottom_emodnet_local',
+     'fetch_emodnet_substrate_local', (55.0, 2.5)),
 ])
 def test_a_bottom_cites_the_record_of_the_sample_it_was_built_from(
-        bottom_fetch, dict_fetch, point, cache, monkeypatch):
+        module_name, bottom_fetch, dict_fetch, point, cache, monkeypatch):
     pytest.importorskip('shapely')
     records = []
-    module = importlib.import_module(getattr(data, dict_fetch).__module__)
+    module = importlib.import_module(module_name)
     original = getattr(module, dict_fetch)
 
     def spy(*a, **kw):

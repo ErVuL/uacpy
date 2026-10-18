@@ -38,9 +38,11 @@ __all__ = [
 ]
 
 
-_VALID_SSP_KINDS = (
-    'measured', 'isovelocity', 'munk', 'analytic', 'n2linear',
-)
+_VALID_SSP_KINDS = ('measured', 'isovelocity', 'munk')
+
+#: Interpolation schemes a model takes as ``interp_ssp=``; as a ``kind`` they
+#: would describe nothing and change nothing, so they are refused there.
+_INTERPOLATION_WORDS = ('analytic', 'n2linear')
 
 
 # A caller passing ``env.depth`` that has round-tripped through I/O can be a few
@@ -57,6 +59,26 @@ def _flat_numeric_sequence(value):
     :meth:`SoundSpeedProfile.from_pairs`, which reports them)."""
     arr = real_array_or_none(value)
     return arr if arr is not None and arr.ndim == 1 and arr.size else None
+
+
+def _columns_on_union_axis(columns, depths=None):
+    """``(axis, matrix)``: casts given as ``(depths, speeds)`` 1-D pairs,
+    each read onto one depth axis — ``depths``, or by default the union of
+    every cast's own depths — as the columns of ``matrix``. A cast holds its
+    end values beyond its own depths (``np.interp``'s constant-edge fill).
+    The union keeps every cast's nodes: an axis taken from one cast would
+    drop the others' and re-interpolate across the gaps
+    (:meth:`SoundSpeedProfile.from_casts`'s stacking;
+    ``uacpy.data.sound_speed._assemble_range_dependent`` writes the same three lines,
+    a private name across the data/core layer boundary being refused by the
+    layering gate)."""
+    if depths is None:
+        axis = np.unique(np.concatenate(
+            [np.asarray(z, dtype=float) for z, _ in columns]))
+    else:
+        axis = np.asarray(depths, dtype=float)
+    matrix = np.column_stack([np.interp(axis, z, c) for z, c in columns])
+    return axis, matrix
 
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
@@ -80,12 +102,12 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         Range axis in **metres**, monotonically increasing. ``None`` for 1-D.
     kind : str
         Declaration of what the data represents:
-        ``'measured'`` (default), ``'isovelocity'``, ``'munk'``,
-        ``'analytic'`` or ``'n2linear'``. Only ``'isovelocity'``
-        actually overrides ``TopOpt(1)`` (forces ``'C'`` — any connection
-        scheme over constant data is constant). The other values are
-        informational metadata; the model's ``interp_ssp`` kwarg drives
-        the AT character.
+        ``'measured'`` (default), ``'isovelocity'`` or ``'munk'``. Only
+        ``'isovelocity'`` actually overrides ``TopOpt(1)`` (forces ``'C'`` —
+        any connection scheme over constant data is constant). The other
+        values are informational metadata; the model's ``interp_ssp`` kwarg
+        drives the AT character, and its scheme names (``'analytic'``,
+        ``'n2linear'``) are refused here, naming ``interp_ssp=``.
     """
     depths: np.ndarray
     sound_speed: np.ndarray
@@ -167,6 +189,14 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 f"got shape {self.sound_speed.shape}."
             )
         self.kind = str(self.kind).lower()
+        if self.kind in _INTERPOLATION_WORDS:
+            raise ConfigurationError(
+                f"SoundSpeedProfile: kind={self.kind!r} names an "
+                f"interpolation scheme (a model's interp_ssp=), not what the "
+                f"data are; as a kind it would change nothing.",
+                remediation="Keep kind='measured' (or 'isovelocity' / "
+                            "'munk'), and choose how the samples connect "
+                            "with the model's interp_ssp=.")
         if self.kind not in _VALID_SSP_KINDS:
             raise ConfigurationError(
                 f"SoundSpeedProfile: kind={self.kind!r} not in "
@@ -308,7 +338,10 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         (default), ``'nearest'`` or ``'cubic'``. A depth outside the profile
         takes the nearest end's value, with a
         :class:`~uacpy.core.exceptions.FallbackWarning` naming the span: the
-        value is held flat, not fabricated.
+        value is held flat, not fabricated. A ``range`` outside a
+        range-dependent profile's range axis reads its end column, as
+        :meth:`eval` holds it, without a warning; check ``ranges`` when the
+        column read matters.
 
         Parameters
         ----------
@@ -547,7 +580,8 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         # therefore *move* the existing sample, never add one beside it. The band
         # this closes is 1e-9 m to 1.19e-5 m, which about 1 in 8400 arbitrary
         # depths lands in; a fetched or interpolated bathymetry reaches it
-        # naturally, and the abort the user saw named the boundary condition.
+        # naturally, and the engine's abort then names the boundary condition,
+        # not the depth.
         last = float(self.depths[-1])
         gap = abs(float(depth_max) - last)
         if gap <= _ROUND_TRIP_NOISE_M:
@@ -614,10 +648,11 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         * scalar (m/s), in any spelling — a Python number, a numpy scalar or
           a 0-d array — isovelocity at that speed spanning ``0..depth_max``.
         * ``(depth, c)`` pairs — linear profile via :meth:`from_pairs`. A
-          tuple of two equal-length 1-D columns ``(depths, speeds)`` is
-          refused, naming ``from_pairs(np.column_stack([depths, speeds]))``.
-          A 2x2 input is always two pairs ``((z0, c0), (z1, c1))``; two
-          2-sample columns must go through ``column_stack`` themselves.
+          tuple of two 1-D columns ``(depths, speeds)`` is refused, naming
+          ``from_pairs(np.column_stack([depths, speeds]))``: shape
+          ``(2, N)`` with ``N != 2``, and two 1-D numpy arrays or a tuple
+          of two lists at any length. A list of tuples, a 2x2 nested list or
+          a 2x2 array is two pairs ``[(z0, c0), (z1, c1)]``.
         * a :class:`SoundSpeedProfile` — returned as-is (by reference).
 
         ``None`` policy: an isovelocity 1500 m/s water column — a usable
@@ -660,7 +695,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                     f"got ssp={value!r}, a flat sequence of {flat.size} "
                     f"number(s). For an isovelocity ocean pass "
                     f"ssp={flat[0]:g}; for a profile pass pairs of shape "
-                    f"(N, 2): ssp=[(depth_m, sound_speed), ...].")
+                    f"(N, 2): ssp=[(depth, sound_speed), ...].")
             refuse_two_columns(
                 value, who='Environment', name='ssp',
                 columns='depths, speeds', pair='depth, sound_speed',
@@ -745,9 +780,6 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         """Build a 2-D profile from a depth axis, range axis (metres),
         and ``c(depth, range)`` matrix of shape ``(n_depth, n_range)``.
 
-        For Bellhop, pair with ``Bellhop(interp_ssp='quad')`` to enable
-        the external ``.ssp`` (quad) file format.
-
         Parameters
         ----------
         depths : ndarray
@@ -782,8 +814,8 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         casts' depths, so no cast loses a node. A cast shorter than the axis
         holds its deepest value below its last sample, and one starting
         below the axis's top holds its shallowest value above it (constant
-        extension, the rule :func:`uacpy.data.assemble_range_dependent`
-        applies to fetched columns); extend a cast under a sound-speed
+        extension, the rule the transect fetchers of :mod:`uacpy.data`
+        apply to fetched columns); extend a cast under a sound-speed
         formula first if the deep gradient matters.
 
         Parameters
@@ -791,7 +823,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         ranges : array_like
             Range of each cast (m), strictly increasing, one per cast.
         casts : sequence of array_like
-            One ``(n_i, 2)`` array — or list of ``(depth_m, sound_speed)``
+            One ``(n_i, 2)`` array — or list of ``(depth, sound_speed)``
             pairs — per cast: rows, as :meth:`from_pairs` takes them. A
             cast given as a tuple of two equal-length columns
             ``(depths, speeds)`` longer than 2 is refused naming
@@ -847,12 +879,10 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             c_u = (np.bincount(inverse, weights=arr[:, 1])
                    / np.bincount(inverse))
             columns.append((z_u, c_u))
-        if depths is None:
-            axis = np.unique(np.concatenate([z for z, _ in columns]))
-        else:
-            axis = require_real_array(depths, f"{who}: depths",
-                                      hint="m").ravel()
-        matrix = np.column_stack([np.interp(axis, z, c) for z, c in columns])
+        if depths is not None:
+            depths = require_real_array(depths, f"{who}: depths",
+                                        hint="m").ravel()
+        axis, matrix = _columns_on_union_axis(columns, depths)
         return cls(depths=axis, sound_speed=matrix, ranges=r, kind=kind)
 
     @classmethod
@@ -910,7 +940,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         salinity,
         *,
         formula: Optional[str] = None,
-        latitude_deg: Optional[float] = None,
+        latitude: Optional[float] = None,
     ) -> 'SoundSpeedProfile':
         """Build a profile from in-situ ``T(z)`` and ``S(z)``.
 
@@ -952,7 +982,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             Salinity (PSU).
         formula : str, optional
             Sound-speed equation; ``None`` is the package default (TEOS-10).
-        latitude_deg : float, optional
+        latitude : float, optional
             Latitude (deg) of the depth-to-pressure conversion; ``None`` is 45.
 
         Examples
@@ -995,7 +1025,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         z = z.ravel()
         T, S = values['temperature'], values['salinity']
         c = sound_speed_at_depth(T, S, z, formula=formula,
-                                 latitude_deg=latitude_deg)
+                                 latitude=latitude)
         return cls(
             depths=z, sound_speed=np.asarray(c).reshape(-1, 1),
             ranges=None, formula=formula,

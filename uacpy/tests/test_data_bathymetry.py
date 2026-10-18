@@ -15,7 +15,7 @@ import pytest
 import uacpy
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import bathymetry
-from uacpy.data.bathymetry import bathy_transect_plan, fetch_bathy_transect
+from uacpy.data.bathymetry import bathy_transect_sampling, fetch_bathy_transect
 
 
 @pytest.fixture(autouse=True)
@@ -356,34 +356,32 @@ def test_the_rate_limiter_serializes_concurrent_callers(monkeypatch):
 
 
 class TestBathyTransectNPointsForms:
-    """``n_points`` has exactly the two documented forms — an integer
-    >= 2, or ``'auto'`` — and any other string raises a typed error
-    naming them, before any fetch happens (previously a raw
-    ``ValueError`` from ``int('lots')``)."""
+    """``n_points`` has exactly the documented forms — an integer >= 2,
+    ``'auto'``, or ``None`` for the default — and any other string raises a
+    typed error naming them, before any fetch happens."""
 
     def test_a_non_auto_string_raises_naming_the_valid_forms(self):
         with pytest.raises(ConfigurationError,
                            match=r"n_points='lots' is not a sample count"):
-            bathy_transect_plan((0.0, 0.0), (1.0, 0.0), n_points='lots')
+            bathy_transect_sampling((0.0, 0.0), (1.0, 0.0), n_points='lots')
 
     def test_fetch_bathy_transect_raises_the_same_error_before_fetching(self):
         with pytest.raises(ConfigurationError, match=r"'auto'"):
             fetch_bathy_transect((0.0, 0.0), (1.0, 0.0), n_points='lots')
 
-    def test_none_raises_a_typed_error(self):
-        with pytest.raises(ConfigurationError,
-                           match="is not a sample count"):
-            bathy_transect_plan((0.0, 0.0), (1.0, 0.0), n_points=None)
+    def test_none_is_the_unset_count(self):
+        assert bathy_transect_sampling(
+            (0.0, 0.0), (1.0, 0.0), n_points=None)['n_points'] == 50
 
-    def test_integer_and_auto_forms_resolve_the_plan(self):
-        assert bathy_transect_plan(
+    def test_integer_and_auto_forms_resolve_the_sampling(self):
+        assert bathy_transect_sampling(
             (0.0, 0.0), (1.0, 0.0), n_points=5)['n_points'] == 5
-        assert bathy_transect_plan(
+        assert bathy_transect_sampling(
             (0.0, 0.0), (1.0, 0.0), n_points='auto')['n_points'] >= 2
 
 
 @pytest.mark.parametrize('bad', [2.5, 'x'], ids=['non-integral', 'non-numeric'])
 def test_a_bad_sample_count_raises_the_typed_configuration_error(bad):
-    from uacpy.data.bathymetry import bathy_transect_plan
+    from uacpy.data.bathymetry import bathy_transect_sampling
     with pytest.raises(ConfigurationError, match='is not a sample count'):
-        bathy_transect_plan((45.0, -30.0), (46.0, -30.0), n_points=bad)
+        bathy_transect_sampling((45.0, -30.0), (46.0, -30.0), n_points=bad)

@@ -150,45 +150,13 @@ def test_apl_uw_model():
     assert coarse['sound_speed'] > a['sound_speed']
 
 
-def test_bottom_from_grain_size():
-    bp = sediment.bottom_from_grain_size(3.5, roughness=0.2)
-    assert isinstance(bp, BoundaryProperties)
-    assert bp.acoustic_type == 'half-space'   # universal: works in every model
-    assert bp.grain_size_phi == 3.5           # retained as informational metadata
-    assert bp.roughness == 0.2
-    assert 1650.0 < bp.sound_speed < 1720.0    # very fine sand ≈ 1691 m/s
-
-
-def test_bottom_from_class():
-    bp = sediment.bottom_from_class('sand')
-    assert bp.acoustic_type == 'half-space'
-    assert bp.sound_speed == pytest.approx(MATERIALS['sand']['sound_speed'])
-    assert bp.density == pytest.approx(MATERIALS['sand']['density'])
-
-
-def test_bottom_from_class_unknown_raises():
-    with pytest.raises(ConfigurationError, match='unknown sediment class'):
-        sediment.bottom_from_class('mud')
-
-
-@pytest.mark.parametrize('name', ['limestone', 'granite', 'sand', 'clay'])
-def test_bottom_from_class_keeps_the_shear_pair(name):
-    """Shear speed and shear attenuation are one property of the material and
-    must travel together: a rock half-space with a shear speed but *lossless*
-    shear (limestone's alpha_s is 0.2 dB/lambda, sand's 2.5) under-predicts
-    bottom loss in Kraken / Scooter / OASES."""
-    bp = sediment.bottom_from_class(name)
-    assert bp.shear_speed == pytest.approx(MATERIALS[name]['shear_speed'])
-    assert bp.shear_attenuation == pytest.approx(
-        MATERIALS[name]['shear_attenuation'])
-    assert bp.name == name
-
-
-def test_bottom_from_class_fluid_drops_both_shear_fields():
-    bp = sediment.bottom_from_class('limestone', elastic=False)
-    assert bp.shear_speed == 0.0
-    assert bp.shear_attenuation == 0.0
-    assert bp.sound_speed == pytest.approx(MATERIALS['limestone']['sound_speed'])
+def test_the_seabed_wrappers_are_gone():
+    # One constructor per seabed: BoundaryProperties.from_grain_size and
+    # from_preset (fluid unless elastic=True); uacpy.data keeps no twin.
+    import uacpy.data
+    for name in ('bottom_from_grain_size', 'bottom_from_class'):
+        assert not hasattr(uacpy.data, name)
+        assert not hasattr(sediment, name)
 
 
 def test_grain_size_none_water_uses_the_package_water():
@@ -261,13 +229,13 @@ def test_range_dependent_bottom_preserves_provenance():
     for col in bottom.columns:
         assert [p.source.id for p in col.data_sources] == ['grainsize']
     # One record per column, each at its column's range.
-    assert [(p.source.id, p.range_m) for p in bottom.data_sources] == [
+    assert [(p.source.id, p.range) for p in bottom.data_sources] == [
         ('grainsize', float(r)) for r in bottom.ranges]
 
 
 def _phi_bottom(phi, water_sound_speed):
     def point_bottom(lat, lon):
-        return sediment.bottom_from_grain_size(
+        return BoundaryProperties.from_grain_size(
             phi(lat) if callable(phi) else phi,
             water_sound_speed=sediment.water_sound_speed_at(
                 water_sound_speed, lat, lon))
@@ -294,11 +262,22 @@ def test_auto_collapses_uniform_seabed_under_varying_water_speed(
     assert len(bottom.columns) == 1
 
 
-def test_an_explicit_count_above_max_points_is_capped_with_a_warning():
-    with pytest.warns(UserWarning, match=r'n_points=6 exceeds max_points=3'):
-        bottom = sediment.range_dependent_bottom_along(
-            _phi_bottom(5.0, 1500.0), (40.0, -30.0), (41.0, -30.0), 6,
+def test_an_explicit_count_above_max_points_is_refused():
+    calls = []
+
+    def point_bottom(lat, lon):
+        calls.append((lat, lon))
+        return BoundaryProperties.from_grain_size(5.0)
+
+    with pytest.raises(ConfigurationError,
+                       match=r'n_points=4 exceeds max_points=3'):
+        sediment.range_dependent_bottom_along(
+            point_bottom, (40.0, -30.0), (41.0, -30.0), 4,
             source_label='test', max_points=3)
+    assert calls == []                         # refused before any fetch
+    bottom = sediment.range_dependent_bottom_along(
+        point_bottom, (40.0, -30.0), (41.0, -30.0), 3, source_label='test',
+        max_points=3)
     assert len(bottom.columns) == 3
 
 
@@ -327,9 +306,9 @@ def test_auto_places_the_transition_at_the_observed_boundary():
         _phi_bottom(lambda la: 3.0 if la < boundary_lat else 7.0, None),
         (40.0, -30.0), (41.0, -30.0), 'auto', source_label='test',
         max_points=probe_n)
-    length_m = bottom.ranges[-1]
-    step_m = length_m / (probe_n - 1)
-    true_edge_m = length_m * 0.2          # boundary_lat on the constant-lon path
+    length = bottom.ranges[-1]
+    step_m = length / (probe_n - 1)
+    true_edge_m = length * 0.2          # boundary_lat on the constant-lon path
     rho = [c.halfspace.density for c in bottom.columns]   # ϕ3 denser than ϕ7
     rr = np.asarray(bottom.ranges, dtype=float)
     transitions = [(rr[i] + rr[i + 1]) / 2.0
@@ -555,8 +534,7 @@ class TestTransectSeabedGapsAreNearestAndAnnounced:
 
     @staticmethod
     def _props(phi):
-        from uacpy.data.sediment import bottom_from_grain_size
-        return bottom_from_grain_size(phi)
+        return BoundaryProperties.from_grain_size(phi)
 
     def test_a_gap_takes_the_nearer_side_not_the_earlier_one(self):
         from uacpy.data.sediment import _fill_gaps_from_nearest
@@ -643,6 +621,30 @@ class TestALithologySampleCitesDeck41:
         dB = self._cache(tmp_path, monkeypatch)
         bottom = dB.fetch_bottom_grainsize(point)
         assert bottom.data_sources[0].source.id == expected
+
+
+@pytest.mark.parametrize('phi', [2.0, 12.0, np.array([1.0, 9.5, 12.0])])
+def test_the_silent_twin_returns_the_report_the_public_function_warns(phi):
+    """``_grain_size_to_geoacoustics`` is the conversion a caller converting
+    for the user runs to give the substitution report under its own name: it
+    warns nothing, and returns the result and the very text the public
+    function warns with (empty when nothing is substituted)."""
+    from uacpy.core.sediment import (_grain_size_to_geoacoustics,
+                                     grain_size_to_geoacoustics)
+    with warnings.catch_warnings(record=True) as public:
+        warnings.simplefilter('always')
+        want = grain_size_to_geoacoustics(phi)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        got, report = _grain_size_to_geoacoustics(
+            phi, model='hamilton', hamilton_fit='continental-terrace',
+            water_sound_speed=None, water_density=None, who='caller')
+    for name in ('sound_speed', 'density', 'attenuation'):
+        np.testing.assert_array_equal(got[name], want[name])
+    texts = [str(w.message) for w in public]
+    assert texts == ([f"grain_size_to_geoacoustics: {report}."] if report
+                     else [])
+    assert bool(report) == (np.max(phi) > 9.0)
 
 
 class TestAnArrayOfGrainSizes:
@@ -1441,21 +1443,21 @@ class TestTheDocumentedNumbersAreTheComputedOnes:
 # ── named choices are matched without regard to case ──────────────────────
 
 _CANONICALISED_ENTRY_POINTS = [
-    ('uacpy/core/sediment.py', 'grain_size_to_geoacoustics', 'canonical_grain_size_selection'),
+    # The public function delegates to its silent twin, which canonicalises.
+    ('uacpy/core/sediment.py', '_grain_size_to_geoacoustics', '_canonical_grain_size_selection'),
     ('uacpy/core/sediment.py', 'grain_size_from_density', 'canonical_choice'),
-    ('uacpy/core/boundary.py', 'BoundaryProperties.from_grain_size', 'canonical_grain_size_selection'),
-    ('uacpy/core/bottom.py', 'Bottom.from_grain_size', 'canonical_grain_size_selection'),
-    ('uacpy/data/sediment.py', 'bottom_from_grain_size', 'canonical_grain_size_selection'),
-    ('uacpy/data/diesing_local.py', 'fetch_bottom_diesing', 'canonical_grain_size_selection'),
-    ('uacpy/data/emodnet_local.py', 'fetch_bottom_emodnet_local', 'canonical_grain_size_selection'),
-    ('uacpy/data/graw_local.py', 'fetch_bottom_graw', 'canonical_grain_size_selection'),
-    ('uacpy/data/mars.py', 'fetch_bottom_mars', 'canonical_grain_size_selection'),
-    ('uacpy/data/pelagic.py', 'fetch_bottom_pelagic', 'canonical_grain_size_selection'),
-    ('uacpy/data/seabed.py', 'fetch_bottom_emodnet', 'canonical_grain_size_selection'),
-    ('uacpy/data/sediment_db.py', 'fetch_bottom_grainsize', 'canonical_grain_size_selection'),
-    ('uacpy/data/environment.py', 'fetch_bottom', 'canonical_grain_size_selection'),
-    ('uacpy/data/environment.py', 'fetch_bottom_transect', 'canonical_grain_size_selection'),
-    ('uacpy/data/environment.py', 'fetch_environment', 'canonical_grain_size_selection'),
+    ('uacpy/core/boundary.py', 'BoundaryProperties.from_grain_size', '_canonical_grain_size_selection'),
+    ('uacpy/core/bottom.py', 'Bottom.from_grain_size', '_canonical_grain_size_selection'),
+    ('uacpy/data/diesing_local.py', 'fetch_bottom_diesing', '_canonical_grain_size_selection'),
+    ('uacpy/data/emodnet_local.py', 'fetch_bottom_emodnet_local', '_canonical_grain_size_selection'),
+    ('uacpy/data/graw_local.py', 'fetch_bottom_graw', '_canonical_grain_size_selection'),
+    ('uacpy/data/mars.py', 'fetch_bottom_mars', '_canonical_grain_size_selection'),
+    ('uacpy/data/pelagic.py', 'fetch_bottom_pelagic', '_canonical_grain_size_selection'),
+    ('uacpy/data/seabed.py', 'fetch_bottom_emodnet', '_canonical_grain_size_selection'),
+    ('uacpy/data/sediment_db.py', 'fetch_bottom_grainsize', '_canonical_grain_size_selection'),
+    ('uacpy/data/environment.py', 'fetch_bottom', '_canonical_grain_size_selection'),
+    ('uacpy/data/environment.py', 'fetch_bottom_transect', '_canonical_grain_size_selection'),
+    ('uacpy/data/environment.py', 'fetch_environment', '_canonical_grain_size_selection'),
     ('uacpy/data/environment.py', 'fetch_environment', 'canonical_formula'),
     ('uacpy/core/acoustics/seawater.py', 'sound_speed_at_depth', 'canonical_formula'),
     ('uacpy/core/ssp.py', 'SoundSpeedProfile.__post_init__', 'canonical_formula'),
@@ -1491,11 +1493,10 @@ def test_every_entry_point_canonicalises_its_named_choice_before_using_it(
 @pytest.mark.parametrize('spelled', ['hamilton', 'Hamilton', 'HAMILTON'])
 def test_a_grain_size_model_is_one_model_in_any_case(spelled):
     from uacpy.core.sediment import grain_size_to_geoacoustics
-    from uacpy.data import bottom_from_grain_size
     want = grain_size_to_geoacoustics(2.0, model='hamilton')
     assert grain_size_to_geoacoustics(
         2.0, model=spelled, hamilton_fit='Continental-Terrace') == want
-    assert bottom_from_grain_size(2.0, model=spelled).sound_speed == \
+    assert BoundaryProperties.from_grain_size(2.0, model=spelled).sound_speed == \
         pytest.approx(want['sound_speed'])
 
 
@@ -1548,12 +1549,11 @@ class TestBottomFromSamples:
         assert all(c.halfspace.data_sources == () for c in bottom.columns)
 
     def test_a_column_is_its_samples_conversion(self):
-        from uacpy.data import bottom_from_grain_size
         bottom = self._three_grabs(n_points=5, max_distance_km=25.0,
                                    model='apl-uw', water_sound_speed=1490.0,
                                    roughness=0.2)
-        want = bottom_from_grain_size(7.5, model='apl-uw',
-                                      water_sound_speed=1490.0, roughness=0.2)
+        want = BoundaryProperties.from_grain_size(
+            7.5, model='apl-uw', water_sound_speed=1490.0, roughness=0.2)
         got = bottom.columns[-1].halfspace
         assert (got.sound_speed, got.density, got.attenuation,
                 got.roughness) == (want.sound_speed, want.density,
@@ -1575,12 +1575,14 @@ class TestBottomFromSamples:
     def test_each_distinct_sample_is_converted_once(self, monkeypatch):
         from uacpy.data import bottom_from_samples, sediment_db
         calls = []
-        convert = sediment_db.bottom_from_grain_size
+        convert = sediment_db._grain_size_to_geoacoustics
 
         def counted(phi, **kwargs):
-            calls.append(phi)
+            if np.ndim(phi) == 0:          # a sample's own conversion, not
+                calls.append(float(phi))   # the one-array report of them all
             return convert(phi, **kwargs)
-        monkeypatch.setattr(sediment_db, 'bottom_from_grain_size', counted)
+        monkeypatch.setattr(sediment_db, '_grain_size_to_geoacoustics',
+                            counted)
         bottom_from_samples([45.0, 45.0], [-6.0, -5.0], [1.0, 7.0],
                             self.START, self.END)
         assert sorted(calls) == [1.0, 7.0]
@@ -1635,6 +1637,33 @@ class TestBottomFromSamples:
         assert texts[0].startswith('bottom_from_samples: of the samples, '
                                    'at ϕ=9.2, 9.4, 9.6, 9.8, 10 and 10.2 '
                                    '(6 of 6 values)'), texts
+
+    def test_samples_convert_without_a_warnings_window_to_the_same_seabed(
+            self, monkeypatch):
+        """No process-global warnings.catch_warnings window is opened (it
+        would mute and collect every thread's warnings while held), and each
+        column is the half-space BoundaryProperties.from_grain_size builds
+        for its sample."""
+        from uacpy.core.environment import BoundaryProperties
+        from uacpy.data import bottom_from_samples, sediment_db
+
+        def no_window(*a, **k):
+            raise AssertionError('a process-global warnings window was opened')
+
+        with monkeypatch.context() as during:  # pytest itself opens windows
+            during.setattr(sediment_db.warnings, 'catch_warnings', no_window)
+            bottom = bottom_from_samples(
+                [45.0, 45.0, 45.0], [-6.0, -5.5, -5.0], [1.5, 3.0, 7.5],
+                (45.0, -6.0), (45.0, -5.0), n_points=3,
+                water_sound_speed=1520.0, roughness=0.5)
+        for column, phi in zip(bottom.columns, [1.5, 3.0, 7.5]):
+            expected = BoundaryProperties.from_grain_size(
+                phi, roughness=0.5, water_sound_speed=1520.0)
+            got = column.halfspace
+            assert (got.grain_size_phi, got.sound_speed, got.density,
+                    got.attenuation, got.roughness) == (
+                expected.grain_size_phi, expected.sound_speed,
+                expected.density, expected.attenuation, expected.roughness)
 
     @pytest.mark.parametrize('lat_offset_deg, warns', [
         (0.081, False),     # 9.0 km north of the track: within 10 km

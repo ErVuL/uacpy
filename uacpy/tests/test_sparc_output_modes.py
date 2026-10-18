@@ -77,7 +77,9 @@ class TestSPARCRunModeSurface:
     def test_time_series_is_the_default(self, sparc_simple_env, source_50hz,
                                         receiver_grid):
         m = SPARC(verbose=False)
-        assert m._resolve_run_mode(None) == RunMode.TIME_SERIES
+        assert m._default_run_mode_for(None) == RunMode.TIME_SERIES
+        assert m.run_settings(sparc_simple_env, source_50hz,
+                              receiver_grid).mode == RunMode.TIME_SERIES
 
     @pytest.mark.requires_binary
     def test_coherent_tl_is_refused_with_a_usable_alternative(
@@ -245,7 +247,7 @@ class TestSPARCEnvironmentHandling:
                         Receiver(depths=np.array([50.0]),
                                  ranges=np.array([600.0, 800.0, 1000.0])))
         assert calls['n'] == 3, f"expected one run per range, got {calls['n']}"
-        assert res.metadata['n_range_runs'] == 3
+        assert res.data.shape[1] == 3
 
     @pytest.mark.requires_binary
     def test_one_binary_run_per_receiver_depth(self, sparc_simple_env,
@@ -350,10 +352,20 @@ def _rel(ref, got):
 
 
 def _full_fft_row(G, f_idx, win=None):
-    """The expression ``_dft_row`` replaced, kept here as the reference."""
+    """The full-transform expression the one-frequency kernel stands in for,
+    kept here as the reference."""
     if win is None:
         return np.fft.fft(G, axis=0)[f_idx, :, :]
     return np.fft.fft(G * win[:, np.newaxis, np.newaxis], axis=0)[f_idx, :, :]
+
+
+def _dft_row(G, f_idx, win=None):
+    """Row ``f_idx`` of the transform along axis 0 through the package's
+    one-frequency kernel: sample times ``n`` at ``f_idx / nt`` cycles per
+    sample."""
+    from uacpy.core._fourier import dtft_at
+    nt = np.shape(G)[0]
+    return dtft_at(G, np.arange(nt), f_idx / nt, window=win)
 
 
 class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
@@ -371,7 +383,6 @@ class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
         return (0, nt // 4, nt // 2, nt - 1)
 
     def test_the_rectangular_row_matches_the_full_single_precision_fft(self):
-        from uacpy.core.acoustics.wavenumber import _dft_row
         G = self._cube()
         for f_idx in self._bins(G.shape[0]):
             ref = _full_fft_row(G, f_idx)
@@ -382,7 +393,6 @@ class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
 
     def test_the_windowed_row_holds_the_double_precision_the_upcast_gives_it(
             self):
-        from uacpy.core.acoustics.wavenumber import _dft_row
         G = self._cube()
         win = np.hanning(G.shape[0])
         for f_idx in self._bins(G.shape[0]):
@@ -406,7 +416,6 @@ class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
     def test_chunking_the_wavenumber_axis_leaves_the_row_unchanged(self):
         # nk past the internal 4e6-element block, so the windowed path takes
         # more than one chunk and the block arithmetic is exercised.
-        from uacpy.core.acoustics.wavenumber import _dft_row
         G = self._cube(nt=64, nrd=8, nk=9000, seed=1)
         assert G.shape[0] * G.shape[1] * G.shape[2] > 4_000_000
         win = np.hanning(G.shape[0])
@@ -416,7 +425,6 @@ class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
             rtol=1e-12, atol=1e-12)
 
     def test_a_double_precision_cube_stays_in_double_precision(self):
-        from uacpy.core.acoustics.wavenumber import _dft_row
         G = self._cube().astype(np.complex128)
         ref = _full_fft_row(G, 9)
         got = _dft_row(G, 9)
@@ -434,6 +442,17 @@ def _direct_dtft_row(G, f_idx, win=None):
         kernel = kernel * win
     kernel = kernel.reshape((nt,) + (1,) * (G.ndim - 1))
     return np.sum(G.astype(np.complex128) * kernel, axis=0)
+
+
+def _direct_dtft(data, times, frequency, *, window=None, axis=0):
+    """``dtft_at`` as a plain summed transform on the given times — the
+    reference the end-to-end route is compared with."""
+    x = np.moveaxis(np.asarray(data), axis, 0).astype(np.complex128)
+    t = np.asarray(times, dtype=float)
+    kernel = np.exp(-2j * np.pi * float(frequency) * t)
+    if window is not None:
+        kernel = kernel * window
+    return np.sum(x * kernel.reshape((t.size,) + (1,) * (x.ndim - 1)), axis=0)
 
 
 
@@ -485,7 +504,7 @@ class TestSparcSnapshotFieldIsUnchangedByTheRowContraction:
         grn = self._grn()
         ranges = np.linspace(200.0, 5000.0, 12)
         new = self._field(grn, ranges, normalize, pulse_type)
-        monkeypatch.setattr(wn, '_dft_row', _direct_dtft_row)
+        monkeypatch.setattr(wn, 'dtft_at', _direct_dtft)
         ref = self._field(grn, ranges, normalize, pulse_type)
         # Single precision on the rectangular branch, double on the windowed
         # one — the same split the row helper is pinned to above.
@@ -493,7 +512,6 @@ class TestSparcSnapshotFieldIsUnchangedByTheRowContraction:
         assert _rel(ref.data, new.data) < tol
 
     def test_a_fractional_row_is_the_transform_between_the_bins(self):
-        from uacpy.core.acoustics.wavenumber import _dft_row
         G = self._grn().data[:, 0].astype(np.complex128)
         win = np.hanning(G.shape[0])
         for f_idx in (0.32, 7.5, 31.9):
@@ -640,7 +658,10 @@ def _write_sparc_grn(path, *, title, nfreq=3, nsd=1, nrd=1, nk=4):
     record(np.zeros(1, dtype='<f4').tobytes())               # Sy
     record(np.zeros(max(nsd, 1), dtype='<f4').tobytes())     # Sz
     record(np.zeros(nrd, dtype='<f4').tobytes())             # Rz
-    record(np.full(nk, 1500.0, dtype='<f8').tobytes())       # cVec
+    # cVec: the phase speeds of a uniform, ascending k grid, as SCOOTER
+    # writes it (k = omega / c, so 1/c is uniform).
+    record((1.0 / np.linspace(1.0 / 2000.0, 1.0 / 1500.0, nk))
+           .astype('<f8').tobytes())
     for _ in range(nfreq * nsd * nrd):
         record(np.zeros(2 * nk, dtype='<f4').tobytes())
 

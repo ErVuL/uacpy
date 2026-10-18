@@ -35,9 +35,11 @@ roughness     RMS interface roughness (m); 0 unless overridden.
 ``c_s`` for silt, sand and gravel is a depth-dependent ``c_s(z̄)`` in the source
 table rather than a number — JKPS §1.6: the shear speeds of unconsolidated
 sediments "are quite low but increase rapidly with depth z̄ below the
-water-bottom interface". Those three presets carry one value each in its place
-and the depth it stands for is not recorded in the table, so pass an explicit
-``shear_speed`` whenever the depth matters.
+water-bottom interface"; Table 1.3's footnotes give the laws
+``c_s = 80 z̄^0.3``, ``110 z̄^0.3`` and ``180 z̄^0.3`` (printed p. 39).
+Those three presets carry the law
+at ``z̄ = 1`` (80, 110, 180 m/s); at ``z̄ = 10`` the same law gives 10^0.3 ≈ 2.0
+times that, so pass an explicit ``shear_speed`` whenever the depth matters.
 """
 
 from __future__ import annotations
@@ -95,9 +97,10 @@ def _entry(
 # c_p, density, alpha_p, c_s, alpha_s and porosity for the eight rows clay …
 # basalt are Jensen, Kuperman, Porter & Schmidt, *Computational Ocean
 # Acoustics*, Table 1.3 (continental shelf and slope), which carries no grain
-# size. Table 1.3 gives clay's c_s as "< 100", prints moraine's as the constant
-# 600, and leaves silt / sand / gravel as depth-dependent c_s(z̄); those four
-# take a single value (see the module docstring).
+# size. Table 1.3 gives clay's c_s as "< 100" (the preset's 80 is uacpy
+# guidance, below that bound, equal to silt's coefficient), prints moraine's as
+# the constant 600, and gives silt / sand / gravel the footnote laws
+# 80 / 110 / 180·z̄^0.3, evaluated at z̄ = 1 (see the module docstring).
 # ``chalk`` and ``limestone`` are that table's shelf/slope rock rows: the
 # porous, partly lithified calcareous rock of the chalk-to-limestone
 # transition, not massive limestone. Hamilton (1980) Fig. 24 p. 1334, the
@@ -179,8 +182,9 @@ def _table_1_3_density(ratio: float) -> float:
 
 
 _PRESETS: Dict[str, Dict] = {
-    # Unconsolidated sediments (c_s as Table 1.3 gives it: clay from its
-    # "< 100", moraine as printed, silt / sand / gravel one value for c_s(z̄))
+    # Unconsolidated sediments (c_s as Table 1.3 gives it: clay under its
+    # "< 100" (uacpy guidance), moraine as printed, silt / sand / gravel the
+    # footnote laws 80 / 110 / 180·z̄^0.3 at z̄ = 1)
     'clay':      _entry(sound_speed=1500.0, density=_table_1_3_density(1.5), attenuation=0.2,
                         shear_speed=80.0, shear_attenuation=1.0,
                         porosity=70.0, grain_size_phi=8.80),
@@ -231,6 +235,11 @@ def get_material(name: str) -> Dict:
     name : str
         A preset name of :func:`list_materials`, in any case.
     """
+    if not isinstance(name, str):
+        raise ConfigurationError(
+            f"get_material: name must be a preset name (str); got "
+            f"{type(name).__name__} {name!r}.",
+            remediation=f"Use one of {sorted(MATERIALS)}.")
     key = name.strip().lower()
     if key not in MATERIALS:
         raise ConfigurationError(

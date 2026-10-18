@@ -13,7 +13,6 @@ import pytest
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _http, diesing_local, fetch_bottom_transect
-from uacpy.data.sediment import bottom_from_grain_size
 
 
 @pytest.mark.parametrize('code, litho, phi', [
@@ -55,7 +54,7 @@ def test_transect_classifies_each_waypoint_from_its_own_cell(monkeypatch):
                                 n_points=3)
     assert isinstance(rdb, Bottom)
     assert rdb.ranges.shape == (3,) and rdb.ranges[0] == 0.0
-    expected = [bottom_from_grain_size(phi).sound_speed
+    expected = [BoundaryProperties.from_grain_size(phi).sound_speed
                 for phi in (7.5, 8.0, 9.0)]
     assert rdb.halfspace_sound_speed.tolist() == pytest.approx(expected)
     # Hamilton c_p falls with ϕ: 1513.71 > 1506.47 > 1494.90 m/s.

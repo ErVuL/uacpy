@@ -1027,3 +1027,82 @@ class TestRayBoxDefaults:
         z_box, r_box_km = self._box_line(tmp_path, z_box=333.0, r_box=7000.0)
         assert z_box == pytest.approx(333.0)
         assert r_box_km == pytest.approx(7.0)
+
+
+@pytest.mark.parametrize('run_type', ['C', 'I', 'S', 'A', 'a', 'E'])
+def test_one_beam_is_refused_for_every_influence_run_type(tmp_path, run_type):
+    """bellhop.f90:176-178 leaves Dalpha = 0 for one beam, so every run that
+    goes through the influence step — binary arrivals 'a' as much as ASCII
+    'A' (influence.f90:639 ``CASE ( 'A', 'a' )``) — comes back empty; only a
+    ray trace ('R') is meaningful with one beam."""
+    env = Environment(bathymetry=100.0, ssp=1500.0)
+    with pytest.raises(ConfigurationError, match='n_beams=1'):
+        write_bellhop_env_file(tmp_path / 'b.env', env,
+                               Source(depths=25.0, frequencies=100.0),
+                               Receiver(depths=[50.0], ranges=[1000.0]),
+                               run_type=run_type, n_beams=1)
+    write_bellhop_env_file(tmp_path / 'r.env', env,
+                           Source(depths=25.0, frequencies=100.0),
+                           Receiver(depths=[50.0], ranges=[1000.0]),
+                           run_type='R', n_beams=1)
+
+
+class TestTheSourceDecidesTheRunTypeSourceLetters:
+    """RunType positions 4 (source type) and 3 (beam pattern) come from the
+    Source the writer is handed; a keyword that contradicts it is refused
+    naming both, so a hand-written deck cannot describe another source."""
+
+    @staticmethod
+    def _run_type(tmp_path, source, **kwargs):
+        path = tmp_path / 'src.env'
+        write_bellhop_env_file(path, Environment(bathymetry=100.0, ssp=1500.0),
+                               source, Receiver(depths=[50.0],
+                                                ranges=[1000.0, 2000.0]),
+                               **kwargs)
+        return _run_type_record(path.read_text().splitlines())[1]
+
+    def test_a_line_source_writes_x(self, tmp_path):
+        record = self._run_type(
+            tmp_path, Source(depths=25.0, frequencies=100.0,
+                             source_type='line'))
+        assert record[3] == 'X'
+        assert self._run_type(
+            tmp_path, Source(depths=25.0, frequencies=100.0))[3] == 'R'
+
+    def test_a_letter_that_contradicts_the_source_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError,
+                           match=r"source_type='R'\) contradicts the Source "
+                                 r"\(source_type='line'"):
+            self._run_type(tmp_path, Source(depths=25.0, frequencies=100.0,
+                                            source_type='line'),
+                           source_type='R')
+        assert self._run_type(tmp_path, Source(depths=25.0, frequencies=100.0,
+                                               source_type='line'),
+                              source_type='X')[3] == 'X'
+
+    def test_a_beam_pattern_source_writes_the_star_and_stages_the_sbp(
+            self, tmp_path):
+        pattern = np.array([[-90.0, -20.0], [0.0, 0.0], [90.0, -20.0]])
+        record = self._run_type(
+            tmp_path, Source(depths=25.0, frequencies=100.0,
+                             beam_pattern=pattern))
+        assert record[2] == '*'
+        from uacpy.io import read_source_beam_pattern
+        staged = read_source_beam_pattern(tmp_path / 'src.sbp')
+        np.testing.assert_allclose(staged.angles_deg, pattern[:, 0])
+        omni = tmp_path / 'omni'
+        omni.mkdir()
+        assert self._run_type(
+            omni, Source(depths=25.0, frequencies=100.0))[2] == ' '
+        assert not (omni / 'src.sbp').exists()
+
+    @pytest.mark.parametrize('flag, pattern', [
+        (True, None), (False, np.array([[-90.0, 0.0], [90.0, 0.0]]))])
+    def test_a_beam_pattern_flag_that_contradicts_the_source_is_refused(
+            self, tmp_path, flag, pattern):
+        with pytest.raises(ConfigurationError,
+                           match=r"source_beam_pattern=.*contradicts the "
+                                 r"Source"):
+            self._run_type(tmp_path, Source(depths=25.0, frequencies=100.0,
+                                            beam_pattern=pattern),
+                           source_beam_pattern=flag)

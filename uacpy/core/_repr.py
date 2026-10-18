@@ -27,15 +27,17 @@ __all__ = ['FieldsRepr', 'SettingsRepr', 'SHOWN_VALUES', 'knob', 'settings_repr'
 SHOWN_VALUES = 4
 
 #: The unit a field name's suffix states, for a record that declares none.
-_SUFFIX_UNITS = (('_dB', 'dB'), ('_db', 'dB'), ('_hz', 'Hz'), ('_Hz', 'Hz'),
+_SUFFIX_UNITS = (('_dB', 'dB'), ('_hz', 'Hz'), ('_Hz', 'Hz'),
                  ('_km', 'km'), ('_m', 'm'), ('_s', 's'), ('_c', '°C'),
                  ('_psu', 'psu'), ('_deg', '°'), ('_dbar', 'dbar'))
 
 
-#: The unit of a field whose name is one of the package's axis names, or
-#: the water's temperature and salinity.
+#: The unit of a field whose name is one of the package's axis names (or a
+#: table column's singular form of one), or the water's temperature and
+#: salinity.
 _NAME_UNITS = {'depths': 'm', 'ranges': 'm', 'frequencies': 'Hz',
                'times': 's', 'lats': '°', 'lons': '°',
+               'depth': 'm', 'range': 'm', 'frequency': 'Hz', 'time': 's',
                'temperature': '°C', 'salinity': 'psu'}
 
 
@@ -164,9 +166,12 @@ def value_bit(name: str, value, unit: str = '') -> Optional[str]:
 
 def _word(value) -> str:
     """A list element in repr words: an enum member by its value, a number
-    in ``:g`` form, an object by its class name."""
+    in ``:g`` form, a provenance record by its source id, an object by its
+    class name."""
     if isinstance(value, Enum):
         return str(value.value)
+    if type(value).__name__ == 'DataProvenance':
+        return value.source.id
     if isinstance(value, (str, int, float, np.number)):
         return value if isinstance(value, str) else num(value)
     return type(value).__name__

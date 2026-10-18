@@ -24,6 +24,7 @@ import pytest
 import uacpy
 from uacpy.core.exceptions import (
     ConfigurationError, ProvenanceWarning, UnsupportedFeatureError,
+    ValidityWarning,
 )
 from uacpy.models.bellhop import Bellhop
 from uacpy.models.ram import RAM
@@ -83,8 +84,8 @@ _REFUSED_ASSIGNMENTS = [
     (_fg, 'pH', 14.1),
     (_fg, 'pH', -0.1),
     (lambda: uacpy.BiologicalLayer(10.0, 50.0, 1000.0, 5.0, 0.01),
-     'z_bottom_m', 5.0),
-    (lambda: uacpy.ConstantAbsorption(0.1), 'value_dB_per_wavelength', -1.0),
+     'z_bottom', 5.0),
+    (lambda: uacpy.ConstantAbsorption(0.1), 'value', -1.0),
     (lambda: uacpy.Source(depths=50.0, frequencies=100.0), 'depths', -5.0),
     (lambda: uacpy.Receiver(depths=[10.0], ranges=[100.0, 200.0]),
      'ranges', [3.0, 1.0]),
@@ -840,8 +841,39 @@ def test_run_rejects_unknown_kwarg(model_cls):
 def test_generate_sea_surface_rejects_nonpositive_range():
     from uacpy import generate_sea_surface
     for bad in (0.0, -100.0):
-        with pytest.raises(ConfigurationError, match="rmax_m"):
+        with pytest.raises(ConfigurationError, match="rmax"):
             generate_sea_surface(bad)
+
+
+@pytest.mark.parametrize('n_points, rows', [(600.9, None), (True, None),
+                                            (600.0, 600), (600, 600)])
+def test_generate_sea_surface_takes_a_whole_point_count_as_given(n_points,
+                                                                 rows):
+    # A count is used as given: 600.9 is refused, not truncated to 600 rows.
+    from uacpy import generate_sea_surface
+    if rows is None:
+        with pytest.raises(ConfigurationError, match='whole number of points'):
+            generate_sea_surface(1000.0, 20.0, n_points=n_points)
+    else:
+        assert generate_sea_surface(1000.0, 20.0,
+                                    n_points=n_points).shape == (rows, 2)
+
+
+@pytest.mark.parametrize('name, says', [('wood', "preset 'wood'"),
+                                        (5, 'got int 5'),
+                                        (None, 'got NoneType None')])
+def test_get_material_refuses_a_name_that_is_not_a_preset_typed(name, says):
+    # get_material(5) raised AttributeError ('int' has no 'strip').
+    from uacpy.core.materials import get_material
+    with pytest.raises(ConfigurationError, match=says):
+        get_material(name)
+
+
+def test_a_profile_query_refusal_names_the_call():
+    env = uacpy.Environment(bathymetry=[(0.0, 100.0), (1000.0, 200.0)])
+    with pytest.raises(ConfigurationError,
+                       match=r'^Bathymetry\.eval: method must be one of'):
+        env.bathymetry.eval(range=500.0, method='spline')
 
 
 @pytest.mark.parametrize("bad", ['deep', object(), {'a': 1}])
@@ -958,8 +990,28 @@ class TestAttenuationCeiling:
     (:73 for ``AttenUnit 'W'``, which uacpy always writes, then :113) and aborts
     at :116 once that exceeds the real part. Substituting one into the other
     leaves a bound on alpha alone, independent of frequency and sound speed:
-    ``8.6858896 * 2*pi``. Kraken/Scooter/OAST/Bellhop-Fortran all abort above it;
-    ``bellhopcxx`` instead returns *less* loss at 1e6 dB/lambda than at 0.5."""
+    ``8.6858896 * 2*pi``. The Acoustics-Toolbox solvers (Kraken, Scooter,
+    SPARC, Bounce, Bellhop-Fortran) abort above it, so their deck writers
+    refuse it; OASES (``oaseun31.f:1522-1523``) and RAM (``ramgeo1.5.f:199``)
+    take any attenuation, so the carriers keep the value and warn."""
+
+    @staticmethod
+    def _env(**bottom):
+        from uacpy.core.boundary import BoundaryProperties
+        with recorded_warnings():
+            hs = BoundaryProperties(sound_speed=1800.0, density=2.0,
+                                    shear_speed=bottom.pop('shear_speed', 0.0),
+                                    **bottom)
+        return uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom=hs)
+
+    @staticmethod
+    def _scooter_deck(env, path):
+        from uacpy.io.oalib_writer import write_scooter_env_file
+        write_scooter_env_file(
+            path, env, uacpy.Source(depths=50.0, frequencies=100.0),
+            uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+            interp_ssp='linear', n_mesh=0, rmax=5000.0, c_low=1400.0,
+            c_high=2000.0)
 
     def test_the_constant_is_the_one_the_fortran_implies(self):
         from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
@@ -967,11 +1019,30 @@ class TestAttenuationCeiling:
                                                                  abs=1e-7)
 
     @pytest.mark.parametrize('alpha', [54.6, 60.0, 1e6])
-    def test_above_the_ceiling_is_refused(self, alpha):
-        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
-                           match='dB/wavelength'):
+    def test_above_the_ceiling_a_carrier_warns_and_an_at_deck_refuses(
+            self, alpha, tmp_path):
+        with pytest.warns(ValidityWarning, match='OASES and RAM take it'):
             uacpy.core.BoundaryProperties(sound_speed=1800.0, density=2.0,
                                           attenuation=alpha)
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='bottom half-space attenuation = .* exceeds'):
+            self._scooter_deck(self._env(attenuation=alpha),
+                               tmp_path / 's.env')
+
+    def test_an_oases_deck_takes_an_attenuation_past_the_at_ceiling(
+            self, tmp_path):
+        from uacpy.io.oases_writer import write_oast_input
+        out = tmp_path / 'o.dat'
+        write_oast_input(out, self._env(attenuation=60.0),
+                         uacpy.Source(depths=50.0, frequencies=100.0),
+                         uacpy.Receiver(depths=[50.0], ranges=[1000.0]))
+        assert '60' in out.read_text()
+
+    def test_the_at_deck_takes_the_ceiling_itself(self, tmp_path):
+        from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        self._scooter_deck(
+            self._env(attenuation=MAX_ATTENUATION_DB_PER_WAVELENGTH),
+            tmp_path / 's.env')
 
     @pytest.mark.parametrize('alpha', [0.0, 0.5, 2.0, 54.0])
     def test_below_the_ceiling_is_accepted(self, alpha):
@@ -1012,19 +1083,29 @@ class TestAttenuationCeiling:
                 uacpy.core.BoundaryProperties.from_preset(name)
         assert not [w for w in record if 'JKPS Table 1.3' in str(w.message)]
 
-    def test_the_shear_channel_is_bounded_too(self):
+    def test_the_shear_channel_is_bounded_too(self, tmp_path):
         from uacpy.core.boundary import SedimentLayer
-        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
-                           match='shear_attenuation'):
+        with pytest.warns(ValidityWarning, match='shear_attenuation'):
             SedimentLayer(thickness=1.0, sound_speed=1600.0, density=1.7,
                           attenuation=0.5, shear_attenuation=100.0)
-
-    def test_sediment_layers_are_bounded_too(self):
-        from uacpy.core.boundary import SedimentLayer
         with pytest.raises(uacpy.core.exceptions.ConfigurationError,
-                           match='dB/wavelength'):
-            SedimentLayer(thickness=1.0, sound_speed=1600.0, density=1.7,
-                          attenuation=1e6)
+                           match='half-space shear_attenuation = 100'):
+            self._scooter_deck(self._env(shear_speed=400.0,
+                                         shear_attenuation=100.0),
+                               tmp_path / 's.env')
+
+    def test_sediment_layers_are_bounded_too(self, tmp_path):
+        from uacpy.core.boundary import BoundaryProperties, SedimentLayer
+        from uacpy.core.bottom import SeabedColumn
+        with recorded_warnings():
+            layer = SedimentLayer(thickness=10.0, sound_speed=1600.0,
+                                  density=1.7, attenuation=1e6)
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom=SeabedColumn(
+            layers=[layer], halfspace=BoundaryProperties(
+                sound_speed=1800.0, density=2.0, attenuation=0.5)))
+        with pytest.raises(uacpy.core.exceptions.ConfigurationError,
+                           match='bottom layer 0 attenuation = 1e\\+06'):
+            self._scooter_deck(env, tmp_path / 's.env')
 
 
 class TestAxesMustSurviveTheDeckPrintResolution:
@@ -1276,10 +1357,11 @@ def test_oassp_rejects_complex_contour_options():
     ('O', or no 'J' under automatic sampling — unoassp30.f:285-290, :983,
     :382-385) writes a spectrum the time-series synthesis cannot undo."""
     from uacpy.models.oases import OASSP
-    from uacpy.models.oases.oassp import _reject_unreadable_oassp_options
+    from uacpy.models.oases._common import _reject_unreadable_trf_options
 
     def check(model):
-        _reject_unreadable_oassp_options(model.options, model.n_wavenumbers)
+        _reject_unreadable_trf_options('OASSP', model.options,
+                                       model.n_wavenumbers)
 
     with pytest.raises(ConfigurationError, match="'O'"):
         check(OASSP(correlation_length=5.0, options='N J s O'))
@@ -1850,6 +1932,19 @@ def test_bounce_rejects_quad_interp_at_construction():
         Bounce(interp_ssp='quad')
 
 
+@pytest.mark.requires_binary
+def test_bounce_rejects_a_reassigned_quad_interp_before_the_deck():
+    """The refusal lives in ``_check_knobs``, which every run calls again
+    (stage 2), so 'quad' set after construction is refused as well."""
+    from uacpy.models.bounce import Bounce
+    model = Bounce(verbose=False)
+    model.interp_ssp = 'quad'
+    with pytest.raises(UnsupportedFeatureError, match="'quad'"):
+        model.run_settings(_guard_env_for(Bounce),
+                           uacpy.Source(depths=50.0, frequencies=100.0),
+                           _guard_rcv())
+
+
 @pytest.mark.parametrize('model_cls,mode', _model_mode_params([
     ('Scooter', None), ('SPARC', None),
 ]))
@@ -2056,6 +2151,12 @@ class TestAGridInsideOneWavelengthIsNamed:
     def test_ranges_typed_in_km_at_low_frequency_are_named(self):
         said = self._messages(Bellhop, np.linspace(0.5, 5.0, 10))
         assert len(said) == 1 and 'the farthest at 5 m' in said[0]
+
+    def test_a_frequency_typed_in_khz_is_named(self):
+        # 0.2 Hz meant as 200 Hz: a 7.5 km wavelength past a 5 km grid.
+        said = self._messages(Bellhop, np.linspace(100.0, 5000.0, 10),
+                              frequency=0.2)
+        assert len(said) == 1 and 'frequencies are in Hz' in said[0]
 
     def test_the_highest_frequency_sets_the_wavelength(self):
         # A band to 400 Hz has a 3.75 m wavelength: 5 m is past it.

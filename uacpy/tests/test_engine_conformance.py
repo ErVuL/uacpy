@@ -55,7 +55,8 @@ import pytest
 
 import uacpy
 from uacpy.core.exceptions import (ExecutableNotFoundError,
-                                   ModelExecutionError)
+                                   ModelExecutionError,
+                                   UnsupportedFeatureError)
 from uacpy.models._registry import ENGINES
 from uacpy.core.run_settings import EngineSettings, RunMode, RunSettings
 from uacpy.models.base import _HOST_OPTIONS, _STAGE_HOOKS, PropagationModel
@@ -117,7 +118,7 @@ def test_the_knob_checks_read_numbers_by_the_one_rule(value, whole, real):
     ('Kraken', 'c_high'), ('Kraken', 'n_modes'), ('Scooter', 'rmax_factor'),
     ('SPARC', 'time_max'), ('Bounce', 'n_angles'), ('RAM', 'dr'),
     ('RAM', 'accuracy'), ('Bellhop', 'r_box'), ('OAST', 'range_max'),
-    ('OASN', 'white_noise_level'), ('OASP', 'freq_max'),
+    ('OASN', 'white_noise_level_dB'), ('OASP', 'freq_max'),
     ('OASSP', 'rms_roughness'), ('OASS', 'correlation_length'),
     ('OASR', 'plot_angle_step')])
 def test_an_unset_numeric_knob_is_read_by_the_one_rule(cls_name, knob):
@@ -367,6 +368,37 @@ def test_run_settings_resolves_every_declared_mode_to_itself(key):
         if mode == RunMode.TIME_SERIES:
             kw = dict(source_waveform=np.hanning(40), sample_rate=400.0)
         assert model.run_settings(env, src, rcv, mode, **kw).mode is mode
+
+
+@pytest.mark.parametrize('key', _KEYS)
+def test_a_mode_the_engine_does_not_run_is_refused_naming_who_does(key):
+    """The refusal lists this engine's own modes and names the registered
+    engines that run the mode asked for (``_registry.engines_running``),
+    as the ``compute_*`` wrappers' refusals do. A mode an engine refuses
+    with a message of its own (``_refuse_run_mode``, SPARC's COHERENT_TL)
+    is left to that message."""
+    from uacpy.models._registry import engines_running
+
+    def generic(mode):
+        try:
+            model._refuse_run_mode(mode)
+        except UnsupportedFeatureError:
+            return False
+        return True
+
+    model = _engine(key)
+    env, src, rcv = _carriers(key)
+    missing = [m for m in RunMode
+               if m not in model.supported_modes and engines_running(m)
+               and generic(m)]
+    if not missing:
+        pytest.skip(f"{key} runs every mode some engine runs")
+    mode = missing[0]
+    with pytest.raises(UnsupportedFeatureError,
+                       match=re.escape(f"does not support: {mode}")) as caught:
+        model.run_settings(env, src, rcv, mode)
+    said = str(caught.value)
+    assert f"(run by {', '.join(engines_running(mode))})" in said, said
 
 
 # ── one checking stage ──────────────────────────────────────────────────
@@ -818,10 +850,16 @@ def test_every_mode_returns_its_declared_output(key, mode):
                  marks=_known_break('stamped_settings', f'{key}-{mode.name}'))
     for key in _KEYS for mode in ENGINES[key].load().spec.modes])
 def test_every_mode_stamps_the_settings_run_settings_resolves(key, mode):
+    """The record a result carries is the one ``run_settings`` resolves,
+    followed by the notes the run adds of what it found
+    (``models._extract.add_run_note``: a count the binary chose, a bin
+    solved on its own deck)."""
     model = _engine(key)
     env, src, rcv = _carriers(key)
-    assert _run(key, mode).run_settings == model.run_settings(
-        env, src, rcv, mode, **_mode_kwargs(mode))
+    stamped = _run(key, mode).run_settings
+    preview = model.run_settings(env, src, rcv, mode, **_mode_kwargs(mode))
+    assert stamped.notes[:len(preview.notes)] == preview.notes
+    assert stamped._replace(notes=preview.notes) == preview
 
 
 @pytest.mark.parametrize('key', _KEYS)
@@ -888,7 +926,7 @@ def test_a_single_depth_weight_scales_the_unit_run(key):
         scaled = model.run(env, weighted, rcv, mode, **_mode_kwargs(mode))
     assert _relative_error(scaled.data, w * unit.data) < \
         _RERUN_TOLERANCE.get(key, 1e-9)
-    assert scaled.metadata['superposed_sources'] == {
+    assert scaled.superposed_sources == {
         'depths': [50.0], 'weights': [complex(w)]}
 
 

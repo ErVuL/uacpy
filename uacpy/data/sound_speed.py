@@ -50,14 +50,15 @@ from uacpy.core.geo import (
     geodesic_waypoints,
 )
 from uacpy.data._geo import (
-    require_month, ring_offsets, run_representative_indices, capped_n_points,
-    require_source, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
+    require_month, ring_offsets, run_representative_indices,
+    checked_explicit_n_points, require_source, auto_budget, checked_max_points,
     checked_max_days, cut_at_first_invalid,
     checked_n_points, checked_max_distance, checked_offset, cell_half_diagonal_km,
 )
 from uacpy.core.geo import parse_date
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data._chain import (SourceChain, SourceProvider, first_answer,
+from uacpy.data._chain import (MissingPrerequisiteError, SourceChain,
+                               SourceProvider, first_answer,
                                lower_source_spec)
 from uacpy.data._http import http_get
 from uacpy.data.sources import SOURCES, DataProvenance
@@ -65,8 +66,8 @@ from uacpy._log import log_message
 from uacpy.data._provenance_notice import (one_provenance_notice,
                                            provenance_fallback)
 
-__all__ = ['fetch_ssp', 'fetch_ssp_transect', 'ssp_transect_plan',
-           'fetch_ts_profile', 'TSProfile', 'assemble_range_dependent',
+__all__ = ['fetch_ssp', 'fetch_ssp_transect', 'ssp_transect_sampling',
+           'fetch_ts_profile', 'TSProfile',
            'extend_ssp_below_data', 'extend_column_to_seafloor',
            'deepen_with_climatology']
 
@@ -99,9 +100,11 @@ def _fetch_ssp_backend(
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
     max_distance_km: Optional[float] = None,
+    who: str = 'fetch_ssp',
 ) -> SoundSpeedProfile:
     """Backend of :func:`fetch_ssp`: ``backend`` is a backend token, as
-    ``fetch_environment`` resolves them."""
+    ``fetch_environment`` resolves them; ``who`` is the public function the
+    offset notice names."""
     formula = canonical_formula(formula, 'fetch_ssp')
     lat, lon = as_coordinate(point)
     depths, temp, sal, lat_idx, lon_idx = _ts_profile_with_cell(
@@ -111,7 +114,7 @@ def _fetch_ssp_backend(
     # Mackenzie is stated in depth, so it reads the WOA23 depths directly;
     # the pressure equations convert them at the site latitude.
     c = np.asarray(sound_speed_at_depth(temp, sal, depths, formula=formula,
-                                        latitude_deg=lat), dtype=float)
+                                        latitude=lat), dtype=float)
     log_message(
         'sound_speed', f"WOA23 SSP at {lat:.3f}, {lon:.3f}: {depths.size} "
         f"levels, c=[{c.min():.1f}, {c.max():.1f}] m/s", verbose=verbose,
@@ -122,12 +125,14 @@ def _fetch_ssp_backend(
     # closest wet neighbour when the nearest is dry, so ``offset_km`` measures
     # the real hop.
     prov = _woa_provenance(lat, lon, lat_idx, lon_idx, resolution, date,
-                           month, deepest_m=float(np.max(depths)),
+                           month, deepest_m=float(np.max(depths)), who=who,
                            max_distance_km=max_distance_km)
     return SoundSpeedProfile(depths=depths, sound_speed=c, kind='measured',
                              data_sources=(prov,), formula=formula)
 
 
+@one_provenance_notice(subject="the profile's data",
+                       record='uacpy.data.citations(ssp)')
 def fetch_ssp(
     point: Coordinate,
     *,
@@ -227,22 +232,23 @@ def fetch_ssp(
         who='fetch_ssp')
 
 
-def ssp_transect_plan(
+def ssp_transect_sampling(
     start: Coordinate, end: Coordinate, *,
     n_points: Union[int, str] = 'auto',
-    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    max_points: Optional[int] = None,
     resolution: str = '1.00',
 ) -> dict:
     """Resolve *where* a WOA23 transect would sample, without fetching.
 
-    Returns ``{'n_points', 'lats', 'lons', 'ranges_m'}`` — the column
+    Returns ``{'n_points', 'lats', 'lons', 'ranges'}`` — the column
     coordinates the transect fetch would use. With ``n_points='auto'`` the
-    plan reflects the **distinct WOA cells** the great-circle crosses (the
+    sampling reflects the **distinct WOA cells** the great-circle crosses (the
     grid cell is the sample identity, computed analytically — no network), so
     you can see how many independent columns are actually available before
-    paying to fetch them. ``max_points`` caps the probe (and thus the result);
-    an explicit ``n_points`` above it is capped to it with a ``FallbackWarning``
-    (the same cap warning :func:`fetch_bathy_transect` emits).
+    paying to fetch them. ``max_points`` is the waypoints ``'auto'`` probes
+    (and thus bounds the result); an explicit ``n_points`` is used as given,
+    and refused when it exceeds an explicit ``max_points`` (as in
+    :func:`fetch_bathy_transect`).
 
     Parameters
     ----------
@@ -252,20 +258,29 @@ def ssp_transect_plan(
         Columns, or ``'auto'`` for one per distinct WOA cell. Default
         ``'auto'``.
     max_points : int, optional
-        Cap on the probe and the result. Default 1000.
+        The probe of ``'auto'`` and so the bound on its result; ``None``
+        (default) is 1000 (uacpy guidance).
     resolution : str, optional
         WOA23 grid resolution in degrees, ``'1.00'`` or ``'0.25'``. Default
         ``'1.00'``.
     """
+    return _ssp_transect_sampling(start, end, n_points=n_points,
+                                  max_points=max_points, resolution=resolution,
+                                  who='ssp_transect_sampling')
+
+
+def _ssp_transect_sampling(start, end, *, n_points, max_points, resolution, who):
+    """:func:`ssp_transect_sampling`, its refusals named after ``who``, the
+    public function called."""
     if resolution not in _GRIDS:
         raise ConfigurationError(
-            f"ssp_transect_plan: unknown resolution={resolution!r}.",
+            f"{who}: unknown resolution={resolution!r}.",
             remediation=f"Use one of {sorted(_GRIDS)}.")
-    max_points = checked_max_points(max_points, 'ssp_transect_plan')
-    n_points = checked_n_points(n_points, 'ssp_transect_plan', allow_auto=True)
-    probe_n = (max_points if n_points == 'auto'
-               else capped_n_points(n_points, max_points, 'ssp_transect_plan'))
-    lats, lons, ranges_m = geodesic_waypoints(start, end, probe_n)
+    max_points = checked_max_points(max_points, who)
+    n_points = checked_n_points(n_points, who, allow_auto=True)
+    probe_n = (auto_budget(max_points) if n_points == 'auto'
+               else checked_explicit_n_points(n_points, max_points, who))
+    lats, lons, ranges = geodesic_waypoints(start, end, probe_n)
     if n_points == 'auto':
         # Identity = WOA grid cell (analytic, no fetch). Collapse runs that
         # fall in the same cell so duplicates are never fetched.
@@ -276,7 +291,7 @@ def ssp_transect_plan(
         reps = list(range(probe_n))
     idx = np.asarray(reps, dtype=int)
     return {'n_points': int(idx.size), 'lats': lats[idx],
-            'lons': lons[idx], 'ranges_m': ranges_m[idx]}
+            'lons': lons[idx], 'ranges': ranges[idx]}
 
 
 def _fetch_ssp_transect_backend(
@@ -284,7 +299,7 @@ def _fetch_ssp_transect_backend(
     end: Coordinate,
     *,
     n_points: Union[int, str] = 'auto',
-    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    max_points: Optional[int] = None,
     date: Union[str, _dt.date, None] = None,
     month: Optional[int] = None,
     formula: str = DEFAULT_SOUND_SPEED_FORMULA,
@@ -296,17 +311,20 @@ def _fetch_ssp_transect_backend(
     verbose: Union[bool, str] = False,
     seafloor=None,
     max_distance_km: Optional[float] = None,
+    who: str = 'fetch_ssp_transect',
 ) -> SoundSpeedProfile:
     """Backend of :func:`fetch_ssp_transect`: ``backend`` is a backend token, as
-    ``fetch_environment`` resolves them."""
-    plan = ssp_transect_plan(start, end, n_points=n_points,
-                             max_points=max_points, resolution=resolution)
-    lats, lons, ranges_m = plan['lats'], plan['lons'], plan['ranges_m']
+    ``fetch_environment`` resolves them; ``who`` is the public function the
+    offset notices name."""
+    plan = _ssp_transect_sampling(start, end, n_points=n_points,
+                                  max_points=max_points, resolution=resolution,
+                                  who=who)
+    lats, lons, ranges = plan['lats'], plan['lons'], plan['ranges']
     columns = [
         _fetch_ssp_backend((la, lo), date=date, month=month, formula=formula,
                   resolution=resolution, backend=backend, decade=decade,
                   base_url=base_url, timeout=timeout, verbose=verbose,
-                  max_distance_km=max_distance_km)
+                  max_distance_km=max_distance_km, who=who)
         for la, lo in zip(lats, lons)
     ]
     # Extend each column to its own local seafloor BEFORE stacking: the
@@ -317,15 +335,15 @@ def _fetch_ssp_transect_backend(
     if seafloor is not None:
         columns = [
             extend_column_to_seafloor(col, seafloor, r, latitude=la)
-            for col, r, la in zip(columns, ranges_m, lats)
+            for col, r, la in zip(columns, ranges, lats)
         ]
     log_message(
         'sound_speed',
         f"WOA23 range-dependent SSP: {len(columns)} columns "
         f"({'auto' if n_points == 'auto' else n_points}) over "
-        f"{ranges_m[-1] / 1000:.1f} km", verbose=verbose,
+        f"{ranges[-1] / 1000:.1f} km", verbose=verbose,
     )
-    return assemble_range_dependent(columns, ranges_m)
+    return _assemble_range_dependent(columns, ranges)
 
 
 @one_provenance_notice(subject="the profile's data",
@@ -335,7 +353,7 @@ def fetch_ssp_transect(
     end: Coordinate,
     *,
     n_points: Union[int, str] = 'auto',
-    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    max_points: Optional[int] = None,
     date: Union[str, _dt.date, None] = None,
     month: Optional[int] = None,
     formula: str = DEFAULT_SOUND_SPEED_FORMULA,
@@ -368,8 +386,10 @@ def fetch_ssp_transect(
     WOA's native range resolution — neither over- nor under-sampling. Pass an
     integer to sample exactly that many evenly-spaced columns instead.
 
-    ``max_points`` caps the number of waypoints probed *before* the reduction
-    (the fetch budget); the result is never larger.
+    ``max_points`` is the number of waypoints ``'auto'`` probes *before* the
+    reduction (the fetch budget); the result is never larger. An explicit
+    ``n_points`` is used as given, and refused when it exceeds an explicit
+    ``max_points``.
 
     Columns are placed on a common depth axis (the union of every sampled
     column's own nodes); shallower columns hold their deepest value below their
@@ -377,7 +397,7 @@ def fetch_ssp_transect(
     otherwise mirror :func:`fetch_ssp`; ``start``/``end`` are ``(lat, lon)``.
     ``source`` takes the same chain spec; Argo has no transect fetch, so a
     chain passes over it, and ``'argo'`` alone is refused. The WOA23 sampling
-    described above is WOA23's; :func:`ssp_transect_plan` resolves it without
+    described above is WOA23's; :func:`ssp_transect_sampling` resolves it without
     fetching.
 
     Parameters
@@ -387,7 +407,8 @@ def fetch_ssp_transect(
     n_points : int or 'auto', optional
         Columns, or ``'auto'`` (see above). Default ``'auto'``.
     max_points : int, optional
-        Cap on the waypoints probed. Default 1000.
+        The waypoints ``'auto'`` probes; ``None`` (default) is 1000 (uacpy
+        guidance).
     date : str or datetime.date, optional
         Calendar date; WOA23 uses only its month. Exclusive with ``month``.
     month : int, optional
@@ -442,7 +463,7 @@ def fetch_ssp_transect(
         who='fetch_ssp_transect')
 
 
-def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
+def _assemble_range_dependent(columns, ranges) -> SoundSpeedProfile:
     """Stack 1-D ``SoundSpeedProfile`` columns into a 2-D range-dependent one.
 
     The common depth axis is the union of every column's depth nodes (see the
@@ -453,7 +474,7 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     to strictly increasing range, so a caller that supplies them out of order
     still gets a correctly-ordered range axis (the carriers assume ascending
     range). The columns' provenance is aggregated onto the assembled profile:
-    one record per column, stamped with the column's range as ``range_m``,
+    one record per column, stamped with the column's range as ``range``,
     so every column's cell and offset stay on the profile. ``formula`` travels with them when
     every column agrees on it, so a later seafloor extension continues the
     assembled field under the equation that built it. A column that is itself
@@ -464,18 +485,18 @@ def assemble_range_dependent(columns, ranges_m) -> SoundSpeedProfile:
     ----------
     columns : sequence of SoundSpeedProfile
         Range-independent profiles, one per range.
-    ranges_m : array_like
+    ranges : array_like
         The range (m) of each column.
     """
     for i, col in enumerate(columns):
         n_ranges = np.asarray(col.sound_speed).shape[1]
         if n_ranges != 1:
             raise ConfigurationError(
-                f"assemble_range_dependent: column {i} has {n_ranges} range "
+                f"_assemble_range_dependent: column {i} has {n_ranges} range "
                 f"columns; each input must be a 1-D profile.",
                 remediation="Pass one single-range SoundSpeedProfile per "
-                            "range in ranges_m.")
-    ranges = np.asarray(ranges_m, dtype=float)
+                            "range in ranges.")
+    ranges = np.asarray(ranges, dtype=float)
     order = np.argsort(ranges, kind='stable')
     ranges = ranges[order]
     columns = [columns[i] for i in order]
@@ -515,7 +536,7 @@ def _woa_provenance(lat, lon, lat_idx, lon_idx, resolution, date, month, *,
     then warns when that hop leaves the cell holding the point, and refuses
     past ``max_distance_km``. A monthly column reaching below the 1500 m the
     monthly fields stop at (``deepest_m``, the column's deepest level) was
-    continued by the annual mean, and the record says so: ``split_depth_m``
+    continued by the annual mean, and the record says so: ``split_depth``
     and ``period_below``."""
     period = _resolve_period(date, month)
     lat_c, lon_c = _cell_center(lat_idx, lon_idx, resolution)
@@ -530,7 +551,7 @@ def _woa_provenance(lat, lon, lat_idx, lon_idx, resolution, date, month, *,
         requested_date=(str(parse_date(date)) if date is not None else None),
         point_kind='cell', cell_size_deg=float(step),
         from_neighbour_cell=(lat_idx, lon_idx) != own_cell,
-        **({'split_depth_m': _MONTHLY_MAX_DEPTH, 'period_below': 'annual mean'}
+        **({'split_depth': _MONTHLY_MAX_DEPTH, 'period_below': 'annual mean'}
            if period and deepest_m is not None
            and deepest_m > _MONTHLY_MAX_DEPTH else {}),
     )
@@ -584,9 +605,11 @@ def _fetch_ts_profile_backend(
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
     max_distance_km: Optional[float] = None,
+    who: str = 'fetch_ts_profile',
 ) -> TSProfile:
     """Backend of :func:`fetch_ts_profile`: ``backend`` is a backend token, as
-    ``fetch_environment`` resolves them."""
+    ``fetch_environment`` resolves them; ``who`` is the public function the
+    offset notice names."""
     depths, temp, sal, lat_idx, lon_idx = _ts_profile_with_cell(
         point, date=date, month=month, resolution=resolution, source=backend,
         decade=decade, base_url=base_url, timeout=timeout, verbose=verbose,
@@ -597,7 +620,7 @@ def _fetch_ts_profile_backend(
                      provenance=_woa_provenance(
                          lat, lon, lat_idx, lon_idx, resolution, date, month,
                          deepest_m=float(np.max(depths)),
-                         who='fetch_ts_profile', max_distance_km=max_distance_km))
+                         who=who, max_distance_km=max_distance_km))
 
 
 def fetch_ts_profile(
@@ -726,7 +749,9 @@ def _ts_profile_with_cell(
     return depths, temp, sal, lat_idx, lon_idx
 
 
-_MONTHLY_MAX_DEPTH = 1500.0  # deepest level in WOA monthly/seasonal fields
+# Deepest level of the WOA23 monthly fields (57 standard levels to 1500 m,
+# against the annual fields' 102 to 5500 m, read off the installed files).
+_MONTHLY_MAX_DEPTH = 1500.0
 
 
 def _resolve_period(date, month) -> int:
@@ -744,8 +769,9 @@ def _resolve_period(date, month) -> int:
 
 # How far the wet-cell search may wander from the nearest cell, in grid cells.
 # A coastal point can snap onto a land cell whose column is entirely fill; the
-# neighbouring cell is usually the same water mass. Kept small so a genuinely
-# land-locked request still fails instead of silently sampling a distant sea.
+# search then takes the nearest wet cell within this many rings. uacpy
+# guidance: kept small so a land-locked request fails instead of silently
+# sampling a distant sea.
 _WET_CELL_SEARCH_RINGS = 2
 
 
@@ -891,24 +917,26 @@ def _woa_cache_first(source, call):
 
 
 def _woa23_point(backend, point, *, date, formula, resolution, timeout,
-                 verbose, max_distance_km=None, **_request):
+                 verbose, max_distance_km=None, who='fetch_environment',
+                 **_request):
     """A ``fetch_environment`` SSP point fetch from one WOA23 backend."""
     return _fetch_ssp_backend(
         point, date=date, formula=formula, resolution=resolution,
         backend=backend, timeout=timeout, verbose=verbose,
-        max_distance_km=max_distance_km)
+        max_distance_km=max_distance_km, who=who)
 
 
 def _woa23_transect(backend, start, end, *, n_points, max_points, date,
                     formula, resolution, timeout, verbose, seafloor,
-                    max_distance_km=None, **_request):
+                    max_distance_km=None, who='fetch_environment',
+                    **_request):
     """A ``fetch_environment`` SSP transect from one WOA23 backend; each
     column extends to its own local ``seafloor`` before stacking."""
     return _fetch_ssp_transect_backend(
         start, end, n_points=n_points, max_points=max_points, date=date,
         formula=formula, resolution=resolution, backend=backend,
         timeout=timeout, verbose=verbose, seafloor=seafloor,
-        max_distance_km=max_distance_km)
+        max_distance_km=max_distance_km, who=who)
 
 
 #: WOA23 as a sound-speed source: the installed grids, then NCEI THREDDS.
@@ -919,9 +947,11 @@ _WOA23_SSP = SourceProvider('woa23', ('local', 'opendap'), _woa23_point,
 def _require_ssp_date(source, date, *, who='fetch_environment',
                       keyword='ssp_sources'):
     """Refuse a time-specific SSP source without ``date=``, naming the
-    ``who`` that chained it and the ``keyword`` it was named by."""
+    ``who`` that chained it and the ``keyword`` it was named by. A chain
+    passes over the refusal to its next source; when no source answers, it
+    is the call's error even where a literal could stand in."""
     if date is None:
-        raise ConfigurationError(
+        raise MissingPrerequisiteError(
             f"{who}: {keyword}={source!r} requires date=.",
             remediation=f"Pass a date, or use {keyword}='woa23'.",
         )
@@ -1247,9 +1277,9 @@ def extend_ssp_below_data(ssp, depth_max: float,
     )
 
 
-def extend_column_to_seafloor(column, seafloor, range_m: float,
+def extend_column_to_seafloor(column, seafloor, range: float,
                               latitude: float = REFERENCE_LATITUDE_DEG):
-    """One transect column, extended down to the seafloor under ``range_m``.
+    """One transect column, extended down to the seafloor under ``range``.
 
     Extension only: a column that already reaches past its local seafloor is
     returned unchanged. :func:`extend_ssp_below_data` delegates the shallower
@@ -1273,12 +1303,12 @@ def extend_column_to_seafloor(column, seafloor, range_m: float,
         One range-independent transect column.
     seafloor : Bathymetry
         The transect's bathymetry.
-    range_m : float
+    range : float
         The column's range (m).
     latitude : float, optional
         Latitude (deg) of the depth-to-pressure conversion. Default 45.
     """
-    depth = float(np.asarray(seafloor.eval(range=range_m)).flat[0])
+    depth = float(np.asarray(seafloor.eval(range=range)).flat[0])
     if depth <= float(np.asarray(column.depths)[-1]):
         return column
     return extend_ssp_below_data(column, depth, latitude=latitude)
@@ -1289,7 +1319,8 @@ def extend_column_to_seafloor(column, seafloor, range_m: float,
 #: raised-cosine blend from the cast to the column, so the joined profile
 #: carries no step and no gradient kink at the join (a step would read as a
 #: reflector and a kink as a false turning depth to a ray model). Core Argo
-#: floats stop near 2000 dbar, so for them the blend spans 1500-2000 m.
+#: floats stop near 2000 dbar, so for them the blend spans 1500-2000 m. The
+#: span is uacpy guidance, not a published value.
 CAST_BLEND_M = 500.0
 
 
@@ -1422,7 +1453,8 @@ def deepen_with_climatology(
             f"{who}: ssp holds {ssp.sound_speed.shape[1]} range columns; it "
             f"deepens one cast.",
             remediation="Deepen each column on its own point and stack them "
-                        "with uacpy.data.assemble_range_dependent.")
+                        "with SoundSpeedProfile.from_casts(ranges, "
+                        "[c.to_pairs() for c in columns]).")
     if not isinstance(source, str) or source not in WOA_SOURCES:
         raise ConfigurationError(
             f"{who}: source={source!r} is not a climatology source.",

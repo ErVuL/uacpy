@@ -13,12 +13,10 @@ source is available it falls back to the fetched 10 m wind, scaled to the
 first, then the cached NBS monthly climatology.
 """
 
-import dataclasses
-
 import numpy as np
 
 from uacpy.core.altimetry import Altimetry
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.altimetry import SEA_SURFACE_CALM_WIND_MPS, generate_sea_surface
 from uacpy.core.units import knots_to_ms, ms_to_knots
 from uacpy._log import log_message
@@ -27,6 +25,7 @@ from uacpy.data._geo import checked_max_days, checked_max_distance
 from uacpy.data._chain import first_answer, lower_source_spec
 from uacpy.core.geo import parse_date
 from uacpy.data.sources import SOURCES, DataProvenance
+from uacpy.data._provenance_notice import one_provenance_notice
 
 __all__ = ['fetch_sea_surface', 'hs_to_pm_wind', 'SEA_SURFACE_SOURCES']
 
@@ -70,7 +69,7 @@ def hs_to_pm_wind(hs):
     Inverts the fully developed ``Hs = 0.0214·U²`` (``U`` in m/s at the 19.5 m
     PM reference height, not a 10 m wind) and returns ``U`` in knots, the unit
     of every wind in uacpy and of
-    :func:`~uacpy.core.altimetry.generate_sea_surface`'s ``wind_speed_kn``, so
+    :func:`~uacpy.core.altimetry.generate_sea_surface`'s ``wind_speed_19_5m_kn``, so
     the answer feeds it directly::
 
         from uacpy.core.altimetry import generate_sea_surface
@@ -90,7 +89,9 @@ def hs_to_pm_wind(hs):
     return float(ms_to_knots(_pm_wind_ms(hs)))
 
 
-def fetch_sea_surface(point, *, date, rmax_m, n_points=None, rng=None,
+@one_provenance_notice(subject="the surface's data",
+                       record='uacpy.data.citations(surface)')
+def fetch_sea_surface(point, *, date, rmax, n_points=None, rng=None,
                       source='auto', max_days=None, timeout=120.0,
                       verbose=False, max_distance_km=None):
     """Sea-surface altimetry and the provenance of the sea state it came from.
@@ -101,7 +102,7 @@ def fetch_sea_surface(point, *, date, rmax_m, n_points=None, rng=None,
         Site coordinates in decimal degrees.
     date : str or datetime.date
         Calendar date of the sea state (required; sea state is time-specific).
-    rmax_m : float
+    rmax : float
         Range extent (m) of the realization — set to the transect length.
     n_points : int, optional
         Range samples in the returned altimetry. Default ``None``: size the
@@ -137,7 +138,7 @@ def fetch_sea_surface(point, *, date, rmax_m, n_points=None, rng=None,
     Returns
     -------
     Altimetry
-        The realization (``.ranges`` 0 → ``rmax_m``, ``.heights`` in m),
+        The realization (``.ranges`` 0 → ``rmax``, ``.heights`` in m),
         carrying the sea state's provenance like every fetched carrier:
         ``.data_sources`` is one :class:`~uacpy.data.DataProvenance` whose
         ``source.id`` is the catalogue id that supplied it (``'waverys'`` /
@@ -175,7 +176,7 @@ def fetch_sea_surface(point, *, date, rmax_m, n_points=None, rng=None,
             log_message('waves', f"Hs {w.hs:.2f} m "
                         f"({w.provenance.source.id}) → "
                         f"PM wind {float(ms_to_knots(u)):.1f} kn", verbose=verbose)
-            return _altimetry(_surface(rmax_m, u, n_points, rng),
+            return _altimetry(_surface(rmax, u, n_points, rng),
                               w.provenance)
         from uacpy.data.wind_live import wind_at
         return wind_at(point, date=date, source=backend, timeout=timeout,
@@ -191,47 +192,30 @@ def fetch_sea_surface(point, *, date, rmax_m, n_points=None, rng=None,
     kind = 'climatology' if backend == 'local' else 'live'
     log_message('wind', f"U10 {answer:.1f} kn (nbs {kind}) → PM wind "
                 f"{float(ms_to_knots(u)):.1f} kn", verbose=verbose)
-    record = _provenance('nbs', lat, lon, date,
-                         climatology=(backend == 'local'))
-    return _altimetry(_surface(rmax_m, u, n_points, rng),
-                      dataclasses.replace(
-                          record, data_point=wind_prov.data_point,
-                          data_date=(record.data_date if backend == 'local'
-                                     else wind_prov.data_date)))
-
-
-def _provenance(src_id, lat, lon, date, *, climatology=False):
-    """Provenance of a sea-state fetch: a live product is dated by the
-    request; the cached wind climatology by its month and reference period."""
-    day = parse_date(date)
-    data_date = None
-    if climatology:
-        from uacpy.data.wind_local import climatology_period
-        try:
-            period = climatology_period()
-        except (ConfigurationError, DataFetchError):
-            period = None
-        data_date = (f"month {day.month:02d}, {period}" if period
-                     else f"month {day.month:02d} (climatology)")
-    return DataProvenance(source=SOURCES[src_id], data_date=data_date,
-                          requested_point=(lat, lon),
-                          requested_date=day.isoformat())
+    # The wind record dates the live step read, or the cached climatology by
+    # its month and reference period.
+    record = DataProvenance(source=SOURCES['nbs'],
+                            data_date=wind_prov.data_date,
+                            data_point=wind_prov.data_point,
+                            requested_point=(lat, lon),
+                            requested_date=parse_date(date).isoformat())
+    return _altimetry(_surface(rmax, u, n_points, rng), record)
 
 
 def _altimetry(pairs, prov):
-    """``(n, 2)`` ``[range_m, height_m]`` pairs → an ``Altimetry`` stamped
+    """``(n, 2)`` ``[range, height]`` pairs → an ``Altimetry`` stamped
     with ``prov``."""
     pairs = np.asarray(pairs, dtype=float)
     return Altimetry(ranges=pairs[:, 0], heights=pairs[:, 1],
                      data_sources=(prov,))
 
 
-def _surface(rmax_m, wind_ms, n_points, rng):
+def _surface(rmax, wind_ms, n_points, rng):
     # A calm sea (near-zero wind / wave) would trip generate_sea_surface's
     # positive-wind guard; floor it to the calm threshold, which the core
     # sizing rule answers with its fixed count and no warning — the
     # realization stands in for a flat surface either way. Sizing, cap and
     # the under-resolution warning are generate_sea_surface's.
     wind_ms = max(wind_ms, SEA_SURFACE_CALM_WIND_MPS)
-    return generate_sea_surface(rmax_m, ms_to_knots(wind_ms), n_points=n_points,
+    return generate_sea_surface(rmax, ms_to_knots(wind_ms), n_points=n_points,
                                 rng=rng)

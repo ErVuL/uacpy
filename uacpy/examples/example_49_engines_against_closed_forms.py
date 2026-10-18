@@ -9,13 +9,11 @@ uacpy.metrics states the agreement on the shared grid.
 
 Uses: analytic.lloyd_mirror · analytic.ideal_waveguide · Bellhop(beam_type=) ·
 Kraken · Scooter · metrics.tl_rmse · metrics.tl_max_error · plot.compare ·
-plot.plot_field_difference
+metrics.tl_difference
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -45,10 +43,10 @@ mirror = analytic.lloyd_mirror(source, line, sound_speed=c)
 beams = {
     'Bellhop, hat beams': uacpy.Bellhop(
         backend='fortran', beam_type='G', n_beams=5001,
-        launch_angles=(-20.0, 20.0)).run(deep, source, line),
+        launch_angles_deg=(-20.0, 20.0)).run(deep, source, line),
     'Bellhop, Gaussian beams': uacpy.Bellhop(
         backend='fortran', beam_type='B', n_beams=5001,
-        launch_angles=(-20.0, 20.0)).run(deep, source, line),
+        launch_angles_deg=(-20.0, 20.0)).run(deep, source, line),
 }
 
 # ── Ideal waveguide, 200 m, pressure-release at both ends: an exact modal sum.
@@ -84,9 +82,8 @@ uacpy.plot.compare([modal.at(depth=30.0)]
                    + [f.at(depth=30.0) for f in modes.values()],
                    labels=['ideal waveguide (exact)', *modes], ax=axes[1],
                    title='Ideal waveguide, 25 Hz, receiver 30 m')
-uacpy.plot.plot_field_difference(modes['Scooter'], modal, axes[2],
-                                 diff_vmax=1.0,
-                                 title='Scooter − ideal waveguide (dB)')
+uacpy.metrics.tl_difference(modes['Scooter'], modal).plot(
+    ax=axes[2], diff_vmax=1.0, title='Scooter − ideal waveguide (dB)')
 fig.tight_layout()
 fig.savefig(OUT / 'example_49_engines_against_closed_forms.png', dpi=150,
             bbox_inches='tight')

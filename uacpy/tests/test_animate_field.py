@@ -230,7 +230,7 @@ def test_plot_time_snapshots_grid_shape():
         'A': _make_synthetic_field(n_t=40, t_max=1.0),
         'B': _make_synthetic_field(n_t=40, t_max=1.0),
     }
-    fig, axes = plot_time_snapshots(fields, times_s=(0.2, 0.5, 0.8))
+    fig, axes = plot_time_snapshots(fields, times=(0.2, 0.5, 0.8))
     assert axes.shape == (2, 3)
     import matplotlib.pyplot as plt
     plt.close(fig)
@@ -240,7 +240,7 @@ def test_plot_time_snapshots_empty_raises():
     from uacpy.plot import plot_time_snapshots
 
     with pytest.raises(ConfigurationError, match='empty'):
-        plot_time_snapshots({}, times_s=(0.1,))
+        plot_time_snapshots({}, times=(0.1,))
 
 
 @pytest.mark.parametrize("frame_stride, accepted", [
@@ -272,7 +272,7 @@ def test_plot_time_snapshots_global_pmax():
     import matplotlib.pyplot as plt
 
     fields = {'A': _make_synthetic_field(n_t=20, t_max=0.5)}
-    fig, axes = plot_time_snapshots(fields, times_s=(0.1, 0.3),
+    fig, axes = plot_time_snapshots(fields, times=(0.1, 0.3),
                                      p_max=0.5)
     for ax in axes.flat:
         im = ax.get_images()[0]
@@ -294,7 +294,7 @@ def test_the_snapshot_grid_states_its_colour_scale(p_max, n_bars, label):
 
     fields = {'A': _make_synthetic_field(n_t=20, t_max=0.5),
               'B': _make_synthetic_field(n_t=20, t_max=0.5)}
-    fig, axes = plot_time_snapshots(fields, times_s=(0.1, 0.3), p_max=p_max)
+    fig, axes = plot_time_snapshots(fields, times=(0.1, 0.3), p_max=p_max)
     panels = set(axes.flat)
     bars = [child for ax in axes[:, -1] for child in ax.child_axes]
     assert all(child not in panels for child in bars)
@@ -329,7 +329,7 @@ def test_the_snapshot_source_star_is_whole_on_the_left_limit(
     from uacpy.plot import plot_time_snapshots
 
     fields = {'A': _make_synthetic_field(n_t=20, t_max=0.5)}
-    fig, axes = plot_time_snapshots(fields, times_s=(0.1,))
+    fig, axes = plot_time_snapshots(fields, times=(0.1,))
     assert marker_fraction_inside(axes[0, 0]) == pytest.approx(1.0)
     plt.close(fig)
 
@@ -361,7 +361,7 @@ def test_a_snapshot_of_a_non_uniform_grid_puts_each_row_at_its_depth():
     each cell is drawn about its own sample instead: 50-70 m."""
     from uacpy.plot import plot_time_snapshots
     import matplotlib.pyplot as plt
-    fig, axes = plot_time_snapshots([_stripe_at_60_m()], times_s=[0.5])
+    fig, axes = plot_time_snapshots([_stripe_at_60_m()], times=[0.5])
     try:
         assert _painted_depths(axes[0, 0]) == pytest.approx((50.0, 70.0))
     finally:
@@ -403,7 +403,7 @@ def test_the_snapshot_grid_draws_into_a_given_figure():
     import matplotlib.pyplot as plt
     parent = plt.figure(layout='constrained')
     try:
-        fig, axes = plot_time_snapshots([_stripe_at_60_m()], times_s=[0.2, 0.5],
+        fig, axes = plot_time_snapshots([_stripe_at_60_m()], times=[0.2, 0.5],
                                         fig=parent)
         assert fig is parent and axes.shape == (1, 2)
     finally:
@@ -487,3 +487,15 @@ def test_animating_a_multi_depth_field_names_one_source_or_the_sum():
     assert plt.get_fignums() == before
     ani = animate_field(field.at(source_depth=20.0))
     plt.close(ani._fig)
+
+
+def test_save_animation_takes_animate_fields_defaults():
+    """One animation, one default pair: saved and shown alike."""
+    import inspect
+    from uacpy.plot import animate_field, save_animation
+    shown = inspect.signature(animate_field).parameters
+    saved = inspect.signature(save_animation).parameters
+    for name in ('fps', 'figsize'):
+        assert saved[name].default == shown[name].default, name
+    assert saved['fps'].default == 30
+    assert saved['figsize'].default == (8, 4.5)

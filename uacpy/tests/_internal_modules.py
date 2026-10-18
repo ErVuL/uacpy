@@ -24,9 +24,6 @@ PACKAGE_INTERNAL_MODULES = {
     'uacpy._log':
         "the package's one logger (log_message and the verbose= threshold), "
         "so one setting governs the output of every package",
-    'uacpy._stack':
-        "the child-only stack-limit and parent-death argv prefixes every "
-        "binary launch runs under",
     'uacpy._version':
         "the generated version file the package root reads __version__ from",
     'uacpy.acoustic_signal._results':
@@ -48,9 +45,16 @@ PACKAGE_INTERNAL_MODULES = {
         "ParallelResult and the io and data records (ExportRecord) build "
         "on, as the results and carriers do; plot_carrier reads "
         "CarrierExport as what a carrier is",
+    'uacpy.core._fourier':
+        "the one DTFT-at-a-frequency kernel that the tone fit and the "
+        "snapshot frequency component both evaluate",
     'uacpy.core._finite_difference':
         "the float32 resolution rule for differencing stored wavenumbers, "
         "applied by the modal dispersion estimate",
+    'uacpy.core._grid':
+        "the one (depth, range) regrid, resample_depth_range, defined in "
+        "the grid library Field.resample_to wraps: uacpy.acoustics exposes "
+        "it and RAM's receiver regrid runs it",
     'uacpy.core._host':
         "the host's memory and CPU budget the engines size their grids "
         "against",

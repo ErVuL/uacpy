@@ -30,11 +30,14 @@ ANSI/ASA S12.64-2009, *Quantities and Procedures for Description and Measurement
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._validate import require_positive_finite_scalar
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 # Combined RNL measurement uncertainty by band (ISO 17208-2:2019 §5), in dB.
 # Reference figures to report alongside a measured level; no function here
@@ -46,21 +49,21 @@ RNL_UNCERTAINTY_DB = {
 }
 
 
-def radiated_noise_level(received_spl_dB, distance_m):
+def radiated_noise_level(received_spl_dB, distance):
     """Radiated Noise Level from a far-field SPL measurement (ISO 17208-1).
 
     ``L_RN = L_p + 20*log10(r)`` — the received decidecade-band SPL plus spherical
-    (``20 log r``) spreading. ``distance_m`` is the slant range from the ship
+    (``20 log r``) spreading. ``distance`` is the slant range from the ship
     reference point to the hydrophone. Returns dB re 1 µPa²·m².
 
     Parameters
     ----------
     received_spl_dB : float or array_like
         Received decidecade-band SPL (dB re 1 µPa²).
-    distance_m : float or array_like
+    distance : float or array_like
         Slant range (m) from the ship reference point.
     """
-    r = np.asarray(distance_m, dtype=float)
+    r = np.asarray(distance, dtype=float)
     # Written as the negation of the admissible condition so NaN is refused
     # too: every comparison against NaN is False, so `r <= 0` let a NaN range
     # through to a NaN level. `isfinite` is the other half — an infinite range
@@ -74,22 +77,22 @@ def radiated_noise_level(received_spl_dB, distance_m):
     return np.asarray(received_spl_dB, dtype=float) + 20.0 * np.log10(r)
 
 
-def nominal_source_depth(draught_m):
+def nominal_source_depth(draught):
     """Nominal monopole source depth ``d_s = 0.7 * draught`` (ISO 17208-2 Formula 1).
 
-    ``draught_m`` may be one draught (a float comes back) or an array of
+    ``draught`` may be one draught (a float comes back) or an array of
     them (a fleet).
 
     Parameters
     ----------
-    draught_m : float or array_like
+    draught : float or array_like
         Ship draught (m).
     """
-    d = np.asarray(draught_m, dtype=float)
+    d = np.asarray(draught, dtype=float)
     if not np.all(np.isfinite(d) & (d > 0)):
         raise ConfigurationError(
             f"nominal_source_depth: draught must be > 0 m and finite; got "
-            f"{draught_m!r}.")
+            f"{draught!r}.")
     return 0.7 * float(d) if d.ndim == 0 else 0.7 * d
 
 
@@ -211,10 +214,17 @@ def ship_source_level_wales_heitmeyer(frequency):
     at the band centre plus ``10·log10(bandwidth)`` for a decidecade band
     (``uacpy.acoustics.band_level`` integrates it exactly).
 
+    Outside 30 Hz-15 kHz the same expressions are evaluated — Eq. 8.195
+    below 30 Hz, where nothing was measured, and the ``-23·log10 f`` line
+    above 15 kHz, where the extrapolation has no data to agree with — with
+    one :class:`~uacpy.core.exceptions.ValidityWarning` naming the measured
+    and the extrapolated bands: the judgement is the user's, as for the
+    other empirical formulas.
+
     Parameters
     ----------
     frequency : float or array_like
-        Frequency (Hz), between 30 Hz and 15 kHz.
+        Frequency (Hz), positive.
 
     Returns
     -------
@@ -224,30 +234,39 @@ def ship_source_level_wales_heitmeyer(frequency):
     Raises
     ------
     ConfigurationError
-        A frequency outside 30 Hz-15 kHz: below 30 Hz nothing was measured,
-        and above 15 kHz the extrapolation has no data to agree with.
+        An empty, non-finite or non-positive frequency (the spectrum is a
+        function of ``log10 f``).
 
     Examples
     --------
     >>> round(float(ship_source_level_wales_heitmeyer(100.0)), 2)
     158.45
     """
+    who = "ship_source_level_wales_heitmeyer"
     f = np.asarray(frequency, dtype=float)
     lo, hi = _WH02_MEASURED_BAND_HZ[0], _WH02_EXTRAPOLATED_MAX_HZ
     if f.size == 0:
         raise ConfigurationError(
-            "ship_source_level_wales_heitmeyer: frequency is empty.",
+            f"{who}: frequency is empty.",
             remediation="Pass at least one frequency in 30-15000 Hz.")
-    if not np.all(np.isfinite(f)) or np.any((f < lo) | (f > hi)):
+    flat = np.atleast_1d(f)
+    bad = flat[~(np.isfinite(flat) & (flat > 0.0))]
+    if bad.size:
         raise ConfigurationError(
-            f"ship_source_level_wales_heitmeyer: frequency must lie in "
-            f"{lo:g}-{hi:g} Hz, the band the Wales and Heitmeyer (2002) mean "
-            f"was measured over ({_WH02_MEASURED_BAND_HZ[0]:g}-"
-            f"{_WH02_MEASURED_BAND_HZ[1]:g} Hz) and extrapolated to; got "
-            f"{np.atleast_1d(f).min():g}-{np.atleast_1d(f).max():g} Hz.",
-            remediation="Evaluate it on the band it covers; a spectrum "
-                        "below 30 Hz or above 15 kHz has to come from a "
-                        "measurement.")
+            f"{who}: frequency must be finite and positive (Hz); the "
+            f"spectrum is a function of log10 f. Got {bad[0]!r}.",
+            remediation="Pass positive frequencies in Hz.")
+    out = flat[(flat < lo) | (flat > hi)]
+    if out.size:
+        warnings.warn(
+            f"{who}: {out.size} of {f.size} frequencies ({out.min():g}-"
+            f"{out.max():g} Hz) lie outside {lo:g}-{hi:g} Hz. The Wales and "
+            f"Heitmeyer (2002) mean was measured over "
+            f"{_WH02_MEASURED_BAND_HZ[0]:g}-{_WH02_MEASURED_BAND_HZ[1]:g} Hz "
+            f"and extrapolated to {hi:g} Hz (Ainslie 2010, sect. 8.3.1.3-"
+            f"8.3.1.4); the levels there are the same expressions evaluated "
+            f"with no data to compare.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     edge = _WH02_MEASURED_BAND_HZ[1]
     level = np.where(f <= edge, _wh02_mean(f),
                      _wh02_mean(edge) - 23.0 * np.log10(f / edge))

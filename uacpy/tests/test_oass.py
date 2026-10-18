@@ -1010,7 +1010,8 @@ class TestRhsContract:
 @pytest.mark.requires_oases
 class TestCLowDirectionOfHarm:
     """oases.md §3: ``c_low`` defaults to the mean field's own bound (1350
-    m/s here, ``oases_wavenumber_bounds`` on the 1500 m/s water — the same
+    m/s here, ``oases_wavenumber_bounds`` over 1500 m/s water and a faster
+    fluid seabed — the same
     figure the doc's measured cases quote). Pinning it differently warns with
     the direction of harm — raising truncates the scattering integral
     (measured 30.15 dB), lowering is inert (measured 1e-4 dB: REVINT bounds
@@ -1099,24 +1100,32 @@ class TestPhysics:
 
 @pytest.mark.requires_oases
 class TestReceiverRangeAxis:
-    def test_non_equispaced_ranges_warn_and_resample(self, tmp_path):
-        # G13 — Block VIII is RMIN RMAX NR and the binary rebuilds the axis
-        # as R0+(i-1)*RSTEP (unoass21.f:267-271), so an irregular request is
-        # replaced by a linspace over the same span.
+    def test_non_equispaced_ranges_are_refused_before_the_mean_field(
+            self, tmp_path):
+        """Block VIII is RMIN RMAX NR and the binary rebuilds the axis as
+        R0+(i-1)*RSTEP (unoass21.f:262-271), so OASS evaluates that
+        linspace and no other range; an irregular request is refused with
+        the np.linspace remedy, before the mean field runs, rather than
+        interpolated in dB."""
         rcv = uacpy.Receiver(depths=[30.0, 70.0],
                              ranges=np.array([200.0, 400.0, 900.0, 2000.0]))
-        with pytest.warns(UserWarning, match='not the equispaced axis'):
-            result = _oass(work_dir=tmp_path).run(_env(), _CLASS_SRC, rcv)
-        assert np.allclose(result.coords['range'], rcv.ranges)
-        assert result.metadata['interpolated'] is True
-        assert np.allclose(result.metadata['native_ranges'],
-                           np.linspace(200.0, 2000.0, 4))
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)OASS: OASS evaluates the equispaced "
+                                 r"range axis.*np\.linspace"):
+            _oass(work_dir=tmp_path).run(_env(), _CLASS_SRC, rcv)
+        assert not list(tmp_path.glob('*.dat'))
+        from uacpy.io.oases_writer import write_oass_input
+        with pytest.raises(ConfigurationError,
+                           match='write_oass_input: OASS evaluates'):
+            write_oass_input(tmp_path / 'oass.dat', _env(), _CLASS_SRC, rcv,
+                             'R', interface=3, correlation_length=10.0,
+                             spectral_exponent=2.0)
 
     def test_equispaced_ranges_are_kept_verbatim(self, tmp_path, recwarn):
         result = _oass(work_dir=tmp_path).run(_env(), _CLASS_SRC, _CLASS_RCV)
-        assert not [w for w in recwarn
-                    if 'not the equispaced axis' in str(w.message)]
+        assert np.allclose(result.coords['range'], _CLASS_RCV.ranges)
         assert 'native_ranges' not in result.metadata
+        assert 'interpolated' not in result.metadata
 
 
 class TestRoughnessMustSurviveTheRecordFormat:
@@ -1564,7 +1573,7 @@ class TestOassMeanFieldOptionLine:
         with pytest.raises(ConfigurationError,
                            match="option line must also contain 'T'") as excinfo:
             self._validate(tmp_path, 'N J s')
-        assert "'N J T s'" in str(excinfo.value)
+        assert "'K J T s'" in str(excinfo.value)
 
     def test_the_default_producer_carries_both_letters(self):
         # The default mean field is built by _build_mean_field, so a

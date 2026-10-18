@@ -21,7 +21,7 @@ from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.acoustics import power_to_dB
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import (
-    refuse_non_finite_samples, require_finite_signal,
+    _MAX_CHANNELS_GUESSED, refuse_non_finite_samples, require_finite_signal,
     require_positive_finite_scalar,
 )
 from uacpy.acoustic_signal.windows import _DEFAULT_NPERSEG, _default_noverlap
@@ -132,6 +132,28 @@ def _scipy_segment(window, nperseg, n):
     return min(256 if nperseg is None else int(nperseg), n)
 
 
+def _welch_nperseg(nperseg, window, n, who):
+    """The ``nperseg`` a Welch estimate hands :func:`scipy.signal.welch` on
+    an ``n``-sample record. A given one goes as given, and a named window's
+    is refused when longer than the record, which holds no segment of it.
+    Unset (``None``), it is an array window's own length, else
+    :data:`~uacpy.acoustic_signal.windows._DEFAULT_NPERSEG` clamped to the
+    record: the segment scipy would clamp it to, without scipy's
+    UserWarning for a segment longer than the input."""
+    if not isinstance(window, (str, tuple)):
+        return len(window) if nperseg is None else int(nperseg)
+    if nperseg is None:
+        return min(_DEFAULT_NPERSEG, n)
+    if int(nperseg) > n:
+        raise ConfigurationError(
+            f"{who}: nperseg={nperseg} is longer than the record ({n} "
+            f"samples), which holds no segment of that length.",
+            remediation=(f"Pass nperseg={n} or fewer, or leave nperseg "
+                         f"unset: it then takes {_DEFAULT_NPERSEG} samples, "
+                         f"or the whole record when that is shorter."))
+    return int(nperseg)
+
+
 def _welch_in_batches(data, sample_rate, *, window, nperseg, noverlap,
                       average, **welch_options):
     """:func:`scipy.signal.welch`, reading a long record in batches of whole
@@ -195,10 +217,10 @@ _DEFAULT_WINDOW = {
 _BAND_WINDOW = "boxcar"
 
 
-# Longest trailing axis the time-axis guard reads as a channel count rather
-# than a record: ``read_wav`` (and soundfile) return ``(n_samples,
-# n_channels)``, and a transform along that last axis is 2-3 "samples" long.
-_MAX_CHANNELS_GUESSED = 64
+# The time-axis guard reads a trailing axis of at most _MAX_CHANNELS_GUESSED
+# (core._validate, shared with write_wav) as a channel count rather than a
+# record: ``read_wav`` (and soundfile) return ``(n_samples, n_channels)``, and
+# a transform along that last axis is 2-3 "samples" long.
 
 
 def _time_axis_last(data, axis, who):
@@ -368,11 +390,11 @@ class SpectralEstimate(PlottedResult,
 
     def _plotter_name(self):
         # A banded estimate is drawn as bars over its standard bands
-        # (plot_sel), since its values belong to whole bands rather than to
-        # points on a frequency axis; a bin estimate as a line (plot_psd).
-        # The unit and the title come from the estimate's own scaling and
-        # method, so the call cannot mislabel it.
-        return "plot_sel" if self.bands is not None else "plot_psd"
+        # (plot_band_levels), since its values belong to whole bands rather
+        # than to points on a frequency axis; a bin estimate as a line
+        # (plot_psd). The unit and the title come from the estimate's own
+        # scaling and method, so the call cannot mislabel it.
+        return "plot_band_levels" if self.bands is not None else "plot_psd"
 
     def level_dB(self, ref=REFERENCE_PRESSURE_WATER):
         """``power`` as a level in dB re the reference pressure ``ref`` (Pa,
@@ -523,7 +545,7 @@ def _check_band_type(band_type, who):
 
     The other ways a banding request could go wrong — a ladder over
     constant-Q kernels, a Welch knob that breaks the bin sum, a banding
-    option with no banding — are not reachable any more: no function's
+    option with no banding — cannot be reached: no function's
     signature offers that combination, which is the point of a function per
     statistic.
     """
@@ -657,7 +679,7 @@ def _estimate(data, sample_rate, *, method="welch", scaling="density",
             data = np.pad(np.asarray(data),
                           [(0, 0)] * (np.ndim(data) - 1) + [(0, pad)])
         duration = n_seg * nps / float(sample_rate)
-    nperseg = options.get("nperseg", _DEFAULT_NPERSEG)
+    nperseg = options.get("nperseg")
     if (not isinstance(window, (str, tuple)) and nperseg is not None
             and np.ndim(window) == 1 and len(window) != int(nperseg)):
         # An array window IS the segment; scipy's own refusal of the pair
@@ -669,6 +691,7 @@ def _estimate(data, sample_rate, *, method="welch", scaling="density",
             remediation=(f"Pass nperseg={len(window)}, or nperseg=None to "
                          f"take the window's length, or a named window such "
                          f"as 'hann'."))
+    nperseg = _welch_nperseg(nperseg, window, np.shape(data)[-1], who)
     noverlap = options.get("noverlap")
     if noverlap is None:
         # The overlap is sized on the segment scipy will use.
@@ -697,7 +720,7 @@ def _estimate(data, sample_rate, *, method="welch", scaling="density",
     return SpectralEstimate(freqs, Pxx, scaling, method)
 
 
-def welch(data, sample_rate, *, scaling="density", nperseg=_DEFAULT_NPERSEG,
+def welch(data, sample_rate, *, scaling="density", nperseg=None,
           noverlap=None, nfft=None, detrend="constant", average="mean",
           window=None, freq_min=None, freq_max=None, integration_time=None,
           axis=None):
@@ -724,9 +747,17 @@ def welch(data, sample_rate, *, scaling="density", nperseg=_DEFAULT_NPERSEG,
         carries ``.scaling`` for exactly that reason.
     nperseg, noverlap, nfft, detrend, average
         The segmentation, forwarded to :func:`scipy.signal.welch`.
-        ``noverlap=None`` keeps every independent sample the window yields:
-        half a segment under hann, 78.3 % under flattop (Abraham §9.2.10.1,
-        :func:`~uacpy.acoustic_signal.windows._default_noverlap`).
+        ``nperseg=None`` takes 8192 samples (uacpy guidance:
+        about 1 Hz bins at an 8 kHz rate), or the whole record when it is
+        shorter, or an array ``window``'s own length; a given ``nperseg``
+        is used as given, and refused when longer than the record.
+        ``noverlap=None`` keeps every independent sample the default windows
+        yield: half a segment under hann, 78.3 % under flattop (Abraham
+        §9.2.10.1, :func:`~uacpy.acoustic_signal.windows._default_noverlap`).
+        Any other window also takes half a segment (uacpy guidance: one
+        overlap for every window but flat-top), short of that rule for a
+        window with a larger independent sample rate (Blackman needs
+        58.5 %): pass ``noverlap`` for it.
         ``average='median'`` is the robust choice for a record with
         transients in it — a passing ship moves the mean of the periodograms
         and leaves the median on the background. ``detrend`` is
@@ -810,7 +841,8 @@ def constant_q(data, sample_rate, *, scaling="density", freq_min=20.0, freq_max=
         As on :func:`welch`; the bandwidth a density divides by is a
         different number in every bin.
     freq_min, freq_max : float, optional
-        First and last bin centre. ``freq_min`` is 20 Hz by default; an unset
+        First and last bin centre. ``freq_min`` is 20 Hz by default (uacpy
+        guidance); an unset
         ``freq_max`` ends the ladder at the last bin below the first one whose
         negative-frequency image leaks more than 0.01 dB into a tone's
         level — measured at 0.4525·fs for 12 bins per octave, 0.4795·fs for
@@ -818,11 +850,12 @@ def constant_q(data, sample_rate, *, scaling="density", freq_min=20.0, freq_max=
         Nyquist). An explicit ``freq_max`` above that is honoured, with a
         warning naming how high those bins read a tone.
     bins_per_octave : int, optional
-        Bins per octave, which fixes Q.
+        Bins per octave, which fixes Q. Default 24 (uacpy guidance).
     window : str, optional
         The kernel's own taper — its length IS the bin's bandwidth, so
         changing it changes the Q the estimator is named for. Unlike
-        :func:`welch` there is no per-scaling default for that reason.
+        :func:`welch` there is no per-scaling default for that reason: the
+        default is ``'hann'``, which ``None`` also selects.
     integration_time : float, optional
         Seconds of record to use, from the start.
     axis : int, optional
@@ -903,7 +936,7 @@ def sound_exposure(data, sample_rate, *, band_type="decidecade",
     (10-40 Hz) hold 2 to 7 lines: that costs spectral detail inside a band
     and the variance of its estimate, not its total or its width — each band
     takes the FFT bins it overlaps in proportion to the overlap, so it
-    integrates exactly its own width, as :func:`decidecade_band_levels`
+    integrates exactly its own width, as :func:`band_levels`
     does. ``nperseg`` near ``10 * sample_rate / 2.3`` (4.3 s, for the 10 Hz
     band's 2.3 Hz width) resolves them at the cost of time resolution.
 
@@ -1150,7 +1183,7 @@ def _probabilistic_estimate(
         segment_times=np.asarray(segment_times))
 
 
-def spectral_centroid(frequencies, weights) -> float:
+def spectral_centroid(frequencies, weights, *, axis=-1):
     """The ``weights``-weighted mean of ``frequencies`` (Hz):
     ``Σ wᵢ fᵢ / Σ wᵢ``, or the plain mean of ``frequencies`` when the
     weights sum to nothing.
@@ -1162,16 +1195,40 @@ def spectral_centroid(frequencies, weights) -> float:
     Parameters
     ----------
     frequencies : array_like
-        Frequencies (Hz).
+        Frequencies (Hz), 1-D.
     weights : array_like
-        A non-negative weight per frequency (e.g. an energy spectrum).
+        A non-negative weight per frequency (e.g. an energy spectrum) along
+        ``axis``; every other axis is a channel with its own centroid.
+    axis : int, optional
+        The frequency axis of ``weights``. Default ``-1``.
+
+    Returns
+    -------
+    float or ndarray
+        The centroid: a float for one channel, else one per channel (the
+        shape of ``weights`` without ``axis``).
     """
-    band = np.asarray(frequencies, dtype=float)
-    weights = np.asarray(weights, dtype=float)
-    total = float(np.sum(weights))
-    if total > 0.0:
-        return float(np.sum(weights * band) / total)
-    return float(np.mean(band))
+    band = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    w = np.atleast_1d(np.asarray(weights, dtype=float))
+    try:
+        w = np.moveaxis(w, int(axis), -1)
+    except (np.exceptions.AxisError, TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"spectral_centroid: axis={axis!r} is not an axis of weights "
+            f"shaped {np.shape(weights)}.") from exc
+    if band.ndim != 1 or w.shape[-1] != band.size:
+        raise ConfigurationError(
+            f"spectral_centroid: weights must hold one value per frequency "
+            f"along axis={axis}; got frequencies {np.shape(frequencies)} "
+            f"and weights {np.shape(weights)}.",
+            remediation="Pass the 1-D frequency axis, and axis= naming the "
+                        "frequency axis of weights (the last by default).")
+    total = np.sum(w, axis=-1)
+    centroid = np.where(total > 0.0,
+                        np.sum(w * band, axis=-1)
+                        / np.where(total > 0.0, total, 1.0),
+                        float(np.mean(band)))
+    return float(centroid) if centroid.ndim == 0 else centroid
 
 
 def level_histogram(levels_dB, level_edges, *, axis=0):
@@ -1316,9 +1373,11 @@ def probabilistic_welch(
         integration_time=None, ref=REFERENCE_PRESSURE_WATER, axis=None):
     """Probability density of Welch levels, in dB re ref²/Hz or ref² (1 µPa).
 
-    The McNamara & Buland (2004) soundscape statistic: a Welch estimate per
-    time segment, histogrammed per frequency, so a month of recording reads as
-    a distribution rather than as one averaged line.
+    The McNamara & Buland (2004) soundscape statistic: a Welch
+    estimate per time segment, histogrammed per frequency, so a month of
+    recording reads as a distribution rather than as one averaged line. The
+    defaults — 1 s segments overlapping 50 %, 1 dB level bins over 0-150 dB,
+    and :func:`welch`'s 8192-sample ``nperseg`` — are uacpy guidance.
 
     Parameters
     ----------

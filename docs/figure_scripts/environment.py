@@ -48,7 +48,7 @@ def shelf_break():
             ranges=[0.0, 20_000.0],
         ),
         altimetry=uacpy.generate_sea_surface(
-            20_000.0, wind_speed_kn=30.0, n_points=1200,
+            20_000.0, wind_speed_19_5m_kn=30.0, n_points=1200,
             rng=np.random.default_rng(0)),
     )
     source = uacpy.Source(depths=40.0, frequencies=150.0)
@@ -169,7 +169,7 @@ def range_profiles():
     """Bathymetry and Altimetry: two 1-D value(range) carriers, opposite signs."""
     env, _, _ = sloping_shelf()
     altimetry = uacpy.Altimetry.coerce(uacpy.generate_sea_surface(
-        2000.0, wind_speed_kn=24.0, n_points=800,
+        2000.0, wind_speed_19_5m_kn=24.0, n_points=800,
         rng=np.random.default_rng(7)))
 
     fig, (ax_a, ax_b) = plt.subplots(2, 1, figsize=(9.0, 5.2))
@@ -236,7 +236,7 @@ def absorption_models():
         temperature=4.0, salinity=35.0, pH=8.0,
     ).table(freqs, depths=3000.0).plot(
         ax=ax, label='Francois–Garrison, 4 °C / 3000 m')
-    uacpy.ConstantAbsorption(value_dB_per_wavelength=1.0e-4).table(
+    uacpy.ConstantAbsorption(value=1.0e-4).table(
         freqs).plot(ax=ax, label='ConstantAbsorption, 1e-4 dB/λ')
     uacpy.Biological(layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)]).table(
         freqs, depths=50.0).plot(ax=ax, label='Biological, f0 = 1.5 kHz')

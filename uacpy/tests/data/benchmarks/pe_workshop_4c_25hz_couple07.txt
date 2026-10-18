@@ -6,16 +6,16 @@
 # (m/s) at depth (m): 0 1539.3, 30 1539.8, 200 1534.2, 600 1502.4, 700 1495.4, 800 1491.8,
 # 1000 1488.0, 1100 1487.5, 1200 1487.9, 3410 1525.0, density 1.0. A 454 m fluid sediment
 # follows the seafloor: sound speed 0.975 x the water speed at the seafloor at its top,
-# 1.305 x that at its base, density 1.5, 0.0258 dB/wavelength, over a half-space at the
+# 1.305 x that top speed at its base, density 1.5, 0.0258 dB/wavelength, over a half-space at the
 # sediment-base speed. Seafloor depth (m) at range (km): 0 3410, 150 3410, 153.271 3200,
 # 156.386 3000, 159.502 2800, 162.617 2600, 165.732 2400, 168.847 2200, 171.963 2000,
 # 175.078 1800, 178.193 1600, 181.308 1400, 184.424 1200, 185.981 1100, 187.539 1000,
 # 189.097 900, 190.654 800, 192.212 700, 193.769 600, 195.327 500, 196.885 400,
 # 198.442 300, 200 200, 250 200, linear between. Source 600 m; receivers 150 m and 700 m.
 # COUPLE makes the complex wavenumber squared piecewise linear in depth between the listed
-# points, i.e. 1/c^2 (not c) is linear. Kraken on this environment written with c-linear
-# profiles sat 3.7 dB median |dTL| from this table over the flat 5-150 km; written
-# 1/c^2-linear, 0.35 dB.
+# points, i.e. 1/c^2 (not c) is linear. Kraken on this environment (water density 1.0)
+# written with c-linear profiles sat 3.81 / 3.72 dB median |dTL| from this table at
+# 150 / 700 m over the flat 5-150 km; written 1/c^2-linear, 0.101 / 0.153 dB.
 # 
 # Solution: COUPLE07 (R. B. Evans, December 2007 version, distributed by OALIB as
 # Modes/couple/couple07.zip), its own Test Case 4 input run unchanged: 300 modes, 23 regions,

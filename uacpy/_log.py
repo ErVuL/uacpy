@@ -146,13 +146,23 @@ def _source_from_filename(filename: str) -> str:
     return Path(filename).stem
 
 
-def _uacpy_format_warning(
-    message, category, filename, lineno, line=None,  # noqa: ARG001
-) -> str:
-    """Custom :func:`warnings.formatwarning` that matches :func:`log_message`.
+#: The formatter :func:`install_warning_formatter` replaced (the stdlib's),
+#: which renders every warning that is not uacpy's own.
+_PYTHON_FORMAT_WARNING = warnings.formatwarning
 
-    Output: ``[YYYY/MM/DD HH:MM:SS UTC] [<CATEGORY>] [<module>:<lineno>] message``.
-    Installed by :func:`install_warning_formatter`.
+
+def _uacpy_format_warning(
+    message, category, filename, lineno, line=None,
+) -> str:
+    """Custom :func:`warnings.formatwarning` that matches :func:`log_message`
+    for uacpy's own warnings and leaves every other one to Python.
+
+    A :class:`~uacpy.core.exceptions.UACPYWarning` renders as
+    ``[YYYY/MM/DD HH:MM:SS UTC] [WARN <Class>] [<module>:<lineno>] message``
+    (``[WARN ValidityWarning]``), so the class a filter names is printed.
+    Any other warning — the user's own, numpy's, matplotlib's — goes to the
+    formatter :func:`install_warning_formatter` replaced, and prints as it
+    does without uacpy. Installed by :func:`install_warning_formatter`.
 
     Guarded against interpreter-shutdown teardown: when matplotlib (or
     any other library) emits a warning during ``__del__`` after Python
@@ -161,16 +171,17 @@ def _uacpy_format_warning(
     str(message) in that case so the warning isn't lost.
     """
     try:
+        if not (isinstance(category, type)
+                and issubclass(category, UACPYWarning)):
+            return _PYTHON_FORMAT_WARNING(message, category, filename, lineno,
+                                          line)
         ts = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S UTC")
-        cat_name = getattr(category, '__name__', str(category))
-        # A uacpy warning names its cause by its class; the label stays the
-        # level, in the log's own vocabulary (DEBUG/INFO/WARN/ERROR).
-        if cat_name == 'UserWarning' or issubclass(category, UACPYWarning):
-            label = 'WARN'
-        else:
-            label = cat_name.replace('Warning', '').upper() or 'WARN'
+        # A uacpy warning names its cause by its class: the label is the
+        # level, in the log's own vocabulary (DEBUG/INFO/WARN/ERROR), then
+        # the class, the name a warnings filter takes.
         source = f"{_source_from_filename(filename)}:{lineno}"
-        return f"[{ts}] [{label}] [{source}] {message}\n"
+        return (f"[{ts}] [WARN {category.__name__}] [{source}] "
+                f"{message}\n")
     except Exception:
         return f"{filename}:{lineno}: {category.__name__}: {message}\n"
 
@@ -178,20 +189,19 @@ def _uacpy_format_warning(
 def install_warning_formatter() -> None:
     """Replace :data:`warnings.formatwarning` with the uacpy-styled version.
 
-    Idempotent. Called once at package import time so every
-    ``warnings.warn(...)`` raised by uacpy code (and anywhere else in
-    the process) renders in the same ``[ts] [LEVEL] [source] msg`` shape
-    as :func:`log_message`. Python's filtering, ``pytest.warns``,
-    ``simplefilter('error')`` and friends keep working unchanged — only
-    the rendered string is replaced.
+    Idempotent. Called once at package import time so every uacpy warning
+    (a :class:`~uacpy.core.exceptions.UACPYWarning`) renders in the same
+    ``[ts] [LEVEL] [source] msg`` shape as :func:`log_message`. Python's
+    filtering, ``pytest.warns``, ``simplefilter('error')`` and friends keep
+    working unchanged — only the rendered string is replaced.
 
-    ``warnings.formatwarning`` is process-global, so this reformats the
-    warnings of every library in the process, not just uacpy's — the price of
-    one consistent rendering for a package used as an application. Two escapes,
+    ``warnings.formatwarning`` is process-global, so the replacement hands
+    every other warning (the user's own, numpy's, matplotlib's) back to the
+    formatter it replaced: those print as they do without uacpy. Two escapes,
     in the order they are checked: ``UACPY_NO_WARNING_FORMAT=1`` keeps Python's
     own rendering (the same truthy opt-out spelling ``UACPY_NO_STACK_RAISE``
-    uses in :mod:`uacpy._stack`, which raises the stack limit of each spawned
-    binary only), and a host application that
+    uses in :func:`uacpy.models._launch.stack_limit_prefix`, which raises the
+    stack limit of each spawned binary only), and a host application that
     installed its own formatter first keeps it — only the stdlib default (or a
     previous install of this one) is replaced.
     """

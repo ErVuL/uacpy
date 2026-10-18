@@ -270,10 +270,10 @@ def _as_frequency_array(frequencies, who: str) -> np.ndarray:
     ``WenzNoise``'s docstring advertises every registry entry as
     ``model(frequencies, *, wind_speed_kn, water_depth, shipping_level,
     rain_rate, **_)`` and the five registries are public, so a caller may hold
-    one and call it directly with a list or a scalar. Doing that reached
-    ``list / 1000.0`` as a ``TypeError`` in one submodel and a 0-d array as
-    ``'float' object is not subscriptable`` in another, and returned a bare
-    scalar from most and a ``(1,)`` array from one. Every submodel converts
+    one and call it directly with a list or a scalar. Unconverted, a list
+    would reach ``list / 1000.0`` as a ``TypeError`` in one submodel and a
+    0-d array ``'float' object is not subscriptable`` in another, and the
+    shapes returned would differ between submodels. Every submodel converts
     here first, so they all answer the same shapes.
     """
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
@@ -329,13 +329,16 @@ KNUDSEN_BAND_HZ = (100.0, 25000.0)
 
 
 def _wind_knudsen(frequencies, *, wind_speed_kn, **_):
-    """Wind (Knudsen, Alford & Emling 1948), in the form most commonly used.
+    """Wind (Knudsen, Alford & Emling 1948), as one straight line in log U and log f.
 
     ``NL = 44 + 20·log10(U_kn) - 17·log10(f_kHz)``, dB re 1 µPa²/Hz.
 
     Straight parallel lines in log-log, which is the shape Knudsen published:
-    his curves shift with wind by the same amount at every frequency. Both
-    coefficients are his. ``-17`` dB/decade is the paper's stated
+    his curves shift with wind by the same amount at every frequency. The
+    slope and the constant are his; the wind term ``20·log10(U_kn)`` is not —
+    he drew one curve per wind force, not a law in U — and no cited source
+    states it: it is uacpy guidance, checked against his
+    figure below. ``-17`` dB/decade is the paper's stated
     -5 dB/octave (-16.61 dB/decade) to 0.4 dB/decade — Dahl et al. (2007)
     restate the same slope as a "5 dB reduction in average pressure spectral
     density per factor of two increase in frequency". The constant 44 is his
@@ -800,20 +803,23 @@ class WenzNoise(Exportable):
 
     Notes
     -----
-    Beaufort vs wind-speed reference (Urick 1983):
+    Beaufort vs wind-speed reference, :data:`uacpy.units.BEAUFORT_SCALE`:
+    Wenz's ranges (JKPS Table 1.6), with force 8 on sea state 6 as the WMO
+    sea-state code pairs them (APL-UW TR 9407 §II.A, Table 2; Wenz gives
+    force 8 sea state 7):
 
     ============  =========  ==============  ================
     Beaufort      Sea state  Wind (knots)    Wind (m/s)
     ============  =========  ==============  ================
-    0             0          <1              0 – 0.2
-    1             1/2        1 – 3           0.3 – 1.5
-    2             1          4 – 6           1.6 – 3.3
+    0             0          <1              <0.5
+    1             1/2        1 – 3           0.5 – 1.7
+    2             1          4 – 6           1.8 – 3.3
     3             2          7 – 10          3.4 – 5.4
-    4             3          11 – 16         5.5 – 7.9
-    5             4          17 – 21         8.0 – 10.7
-    6             5          22 – 27         10.8 – 13.8
-    7             6          28 – 33         13.9 – 17.1
-    8             6          34 – 40         17.2 – 20.7
+    4             3          11 – 16         5.5 – 8.4
+    5             4          17 – 21         8.5 – 11.1
+    6             5          22 – 27         11.2 – 14.1
+    7             6          28 – 33         14.2 – 17.2
+    8             6          34 – 40         17.3 – 20.8
     ============  =========  ==============  ================
 
     Examples

@@ -22,8 +22,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from uacpy.core._repr import FieldsRepr
 from uacpy.core.exceptions import ConfigurationError
 
-__all__ = ['DataSource', 'DataProvenance', 'SOURCES', 'POINT_KINDS',
-           'fetch_summary_line', 'point_in_words']
+__all__ = ['DataSource', 'DataProvenance', 'SOURCES', 'POINT_KINDS']
 
 #: What a record's ``data_point`` can be: the centre of a grid ``'cell'``,
 #: the position of an Argo ``'cast'``, or of a seabed ``'sample'``.
@@ -92,6 +91,8 @@ class DataProvenance(FieldsRepr):
     citation through ``prov.source`` (a shared catalogue entry), and this
     fetch's specifics off ``prov`` directly. Carriers and environments hold
     these uniformly as ``data_sources`` tuples."""
+    _REPR_UNITS = {'split_depth': 'm'}
+
     source: DataSource
     data_date: Optional[str] = None                    # actual date/period represented
     data_point: Optional[Tuple[float, float]] = None   # actual (lat, lon) returned
@@ -115,12 +116,12 @@ class DataProvenance(FieldsRepr):
     from_neighbour_cell: Optional[bool] = None
     #: The along-track range (m) of the column this record supplied, on a
     #: range-dependent carrier; ``None`` for a single point.
-    range_m: Optional[float] = None
+    range: Optional[float] = None
     #: Depth (m) below which the column holds another period than
     #: ``data_date`` — a WOA23 monthly column (which ends at 1500 m) continued
     #: by the annual mean; ``None`` when the whole column is one period.
-    split_depth_m: Optional[float] = None
-    #: The period below ``split_depth_m`` (``'annual mean'``).
+    split_depth: Optional[float] = None
+    #: The period below ``split_depth`` (``'annual mean'``).
     period_below: Optional[str] = None
 
     def __post_init__(self):
@@ -146,9 +147,9 @@ class DataProvenance(FieldsRepr):
                                   else float(self.cell_size_deg)),
                 'from_neighbour_cell': (None if self.from_neighbour_cell is None
                                         else bool(self.from_neighbour_cell)),
-                'range_m': None if self.range_m is None else float(self.range_m),
-                'split_depth_m': (None if self.split_depth_m is None
-                                  else float(self.split_depth_m)),
+                'range': None if self.range is None else float(self.range),
+                'split_depth': (None if self.split_depth is None
+                                else float(self.split_depth)),
                 'period_below': self.period_below}
 
     @classmethod
@@ -168,7 +169,7 @@ class DataProvenance(FieldsRepr):
         for key in ('data_point', 'requested_point'):
             if key in fields:
                 fields[key] = tuple(float(v) for v in fields[key])
-        for key in ('cell_size_deg', 'range_m', 'split_depth_m'):
+        for key in ('cell_size_deg', 'range', 'split_depth'):
             if key in fields:
                 fields[key] = float(fields[key])
         if 'from_neighbour_cell' in fields:
@@ -204,7 +205,7 @@ class DataProvenance(FieldsRepr):
         known; ``None`` without a data point."""
         if self.data_point is None:
             return None
-        where = point_in_words(*self.data_point)
+        where = _point_in_words(*self.data_point)
         if self.point_kind == 'cell':
             size = ('' if self.cell_size_deg is None
                     else f"{_degrees_in_words(self.cell_size_deg)} ")
@@ -228,8 +229,8 @@ class DataProvenance(FieldsRepr):
                 req = f", requested {self.requested_date}"
             else:
                 req = ""
-            split = ("" if self.split_depth_m is None else
-                     f" above {self.split_depth_m:g} m, {self.period_below} "
+            split = ("" if self.split_depth is None else
+                     f" above {self.split_depth:g} m, {self.period_below} "
                      f"below")
             bits.append(f"date {self.data_date}{split}{req}")
         return bits
@@ -248,10 +249,10 @@ class DataProvenance(FieldsRepr):
         return ("  Fetched:     " + "; ".join(bits)) if bits else None
 
 
-def fetch_summary_line(records: Sequence[DataProvenance]) -> Optional[str]:
+def _fetch_summary_line(records: Sequence[DataProvenance]) -> Optional[str]:
     """The ``Fetched:`` line of one source's records: the record's own line
     for one, else a summary — the dates, how many points (along the transect
-    when they carry ``range_m``), the span of their offsets, and where the
+    when they carry ``range``), the span of their offsets, and where the
     largest one is."""
     records = list(records)
     if len(records) == 1:
@@ -271,8 +272,8 @@ def fetch_summary_line(records: Sequence[DataProvenance]) -> Optional[str]:
         offsets = [r.offset_km for r in located]
         far = located[offsets.index(max(offsets))]
         along = (" along the transect"
-                 if all(r.range_m is not None for r in located) else "")
-        at = (f"range {far.range_m / 1000.0:g} km: " if far.range_m is not None
+                 if all(r.range is not None for r in located) else "")
+        at = (f"range {far.range / 1000.0:g} km: " if far.range is not None
               else "")
         if max(offsets) == 0.0:
             bits.append(f"{len(located)} points{along}, each read at its "
@@ -296,7 +297,7 @@ def _day(text):
         return None
 
 
-def point_in_words(lat: float, lon: float) -> str:
+def _point_in_words(lat: float, lon: float) -> str:
     """``(42.5, -4.5)`` as ``'42.50 N, 4.50 W'``."""
     return (f"{abs(lat):.2f} {'N' if lat >= 0 else 'S'}, "
             f"{abs(lon):.2f} {'E' if lon >= 0 else 'W'}")

@@ -17,9 +17,10 @@ from uacpy.models._defaults import (
 )
 
 
-# Fewest frequencies an auto-derived TIME_SERIES grid may carry. Δf is
+# Fewest frequencies an auto-derived TIME_SERIES grid may carry, uacpy
+# guidance (no source gives a minimum). Δf is
 # 1/waveform-duration, so a short pulse over a narrow band can derive 2-3 bins
-# — below what the band-edge taper in ``_ifft_to_trace`` can act on, and too
+# — below what a band-edge taper (``window='hann'``) can act on, and too
 # few to represent an arrival. Costs one model run per extra bin.
 # Odd on purpose: RAM re-parameterises a uniform grid as an (fc, Q, T) sweep
 # that is symmetric about a bin, so an odd count round-trips exactly while an

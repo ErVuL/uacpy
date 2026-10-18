@@ -16,19 +16,20 @@ class ScooterSettings(EngineSettings):
     ----------
     c_low, c_high : float
         The phase-speed window (m/s) of the wavenumber integration, the
-        deck's ``cLow`` / ``cHigh``. Unpinned, ``c_low = 0.9 × min(SSP)``
-        and ``c_high`` is the unbounded ``DEFAULT_C_MAX_UNBOUNDED`` (1e9 m/s,
-        ``k_min = 0``, Jensen et al., ch. 4 App. 1) over every seabed. The
-        default ``c_low`` reads the
-        water only, so seabed interface (Scholte) waves slower than it are
-        outside the window.
+        deck's ``cLow`` / ``cHigh``. Unpinned, ``c_low`` is the slowest
+        speed of every medium (shear speeds and half-spaces included) ×
+        0.85 over an elastic half-space, × 0.90 otherwise
+        (``scooter.f90:193-259``,
+        :func:`~uacpy.core.engine_defaults.default_c_low`), and ``c_high``
+        is the unbounded ``DEFAULT_C_MAX_UNBOUNDED`` (1e9 m/s, ``k_min = 0``,
+        Jensen et al., ch. 4 App. 1) over every seabed.
     c_low_origin, c_high_origin : str
         Where each bound came from: the constructor, or the rule above.
-    rmax_m : float
+    rmax : float
         The spectral ``RMax`` (m), ``receiver.ranges.max() ×
         rmax_factor``, written in km; it fixes the wavenumber sampling.
     rmax_factor : float
-        The multiplier that ``rmax_m`` was built with.
+        The multiplier that ``rmax`` was built with.
     rmax_factor_origin : str
         Where ``rmax_factor`` came from: the constructor, or the default
         (2.0 in every run mode, the toolbox's Scooter decks).
@@ -62,7 +63,7 @@ class ScooterSettings(EngineSettings):
     c_low_origin: str
     c_high: float
     c_high_origin: str
-    rmax_m: float
+    rmax: float
     rmax_factor: float
     rmax_factor_origin: str
     n_mesh: int

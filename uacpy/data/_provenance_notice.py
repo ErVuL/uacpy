@@ -26,7 +26,7 @@ from uacpy.core.exceptions import FallbackWarning, ProvenanceWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = ['one_provenance_notice', 'provenance_notice',
-           'provenance_fallback']
+           'provenance_fallback', 'licence_notice_text']
 
 #: The end of a notice's first sentence: a full stop after a letter or a
 #: bracket, so "62.08 N" and "1.5 m" do not end it, and not the one of a
@@ -57,6 +57,17 @@ def provenance_notice(message: str) -> None:
         return
     warnings.warn(message, ProvenanceWarning,
                   skip_file_prefixes=USER_FRAME_SKIP)
+
+
+def licence_notice_text(source) -> str:
+    """The notice that a catalogue source (a ``DataSource`` whose
+    ``commercial_use`` is False) does not permit commercial use without
+    verification. Every route that reaches such a source gives this one
+    wording, so a fetch that reaches it twice (its own fetcher, then
+    ``fetch_environment``'s catalogue check) lists it once."""
+    return (f"{source.name} ({source.id!r}) does not permit commercial use "
+            f"without verification — licence: {source.license}. See "
+            f"uacpy.data.citations() for its attribution.")
 
 
 def provenance_fallback(message: str) -> None:

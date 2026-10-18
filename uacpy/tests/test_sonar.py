@@ -71,8 +71,8 @@ class TestReverberation:
     def test_boundary_matches_manual_formula(self):
         r = np.array([1000.0])
         rl = sonar.boundary_reverberation(
-            r, 220.0, -40.0, pulse_length_s=0.1,
-            horizontal_beamwidth_rad=0.1, sound_speed=1500.0, tl_dB=None,
+            r, 220.0, -40.0, pulse_length=0.1,
+            horizontal_beamwidth=0.1, sound_speed=1500.0, tl_dB=None,
         )
         tl = 20 * np.log10(1000.0)
         cell = 0.1 * 1000.0 * (1500.0 * 0.1 / 2)
@@ -89,58 +89,60 @@ class TestReverberation:
         r = np.array([500.0, 1000.0, 2000.0, 4000.0])
         tl_fn = lambda rr: 15.0 * np.log10(rr)  # noqa: E731
         b_call = sonar.boundary_reverberation(
-            r, 200.0, -27.0, pulse_length_s=0.01,
-            horizontal_beamwidth_rad=0.1, tl_dB=tl_fn,
+            r, 200.0, -27.0, pulse_length=0.01,
+            horizontal_beamwidth=0.1, tl_dB=tl_fn,
         )
         b_arr = sonar.boundary_reverberation(
-            r, 200.0, -27.0, pulse_length_s=0.01,
-            horizontal_beamwidth_rad=0.1, tl_dB=15.0 * np.log10(r),
+            r, 200.0, -27.0, pulse_length=0.01,
+            horizontal_beamwidth=0.1, tl_dB=15.0 * np.log10(r),
         )
         np.testing.assert_allclose(b_call, b_arr)
         v_call = sonar.volume_reverberation(
-            r, 200.0, -70.0, pulse_length_s=0.01,
-            solid_angle_beamwidth_sr=0.01, tl_dB=tl_fn,
+            r, 200.0, -70.0, pulse_length=0.01,
+            solid_angle_beamwidth=0.01, tl_dB=tl_fn,
         )
         v_arr = sonar.volume_reverberation(
-            r, 200.0, -70.0, pulse_length_s=0.01,
-            solid_angle_beamwidth_sr=0.01, tl_dB=15.0 * np.log10(r),
+            r, 200.0, -70.0, pulse_length=0.01,
+            solid_angle_beamwidth=0.01, tl_dB=15.0 * np.log10(r),
         )
         np.testing.assert_allclose(v_call, v_arr)
         # Spherical-spreading callable reproduces the tl_dB=None default.
         b_sph = sonar.boundary_reverberation(
-            r, 200.0, -27.0, pulse_length_s=0.01,
-            horizontal_beamwidth_rad=0.1,
+            r, 200.0, -27.0, pulse_length=0.01,
+            horizontal_beamwidth=0.1,
             tl_dB=lambda rr: 20.0 * np.log10(rr),
         )
         b_none = sonar.boundary_reverberation(
-            r, 200.0, -27.0, pulse_length_s=0.01,
-            horizontal_beamwidth_rad=0.1, tl_dB=None,
+            r, 200.0, -27.0, pulse_length=0.01,
+            horizontal_beamwidth=0.1, tl_dB=None,
         )
         np.testing.assert_allclose(b_sph, b_none)
 
     def test_volume_decays_slower_than_boundary(self):
         r = np.array([500.0, 5000.0])
-        b = sonar.boundary_reverberation(r, 220, -40, pulse_length_s=0.1,
-                                         horizontal_beamwidth_rad=0.1)
-        v = sonar.volume_reverberation(r, 220, -80, pulse_length_s=0.1,
-                                       solid_angle_beamwidth_sr=0.01)
+        b = sonar.boundary_reverberation(r, 220, -40, pulse_length=0.1,
+                                         horizontal_beamwidth=0.1)
+        v = sonar.volume_reverberation(r, 220, -80, pulse_length=0.1,
+                                       solid_angle_beamwidth=0.01)
         # Volume cell ~ r^2 vs boundary ~ r, so volume falls off less per decade.
         assert (v[0] - v[1]) < (b[0] - b[1])
 
-    def test_total_is_incoherent_sum(self):
+    def test_components_sum_incoherently(self):
+        from uacpy.acoustics import sum_levels_dB
         a, b = np.array([80.0]), np.array([74.0])
-        tot = sonar.total_reverberation(a, b)
+        tot = sum_levels_dB(a, b)
         expected = 10 * np.log10(10 ** 8.0 + 10 ** 7.4)
         assert tot[0] == pytest.approx(expected)
         # Independent hand value: 10log10(1e8 + 2.5119e7) = 80.973 dB.
         assert tot[0] == pytest.approx(80.973, abs=0.01)
 
-    def test_total_survives_levels_that_overflow_a_linear_sum(self):
+    def test_the_component_sum_survives_levels_that_overflow_a_linear_sum(
+            self):
         """``10**(x/10)`` is inf past ~3080 dB; the sum goes through
         logaddexp, as WenzNoise's does, and stays exact: two equal levels
         add 10·log10(2)."""
-        tot = sonar.total_reverberation(np.array([4000.0]),
-                                        np.array([4000.0]))
+        from uacpy.acoustics import sum_levels_dB
+        tot = sum_levels_dB(np.array([4000.0]), np.array([4000.0]))
         assert tot[0] == pytest.approx(4000.0 + 10.0 * np.log10(2.0))
 
     def test_bottom_scattering_is_an_attribute_but_not_listed(self):
@@ -159,9 +161,9 @@ class TestReverberation:
     def test_bad_pulse_raises(self):
         with pytest.raises(
                 ConfigurationError,
-                match='pulse_length_s and horizontal_beamwidth_rad must be > 0'):
-            sonar.boundary_reverberation([100.0], 220, -40, pulse_length_s=0.0,
-                                         horizontal_beamwidth_rad=0.1)
+                match='pulse_length and horizontal_beamwidth must be > 0'):
+            sonar.boundary_reverberation([100.0], 220, -40, pulse_length=0.0,
+                                         horizontal_beamwidth=0.1)
 
 
 class TestSonarEquation:
@@ -174,9 +176,9 @@ class TestSonarEquation:
         'never detectable' for a target detectable to 9 km."""
         r = np.array([1000., 3000., 5000., 7000., 9000., 11000.])
         se = np.array([10.0, np.nan, 6.0, np.nan, 1.0, -3.0])
-        assert sonar.detection_range(r, signal_excess_dB=se) == pytest.approx(9500.0)
+        assert sonar.detection_ranges(r, signal_excess_dB=se) == pytest.approx(9500.0)
         # an all-NaN row is genuinely unknown -> nan, not inf
-        assert np.isnan(sonar.detection_range(r, signal_excess_dB=np.full(6, np.nan)))
+        assert np.isnan(sonar.detection_ranges(r, signal_excess_dB=np.full(6, np.nan)))
 
     def test_passive_signal_excess(self):
         se = sonar.passive_signal_excess(140, 80, 60, directivity_index_dB=15,
@@ -201,6 +203,24 @@ class TestSonarEquation:
                 match='provide noise_level_dB and/or reverberation_level_dB'):
             sonar.active_signal_excess(220, 60, 10, detection_threshold_dB=0.0)
 
+    @pytest.mark.parametrize('noise, reverb, named', [
+        (None, np.array([]), 'reverberation_level_dB'),
+        (np.array([]), None, 'noise_level_dB'),
+        (60.0, np.array([]), 'reverberation_level_dB')])
+    def test_a_zero_length_background_is_refused(self, noise, reverb, named):
+        """An empty background array would broadcast the whole budget to an
+        empty result; a finite budget of the same terms is a number."""
+        with pytest.raises(ConfigurationError, match=f'zero-length {named}'):
+            sonar.active_signal_excess(200.0, 70.0, 10.0,
+                                       detection_threshold_dB=10.0,
+                                       noise_level_dB=noise,
+                                       reverberation_level_dB=reverb)
+        se = sonar.active_signal_excess(200.0, 70.0, 10.0,
+                                        detection_threshold_dB=10.0,
+                                        noise_level_dB=60.0,
+                                        reverberation_level_dB=np.array([50.0]))
+        assert se.shape == (1,) and np.isfinite(se[0])
+
     def test_figure_of_merit(self):
         assert sonar.figure_of_merit(220, 60, 15,
                                      detection_threshold_dB=10) == pytest.approx(220 - 45 - 10)
@@ -208,32 +228,32 @@ class TestSonarEquation:
     def test_detection_range_crossing(self):
         r = np.linspace(0, 100, 11)
         se = 50 - r  # crosses zero at r=50
-        assert sonar.detection_range(r, signal_excess_dB=se) == pytest.approx(50.0)
+        assert sonar.detection_ranges(r, signal_excess_dB=se) == pytest.approx(50.0)
 
     def test_detection_range_all_positive_is_inf(self):
         r = np.linspace(1, 10, 10)
-        assert sonar.detection_range(r, signal_excess_dB=np.ones_like(r)) == np.inf
+        assert sonar.detection_ranges(r, signal_excess_dB=np.ones_like(r)) == np.inf
 
     def test_detection_range_all_negative_is_nan(self):
         r = np.linspace(1, 10, 10)
-        assert np.isnan(sonar.detection_range(r, signal_excess_dB=-np.ones_like(r)))
+        assert np.isnan(sonar.detection_ranges(r, signal_excess_dB=-np.ones_like(r)))
 
     def test_detection_range_first_mode_reports_first_loss(self):
         # Direct path to 1.5, shadow, convergence zone 2.5..3.5: 'first' is
         # the first-loss range, 'outermost' the far edge of the zone.
         r = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
         se = np.array([5.0, 1.0, -1.0, 1.0, -1.0])
-        assert sonar.detection_range(r, signal_excess_dB=se, crossing='first') == pytest.approx(1.5)
-        assert sonar.detection_range(r, signal_excess_dB=se) == pytest.approx(3.5)
+        assert sonar.detection_ranges(r, signal_excess_dB=se, crossing='first') == pytest.approx(1.5)
+        assert sonar.detection_ranges(r, signal_excess_dB=se) == pytest.approx(3.5)
 
     def test_detection_range_first_crossing_edges(self):
         r = np.linspace(1, 10, 10)
-        assert sonar.detection_range(r, signal_excess_dB=np.ones_like(r), crossing='first') == np.inf
+        assert sonar.detection_ranges(r, signal_excess_dB=np.ones_like(r), crossing='first') == np.inf
         # Shadow at the nearest range: no first-loss range from the source.
         se = np.array([-1.0, 1, 1, -1, -1, -1, -1, -1, -1, -1])
-        assert np.isnan(sonar.detection_range(r, signal_excess_dB=se, crossing='first'))
+        assert np.isnan(sonar.detection_ranges(r, signal_excess_dB=se, crossing='first'))
         with pytest.raises(ConfigurationError, match="crossing must be"):
-            sonar.detection_range(r, signal_excess_dB=se, crossing='last')
+            sonar.detection_ranges(r, signal_excess_dB=se, crossing='last')
 
     def test_detection_annuli_lists_every_interval(self):
         r = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
@@ -243,10 +263,20 @@ class TestSonarEquation:
                        pytest.approx((4 + 1 / 3, 5.0))]
         assert sonar.detection_annuli(r, signal_excess_dB=-np.ones_like(r)) == []
 
+    @pytest.mark.parametrize('call', ['detection_ranges', 'detection_annuli'])
+    def test_a_range_axis_out_of_order_is_refused(self, call):
+        # [3, 2, 1] m with SE >= 0 at the farthest range read 1667 m (and
+        # annulus (3, 1.667)) where the in-order axis gives inf.
+        fn = getattr(sonar, call)
+        with pytest.raises(ConfigurationError,
+                           match='ranges must be strictly increasing'):
+            fn([3.0, 2.0, 1.0], signal_excess_dB=[1.0, 0.5, -1.0])
+        fn([1.0, 2.0, 3.0], signal_excess_dB=[-1.0, 0.5, 1.0])
+
     def test_detection_range_outermost_of_multiple_crossings(self):
         r = np.array([0.0, 1.0, 2.0, 3.0])
         se = np.array([5.0, -1.0, 1.0, -1.0])  # down-crossing between r=2 and r=3
-        assert sonar.detection_range(r, signal_excess_dB=se) == pytest.approx(2.5)
+        assert sonar.detection_ranges(r, signal_excess_dB=se) == pytest.approx(2.5)
 
     def test_detection_range_does_not_interpolate_across_a_no_data_hole(self):
         # The + and - samples bracket an unfilled (NaN) cell, so the crossing
@@ -254,18 +284,18 @@ class TestSonarEquation:
         # positive sample's range, not a sub-cell position inside the hole.
         r = np.array([0.0, 1000.0, 2000.0])
         se = np.array([5.0, np.nan, -5.0])
-        assert sonar.detection_range(r, signal_excess_dB=se) == pytest.approx(0.0)
+        assert sonar.detection_ranges(r, signal_excess_dB=se) == pytest.approx(0.0)
 
     def test_detection_range_interpolates_between_adjacent_samples(self):
         r = np.array([0.0, 1000.0])
         se = np.array([5.0, -5.0])
-        assert sonar.detection_range(r, signal_excess_dB=se) == pytest.approx(500.0)
+        assert sonar.detection_ranges(r, signal_excess_dB=se) == pytest.approx(500.0)
 
 
 class TestFarEdgeRecoveryUnderTrailingNoData:
     """The far edge is the last range WITH DATA, not ``ranges[-1]``.
 
-    ``detection_range`` masks the no-data cells before it looks for the far
+    ``detection_ranges`` masks the no-data cells before it looks for the far
     edge: SE >= 0 at the outermost FILLED cell puts the crossing beyond the
     grid (inf), and the warning names that cell's range.
     """
@@ -276,7 +306,7 @@ class TestFarEdgeRecoveryUnderTrailingNoData:
 
         SE starts positive, dips negative, and is back above zero across the
         eight cells that end at the outermost filled one, so every row takes
-        ``detection_range``'s far-edge-recovery branch.
+        ``detection_ranges``' far-edge-recovery branch.
         """
         r = np.arange(0.0, 20001.0, 1000.0)
         se = np.full(r.size, -1.0)
@@ -287,10 +317,10 @@ class TestFarEdgeRecoveryUnderTrailingNoData:
 
     def test_far_edge_recovery_names_the_last_range_with_data(self):
         r, se = self._recovery_with_trailing_no_data(3)
-        msgs = warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=se), _SHADOW)
+        msgs = warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=se), _SHADOW)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            assert sonar.detection_range(r, signal_excess_dB=se) == np.inf
+            assert sonar.detection_ranges(r, signal_excess_dB=se) == np.inf
         assert r[-1] == 20000.0
         assert len(msgs) == 1 and '(17000 m)' in msgs[0]
 
@@ -307,8 +337,8 @@ class TestFarEdgeRecoveryUnderTrailingNoData:
         )
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            depths, ranges = sonar.detection_ranges_by_depth(field)
-        np.testing.assert_array_equal(depths, [10.0, 20.0])
+            ranges = sonar.detection_ranges_field(field)
+        assert ranges.shape == (2,)
         assert np.all(ranges == np.inf)
 
 
@@ -334,6 +364,18 @@ class TestDetection:
         pf, pd = sonar.roc_curve(2.0)
         assert np.all(np.diff(pd) >= -1e-9)
         assert pd.max() <= 1.0 and pd.min() >= 0.0
+
+    def test_roc_curve_is_a_record_that_unpacks(self):
+        """The curve unpacks as ``(pfa, pd)`` and carries the deflection it
+        was computed for, which its ``.plot()`` labels the line with."""
+        curve = sonar.roc_curve(2.0, n_points=5)
+        assert isinstance(curve, sonar.RocCurve)
+        pf, pd = curve
+        np.testing.assert_array_equal(pf, curve.pfa)
+        np.testing.assert_array_equal(pd, curve.pd)
+        assert curve.deflection == 2.0
+        again = sonar.RocCurve.from_dict(curve.to_dict())
+        assert again.deflection == 2.0
 
     def test_roc_curve_default_pf_grid(self):
         # Default grid: logspace(-6, log10(0.99), 200) — 200 points from
@@ -407,9 +449,9 @@ class TestDetection:
         # the doc's -7.79 / -2.79 dB, exactly 5 dB (one decade of w*t) apart.
         d = (norm.ppf(0.5) - norm.ppf(1e-4)) ** 2
         dt_passive = sonar.detection_threshold_energy(
-            0.5, 1e-4, bandwidth_hz=50.0, integration_time_s=10.0, exact=False)
+            0.5, 1e-4, bandwidth=50.0, integration_time=10.0, exact=False)
         dt_active = sonar.detection_threshold_energy(
-            0.5, 1e-4, bandwidth_hz=100.0, integration_time_s=0.5, exact=False)
+            0.5, 1e-4, bandwidth=100.0, integration_time=0.5, exact=False)
         assert dt_passive == pytest.approx(5.0 * np.log10(d / 500.0))
         assert dt_active == pytest.approx(5.0 * np.log10(d / 50.0))
         assert dt_passive == pytest.approx(-7.7906, abs=5e-4)
@@ -423,8 +465,8 @@ class TestDetection:
         from scipy.stats import gamma
         for (bw, t, m, want) in ((50.0, 10.0, 500.0, -7.5519),
                                  (100.0, 0.5, 50.0, -2.0482)):
-            got = sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=bw,
-                                                   integration_time_s=t)
+            got = sonar.detection_threshold_energy(0.5, 1e-4, bandwidth=bw,
+                                                   integration_time=t)
             assert got == pytest.approx(
                 10 * np.log10(gamma.isf(1e-4, m) / gamma.isf(0.5, m) - 1),
                 abs=1e-12)
@@ -531,6 +573,28 @@ class TestSignalExcessField:
         assert no_energy_mask(se.data[0]).all()
         np.testing.assert_allclose(se.data[1:], expected[1:], atol=1e-9)
         assert not no_energy_mask(se.data[1:]).any()
+
+    @pytest.mark.parametrize('budget', ['echo', 'passive', 'active'])
+    def test_the_array_functions_keep_the_marker_too(self, budget):
+        """``levels.py``: anything turning a loss into another level carries
+        the marker across. A 600 dB one-way TL gives -600 dB, as the Field
+        route does, not SL-600-... (which the mask would not read as
+        no-energy); finite cells and scalar-in-scalar-out are unchanged."""
+        from uacpy.core.acoustics.levels import no_energy_mask
+        from uacpy.core.constants import NO_ENERGY_DB
+        call = {
+            'echo': lambda tl: sonar.echo_level(200.0, tl, 10.0),
+            'passive': lambda tl: sonar.passive_signal_excess(
+                160.0, tl, 60.0, detection_threshold_dB=10.0),
+            'active': lambda tl: sonar.active_signal_excess(
+                200.0, tl, 10.0, noise_level_dB=60.0,
+                detection_threshold_dB=10.0),
+        }[budget]
+        out = call(np.array([70.0, NO_ENERGY_DB]))
+        assert out[1] == -NO_ENERGY_DB
+        assert no_energy_mask(out).tolist() == [False, True]
+        assert out[0] == pytest.approx(float(call(70.0)))
+        assert np.ndim(call(70.0)) == 0
 
     def test_a_two_way_deep_null_is_not_read_as_the_marker(self):
         # 350 dB one way is a real (round-off) null, kept by the mask; two
@@ -972,7 +1036,7 @@ class TestScanFalseAlarmAccountsForManyLooks:
             1.0 - (1.0 - 1e-4) ** 16)
 
     def test_it_raises_the_detection_threshold(self):
-        kw = dict(pd=0.5, bandwidth_hz=10.0, integration_time_s=10.0)
+        kw = dict(pd=0.5, bandwidth=10.0, integration_time=10.0)
         one = sonar.detection_threshold_energy(pf=1e-4, **kw)
         scan = sonar.detection_threshold_energy(
             pf=sonar.per_look_false_alarm(1e-4, 16), **kw)
@@ -1159,34 +1223,32 @@ class TestDetectionProbabilityField:
                              [5.0, 5.0, 5.0],
                              [-5.0, -5.0, -5.0]])
         se.coords['range'] = r
-        depths, dr = sonar.detection_ranges_by_depth(se)
-        assert depths.shape == dr.shape == (3,)
+        dr = sonar.detection_ranges_field(se)
+        assert dr.shape == (3,)
         assert dr[0] == pytest.approx(2000.0)   # exact zero at 2 km
         assert np.isinf(dr[1])
         assert np.isnan(dr[2])
 
     @pytest.mark.parametrize('kind', ['pressure', 'level', 'difference'])
-    def test_detection_ranges_by_depth_refuses_a_field_that_is_not_signal_excess(
+    def test_detection_ranges_field_refuses_a_field_that_is_not_signal_excess(
             self, kind):
         """A TL of 47-80 dB read as SE is positive everywhere: inf range at
         every depth."""
         se = self._se_field([[60.0, 70.0, 80.0]])
         with pytest.raises(ConfigurationError, match='not signal excess'):
-            sonar.detection_ranges_by_depth(se.replace(kind=kind))
+            sonar.detection_ranges_field(se.replace(kind=kind))
 
-    def test_detection_ranges_by_depth_accepts_a_signal_excess_field(self):
+    def test_detection_ranges_field_accepts_a_signal_excess_field(self):
         se = self._se_field([[60.0, 70.0, 80.0]])
-        _, dr = sonar.detection_ranges_by_depth(se)
+        dr = sonar.detection_ranges_field(se)
         assert np.isinf(dr[0])
 
-    def test_detection_range_by_depth_requires_canonical(self):
+    def test_detection_ranges_field_needs_a_range_axis(self):
         from uacpy.core.results import Field
-        f = Field(data=np.zeros(4), coords={'range': np.arange(4.0) + 1},
+        f = Field(data=np.zeros(4), coords={'depth': np.arange(4.0) + 1},
                   kind='signal_excess')
-        with pytest.raises(
-                ConfigurationError,
-                match=r"requires canonical \['depth', 'range'\] coords"):
-            sonar.detection_ranges_by_depth(f)
+        with pytest.raises(ConfigurationError, match='has no range axis'):
+            sonar.detection_ranges_field(f)
 
     def test_plot_detection_probability_smoke(self):
         import matplotlib.pyplot as plt
@@ -1349,12 +1411,12 @@ class TestTargetStrength:
                                sound_speed=1500.0)
 
     def test_invalid_inputs_raise(self):
-        with pytest.raises(ConfigurationError, match='radius_m must be > 0'):
+        with pytest.raises(ConfigurationError, match='radius must be > 0'):
             sonar.ts_sphere(0.0)
         with pytest.raises(ConfigurationError,
                            match='frequency must be > 0'):
             sonar.ts_cylinder(1.0, 5.0, frequency=-100.0)
-        with pytest.raises(ConfigurationError, match='height_m must be > 0'):
+        with pytest.raises(ConfigurationError, match='height must be > 0'):
             sonar.ts_plate(1.0, -1.0, frequency=1000.0)
 
     def test_feeds_active_signal_excess(self):
@@ -1372,10 +1434,10 @@ class TestDetectionThresholdReference:
     def test_five_dB_per_decade_of_time_bandwidth(self):
         """Abraham 9.2.3.1: SNR_d falls 5 dB per decade of M = w*t."""
         from uacpy.sonar import detection_threshold_energy
-        a = detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100.0,
-                                       integration_time_s=1.0, exact=False)
-        b = detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100.0,
-                                       integration_time_s=10.0, exact=False)
+        a = detection_threshold_energy(0.5, 1e-4, bandwidth=100.0,
+                                       integration_time=1.0, exact=False)
+        b = detection_threshold_energy(0.5, 1e-4, bandwidth=100.0,
+                                       integration_time=10.0, exact=False)
         assert (a - b) == pytest.approx(5.0, abs=1e-9)
 
     def test_offset_from_urick_band_power_form_is_10log10_w(self):
@@ -1583,7 +1645,7 @@ class TestReverberationCells:
     Processing Handbook*; Urick Ch. 8), so with spherical spreading boundary
     reverberation falls 30 dB per decade of range and volume 20 dB."""
 
-    KW = dict(pulse_length_s=0.01, sound_speed=1500.0)
+    KW = dict(pulse_length=0.01, sound_speed=1500.0)
     SL, SB, SV, PHI, PSI = 200.0, -27.0, -70.0, 0.1, 0.01
 
     def test_cells_match_the_published_expressions(self):
@@ -1591,14 +1653,14 @@ class TestReverberationCells:
                                                volume_reverberation)
         r = np.array([500.0, 2000.0, 9000.0])
         tl = 20 * np.log10(r)
-        c, tau = self.KW['sound_speed'], self.KW['pulse_length_s']
+        c, tau = self.KW['sound_speed'], self.KW['pulse_length']
         assert np.allclose(
             boundary_reverberation(r, self.SL, self.SB,
-                                   horizontal_beamwidth_rad=self.PHI, **self.KW),
+                                   horizontal_beamwidth=self.PHI, **self.KW),
             self.SL - 2 * tl + self.SB + 10 * np.log10(self.PHI * r * (c * tau / 2)))
         assert np.allclose(
             volume_reverberation(r, self.SL, self.SV,
-                                 solid_angle_beamwidth_sr=self.PSI, **self.KW),
+                                 solid_angle_beamwidth=self.PSI, **self.KW),
             self.SL - 2 * tl + self.SV + 10 * np.log10(self.PSI * r ** 2 * (c * tau / 2)))
 
     def test_decay_slopes_are_the_classic_minus_30_and_minus_20(self):
@@ -1606,15 +1668,15 @@ class TestReverberationCells:
                                                volume_reverberation)
         r = np.array([1e3, 1e4])                       # one decade
         b = boundary_reverberation(r, self.SL, self.SB,
-                                   horizontal_beamwidth_rad=self.PHI, **self.KW)
+                                   horizontal_beamwidth=self.PHI, **self.KW)
         v = volume_reverberation(r, self.SL, self.SV,
-                                 solid_angle_beamwidth_sr=self.PSI, **self.KW)
+                                 solid_angle_beamwidth=self.PSI, **self.KW)
         assert b[1] - b[0] == pytest.approx(-30.0)
         assert v[1] - v[0] == pytest.approx(-20.0)
 
-    def test_total_is_an_incoherent_power_sum(self):
-        from uacpy.sonar.reverberation import total_reverberation
-        got = total_reverberation(np.array([80.0]), np.array([74.0]))
+    def test_components_are_an_incoherent_power_sum(self):
+        from uacpy.acoustics import sum_levels_dB
+        got = sum_levels_dB(np.array([80.0]), np.array([74.0]))
         assert got[0] == pytest.approx(10 * np.log10(10 ** 8.0 + 10 ** 7.4))
 
 
@@ -1632,7 +1694,7 @@ class TestReverberationGuardsItsDomain:
     encountered in log10``, and r = 0 fell out of an inf - inf.
     """
 
-    KW = dict(pulse_length_s=0.1, horizontal_beamwidth_rad=0.1,
+    KW = dict(pulse_length=0.1, horizontal_beamwidth=0.1,
               sound_speed=1500.0)
 
     def test_the_derived_error_matches_the_exact_annulus_area(self):
@@ -1647,8 +1709,8 @@ class TestReverberationGuardsItsDomain:
                 predicted, abs=1e-12)
 
     @pytest.mark.parametrize('call, beam, expected', [
-        ('boundary_reverberation', 'horizontal_beamwidth_rad', 2.43),
-        ('volume_reverberation', 'solid_angle_beamwidth_sr', 5.12),
+        ('boundary_reverberation', 'horizontal_beamwidth', 2.43),
+        ('volume_reverberation', 'solid_angle_beamwidth', 5.12),
     ])
     def test_the_warning_quotes_its_own_cell_geometry(self, call, beam,
                                                       expected):
@@ -1659,7 +1721,7 @@ class TestReverberationGuardsItsDomain:
         fn = getattr(reverberation, call)
         with pytest.warns(UserWarning,
                           match=f'low by about {expected:.2f} dB'):
-            fn(np.array([50.0, 500.0]), 200.0, -27.0, pulse_length_s=0.1,
+            fn(np.array([50.0, 500.0]), 200.0, -27.0, pulse_length=0.1,
                sound_speed=1500.0, **{beam: 0.1})
 
     def test_the_shell_error_matches_the_exact_shell_volume(self):
@@ -1694,7 +1756,7 @@ class TestReverberationGuardsItsDomain:
 
     def test_volume_reverberation_guards_the_same_domain(self):
         from uacpy.sonar.reverberation import volume_reverberation
-        kw = dict(pulse_length_s=0.1, solid_angle_beamwidth_sr=0.01,
+        kw = dict(pulse_length=0.1, solid_angle_beamwidth=0.01,
                   sound_speed=1500.0)
         with recorded_warnings() as rec:
             volume_reverberation(np.array([1.0, 1000.0]), 200.0, -70.0, **kw)
@@ -1709,15 +1771,15 @@ class TestReverberationGuardsItsDomain:
         assert [w for w in rec if issubclass(w.category, RuntimeWarning)] == []
 
     @pytest.mark.parametrize('fn,extra', [
-        ('boundary_reverberation', {'horizontal_beamwidth_rad': 0.1}),
-        ('volume_reverberation', {'solid_angle_beamwidth_sr': 0.01}),
+        ('boundary_reverberation', {'horizontal_beamwidth': 0.1}),
+        ('volume_reverberation', {'solid_angle_beamwidth': 0.01}),
     ])
     def test_a_negative_range_is_refused(self, fn, extra):
         from uacpy.sonar import reverberation
         with pytest.raises(ConfigurationError, match='must be >= 0'):
             getattr(reverberation, fn)(
                 np.array([-100.0, 100.0]), 200.0, -27.0,
-                pulse_length_s=0.1, sound_speed=1500.0, **extra)
+                pulse_length=0.1, sound_speed=1500.0, **extra)
 
 
 class TestChapmanHarrisFlagsExtrapolation:
@@ -1729,7 +1791,7 @@ class TestChapmanHarrisFlagsExtrapolation:
     extrapolated value is indistinguishable from a validated one. At 10 kn and
     10 deg grazing it runs from -76.50 dB at 100 Hz to -28.76 dB at 200 kHz.
 
-    Every bound here is quoted from the corpus, and the two sources disagree:
+    Every bound here is quoted from its source, and the two sources disagree:
 
     * JKPS Sect. 1.7.1 — curves "derived from measurements over the frequency
       range of 400-6400 Hz and wind speed up to 15 m/s", and they "perform
@@ -1865,14 +1927,14 @@ class TestBeamwidthAndLambertCeilings:
     mu is capped at 1/π (−4.97 dB) by energy conservation."""
 
     @pytest.mark.parametrize('call, beam, ceiling', [
-        ('boundary_reverberation', 'horizontal_beamwidth_rad', 2.0 * np.pi),
-        ('volume_reverberation', 'solid_angle_beamwidth_sr', 4.0 * np.pi)])
+        ('boundary_reverberation', 'horizontal_beamwidth', 2.0 * np.pi),
+        ('volume_reverberation', 'solid_angle_beamwidth', 4.0 * np.pi)])
     @pytest.mark.parametrize('factor, refused', [(1.0, False),
                                                  (1.0 + 1e-9, True),
                                                  (3.0, True)])
     def test_a_beamwidth_past_every_direction_is_refused(
             self, call, beam, ceiling, factor, refused):
-        kw = {'pulse_length_s': 0.01, beam: ceiling * factor}
+        kw = {'pulse_length': 0.01, beam: ceiling * factor}
         fn = getattr(sonar, call)
         if refused:
             with pytest.raises(ConfigurationError, match=f'{beam}=.* exceeds'):
@@ -1890,7 +1952,7 @@ class TestBeamwidthAndLambertCeilings:
 
 
 class TestLambertBottomFlagsExtrapolation:
-    """Every constant here is quoted from the corpus.
+    """Every constant here is quoted from its source.
 
     * Etter Sect. 9.3.3, citing Urick (1983) Ch. 8: Lambert's law "appears to
       provide a good approximation to the observed data for many deep-water
@@ -1991,8 +2053,14 @@ class TestCsdmRequiresSnapshots:
         np.testing.assert_allclose(K, d @ d.conj().T)
 
 
-class TestCsdmAndSampleCovarianceShareOneCore:
-    """``csdm`` and ``acoustic_signal.sample_covariance`` compute the same
+def _snapshot_covariance(d):
+    """``Snapshots.covariance`` of the snapshot matrix ``d``."""
+    from uacpy.acoustic_signal import Snapshots
+    return Snapshots(100.0, d).covariance()
+
+
+class TestCsdmAndSnapshotsCovarianceShareOneCore:
+    """``csdm`` and ``acoustic_signal.Snapshots.covariance`` compute the same
     ``(d dH)/L`` average, so they accept and refuse the same snapshots.
 
     A NaN snapshot is realistic: every engine NaNs the ``r <= 0`` columns of a
@@ -2008,10 +2076,9 @@ class TestCsdmAndSampleCovarianceShareOneCore:
         return (rng.standard_normal((6, 20))
                 + 1j * rng.standard_normal((6, 20)))
 
-    def test_the_two_names_return_the_same_matrix(self):
-        from uacpy.acoustic_signal.beamforming import sample_covariance
+    def test_the_two_doors_return_the_same_matrix(self):
         d = self._snapshots()
-        np.testing.assert_array_equal(sonar.csdm(d), sample_covariance(d))
+        np.testing.assert_array_equal(sonar.csdm(d), _snapshot_covariance(d))
 
     @pytest.mark.parametrize('bad', [NAN, INF])
     def test_csdm_refuses_a_non_finite_snapshot(self, bad):
@@ -2021,12 +2088,11 @@ class TestCsdmAndSampleCovarianceShareOneCore:
             sonar.csdm(d)
 
     @pytest.mark.parametrize('bad', [NAN, INF])
-    def test_sample_covariance_refuses_a_non_finite_snapshot(self, bad):
-        from uacpy.acoustic_signal.beamforming import sample_covariance
+    def test_snapshots_covariance_refuses_a_non_finite_snapshot(self, bad):
         d = self._snapshots()
         d[2, 3] = bad
         with pytest.raises(ConfigurationError, match='NaN or Inf'):
-            sample_covariance(d)
+            _snapshot_covariance(d)
 
     def test_the_non_finite_message_names_the_count_and_first_index(self):
         d = self._snapshots()
@@ -2041,37 +2107,33 @@ class TestCsdmAndSampleCovarianceShareOneCore:
 
     @pytest.mark.parametrize('shape, cue', [((0, 5), 'zero sensor rows'),
                                             ((6, 0), 'zero snapshot')])
-    @pytest.mark.parametrize('name', ['csdm', 'sample_covariance'])
+    @pytest.mark.parametrize('name', ['csdm', 'Snapshots.covariance'])
     def test_both_degenerate_axes_are_refused_on_both_entry_points(
             self, name, shape, cue):
         """A zero-sensor matrix averages to an empty ``(0, 0)`` covariance and
         every beamformer scores that as a silent all-zero surface — the same
         confident-meaningless-answer shape as the NaN case, on the other
         axis."""
-        from uacpy.acoustic_signal.beamforming import sample_covariance
-        call = sonar.csdm if name == 'csdm' else sample_covariance
+        call = sonar.csdm if name == 'csdm' else _snapshot_covariance
         with pytest.raises(ConfigurationError, match=cue) as exc:
             call(np.zeros(shape, dtype=complex))
         assert name in str(exc.value)
 
     def test_a_zero_sensor_covariance_never_reaches_a_surface(self):
-        from uacpy.acoustic_signal.beamforming import (
-            bartlett, sample_covariance,
-        )
+        from uacpy.acoustic_signal.beamforming import bartlett
         with pytest.raises(ConfigurationError,
                            match='snapshots has zero sensor rows'):
-            bartlett(sample_covariance(np.zeros((0, 5), complex)),
+            bartlett(sonar.csdm(np.zeros((0, 5), complex)),
                      np.zeros((3, 0), complex))
 
-    @pytest.mark.parametrize('name', ['csdm', 'sample_covariance'])
+    @pytest.mark.parametrize('name', ['csdm', 'Snapshots.covariance'])
     def test_a_field_is_named_with_the_bridge_rather_than_a_cast_error(
             self, name):
         """``np.asarray(Field, dtype=complex)`` raises ``must be real number,
         not Field``, which names nothing the caller passed. Both covariance
-        names give the typed message the rest of the package gives."""
-        from uacpy.acoustic_signal.beamforming import sample_covariance
+        doors give the typed message the rest of the package gives."""
         from uacpy.core.results import Field
-        call = sonar.csdm if name == 'csdm' else sample_covariance
+        call = sonar.csdm if name == 'csdm' else _snapshot_covariance
         t = np.arange(64) / 64.0
         field = Field(data=np.sin(2 * np.pi * 4 * t), coords={'time': t})
         with pytest.raises(
@@ -2085,10 +2147,9 @@ class TestCsdmAndSampleCovarianceShareOneCore:
     def test_a_one_sensor_one_snapshot_matrix_is_the_admissible_corner(self):
         """Both sides of both new boundaries: ``(1, 1)`` is the smallest
         matrix that still defines a covariance, and it is accepted."""
-        from uacpy.acoustic_signal.beamforming import sample_covariance
         d = np.array([[2.0 + 1.0j]])
         np.testing.assert_allclose(sonar.csdm(d), d @ d.conj().T)
-        np.testing.assert_allclose(sample_covariance(d), d @ d.conj().T)
+        np.testing.assert_allclose(_snapshot_covariance(d), d @ d.conj().T)
 
     def test_an_all_finite_snapshot_set_beamforms(self):
         # The negative control for the guard: the ordinary path is untouched,
@@ -2182,7 +2243,7 @@ class TestSonarPositivityGuardsRefuseNaN:
         converted to Python scalars". The sibling guard in ``acoustic_signal``
         already typed this case; both now say which argument."""
         with pytest.raises(ConfigurationError,
-                           match="radius_m must be a (scalar number|number, "
+                           match="radius must be a (scalar number|number, "
                                  "not text)"):
             ts.ts_sphere(bad)
 
@@ -2197,8 +2258,8 @@ class TestSonarPositivityGuardsRefuseNaN:
             roc_curve(NAN)
 
     @pytest.mark.parametrize("kwargs", [
-        {'bandwidth_hz': NAN, 'integration_time_s': 1.0},
-        {'bandwidth_hz': 100.0, 'integration_time_s': NAN},
+        {'bandwidth': NAN, 'integration_time': 1.0},
+        {'bandwidth': 100.0, 'integration_time': NAN},
     ])
     def test_detection_threshold_energy_nan_band_or_time_raises(self, kwargs):
         with pytest.raises(ConfigurationError, match="must be > 0 and finite"):
@@ -2306,41 +2367,41 @@ class TestReverberationGuardsRefuseNaNButKeepZeroRange:
     def test_boundary_reverberation_nan_pulse_length_raises(self):
         with pytest.raises(ConfigurationError, match="must be > 0 and finite"):
             boundary_reverberation([100.0, 200.0], 200.0, -30.0,
-                                   pulse_length_s=NAN,
-                                   horizontal_beamwidth_rad=0.1)
+                                   pulse_length=NAN,
+                                   horizontal_beamwidth=0.1)
 
     def test_volume_reverberation_nan_solid_angle_raises(self):
         with pytest.raises(ConfigurationError, match="must be > 0 and finite"):
             volume_reverberation([100.0, 200.0], 200.0, -70.0,
-                                 pulse_length_s=0.01,
-                                 solid_angle_beamwidth_sr=NAN)
+                                 pulse_length=0.01,
+                                 solid_angle_beamwidth=NAN)
 
     @pytest.mark.parametrize("bad,first", [
-        (dict(pulse_length_s=NAN, sound_speed=-1.0, ranges_m=[-1.0]),
-         "pulse_length_s and horizontal_beamwidth_rad must be > 0 and finite"),
-        (dict(sound_speed=-1.0, ranges_m=[-1.0]),
+        (dict(pulse_length=NAN, sound_speed=-1.0, ranges=[-1.0]),
+         "pulse_length and horizontal_beamwidth must be > 0 and finite"),
+        (dict(sound_speed=-1.0, ranges=[-1.0]),
          "boundary_reverberation: sound_speed must be > 0 m/s and finite"),
-        (dict(ranges_m=[-1.0]),
-         "boundary_reverberation: ranges_m must be >= 0 and finite"),
+        (dict(ranges=[-1.0]),
+         "boundary_reverberation: ranges must be >= 0 and finite"),
     ])
     def test_boundary_reverberation_reports_the_first_failing_guard(
             self, bad, first):
         # Guard order is pulse/beam, sound speed, ranges: a call with several
         # bad arguments names the first of them.
-        kw = dict(ranges_m=[100.0], pulse_length_s=0.01,
-                  horizontal_beamwidth_rad=0.1, sound_speed=1500.0)
+        kw = dict(ranges=[100.0], pulse_length=0.01,
+                  horizontal_beamwidth=0.1, sound_speed=1500.0)
         kw.update(bad)
         with pytest.raises(ConfigurationError, match=first):
-            boundary_reverberation(kw.pop("ranges_m"), 200.0, -30.0, **kw)
+            boundary_reverberation(kw.pop("ranges"), 200.0, -30.0, **kw)
 
     def test_volume_reverberation_names_its_own_beam_argument_first(self):
         with pytest.raises(ConfigurationError,
-                           match="volume_reverberation: pulse_length_s and "
-                                 "solid_angle_beamwidth_sr must be > 0 and "
-                                 "finite; got pulse_length_s=0.01, "
-                                 "solid_angle_beamwidth_sr=-0.1"):
-            volume_reverberation([-1.0], 200.0, -70.0, pulse_length_s=0.01,
-                                 solid_angle_beamwidth_sr=-0.1,
+                           match="volume_reverberation: pulse_length and "
+                                 "solid_angle_beamwidth must be > 0 and "
+                                 "finite; got pulse_length=0.01, "
+                                 "solid_angle_beamwidth=-0.1"):
+            volume_reverberation([-1.0], 200.0, -70.0, pulse_length=0.01,
+                                 solid_angle_beamwidth=-0.1,
                                  sound_speed=0.0)
 
     # ``INF`` completes the set the test's name already claimed: the guard was
@@ -2349,8 +2410,8 @@ class TestReverberationGuardsRefuseNaNButKeepZeroRange:
     def test_non_finite_range_raises(self, bad):
         with pytest.raises(ConfigurationError, match="must be >= 0 and finite"):
             boundary_reverberation([bad, 200.0], 200.0, -30.0,
-                                   pulse_length_s=0.01,
-                                   horizontal_beamwidth_rad=0.1)
+                                   pulse_length=0.01,
+                                   horizontal_beamwidth=0.1)
 
     def test_zero_range_returns_nan_without_a_numpy_warning(self):
         # r == 0 is the package's no-data convention for a zero-area cell and
@@ -2358,8 +2419,8 @@ class TestReverberationGuardsRefuseNaNButKeepZeroRange:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             out = boundary_reverberation([0.0, 200.0], 200.0, -30.0,
-                                         pulse_length_s=0.01,
-                                         horizontal_beamwidth_rad=0.1)
+                                         pulse_length=0.01,
+                                         horizontal_beamwidth=0.1)
         assert np.isnan(out[0]) and np.isfinite(out[1])
 
 
@@ -2367,34 +2428,34 @@ class TestReverberationGuardsRefuseNaNButKeepZeroRange:
 #: ``sonar.scattering`` whose message promises "and finite", each call setting
 #: exactly that one parameter to +inf and leaving the rest valid.
 _INFINITY_SITES = [
-    ('boundary_reverberation/ranges_m',
+    ('boundary_reverberation/ranges',
      lambda: boundary_reverberation([INF, 200.0], 200.0, -30.0,
-                                    pulse_length_s=0.01,
-                                    horizontal_beamwidth_rad=0.1)),
-    ('boundary_reverberation/pulse_length_s',
+                                    pulse_length=0.01,
+                                    horizontal_beamwidth=0.1)),
+    ('boundary_reverberation/pulse_length',
      lambda: boundary_reverberation([100.0, 200.0], 200.0, -30.0,
-                                    pulse_length_s=INF,
-                                    horizontal_beamwidth_rad=0.1)),
-    ('boundary_reverberation/horizontal_beamwidth_rad',
+                                    pulse_length=INF,
+                                    horizontal_beamwidth=0.1)),
+    ('boundary_reverberation/horizontal_beamwidth',
      lambda: boundary_reverberation([100.0, 200.0], 200.0, -30.0,
-                                    pulse_length_s=0.01,
-                                    horizontal_beamwidth_rad=INF)),
-    ('volume_reverberation/ranges_m',
+                                    pulse_length=0.01,
+                                    horizontal_beamwidth=INF)),
+    ('volume_reverberation/ranges',
      lambda: volume_reverberation([INF, 200.0], 200.0, -70.0,
-                                  pulse_length_s=0.01,
-                                  solid_angle_beamwidth_sr=0.01)),
-    ('volume_reverberation/pulse_length_s',
+                                  pulse_length=0.01,
+                                  solid_angle_beamwidth=0.01)),
+    ('volume_reverberation/pulse_length',
      lambda: volume_reverberation([100.0, 200.0], 200.0, -70.0,
-                                  pulse_length_s=INF,
-                                  solid_angle_beamwidth_sr=0.01)),
-    ('volume_reverberation/solid_angle_beamwidth_sr',
+                                  pulse_length=INF,
+                                  solid_angle_beamwidth=0.01)),
+    ('volume_reverberation/solid_angle_beamwidth',
      lambda: volume_reverberation([100.0, 200.0], 200.0, -70.0,
-                                  pulse_length_s=0.01,
-                                  solid_angle_beamwidth_sr=INF)),
+                                  pulse_length=0.01,
+                                  solid_angle_beamwidth=INF)),
     ('roc_curve/deflection', lambda: roc_curve(INF)),
-    ('detection_threshold_energy/bandwidth_hz',
+    ('detection_threshold_energy/bandwidth',
      lambda: detection_threshold_energy(0.9, 1e-4, INF, 1.0)),
-    ('detection_threshold_energy/integration_time_s',
+    ('detection_threshold_energy/integration_time',
      lambda: detection_threshold_energy(0.9, 1e-4, 100.0, INF)),
     ('chapman_harris_surface/wind_speed_kn',
      lambda: chapman_harris_surface(frequency=1000.0,
@@ -2402,7 +2463,7 @@ _INFINITY_SITES = [
     ('chapman_harris_surface/frequency',
      lambda: chapman_harris_surface(frequency=INF,
                                     grazing_deg=10.0, wind_speed_kn=10.0)),
-    ('column_scattering_strength/thickness_m',
+    ('column_scattering_strength/thickness',
      lambda: column_scattering_strength(-30.0, INF)),
 ]
 
@@ -2453,8 +2514,8 @@ class TestSonarGuardsRefuseInfinity:
     @pytest.mark.parametrize('bad', [INF, -INF, NAN, 0.0, -1500.0],
                              ids=['inf', '-inf', 'nan', 'zero', 'negative'])
     @pytest.mark.parametrize('fn,extra', [
-        ('boundary_reverberation', {'horizontal_beamwidth_rad': 0.1}),
-        ('volume_reverberation', {'solid_angle_beamwidth_sr': 0.01}),
+        ('boundary_reverberation', {'horizontal_beamwidth': 0.1}),
+        ('volume_reverberation', {'solid_angle_beamwidth': 0.01}),
     ])
     def test_a_bad_sound_speed_is_refused(self, fn, extra, bad):
         """``sound_speed`` carried no check at all, and failed three ways in
@@ -2469,7 +2530,7 @@ class TestSonarGuardsRefuseInfinity:
         with pytest.raises(ConfigurationError,
                            match='sound_speed must be > 0 m/s and finite'):
             getattr(reverberation, fn)([100.0, 200.0], 200.0, -30.0,
-                                       pulse_length_s=0.01, sound_speed=bad,
+                                       pulse_length=0.01, sound_speed=bad,
                                        **extra)
 
     @pytest.mark.parametrize('bad', [INF, -INF, NAN], ids=['inf', '-inf', 'nan'])
@@ -2507,21 +2568,21 @@ class TestSonarGuardsRefuseInfinity:
         them into rejections.
 
         ``-inf`` dB is exactly zero linear power — an absent contribution — and
-        ``total_reverberation`` relies on it: a -inf component adds nothing to
-        the incoherent sum, where a 0 dB one shifts it. NaN is the package's
-        own no-data convention, which ``boundary_reverberation`` deliberately
-        *returns* at zero range. A finiteness guard on a dB-valued parameter
-        would refuse both."""
-        out = sonar.total_reverberation(np.array([level]), np.array([50.0]))
+        the incoherent sum of reverberation components (``sum_levels_dB``)
+        relies on it: a -inf component adds nothing, where a 0 dB one shifts
+        it. NaN is the package's own no-data convention, which
+        ``boundary_reverberation`` deliberately *returns* at zero range. A
+        finiteness guard on a dB-valued parameter would refuse both."""
+        from uacpy.acoustics import sum_levels_dB
+        out = sum_levels_dB(np.array([level]), np.array([50.0]))
         if np.isneginf(level):
             assert out[0] == pytest.approx(50.0)
-            assert sonar.total_reverberation(
-                np.array([0.0]), np.array([50.0]))[0] > 50.0
+            assert sum_levels_dB(np.array([0.0]), np.array([50.0]))[0] > 50.0
         else:
             assert np.isnan(out[0])
         for dB_arg in (lambda v: sonar.boundary_reverberation(
-                           [100.0, 200.0], v, -30.0, pulse_length_s=0.01,
-                           horizontal_beamwidth_rad=0.1),
+                           [100.0, 200.0], v, -30.0, pulse_length=0.01,
+                           horizontal_beamwidth=0.1),
                        lambda v: sonar.column_scattering_strength(v, 10.0)):
             assert not np.all(np.isfinite(np.asarray(dB_arg(level), float)))
 
@@ -2531,8 +2592,8 @@ class TestSonarGuardsRefuseInfinity:
         zero-area range cell, a 0 deg grazing angle, a zero deflection — still
         pass, and a wholly ordinary call still returns its finite level."""
         rl = boundary_reverberation([0.0, 100.0, 1000.0], 200.0, -27.0,
-                                    pulse_length_s=0.01,
-                                    horizontal_beamwidth_rad=0.1)
+                                    pulse_length=0.01,
+                                    horizontal_beamwidth=0.1)
         assert np.isnan(rl[0]) and np.all(np.isfinite(rl[1:]))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -2545,9 +2606,9 @@ class TestSonarGuardsRefuseInfinity:
         assert np.isfinite(column_scattering_strength(-30.0, 10.0))
 
 
-# ── detection_range far-edge recovery ───────────────────────────────────────
+# ── detection_ranges far-edge recovery ──────────────────────────────────────
 #
-# `detection_range` returns inf when the signal excess is >= 0 at the far edge:
+# `detection_ranges` returns inf when the signal excess is >= 0 at the far edge:
 # the outermost crossing lies beyond the grid, and the grid's own edge would be
 # a number that moves with `receiver.ranges` (measured on a Kraken shelf
 # budget: 20000.0 m on a 20 km grid against 45947 m on a 120 km grid). When
@@ -2565,7 +2626,7 @@ class TestDetectionRangeFarEdgeRecovery:
     def test_far_edge_recovery_warns_and_names_the_in_grid_shadow(self):
         r = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
         se = np.array([5.0, -1.0, 2.0, 3.0, 4.0])
-        msgs = warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=se), _SHADOW)
+        msgs = warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=se), _SHADOW)
         assert len(msgs) == 1
         # SE crosses down at 5/6 and back up at 1 + 1/3.
         assert 'between 0.833333 and 1.33333 m' in msgs[0]
@@ -2575,7 +2636,7 @@ class TestDetectionRangeFarEdgeRecovery:
     def test_a_shadow_at_the_nearest_range_is_the_one_named(self):
         r = np.array([0.0, 1.0, 2.0, 3.0])
         se = np.array([-1.0, -2.0, 1.0, 2.0])
-        msgs = warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=se), _SHADOW)
+        msgs = warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=se), _SHADOW)
         assert len(msgs) == 1
         assert 'between 0 and 1.66667 m' in msgs[0]
 
@@ -2605,10 +2666,10 @@ class TestDetectionRangeFarEdgeRecovery:
                                   [5.0, -1.0, 2.0, 3.0, 4.0]]),
                    coords={'depth': np.array([10.0, 20.0, 30.0]), 'range': r},
                    kind='signal_excess')
-        msgs = warning_messages(lambda: sonar.detection_ranges_by_depth(se),
+        msgs = warning_messages(lambda: sonar.detection_ranges_field(se),
                                 _SHADOW)
         assert len(msgs) == 1
-        assert msgs[0].startswith('detection_ranges_by_depth: 2 of 3 rows')
+        assert msgs[0].startswith('detection_ranges_field: 2 of 3 rows')
         assert 'at depth 20:' in msgs[0]
 
     def test_far_edge_recovery_returns_inf(self):
@@ -2620,7 +2681,7 @@ class TestDetectionRangeFarEdgeRecovery:
         se = np.array([5.0, -1.0, 2.0, 3.0, 4.0])
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            assert sonar.detection_range(r, signal_excess_dB=se) == np.inf
+            assert sonar.detection_ranges(r, signal_excess_dB=se) == np.inf
 
     def test_negative_at_the_last_sample_is_silent(self):
         """One sample either side of the branch: SE at the outermost range is
@@ -2628,13 +2689,13 @@ class TestDetectionRangeFarEdgeRecovery:
         the crossing beyond the grid."""
         r = np.array([0.0, 1.0, 2.0, 3.0])
         se = np.array([5.0, -1.0, 1.0, -1.0])
-        msgs = warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=se), _SHADOW)
+        msgs = warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=se), _SHADOW)
         assert msgs == []
 
     def test_positive_at_the_last_sample_warns(self):
         r = np.array([0.0, 1.0, 2.0, 3.0])
         se = np.array([5.0, -1.0, 1.0, 1.0])
-        msgs = warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=se), _SHADOW)
+        msgs = warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=se), _SHADOW)
         assert len(msgs) == 1
 
     def test_zero_at_the_last_sample_warns(self):
@@ -2642,7 +2703,7 @@ class TestDetectionRangeFarEdgeRecovery:
         warning side of that comparison, not the silent one."""
         r = np.array([0.0, 1.0, 2.0, 3.0])
         se = np.array([5.0, -1.0, 1.0, 0.0])
-        msgs = warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=se), _SHADOW)
+        msgs = warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=se), _SHADOW)
         assert len(msgs) == 1
 
     def test_positive_everywhere_is_silent(self):
@@ -2650,22 +2711,22 @@ class TestDetectionRangeFarEdgeRecovery:
         same vector with one sample pushed negative, which does warn."""
         r = np.linspace(1.0, 10.0, 10)
         always = np.ones(10)
-        assert warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=always),
+        assert warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=always),
                          _SHADOW) == []
         dipped = always.copy()
         dipped[4] = -1.0
-        assert len(warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=dipped),
+        assert len(warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=dipped),
                              _SHADOW)) == 1
 
     def test_negative_everywhere_is_silent(self):
         r = np.linspace(1.0, 10.0, 10)
-        assert warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=-np.ones(10)),
+        assert warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=-np.ones(10)),
                          _SHADOW) == []
 
     def test_no_data_hole_before_a_negative_far_edge_is_silent(self):
         r = np.array([0.0, 1000.0, 2000.0])
         se = np.array([5.0, np.nan, -5.0])
-        assert warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=se),
+        assert warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=se),
                          _SHADOW) == []
 
     def test_trailing_no_data_after_a_recovery_warns_about_the_last_filled_cell(self):
@@ -2673,7 +2734,7 @@ class TestDetectionRangeFarEdgeRecovery:
         FILLED, so the warning names that range, not the grid's edge."""
         r = np.array([0.0, 1.0, 2.0, 3.0])
         se = np.array([5.0, -1.0, 2.0, np.nan])
-        msgs = warning_messages(lambda: sonar.detection_range(r, signal_excess_dB=se), _SHADOW)
+        msgs = warning_messages(lambda: sonar.detection_ranges(r, signal_excess_dB=se), _SHADOW)
         assert len(msgs) == 1
         assert '(2 m)' in msgs[0]
 
@@ -2861,12 +2922,15 @@ class TestBottomBackscatterReproducesTable3:
     def test_generic_bottom_column(self, name, freq):
         """Every column to 0.6 dB (the table prints 0.1 dB): the
         composite-roughness, large-roughness and volume terms to 0.3 dB,
-        rock's 40 deg cell 0.6 dB, everything on sand within 0.25 dB."""
+        rock's 40 deg cell 0.6 dB, everything on sand within 0.35 dB with
+        the Kirchhoff integral near vertical."""
         got = apl_uw_bottom_backscatter(
             ANGLES, freq, BottomParameters.from_sediment(name),
             water_sound_speed=TABLE_WATER_SOUND_SPEED)
         d = np.abs(got - np.array(TABLE_3[(name, freq)]))
-        assert d.max() < 0.6, f"{name} at {freq/1e3:g} kHz: {np.round(d, 2)}"
+        bound = 0.4 if 'sand' in name and 'gravel' not in name else 0.6
+        assert d.max() < bound, (
+            f"{name} at {freq/1e3:g} kHz: {np.round(d, 2)}")
 
     @pytest.mark.parametrize('sigma2', sorted(TABLE_3_SILT))
     def test_silt_columns_follow_the_volume_parameter(self, sigma2):
@@ -2875,14 +2939,55 @@ class TestBottomBackscatterReproducesTable3:
         p = BottomParameters.from_grain_size(6.0).replace(volume_parameter=sigma2)
         got = apl_uw_bottom_backscatter(ANGLES, 30e3, p,
                                         water_sound_speed=TABLE_WATER_SOUND_SPEED)
-        assert np.abs(got - np.array(TABLE_3_SILT[sigma2])).max() < 0.25
+        assert np.abs(got - np.array(TABLE_3_SILT[sigma2])).max() < 0.35
 
-    def test_kirchhoff_level_is_the_documented_factor_above_the_printed_form(self):
-        """The near-vertical value would sit 3.6 dB under Table 3 without
-        the level factor; the factor is 2^(2(1-alpha)/alpha) = 2.30 at
-        gamma = 3.25, applied to the Kirchhoff branch only."""
-        from uacpy.sonar.bottom_scattering import _kirchhoff_level
-        assert _kirchhoff_level(3.25 / 2.0 - 1.0) == pytest.approx(2.0 ** 1.2)
+
+class TestTheKirchhoffTermIsTheKirchhoffIntegral:
+    """TR 9407 p. IV-27: the Kirchhoff approximation "yields an integral …
+    which must be integrated numerically or otherwise approximated"; Eq. 37
+    approximates it and is exact at gamma = 3. The model evaluates the
+    integral (Jackson, Winebrenner & Ishimaru 1986)."""
+
+    @pytest.mark.parametrize('q', [1e-3, 0.1, 1.0, 10.0, 1e3])
+    def test_the_integral_is_its_closed_form_at_alpha_one_half(self, q):
+        from uacpy.sonar.bottom_scattering import _kirchhoff_integral
+        assert _kirchhoff_integral([q], 0.5)[0] == pytest.approx(
+            q / (1.0 + q * q) ** 1.5, rel=1e-10)
+
+    @pytest.mark.parametrize('alpha', [0.2, 0.625, 0.95])
+    def test_the_series_and_the_quadrature_meet_at_the_switch(self, alpha):
+        from uacpy.sonar import bottom_scattering as bs
+        # theta just either side of where q^(-1/(2 alpha)) crosses the
+        # switch scale, at q_c = 0.1.
+        qc = 0.1
+        c_switch = bs._KIRCHHOFF_SERIES_SCALE * qc ** (1.0 / (2.0 * alpha))
+        theta = np.arccos(c_switch * np.array([0.98, 1.02]))
+        sigma = bs._kirchhoff_cross_section(theta, qc, alpha, 1.0)
+        assert sigma[0] == pytest.approx(sigma[1], rel=1e-3)
+
+    @pytest.mark.parametrize('gamma', [3.0, 3.25])
+    def test_vertical_incidence_is_the_integral_limit(self, gamma):
+        """At 90 deg the integral is Γ(1/alpha) q_c^(-1/alpha) / (16 pi
+        alpha) |R(90)|^2, alpha = gamma/2 - 1, which carries the whole
+        medium-sand strength at 10 kHz for these gamma; Eq. 37 scaled by
+        the level that matches Table 3 at gamma = 3.25 would sit 6.0 dB
+        above it at gamma = 3, where Eq. 37 itself is exact."""
+        from scipy.special import gamma as G
+        p = BottomParameters.from_sediment('medium sand').replace(
+            spectral_exponent=gamma)
+        f, c1 = 10e3, TABLE_WATER_SOUND_SPEED
+        alpha = gamma / 2.0 - 1.0
+        k = 2.0 * np.pi * f / (c1 * 100.0)                     # cm^-1
+        ch2 = (2.0 * np.pi * p.spectral_strength * G(2.0 - alpha)
+               * 2.0 ** (-2.0 * alpha)
+               / (alpha * (1.0 - alpha) * G(1.0 + alpha)))      # Eq. 36
+        qc = ch2 * 2.0 ** (1.0 - 2.0 * alpha) * k ** (2.0 * (1.0 - alpha))
+        y = p.density_ratio * p.speed_ratio / (1.0 + 1j * p.loss_parameter)
+        r90_sq = abs((y - 1.0) / (y + 1.0)) ** 2
+        limit = r90_sq * G(1.0 / alpha) * qc ** (-1.0 / alpha) / (
+            16.0 * np.pi * alpha)
+        got = apl_uw_bottom_backscatter(90.0, f, p, water_sound_speed=c1)
+        assert got == pytest.approx(10.0 * np.log10(limit), abs=0.05)
 
     def test_zero_grazing_uses_the_value_at_one_thousandth_of_a_degree(self):
         p = BottomParameters.from_sediment('medium sand')
@@ -2960,7 +3065,7 @@ class TestBottomParameters:
         alpha_dB_lambda = ref.loss_parameter * 40.0 * np.pi / np.log(10.0)
         p = BottomParameters.from_geoacoustics(
             sound_speed=ref.speed_ratio * 1500.0, density=ref.density_ratio * 1.027,
-            attenuation_dB_per_wavelength=alpha_dB_lambda,
+            attenuation=alpha_dB_lambda,
             water_sound_speed=1500.0, water_density=1.027)
         assert p.density_ratio == pytest.approx(ref.density_ratio)
         assert p.speed_ratio == pytest.approx(ref.speed_ratio)
@@ -2974,11 +3079,11 @@ class TestBottomParameters:
         reads the handbook's own relations off it whatever conversion built
         the geoacoustics — the same BottomParameters for the Hamilton and the
         APL-UW seabed of the same Mz."""
-        from uacpy.data import bottom_from_grain_size
+        from uacpy.core.environment import BoundaryProperties
         expected = BottomParameters.from_grain_size(1.5)
         for model in ('hamilton', 'apl-uw'):
-            seabed = bottom_from_grain_size(1.5, model=model,
-                                            water_sound_speed=1500.0)
+            seabed = BoundaryProperties.from_grain_size(
+                1.5, model=model, water_sound_speed=1500.0)
             assert BottomParameters.from_bottom(
                 seabed, water_sound_speed=1500.0) == expected
             assert BottomParameters.from_bottom(
@@ -2991,9 +3096,8 @@ class TestBottomParameters:
         A boundary without a grain size takes this route under 'auto', and
         refuses 'grain-size' with the remedy."""
         from uacpy.core.environment import BoundaryProperties
-        from uacpy.data import bottom_from_grain_size
-        seabed = bottom_from_grain_size(1.5, model='apl-uw',
-                                        water_sound_speed=1500.0)
+        seabed = BoundaryProperties.from_grain_size(1.5, model='apl-uw',
+                                                    water_sound_speed=1500.0)
         # The seabed was built against the package's one water (1.027).
         p = BottomParameters.from_bottom(seabed, water_sound_speed=1500.0,
                                          water_density=1.027,
@@ -3011,7 +3115,7 @@ class TestBottomParameters:
         auto = BottomParameters.from_bottom(bare, water_sound_speed=1500.0,
                                             water_density=1.0)
         assert auto == BottomParameters.from_geoacoustics(
-            sound_speed=1700.0, density=1.9, attenuation_dB_per_wavelength=0.6,
+            sound_speed=1700.0, density=1.9, attenuation=0.6,
             water_sound_speed=1500.0, water_density=1.0)
         with pytest.raises(ConfigurationError, match="method='geoacoustics'"):
             BottomParameters.from_bottom(bare, water_sound_speed=1500.0,
@@ -3023,7 +3127,6 @@ class TestBottomParameters:
         parameterise and says so."""
         from uacpy.core.boundary import BoundaryProperties, SedimentLayer
         from uacpy.core.bottom import Bottom, SeabedColumn
-        from uacpy.data import bottom_from_grain_size
         sand = SedimentLayer(thickness=5.0, sound_speed=1700.0, density=1.9,
                              attenuation=0.6)
         rock = BoundaryProperties(sound_speed=3000.0, density=2.4, attenuation=0.1)
@@ -3032,10 +3135,10 @@ class TestBottomParameters:
                                            water_density=1.0)
         assert top.speed_ratio == pytest.approx(1700.0 / 1500.0)
         bottom = Bottom.from_columns(
-            [SeabedColumn.from_halfspace(
-                bottom_from_grain_size(1.5, water_sound_speed=1500.0)),
-             SeabedColumn.from_halfspace(
-                bottom_from_grain_size(6.0, water_sound_speed=1500.0))],
+            [SeabedColumn.from_halfspace(BoundaryProperties.from_grain_size(
+                1.5, water_sound_speed=1500.0)),
+             SeabedColumn.from_halfspace(BoundaryProperties.from_grain_size(
+                6.0, water_sound_speed=1500.0))],
             ranges=[0.0, 1000.0])
         near = BottomParameters.from_bottom(bottom, water_sound_speed=1500.0)
         far = BottomParameters.from_bottom(bottom, water_sound_speed=1500.0,
@@ -3075,7 +3178,7 @@ class TestBottomParameters:
         this constructor they are the only two the grain size feeds: w2 swings
         25x across the clamp. The measured rho, nu and delta are untouched."""
         kwargs = dict(sound_speed=1700.0, density=1.8,
-                      attenuation_dB_per_wavelength=0.5,
+                      attenuation=0.5,
                       water_sound_speed=1500.0, water_density=1.0)
         with pytest.warns(UserWarning, match='-1 <= Mz <= 9'):
             p = BottomParameters.from_geoacoustics(grain_size_phi=phi, **kwargs)
@@ -3093,7 +3196,7 @@ class TestBottomParameters:
         with pytest.raises(ConfigurationError, match='must be finite'):
             BottomParameters.from_geoacoustics(
                 sound_speed=1700.0, density=1.8,
-                attenuation_dB_per_wavelength=0.5, water_sound_speed=1500.0,
+                attenuation=0.5, water_sound_speed=1500.0,
                 water_density=1.0, grain_size_phi=phi)
 
     def test_the_two_routes_differ_in_delta_by_the_reports_c1(self):
@@ -3109,7 +3212,7 @@ class TestBottomParameters:
             direct = BottomParameters.from_grain_size(phi)
             via_geo = BottomParameters.from_geoacoustics(
                 sound_speed=geo['sound_speed'], density=geo['density'],
-                attenuation_dB_per_wavelength=geo['attenuation'],
+                attenuation=geo['attenuation'],
                 water_sound_speed=water, water_density=1.027,
                 grain_size_phi=phi)
             assert via_geo.density_ratio == pytest.approx(direct.density_ratio)
@@ -3334,29 +3437,29 @@ class TestRayleighRoughnessParameter:
             rayleigh_parameter(250.0, -0.5, 10.0)
 
     def test_the_notice_comes_only_past_the_limit_and_names_the_angle(self):
-        from uacpy.sonar.scattering import non_perturbative_roughness_notice
-        assert non_perturbative_roughness_notice('T', 250.0, 0.05) is None
-        notice = non_perturbative_roughness_notice('T', 250.0, 0.5)
+        from uacpy.sonar.scattering import _non_perturbative_roughness_notice
+        assert _non_perturbative_roughness_notice('T', 250.0, 0.05) is None
+        notice = _non_perturbative_roughness_notice('T', 250.0, 0.5)
         assert 'Rayleigh' in notice and '72.7 deg' in notice
 
     def test_the_notice_uses_the_requested_angles_when_given(self):
         """Shallow grazing on the same interface stays inside the theory even
         though normal incidence would not."""
-        from uacpy.sonar.scattering import non_perturbative_roughness_notice
-        assert non_perturbative_roughness_notice(
+        from uacpy.sonar.scattering import _non_perturbative_roughness_notice
+        assert _non_perturbative_roughness_notice(
             'T', 250.0, 0.5, grazing_deg=[5.0, 10.0, 20.0]) is None
-        assert non_perturbative_roughness_notice(
+        assert _non_perturbative_roughness_notice(
             'T', 250.0, 0.5, grazing_deg=[5.0, 85.0]) is not None
 
     @pytest.mark.parametrize('rms, grazing', [
         (0.05, None), (0.5, None), (0.5, [5.0, 10.0, 20.0]),
         (0.5, [5.0, 85.0])])
     def test_the_notice_says_nothing_itself(self, rms, grazing):
-        """``non_perturbative_roughness_notice`` returns the text a stage-3
+        """``_non_perturbative_roughness_notice`` returns the text a stage-3
         resolver records and warns nothing."""
-        from uacpy.sonar.scattering import non_perturbative_roughness_notice
+        from uacpy.sonar.scattering import _non_perturbative_roughness_notice
         with recorded_warnings() as w:
-            notice = non_perturbative_roughness_notice(
+            notice = _non_perturbative_roughness_notice(
                 'T', 250.0, rms, grazing_deg=grazing)
         assert w == []
         assert (notice is None) == (rms == 0.05 or grazing == [5.0, 10.0,
@@ -3404,8 +3507,9 @@ class TestDetectionThresholdIsRequired:
 
 
 class TestDetectionRangeField:
-    """``detection_range_from_field`` is ``detection_range`` on a 1-D ``['range']``
-    signal-excess Field: same numbers, same modes, same beyond-the-grid inf."""
+    """``detection_ranges_field`` is ``detection_ranges`` on a signal-excess
+    Field: same numbers, same modes, same beyond-the-grid inf; a float for a
+    ``['range']`` cut, one range per depth for a map."""
 
     @staticmethod
     def _se_map():
@@ -3420,32 +3524,37 @@ class TestDetectionRangeField:
             detection_threshold_dB=0.0)
 
     @pytest.mark.parametrize('crossing', ['outermost', 'first'])
-    def test_it_equals_detection_range_on_the_cut(self, crossing):
+    def test_it_equals_detection_ranges_on_the_cut(self, crossing):
         se = self._se_map()
         cut = se.at(depth=10.0)
-        assert sonar.detection_range_from_field(cut, crossing=crossing) == \
-            pytest.approx(sonar.detection_range(cut.coords['range'],
-                                                signal_excess_dB=cut.data, crossing=crossing))
+        got = sonar.detection_ranges_field(cut, crossing=crossing)
+        assert isinstance(got, float)
+        assert got == pytest.approx(sonar.detection_ranges(
+            cut.coords['range'], signal_excess_dB=cut.data,
+            crossing=crossing))
         # SE = [20, 10, -1, 10, -2] dB on 0-4 km.
-        assert sonar.detection_range_from_field(cut) == \
+        assert sonar.detection_ranges_field(cut) == \
             pytest.approx(3000.0 + 1000.0 * 10.0 / 12.0)
-        assert sonar.detection_range_from_field(cut, crossing='first') == \
+        assert sonar.detection_ranges_field(cut, crossing='first') == \
             pytest.approx(1000.0 + 1000.0 * 10.0 / 11.0)
 
     def test_a_cut_positive_at_its_edge_is_inf(self):
         cut = self._se_map().at(depth=20.0)
-        assert sonar.detection_range_from_field(cut) == np.inf
+        assert sonar.detection_ranges_field(cut) == np.inf
 
-    def test_a_two_dimensional_map_is_refused(self):
-        with pytest.raises(ConfigurationError, match="1-D \\['range'\\]"):
-            sonar.detection_range_from_field(self._se_map())
+    def test_a_two_dimensional_map_gives_one_range_per_depth(self):
+        se = self._se_map()
+        got = sonar.detection_ranges_field(se)
+        assert got.shape == (2,)
+        for i, depth in enumerate(se.coords['depth']):
+            assert got[i] == sonar.detection_ranges_field(se.at(depth=depth))
 
     def test_a_tl_field_is_refused(self):
         from uacpy.core.results import Field
         tl = Field(data=np.array([40.0, 70.0]),
                    coords={'range': np.array([100.0, 200.0])})
         with pytest.raises(ConfigurationError, match='not signal excess'):
-            sonar.detection_range_from_field(tl)
+            sonar.detection_ranges_field(tl)
 
 
 def _budget_tl_field():
@@ -3743,23 +3852,22 @@ class TestDetectionRangesAppliesDetectionRangePerSlice:
     RANGES = np.linspace(0.0, 10000.0, 11)
 
     @pytest.mark.parametrize('crossing', ['outermost', 'first'])
-    def test_each_row_is_detection_range(self, crossing):
+    def test_each_row_is_its_one_curve_call(self, crossing):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
             got = sonar.detection_ranges(self.RANGES,
                                          signal_excess_dB=self.ROWS,
                                          crossing=crossing)
-            want = [sonar.detection_range(self.RANGES, signal_excess_dB=row,
-                                          crossing=crossing)
+            want = [sonar.detection_ranges(self.RANGES, signal_excess_dB=row,
+                                           crossing=crossing)
                     for row in self.ROWS]
         np.testing.assert_array_equal(got, want)
 
     def test_the_crossing_keyword_is_the_one_detection_range_takes(self):
-        """One word per idea: the three detection-range functions all name
-        the choice ``crossing``; ``mode=`` is no keyword of any."""
+        """One word per idea: the two detection-range functions both name
+        the choice ``crossing``; ``mode=`` is no keyword of either."""
         import inspect
-        for fn in (sonar.detection_range, sonar.detection_ranges,
-                   sonar.detection_ranges_by_depth):
+        for fn in (sonar.detection_ranges, sonar.detection_ranges_field):
             params = inspect.signature(fn).parameters
             assert 'crossing' in params and 'mode' not in params, fn
         with warnings.catch_warnings():
@@ -3788,7 +3896,7 @@ class TestDetectionRangesAppliesDetectionRangePerSlice:
 
     def test_a_range_axis_of_another_length_is_refused(self):
         with pytest.raises(ConfigurationError, match='11 samples along '
-                                                     'axis 0, ranges_m has 4'):
+                                                     'axis 0, ranges has 4'):
             sonar.detection_ranges(self.RANGES[:4],
                                    signal_excess_dB=self.ROWS.T, axis=0)
 
@@ -3803,11 +3911,10 @@ class TestDetectionRangesAppliesDetectionRangePerSlice:
                    kind='signal_excess', unit='dB')
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
-            depths, ranges = sonar.detection_ranges_by_depth(se)
+            ranges = sonar.detection_ranges_field(se)
             want = sonar.detection_ranges(self.RANGES,
                                           signal_excess_dB=self.ROWS, axis=1)
         np.testing.assert_array_equal(ranges, want)
-        np.testing.assert_array_equal(depths, np.arange(4.0))
 
 
 @pytest.mark.parametrize('name', ['ts_sphere', 'ts_convex', 'ts_ellipsoid',

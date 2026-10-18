@@ -8,12 +8,12 @@ column at r > 0, the requested axes kept, the ``PhaseReference`` member) is
 held by ``test_engine_conformance.py``; this module pins which engine does
 what:
 
-1. **Below-seafloor receivers.** The engines whose solvers stop meshing at
-   the seafloor (Bellhop, Scooter, SPARC, RAM) return NaN there — on the
-   *requested* depth axis, never a clamped one — while the engines that mesh
-   the sediment (Kraken with a penetrable bottom, OAST) return a finite
-   physical transmitted field. The suite previously asserted only the
-   warnings, not the values.
+1. **Below-seafloor receivers.** The engines whose solvers stop at the
+   seafloor or at the deepest modelled interface (Bellhop, Scooter, SPARC)
+   return NaN at a receiver in the half-space — on the *requested* depth
+   axis, never a clamped one — while the engines that compute the field in
+   the seabed (Kraken with a penetrable bottom, OAST, and RAM above its
+   absorbing layer) return a finite transmitted field there.
 
 2. **Field dtype/unit/identity.** Bellhop, Kraken, Scooter and RAM emit
    complex pressure (``unit='Pa'``, ``phase_reference='travelling_wave'``);
@@ -124,13 +124,12 @@ ALL_ENGINES = [
     'sparc_field',
     pytest.param('oast_field', marks=pytest.mark.requires_oases),
 ]
-# Engines that mask sub-seafloor receivers to NaN vs. engines that mesh the
-# sediment and return the physical transmitted field there (base.py
-# _warn_receiver_below_resolvable documents exactly this split).
-MASKING_ENGINES = ['bellhop_field', 'scooter_field', 'sparc_field',
-                   'ram_field']
+# Engines that return NaN at a half-space receiver vs. engines that compute
+# the field in the seabed and return it there
+# (``models/_checks.warn_receiver_below_resolvable`` documents this split).
+MASKING_ENGINES = ['bellhop_field', 'scooter_field', 'sparc_field']
 TRANSMITTING_ENGINES = [
-    'kraken_field',
+    'kraken_field', 'ram_field',
     pytest.param('oast_field', marks=pytest.mark.requires_oases),
 ]
 
@@ -148,8 +147,8 @@ def _finite_over_extra_axes(field):
 
 @pytest.mark.parametrize('engine', MASKING_ENGINES)
 def test_sub_seafloor_receiver_is_nan_for_masking_engines(engine, request):
-    """Bellhop/Scooter/SPARC/RAM stop resolving the field at the seafloor:
-    the 110-m receiver row (seafloor at 100 m) is all-NaN, at every range."""
+    """Bellhop/Scooter/SPARC evaluate no field in the half-space: the
+    110-m receiver row (seafloor at 100 m) is all-NaN, at every range."""
     field = request.getfixturevalue(engine)
     row = np.asarray(field.data)[I_SUBFLOOR, ...]
     assert np.isnan(row).all(), (
@@ -162,8 +161,9 @@ def test_sub_seafloor_receiver_is_nan_for_masking_engines(engine, request):
 @pytest.mark.parametrize('engine', TRANSMITTING_ENGINES)
 def test_sub_seafloor_receiver_is_finite_for_transmitting_engines(
         engine, request):
-    """Kraken (penetrable fluid half-space) and OAST mesh the sediment, so
-    the 110-m receiver carries a finite physical transmitted field."""
+    """Kraken (penetrable fluid half-space) and OAST mesh the sediment,
+    and RAM's PE marches through it down to its absorbing layer, so the
+    110-m receiver carries a finite transmitted field."""
     field = request.getfixturevalue(engine)
     finite = _finite_over_extra_axes(field)
     assert finite[I_SUBFLOOR, 1:].all(), (

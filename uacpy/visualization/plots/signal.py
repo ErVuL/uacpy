@@ -22,8 +22,10 @@ from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.visualization.plots._common import (
     ZORDER_LEGEND, ZORDER_SOURCE, _axes_pair, _carrier_or_arrays,
     _cell_edge_extent, _checked_dynamic_range_dB, _flip_y, _floored_dB,
-    _overlay_seafloor, _plot_warn, _refuse_spread_carrier, _require_nonempty,
-    _title_or, fig_ax, typed_plot_error)
+    _no_energy_as_gap, invert_yaxis_once,
+    _overlay_seafloor, _plot_warn, _refuse_axes_after_carrier,
+    _refuse_spread_carrier, _require_nonempty, _title_or, fig_ax,
+    typed_plot_error)
 from uacpy.core.results.quantities import label as quantity_label
 from uacpy.visualization.style import SOURCE_MARKER_STYLE, cmap_for_field
 
@@ -243,10 +245,10 @@ def _fk_scaling(power, scaling):
             raise ConfigurationError(
                 "plot_fk: scaling= is required with a bare power array, "
                 "because a density (fk_transform(..., scaling='density')) "
-                "and the raw |FK|² panel (scaling='power') "
+                "and the raw |FK|² panel (scaling='raw') "
                 "are labelled differently and nothing in "
                 "the array says which it is. Pass scaling='density' or "
-                "scaling='power', or hand plot_fk the FKResult itself.")
+                "scaling='raw', or hand plot_fk the FKResult itself.")
         return carried
     # Imported here, not at module level: ``arrays`` pulls in scipy.signal,
     # which the plotting surface leaves unloaded until a DSP plot is drawn.
@@ -276,7 +278,7 @@ def _fk_colorbar_label(scaling, wavenumber_unit, ref):
         r, x = _ref_label(ref), "Pa"
     else:
         r, x = _ref_label(ref), "(gather unit)"
-    if scaling == "power":
+    if scaling == "raw":
         return f"|FK|² (dB re {r}{x}², unnormalised)"
     if wavenumber_unit == "cycles/m":
         return f"PSD (dB re {r}{x}²·m/Hz)"
@@ -287,12 +289,12 @@ def _fk_colorbar_label(scaling, wavenumber_unit, ref):
 # (plot_radon, plot_taup). A fixed -60..+20 dB window suits a PEAK-RELATIVE
 # scale — which is what docs/figure_scripts/signal.py hand-rolls, at
 # vmin=-40, vmax=0 — but the level here goes through
-# power_to_dB(power, ref), an ABSOLUTE dB re 1 µPa². Measured on the
-# fk_transform output this function documents itself as consuming, for a 1 Pa
-# plane-wave gather at fs = 2 kHz, dx = 2 m: the panel spans 107.3 .. 196.9 dB
-# with a median of 122.2, so every pixel would sit above that vmax and the
-# figure would come out a uniform block. A fixed absolute window cannot work here anyway: the
-# transform sums over the gather, so the level moves with its size.
+# power_to_dB(power, ref), an ABSOLUTE dB re 1 µPa². On the fk_transform
+# output this function documents itself as consuming, for a 1 Pa plane-wave
+# gather at fs = 2 kHz, dx = 2 m, the panel spans 107.3 .. 196.9 dB with a
+# median of 122.2: every pixel sits above that vmax and the figure is one
+# uniform block. No fixed absolute window can work here: the transform sums
+# over the gather, so the level moves with its size.
 @typed_plot_error
 def plot_fk(frequencies, wavenumbers=None, power=None, ax=None, *,
             scaling=None, wavenumber_unit="rad/m",
@@ -304,10 +306,10 @@ def plot_fk(frequencies, wavenumbers=None, power=None, ax=None, *,
     Handed the result itself — ``plot_fk(fk_transform(gather, fs, dx))`` — the
     colour axis follows the result's ``scaling``: a calibrated density
     (``scaling='density'``) is labelled "PSD" in Pa² per Hz per wavenumber unit,
-    the raw ``|FK|²`` panel (``scaling='power'``) is labelled as unnormalised
+    the raw ``|FK|²`` panel (``scaling='raw'``) is labelled as unnormalised
     power. Handed bare ``(frequencies, wavenumbers, power)`` arrays the
     transform's choice is not recoverable, so ``scaling=`` (``'density'`` or
-    ``'power'``) must state it; given alongside a result it must agree.
+    ``'raw'``) must state it; given alongside a result it must agree.
 
     Parameters
     ----------
@@ -318,7 +320,7 @@ def plot_fk(frequencies, wavenumbers=None, power=None, ax=None, *,
         Angular wavenumber ``k`` (rad/m), as :func:`fk_transform` returns it.
     power : ndarray, optional
         The panel ``(len(frequencies), len(wavenumbers))``.
-    scaling : {'density', 'power'}, optional
+    scaling : {'density', 'raw'}, optional
         Which unit ``power`` is in; ``None`` reads it from an ``FKResult``.
     wavenumber_unit : {'rad/m', 'cycles/m'}
         Abscissa unit. ``'cycles/m'`` divides the axis by 2π and, for a
@@ -405,10 +407,9 @@ def plot_fk(frequencies, wavenumbers=None, power=None, ax=None, *,
 
 # Axis label and SI → display scale per Radon moveout family.
 # ``radon_transform`` scans moveout in SI units of the offset in metres:
-# slowness s/m (×1e3 → s/km), curvature s/m² (×1e6 → s/km²), velocity m/s
-# (already the display unit, ×1).
+# curvature s/m² (×1e6 → s/km²), velocity m/s (already the display unit,
+# ×1). The linear family is a tau-p panel, drawn by plot_taup.
 _RADON_AXIS = {
-    "linear": ("Slowness p (s/km)", 1e3),
     "parabolic": ("Curvature q (s/km²)", 1e6),
     "hyperbolic": ("Velocity v (m/s)", 1.0),
 }
@@ -439,12 +440,12 @@ def plot_radon(moveout, taus=None, R=None, ax=None, *, kind=None,
     :func:`radon_transform` output.
 
     ``kind`` is the moveout family the panel was scanned in —
-    ``'linear'`` (slowness, drawn in s/km), ``'parabolic'`` (curvature,
-    s/km²) or ``'hyperbolic'`` (velocity, m/s) — and sets the axis's name and
-    scale. A :class:`RadonResult` carries its own; given alongside one,
-    ``kind=`` must agree with it. Bare arrays default to ``'linear'``. Any
-    other value is refused: drawn under a fallback axis it would put the
-    panel on a scale nobody chose.
+    ``'parabolic'`` (curvature, drawn in s/km²) or ``'hyperbolic'``
+    (velocity, m/s) — and sets the axis's name and scale. A
+    :class:`RadonResult` carries its own; given alongside one, ``kind=`` must
+    agree with it. Bare arrays need it. Any other value is refused: drawn
+    under a fallback axis it would put the panel on a scale nobody chose. A
+    linear (slant-stack) panel is :func:`plot_taup`'s.
 
     Parameters
     ----------
@@ -456,8 +457,8 @@ def plot_radon(moveout, taus=None, R=None, ax=None, *, kind=None,
         The ``(n_moveout, n_tau)`` panel, with array input.
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
-    kind : {'linear', 'parabolic', 'hyperbolic'}, optional
-        The moveout family (see above).
+    kind : {'parabolic', 'hyperbolic'}, optional
+        The moveout family (see above); required with bare arrays.
     vmin, vmax : float, optional
         Colour limits of the amplitude; ``None`` is 0 and the panel's peak.
     cmap : str, optional
@@ -495,7 +496,12 @@ def plot_radon(moveout, taus=None, R=None, ax=None, *, kind=None,
             f"plot_radon: kind={kind!r} contradicts the RadonResult, which "
             f"was scanned with kind={carried!r}. Drop kind= to use the "
             f"result's own.")
-    kind = kind or carried or "linear"
+    if kind is None and carried is None:
+        raise ConfigurationError(
+            f"plot_radon: bare arrays carry no moveout family; pass kind= "
+            f"(one of {tuple(_RADON_AXIS)}, the one radon_transform "
+            f"scanned), or the RadonResult itself.")
+    kind = kind or carried
     if kind not in _RADON_AXIS:
         raise ConfigurationError(
             f"plot_radon: the RadonResult carries kind={kind!r}, which is not "
@@ -617,6 +623,33 @@ _HISTOGRAM_KIND = {"density": "PPSD", "spectrum": "Band-power histogram",
 #: How a standard band ladder is named on a frequency axis.
 _BAND_NAMES = {"decidecade": "decidecade", "octave": "octave",
                "linear": "linear"}
+
+#: The mantissas of the standardised nominal decidecade (one-third octave)
+#: and octave centre frequencies, in reasonable agreement with 10^(n/10)
+#: (Jacobsen & Juhl, *Fundamentals of General Linear Acoustics*, §4.2,
+#: Table 4.1 and its note 7; Pierce, *Acoustics*, §2.2.1): 31.5, 63, 125,
+#: 400, 1600, 3150 … where the exact centres are 31.6, 63.1, 126, 398, 1585,
+#: 3162.
+_NOMINAL_BAND_MANTISSAS = np.array(
+    [1.0, 1.25, 1.6, 2.0, 2.5, 3.15, 4.0, 5.0, 6.3, 8.0, 10.0])
+
+#: Largest relative distance between a band centre and the nominal value it
+#: is labelled with (uacpy guidance): the exact base-10 centres lie within
+#: 0.9 % of theirs, and a centre farther off keeps its own value.
+_NOMINAL_LABEL_TOLERANCE = 0.02
+
+
+def _band_centre_label(centre):
+    """The tick label of a band centred at ``centre`` Hz: its standardised
+    nominal frequency (``_NOMINAL_BAND_MANTISSAS``) when the centre sits on
+    the base-10 ladder, else the centre itself to three significant
+    digits."""
+    decade = 10.0 ** np.floor(np.log10(centre))
+    nominal = decade * _NOMINAL_BAND_MANTISSAS[
+        np.argmin(np.abs(_NOMINAL_BAND_MANTISSAS - centre / decade))]
+    if abs(centre / nominal - 1.0) <= _NOMINAL_LABEL_TOLERANCE:
+        return f"{nominal:g}"
+    return f"{centre:.3g}"
 
 
 def _band_axis_label(band_type):
@@ -850,7 +883,7 @@ def plot_psd(frequencies, psd_linear=None, ax=None, *,
     fitted to the finite levels drawn, at least 5 dB beyond them and on a
     multiple of 10 dB — the one rule of this module's level plotters
     (:func:`plot_constant_q_psd`, :func:`plot_ppsd`,
-    :func:`plot_constant_q_ppsd`, :func:`plot_sel`).
+    :func:`plot_constant_q_ppsd`, :func:`plot_band_levels`).
 
     Parameters
     ----------
@@ -914,7 +947,7 @@ def plot_psd(frequencies, psd_linear=None, ax=None, *,
                         "constant-Q's geometric bins evenly) or 'linear', "
                         "which reads a narrow band the way a spectrum "
                         "analyser does.")
-    psd_dB = power_to_dB(np.asarray(psd_linear), ref)
+    psd_dB = _no_energy_as_gap(power_to_dB(np.asarray(psd_linear), ref))
     frequencies = np.asarray(frequencies, dtype=float)
     if freq_scale == "log" and np.any(frequencies > 0.0):
         # A log axis has no place for the DC bin; drawn, matplotlib clips it
@@ -1073,94 +1106,6 @@ def plot_ppsd(result, ax=None, *, ymin=None, ymax=None, vmin=0, vmax=None,
         figsize=figsize, show_colorbar=show_colorbar, **mpl_kw)
 
 
-@typed_plot_error
-def plot_sel(sel_pa2s, bands=None, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
-             duration=None, band_type="decidecade", ymin=None, ymax=None,
-             title=None, figsize=(10, 6), **mpl_kw):
-    """Bar plot of standard-band levels (dB). Consumes a banded
-    :class:`~uacpy.acoustic_signal.SpectralEstimate` — one computed with a
-    ``band_type`` — or the same numbers as ``(values, bands)`` arrays.
-
-    The unit comes from the estimate's ``scaling``: an exposure is per band
-    and integrated over the record (Pa²·s), a spectrum per band (Pa²) and a density
-    per hertz of the band's own width (Pa²/Hz). A bar chart labelled "·s" over
-    band power would misstate the quantity by the record length. An unset ``ymin`` / ``ymax`` is fitted to the levels drawn, as
-    :func:`plot_psd` states.
-
-    Parameters
-    ----------
-    sel_pa2s : SpectralEstimate or array_like
-        A banded estimate, or its values in linear units.
-    bands : sequence of (low, center, high), optional
-        Band edges (Hz), with array input.
-    ax : matplotlib.axes.Axes, optional
-        Existing axes; a new figure is made when omitted.
-    ref : float, optional
-        Reference pressure (Pa) of the dB scale. Default 1 µPa.
-    duration : float, optional
-        Record duration (s), named in the default title.
-    band_type : str, optional
-        The band ladder; an estimate passes its own. Default
-        ``'decidecade'``.
-    ymin, ymax : float, optional
-        Level-axis limits (dB); an edge left ``None`` is fitted to the levels
-        drawn (see above).
-    title : str, optional
-        Axes title. ``None`` draws the default caption; ``''`` draws none.
-    figsize : tuple, optional
-        Size (inches) of the new figure, ``(10, 6)`` by default; unused when
-        ``ax`` is given.
-    **mpl_kw
-        Matplotlib keywords for the bars.
-    """
-    scaling = getattr(sel_pa2s, 'scaling', 'exposure')
-    if hasattr(sel_pa2s, 'power') and hasattr(sel_pa2s, 'bands'):
-        if sel_pa2s.bands is None:
-            raise ConfigurationError(
-                f"plot_sel: this estimate was asked for no band_type, so its "
-                f"values sit on {sel_pa2s.method!r} bins and there are no "
-                f"band edges to draw bars between.",
-                remediation="Use plot_psd(result), or result.plot(), which "
-                            "picks the plotter from the estimate itself; or "
-                            "compute it with sound_exposure(), whose values "
-                            "sit on bands.")
-        # The ladder decides the frequency axis: every standard ladder is
-        # geometric and reads on a log axis, while 'linear' does not.
-        band_type = getattr(sel_pa2s, 'band_type', None) or band_type
-        sel_pa2s, bands = sel_pa2s.power, sel_pa2s.bands
-    elif bands is None:
-        raise ConfigurationError(
-            "plot_sel: pass a banded estimate, or values and the bands "
-            "they sit on.",
-            remediation="plot_sel(sound_exposure(x, fs)), or "
-                        "plot_sel(values, bands).")
-    fig, ax = fig_ax(ax, figsize)
-    held = _held_window(ax)
-    # Bands are (low, center, high) triples; each bar spans its own band,
-    # so a list with gaps (every other band, dropped bands) keeps them.
-    lows = [float(low) for low, _, _ in bands]
-    width = [float(high) - float(low) for low, _, high in bands]
-    sel_dB = power_to_dB(np.asarray(sel_pa2s), ref)
-    ax.bar(lows, sel_dB, width=width,
-           align="edge", edgecolor="black", **mpl_kw)
-    unit = _scaling_unit("plot_sel", scaling)
-    default = {"exposure": "SEL", "spectrum": "Band power",
-               "density": "Band density"}[scaling]
-    # ``duration`` is the caller's own note about the record; without it the
-    # title states the quantity alone rather than "(Nones)".
-    ax.set_title(_title_or(title, f"{default} ({duration}s)"
-                           if duration is not None else default))
-    ax.set_ylabel(f"Level (dB re {_ref_label(ref)}{unit})")
-    if band_type != "linear":
-        ax.set_xscale("log")
-    ax.set_xlabel(_band_axis_label(band_type))
-    ax.set_ylim(_level_window_dB(sel_dB, ymin, ymax, held))
-    _warn_if_offscreen(ax, sel_dB, "plot_sel", "ymin=/ymax")
-    ax.grid(which="both", alpha=0.75)
-    ax.set_axisbelow(True)
-    return fig, ax
-
-
 # ── Time-frequency (timefreq) ───────────────────────────────────────────────
 
 #: Depth (dB) below its loudest level that a spectrogram's default colour
@@ -1187,12 +1132,14 @@ def plot_spectrogram(frequencies, times=None, Sxx=None, ax=None, *,
                      dynamic_range_dB=SPECTROGRAM_DYNAMIC_RANGE_DB,
                      cmap="viridis", title=None, figsize=(10, 6),
                      show_colorbar=True, scaling=None, mode=None, **mpl_kw):
-    """Spectrogram colormap (dB). Consumes :func:`spectrogram` output.
+    """Spectrogram colormap (dB). Consumes :func:`spectrogram` output, or
+    :func:`stft` output drawn as ``|coefficients|²``.
 
     ``scaling`` (``'density'`` Pa²/Hz or ``'spectrum'`` Pa²) and ``mode``
     say what the panel holds, and the colour bar is labelled from them; a
-    :class:`~uacpy.acoustic_signal.SpectrogramResult` carries both, and bare
-    arrays default to the ``spectrogram`` defaults (``'density'``,
+    :class:`~uacpy.acoustic_signal.SpectrogramResult` (``'psd'``) or an
+    :class:`~uacpy.acoustic_signal.STFTResult` (``'complex'``) carries both,
+    and bare arrays default to the ``spectrogram`` defaults (``'density'``,
     ``'psd'``). A ``'magnitude'`` or ``'complex'`` panel is drawn as its
     square, which carries no one-sided doubling: it is the two-sided
     density (or band power), 3.01 dB below the ``'psd'`` panel off DC and
@@ -1251,9 +1198,12 @@ def plot_spectrogram(frequencies, times=None, Sxx=None, ax=None, *,
         scaling = getattr(frequencies, 'scaling', 'density')
     if mode is None:
         mode = getattr(frequencies, 'mode', 'psd')
+    stft = 'STFTResult' in {k.__name__ for k in type(frequencies).__mro__}
     _unpacked = _carrier_or_arrays(
         frequencies, (times, Sxx,), count=3, who="plot_spectrogram",
-        carrier=(('SpectrogramResult',), ('frequencies', 'times', 'power')),
+        carrier=((('STFTResult',), ('frequencies', 'times', 'coefficients'))
+                 if stft else
+                 (('SpectrogramResult',), ('frequencies', 'times', 'power'))),
         fields=('frequencies', 'times', 'Sxx'))
     if _unpacked is not None:
         frequencies, times, Sxx = _unpacked
@@ -1510,7 +1460,7 @@ def plot_constant_q_psd(frequencies, power=None, ax=None, *,
             "plot_constant_q_psd(constant_q(x, fs)).")
     scaling = "density" if scaling is None else str(scaling)
     unit = f"{_ref_label(ref)}{_scaling_unit('plot_constant_q_psd', scaling)}"
-    power_dB = power_to_dB(np.asarray(power), ref)
+    power_dB = _no_energy_as_gap(power_to_dB(np.asarray(power), ref))
     fig, ax = fig_ax(ax, figsize)
     held = _held_window(ax)
     ax.semilogx(frequencies, power_dB, label=label, **mpl_kw)
@@ -1536,7 +1486,7 @@ def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=None,
     with ``method='constant_q'``.
 
     The dB reference is fixed at compute time by
-    :func:`uacpy.acoustic_signal.probabilistic_welch` (default
+    :func:`uacpy.acoustic_signal.probabilistic_constant_q` (default
     1 µPa) and read off the result, so the level axis names whatever reference
     was used; ``scaling`` is read off it too, and the keyword stands in only
     for a hand-built result that carries none. An unset ``ymin`` / ``ymax`` is fitted to the levels drawn, as
@@ -1779,138 +1729,173 @@ def plot_cepstrum(c, ax=None, *, sample_rate=None, title=None, figsize=(9, 4),
 # ── Decidecade bands / array spectra / ambiguity ────────────────────────────
 
 @typed_plot_error
-def plot_band_levels(centers, levels=None, ax=None, *, title=None, width=0.8,
-                     ref=None, band_type=None, figsize=(9, 4), **mpl_kw):
-    """Bar plot of standard band levels vs centre frequency. Consumes a
-    :class:`~uacpy.acoustic_signal.BandLevels` itself, or its arrays: levels
-    already in dB re ``ref²``.
+def plot_band_levels(centers, levels=None, ax=None, *, lower=None, upper=None,
+                     ref=None, band_type=None, duration=None, ymin=None,
+                     ymax=None, title=None, figsize=(10, 5), **mpl_kw):
+    """Band levels (dB) as bars, each spanning its own band's edges on a log
+    frequency axis, the level window fitted to the bars.
 
-    ``band_type`` names the ladder the bands sit on (``'decidecade'`` or
-    ``'octave'``) on the axis and in the title. ``ref`` is the reference
-    pressure in Pa the levels were computed against and names the axis, as
-    ``ref=`` does on every level plotter in this family. Both are read off a
-    ``BandLevels`` passed whole (a contradicting keyword is refused); with
-    bare arrays ``None`` is ``'decidecade'`` and 1 µPa, the defaults of
-    :func:`decidecade_band_levels`.
+    Draws either band record, or bare arrays:
 
-    For band power still in Pa² (a banded
-    :class:`~uacpy.acoustic_signal.SpectralEstimate`), use
-    :func:`plot_sel`, which converts it and draws each bar between its band
-    edges; this one draws levels that are already decibels.
+    * a :class:`~uacpy.acoustic_signal.BandLevels` (``band_levels``):
+      levels already in dB re ``ref²``, its band edges ``lower`` /
+      ``upper``, its ``ref`` and ``band_type``; ``result.plot()`` is this
+      call;
+    * a banded :class:`~uacpy.acoustic_signal.SpectralEstimate` (one
+      computed with a ``band_type``, such as ``sound_exposure`` output): its
+      band power in Pa², Pa²·s or Pa²/Hz, converted to dB re ``ref²``
+      (1 µPa unless ``ref=`` is given), its unit and default title read off
+      its ``scaling`` — an exposure is integrated over the record (SEL), a
+      spectrum is per band, a density per hertz of the band's own width;
+      ``result.plot()`` is this call;
+    * arrays: band ``centers`` (Hz) and ``levels`` (dB re ``ref²``), with
+      the band edges ``lower=`` / ``upper=`` (Hz).
+
+    ``ref`` and ``band_type`` are read off a record passed whole (a
+    contradicting keyword is refused); with arrays ``None`` is 1 µPa and
+    ``'decidecade'``, the defaults of
+    :func:`~uacpy.acoustic_signal.band_levels`. The ticks read the
+    standardised nominal centre frequencies (400, 1600, 3150 Hz …, not the
+    exact 398, 1585, 3162). An unset ``ymin`` / ``ymax`` is fitted to the
+    levels drawn, as :func:`plot_psd` states.
 
     Parameters
     ----------
-    centers : BandLevels or array_like
-        The result itself, or its band centre frequencies (Hz).
+    centers : BandLevels, SpectralEstimate or array_like
+        A band record, or the band centre frequencies (Hz).
     levels : array_like, optional
         Band levels (dB re ``ref``²), with array input.
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
-    title : str, optional
-        Axes title. ``None`` draws the default caption; ``''`` draws none.
-    width : float, optional
-        Bar width as a fraction of the band spacing. Default 0.8.
+    lower, upper : array_like, optional
+        Band edges (Hz), with array input.
     ref : float, optional
         Reference pressure (Pa) of the dB scale (see above).
-    band_type : {'decidecade', 'octave'}, optional
+    band_type : str, optional
         The band ladder (see above).
+    duration : float, optional
+        Record duration (s), named in the default title.
+    ymin, ymax : float, optional
+        Level-axis limits (dB); an edge left ``None`` is fitted to the
+        levels drawn.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
     figsize : tuple, optional
-        Size (inches) of the new figure, ``(9, 4)`` by default; unused when
+        Size (inches) of the new figure, ``(10, 5)`` by default; unused when
         ``ax`` is given.
     **mpl_kw
         Matplotlib keywords for the bars.
     """
+    who = 'plot_band_levels'
     given = centers
-    _unpacked = _carrier_or_arrays(
-        centers, (levels,), count=2, who="plot_band_levels",
-        carrier=(('BandLevels',), ('centers', 'levels')),
-        fields=('centers', 'levels'))
-    if _unpacked is not None:
-        for name, value in (('ref', ref), ('band_type', band_type)):
-            carried = getattr(given, name, None)
-            if value is not None and carried is not None and value != carried:
-                raise ConfigurationError(
-                    f"plot_band_levels: {name}={value!r} contradicts the "
-                    f"BandLevels, whose levels were computed with "
-                    f"{name}={carried!r}. Drop {name}= to use the result's "
-                    f"own, or recompute the levels with {name}={value!r}.")
-        ref = getattr(given, 'ref', None) if ref is None else ref
-        band_type = (getattr(given, 'band_type', None) if band_type is None
-                     else band_type)
-        centers, levels = _unpacked
-    elif levels is None:
-        raise ConfigurationError(
-            "plot_band_levels: pass both arrays, plot_band_levels(centers, "
-            "levels), or one BandLevels, plot_band_levels(band_levels(...)).")
-    ref = REFERENCE_PRESSURE_WATER if ref is None else ref
+    scaling = None
+    if hasattr(given, 'power') and hasattr(given, 'bands'):
+        _refuse_axes_after_carrier(who, given, [('levels', levels)])
+    if (levels is None and hasattr(given, 'power')
+            and hasattr(given, 'bands')):
+        if given.bands is None:
+            raise ConfigurationError(
+                f"{who}: this estimate was asked for no band_type, so its "
+                f"values sit on {given.method!r} bins and there are no "
+                f"band edges to draw bars between.",
+                remediation="Use plot_psd(result), or result.plot(), which "
+                            "picks the plotter from the estimate itself; or "
+                            "compute it with sound_exposure(), whose values "
+                            "sit on bands.")
+        if band_type is not None and given.band_type is not None \
+                and band_type != given.band_type:
+            raise ConfigurationError(
+                f"{who}: band_type={band_type!r} contradicts the estimate, "
+                f"whose values sit on {given.band_type!r} bands.")
+        scaling = given.scaling
+        unit = _scaling_unit(who, scaling)
+        band_type = given.band_type or band_type
+        bands = np.asarray(given.bands, dtype=float)
+        lower, centers, upper = bands[:, 0], bands[:, 1], bands[:, 2]
+        ref = REFERENCE_PRESSURE_WATER if ref is None else ref
+        levels = power_to_dB(np.asarray(given.power), ref)
+    else:
+        _unpacked = _carrier_or_arrays(
+            centers, (levels,), count=2, who=who,
+            carrier=(('BandLevels',), ('centers', 'levels')),
+            fields=('centers', 'levels'))
+        if _unpacked is not None:
+            for name, value in (('ref', ref), ('band_type', band_type)):
+                carried = getattr(given, name, None)
+                if (value is not None and carried is not None
+                        and value != carried):
+                    raise ConfigurationError(
+                        f"{who}: {name}={value!r} contradicts the "
+                        f"BandLevels, whose levels were computed with "
+                        f"{name}={carried!r}. Drop {name}= to use the "
+                        f"result's own, or recompute the levels with "
+                        f"{name}={value!r}.")
+            ref = getattr(given, 'ref', None) if ref is None else ref
+            band_type = (getattr(given, 'band_type', None)
+                         if band_type is None else band_type)
+            lower = getattr(given, 'lower', None) if lower is None else lower
+            upper = getattr(given, 'upper', None) if upper is None else upper
+            centers, levels = _unpacked
+        elif levels is None:
+            raise ConfigurationError(
+                f"{who}: pass a band record, plot_band_levels(band_levels(...))"
+                f" or plot_band_levels(sound_exposure(...)), or the arrays, "
+                f"plot_band_levels(centers, levels, lower=..., upper=...).")
+        if lower is None or upper is None:
+            raise ConfigurationError(
+                f"{who}: each bar spans its band, so the band edges are "
+                f"needed: pass lower= and upper= (Hz) with the arrays.",
+                remediation="Pass the BandLevels itself (it carries them), "
+                            "or the edges of uacpy.acoustic_signal."
+                            "decidecade_bands / octave_bands.")
+        ref = REFERENCE_PRESSURE_WATER if ref is None else ref
+        unit = '²'
     band_type = "decidecade" if band_type is None else band_type
-    _require_nonempty('plot_band_levels', centers=centers, levels=levels)
+    _require_nonempty(who, centers=centers, levels=levels)
     c = np.asarray(centers, dtype=float)
-    lv = np.asarray(levels, dtype=float)
+    lv = _no_energy_as_gap(levels)
+    lo = np.asarray(lower, dtype=float)
+    hi = np.asarray(upper, dtype=float)
+    if not (lo.shape == hi.shape == c.shape == lv.shape):
+        raise ConfigurationError(
+            f"{who}: centers, levels and the band edges need one value per "
+            f"band; got shapes {c.shape}, {lv.shape}, {lo.shape} and "
+            f"{hi.shape}.")
+    own_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    # Bars are drawn against log10(f) on a LINEAR axis, with the ticks relabelled
-    # back to Hz below: decidecade bands are equal-width in log10(f), so every
-    # bar comes out the same width and none collapses at the low end (a true log
-    # axis would squash them).
-    x = np.log10(c)
-    bw = width * np.median(np.diff(x)) if c.size > 1 else 0.04
-    ax.bar(x, lv, width=bw, **mpl_kw)
-    ticks = x[:: max(1, c.size // 12)]          # ~12 labelled bands, else unreadable
-    ax.set_xticks(ticks)
-    ax.set_xticklabels([f"{v:.0f}" for v in 10 ** ticks], rotation=45)
+    held = _held_window(ax)
+    mpl_kw.setdefault('edgecolor', 'black')
+    # Each bar spans its own band, so a list with gaps (every other band,
+    # dropped bands) keeps them.
+    ax.bar(lo, lv, width=hi - lo, align='edge', **mpl_kw)
     ladder = _BAND_NAMES.get(band_type, band_type)
-    ax.set_xlabel(f"{ladder.capitalize()} band centre (Hz)")
-    ax.set_ylabel(f"Band level (dB re {_ref_label(ref)}Pa²)")
-    ax.set_title(_title_or(title, f"{ladder.capitalize()} band levels"))
-    ax.grid(alpha=0.3, axis="y")
-    return fig, ax
-
-
-@typed_plot_error
-def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, dB=True, label=None,
-                          title=None, figsize=(8, 4), dynamic_range_dB=None,
-                          **mpl_kw):
-    """Line plot of a beamformer angular spectrum (Bartlett/MVDR/MUSIC).
-
-    Parameters
-    ----------
-    angles_deg : array_like
-        Look angles (deg).
-    spectrum : array_like
-        Beamformer power per angle.
-    ax : matplotlib.axes.Axes, optional
-        Existing axes; a new figure is made when omitted.
-    dB : bool, optional
-        Draw ``10·log10`` relative to the peak. Default True.
-    label : str, optional
-        Legend label of the line.
-    title : str, optional
-        Axes title. ``None`` draws the default caption; ``''`` draws none.
-    figsize : tuple, optional
-        Size (inches) of the new figure, ``(8, 4)`` by default; unused when
-        ``ax`` is given.
-    dynamic_range_dB : float, optional
-        With ``dB``, the depth below the peak at which the curve is floored,
-        a null drawn on the floor; ``None`` is 120 dB.
-    **mpl_kw
-        Matplotlib keywords for the line.
-    """
-    P = np.real(np.asarray(spectrum))
-    if dB:
-        # Beamformer output has no absolute reference (MVDR/MUSIC pseudo-power
-        # least of all), so the dB axis is relative to the peak: 0 dB = look
-        # direction of maximum response.
-        P = _floored_dB(P / np.max(P), power=True,
-                        dynamic_range_dB=dynamic_range_dB,
-                        who='plot_angular_spectrum')
-    fig, ax = fig_ax(ax, figsize)
-    ax.plot(angles_deg, P, label=label, **mpl_kw)
-    ax.set_xlabel("Look angle (°)")
-    ax.set_ylabel("Power (dB re max)" if dB else "Power")
-    ax.set_title(_title_or(title, "Angular spectrum"))
-    ax.grid(alpha=0.3)
-    if label:
-        ax.legend()
+    if band_type != 'linear':
+        ax.set_xscale('log')
+        ticks = c[:: max(1, c.size // 12)]      # ~12 labelled bands
+        ax.set_xticks(ticks, [_band_centre_label(v) for v in ticks],
+                      rotation=45)
+        ax.set_xticks([], minor=True)
+    ax.set_xlabel(_band_axis_label(band_type))
+    if scaling is None:
+        ax.set_ylabel(f"Band level (dB re {_ref_label(ref)}Pa{unit})")
+        default = f"{ladder.capitalize()} band levels"
+    else:
+        ax.set_ylabel(f"Level (dB re {_ref_label(ref)}{unit})")
+        default = {"exposure": "SEL", "spectrum": "Band power",
+                   "density": "Band density"}[scaling]
+    # ``duration`` is the caller's own note about the record; without it the
+    # title states the quantity alone rather than "(Nones)".
+    ax.set_title(_title_or(title, f"{default} ({duration}s)"
+                           if duration is not None else default))
+    ax.set_ylim(_level_window_dB(lv, ymin, ymax, held))
+    _warn_if_offscreen(ax, lv, who, "ymin=/ymax")
+    ax.grid(which="both", alpha=0.3, axis="y")
+    ax.set_axisbelow(True)
+    if own_fig:
+        # Lay the plotter's own figure out around its labels, as
+        # plot_constellation does: on the default figsize the x label
+        # otherwise ends below the canvas.
+        fig.tight_layout()
     return fig, ax
 
 
@@ -1926,10 +1911,10 @@ def plot_matched_field(field, ax=None, *, dynamic_range_dB=20.0,
     :func:`uacpy.sonar.bartlett` / :func:`~uacpy.sonar.mvdr` over a replica
     bank, :meth:`~uacpy.core.results.Covariance.bartlett` /
     :meth:`~uacpy.core.results.Covariance.mvdr` over OASN replicas, or
-    :func:`~uacpy.core.results.ambiguity_field` of an array-level surface —
+    :func:`~uacpy.sonar.ambiguity_field` of an array-level surface —
     and draws its candidate ``depth`` against its horizontal axis
     (``'range'`` or OASN's ``'x'``), labelled with that axis's name.
-    ``true_position`` is an ``(horizontal_m, depth_m)`` pair, marked with
+    ``true_position`` is an ``(horizontal_m, depth)`` pair, marked with
     the package's source star for comparison, and ``**mpl_kw`` goes to the
     pcolormesh. ``Field.plot()`` of such a surface draws it here.
 
@@ -1957,7 +1942,7 @@ def plot_matched_field(field, ax=None, *, dynamic_range_dB=20.0,
     cmap : str, optional
         Colormap; ``None`` is the registered ambiguity map.
     true_position : (float, float), optional
-        ``(horizontal_m, depth_m)`` to mark.
+        ``(horizontal_m, depth)`` to mark.
     mark_peak : bool, optional
         Mark the surface's peak. Default True.
     title : str, optional
@@ -2038,16 +2023,15 @@ def plot_matched_field(field, ax=None, *, dynamic_range_dB=20.0,
     ax.set_xlabel(f'Candidate {horizontal[0]} (km)')
     ax.set_ylabel('Candidate depth (m)')
     ax.set_title(_title_or(title, 'Matched-field ambiguity surface'))
-    # Depth downward, set as an explicit descending limit rather than
-    # invert_yaxis(): a shared-y pair would call this once per axis and the
-    # second call would undo the first.
-    ax.set_ylim(float(np.max(z)), float(np.min(z)))
+    # Depth downward, idempotently: a shared-y pair calls this once per
+    # axis, and the edge cells keep their whole height.
+    invert_yaxis_once(ax)
     if env is not None:
         _overlay_seafloor(ax, env, x, painted=im)
     if show_legend and (mark_peak or true_position is not None):
         # One row, not a block: a heatmap fills its axes, so 'best' has no
-        # empty corner to find and any multi-row box lands on the surface --
-        # on the deck it covered a third of it, directly over the peak.
+        # empty corner to find and any multi-row box lands on the surface,
+        # on a deck-sized panel over a third of it, over the peak.
         ax.legend(loc='upper center', ncol=2, fontsize='small',
                   framealpha=0.85).set_zorder(ZORDER_LEGEND)
     return fig, ax
@@ -2058,7 +2042,7 @@ _AMBIGUITY_DYNAMIC_RANGE_DB = 40.0
 
 
 @typed_plot_error
-def plot_ambiguity(delays_s, doppler_hz=None, chi=None, ax=None, *,
+def plot_ambiguity(delays, doppler_shifts=None, chi=None, ax=None, *,
                    dB=False,
                    dynamic_range_dB=None, cmap=None,
                    title=None, figsize=(8, 6), show_colorbar=True, **mpl_kw):
@@ -2070,9 +2054,9 @@ def plot_ambiguity(delays_s, doppler_hz=None, chi=None, ax=None, *,
 
     Parameters
     ----------
-    delays_s : AmbiguityResult or array_like
+    delays : AmbiguityResult or array_like
         The result itself, or its delay axis (s).
-    doppler_hz : array_like, optional
+    doppler_shifts : array_like, optional
         Doppler shifts (Hz), with array input.
     chi : array_like, optional
         The ``(n_doppler, n_delays)`` surface, with array input.
@@ -2099,12 +2083,12 @@ def plot_ambiguity(delays_s, doppler_hz=None, chi=None, ax=None, *,
     # Recognised only when the other positional arguments are
     # None, so an explicit array call is never reinterpreted.
     _unpacked = _carrier_or_arrays(
-        delays_s, (doppler_hz, chi,), count=3, who="plot_ambiguity",
-        carrier=(('AmbiguityResult',), ('delays_s', 'doppler_hz', 'amplitude')),
-        fields=('delays_s', 'doppler_hz', 'chi'))
+        delays, (doppler_shifts, chi,), count=3, who="plot_ambiguity",
+        carrier=(('AmbiguityResult',), ('delays', 'doppler_shifts', 'amplitude')),
+        fields=('delays', 'doppler_shifts', 'chi'))
     if _unpacked is not None:
-        delays_s, doppler_hz, chi = _unpacked
-    if doppler_hz is None or chi is None:
+        delays, doppler_shifts, chi = _unpacked
+    if doppler_shifts is None or chi is None:
         raise ConfigurationError(
             "plot_ambiguity: pass every array, or one AmbiguityResult.")
     if dynamic_range_dB is not None and not dB:
@@ -2115,9 +2099,9 @@ def plot_ambiguity(delays_s, doppler_hz=None, chi=None, ax=None, *,
     span_dB = (_AMBIGUITY_DYNAMIC_RANGE_DB if dynamic_range_dB is None
                else _checked_dynamic_range_dB('plot_ambiguity',
                                               dynamic_range_dB))
-    amp = _require_image_grid(np.abs(np.asarray(chi)), len(doppler_hz),
-                              len(delays_s), "plot_ambiguity",
-                              "doppler_hz", "delays_s")
+    amp = _require_image_grid(np.abs(np.asarray(chi)), len(doppler_shifts),
+                              len(delays), "plot_ambiguity",
+                              "doppler_shifts", "delays")
     label = "|χ|"
     if dB:
         # The sidelobe structure IS the reason to draw an ambiguity surface,
@@ -2148,8 +2132,8 @@ def plot_ambiguity(delays_s, doppler_hz=None, chi=None, ax=None, *,
         cmap = cmap_for_field('ambiguity', dB=True)
     fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(amp, aspect="auto", origin="lower",
-                   extent=_cell_edge_extent(np.asarray(delays_s) * 1e3,
-                                            doppler_hz),
+                   extent=_cell_edge_extent(np.asarray(delays) * 1e3,
+                                            doppler_shifts),
                    cmap=cmap, **mpl_kw)
     if show_colorbar:
         fig.colorbar(im, ax=ax, label=label)
@@ -2162,12 +2146,15 @@ def plot_ambiguity(delays_s, doppler_hz=None, chi=None, ax=None, *,
 # ── System identification (FRF) ─────────────────────────────────────────────
 
 @typed_plot_error
-def plot_frf(frequencies, tf=None, ax=None, *, tag="", label=None, ymin=-60,
-             ymax=60, title=None, figsize=(10, 12), dynamic_range_dB=None,
+def plot_frf(frequencies, tf=None, ax=None, *, tag="", label=None, ymin=None,
+             ymax=None, title=None, figsize=(10, 12), dynamic_range_dB=None,
              **mpl_kw):
-    """Transfer-function magnitude (dB) + phase (deg). Consumes an
-    ``FRFResult`` itself, or its ``(frequencies, transfer_function)``.
-    ``ax`` may be a 2-tuple ``(ax_mag, ax_phase)``.
+    """Transfer-function magnitude (dB) over phase (radians, wrapped), on a
+    log frequency axis — the convention ``Field.plot_transfer_function``
+    draws a modelled ``H(f)`` in, so a measured and a modelled FRF share one
+    pair of axes. Consumes an ``FRFResult`` itself, or its
+    ``(frequencies, transfer_function)``. ``ax`` may be a 2-tuple
+    ``(ax_mag, ax_phase)``.
 
     Parameters
     ----------
@@ -2183,7 +2170,8 @@ def plot_frf(frequencies, tf=None, ax=None, *, tag="", label=None, ymin=-60,
     label : str, optional
         Legend label of the line.
     ymin, ymax : float, optional
-        Magnitude-axis limits (dB). Default -60 and 60.
+        Magnitude-axis limits (dB); ``None`` (default) autoscales that end
+        to the drawn magnitude.
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
     figsize : tuple, optional
@@ -2208,7 +2196,8 @@ def plot_frf(frequencies, tf=None, ax=None, *, tag="", label=None, ymin=-60,
     if ax is None:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, sharex=True)
     else:
-        ax1, ax2 = _axes_pair("plot_frf", ax, "(ax_mag, ax_phase)")
+        ax1, ax2 = _axes_pair("plot_frf", ax, "(ax_mag, ax_phase)",
+                              "plt.subplots(2, 1, sharex=True)")
         fig = ax1.figure
     lbl = (f"{tag} {label}").strip() if (tag or label) else None
     mag_dB = _floored_dB(tf, dynamic_range_dB=dynamic_range_dB, who='plot_frf')
@@ -2216,17 +2205,17 @@ def plot_frf(frequencies, tf=None, ax=None, *, tag="", label=None, ymin=-60,
     ax1.set_title(_title_or(title, "Frequency response"))
     ax1.set_ylabel("Magnitude (dB)")
     ax1.set_xscale("log")
-    ax1.set_ylim((ymin, ymax))
+    if ymin is not None or ymax is not None:
+        ax1.set_ylim(bottom=ymin, top=ymax)
+        _warn_if_offscreen(ax1, mag_dB, "plot_frf", "ymin=/ymax")
     ax1.set_xlim(_log_freq_xlim(frequencies))
-    # Only the magnitude panel is pinned to a fixed window; the phase axis
-    # below spans the full ±180° a phase can occupy.
-    _warn_if_offscreen(ax1, mag_dB, "plot_frf", "ymin=/ymax")
     ax1.grid(which="both", alpha=0.5)
-    ax2.plot(frequencies, np.angle(tf, deg=True), label=lbl, **mpl_kw)
-    ax2.set_ylabel("Phase (degrees)")
+    # The phase axis spans the whole (-π, π] a wrapped phase occupies.
+    ax2.plot(frequencies, np.angle(tf), label=lbl, **mpl_kw)
+    ax2.set_ylabel("Phase (rad)")
     ax2.set_xlabel("Frequency (Hz)")
     ax2.set_xscale("log")
-    ax2.set_ylim((-180, 180))
+    ax2.set_ylim((-np.pi, np.pi))
     ax2.set_xlim(_log_freq_xlim(frequencies))
     ax2.grid(which="both", alpha=0.5)
     if lbl:
@@ -2236,10 +2225,11 @@ def plot_frf(frequencies, tf=None, ax=None, *, tag="", label=None, ymin=-60,
 
 
 @typed_plot_error
-def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
-                   ymin=0.75, ymax=1.01, figsize=(10, 4), **mpl_kw):
-    """Coherence vs frequency. Consumes a ``frf_welch`` result's
-    ``frequencies`` and ``coherence``.
+def plot_coherence(frequencies, coherence=None, ax=None, *, label=None,
+                   title=None, ymin=0.75, ymax=1.01, figsize=(10, 4),
+                   **mpl_kw):
+    """Coherence vs frequency, of an ``FRFResult`` that carries one
+    (``frf_welch``) — ``plot_coherence(result)`` — or of the two arrays.
 
     ``ymin`` / ``ymax`` default to the near-unity window a well-conditioned
     FRF lives in; widen it (``ymin=0``) to see a poorly coherent band, which
@@ -2247,10 +2237,10 @@ def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
 
     Parameters
     ----------
-    frequencies : array_like
-        Frequencies (Hz).
-    coh : array_like
-        Coherence per frequency, 0-1.
+    frequencies : FRFResult or array_like
+        The result itself, or the frequencies (Hz).
+    coherence : array_like, optional
+        Coherence per frequency, 0-1, with array input.
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
     label : str, optional
@@ -2265,55 +2255,126 @@ def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
     **mpl_kw
         Matplotlib keywords for the line.
     """
+    if _is_frf_result(frequencies):
+        _refuse_axes_after_carrier('plot_coherence', frequencies,
+                                   [('coherence', coherence)])
+    if _is_frf_result(frequencies) and coherence is None:
+        result = frequencies
+        if result.coherence is None:
+            raise ConfigurationError(
+                f"plot_coherence: this FRFResult (method {result.method!r}) "
+                f"carries no coherence; frf_welch measures one.",
+                remediation="Estimate with uacpy.acoustic_signal.frf_welch, "
+                            "or pass the frequencies and a coherence array.")
+        frequencies, coherence = result.frequencies, result.coherence
+    elif coherence is None:
+        raise ConfigurationError(
+            "plot_coherence: pass an FRFResult, plot_coherence(frf_welch(x, "
+            "y, fs)), or both arrays, plot_coherence(frequencies, "
+            "coherence).")
+    own_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    ax.plot(frequencies, coh, label=label, **mpl_kw)
+    ax.plot(frequencies, coherence, label=label, **mpl_kw)
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Coherence")
     ax.set_xscale("log")
     ax.set_ylim((ymin, ymax))
     ax.set_xlim(_log_freq_xlim(frequencies))
-    _warn_if_offscreen(ax, coh, "plot_coherence", "ymin=/ymax")
+    _warn_if_offscreen(ax, coherence, "plot_coherence", "ymin=/ymax")
     ax.grid(which="both", alpha=0.5)
     ax.set_title(_title_or(title, "Coherence"))
     if label:
         ax.legend()
+    if own_fig:
+        # Lay the plotter's own figure out around its labels, as
+        # plot_constellation does: on the default figsize the x label
+        # otherwise ends below the canvas.
+        fig.tight_layout()
     return fig, ax
 
 
+def _is_frf_result(value) -> bool:
+    """Whether ``value`` is an ``FRFResult`` (by class name, as the other
+    carrier checks of this module, which import no carrier class)."""
+    return 'FRFResult' in {klass.__name__ for klass in type(value).__mro__}
+
+
 @typed_plot_error
-def plot_lsfir_diagnostics(Minfo, Vinfo, g, *, title=None, figsize=(12, 8)):
-    """LS-FIR diagnostics: an ``lsfir`` result's ``information_matrix``,
-    ``information_vector`` and ``impulse_response``.
+def plot_lsfir_diagnostics(information_matrix, information_vector=None,
+                           impulse_response=None, *, title=None,
+                           figsize=None, fig=None):
+    """LS-FIR diagnostics, three panels: the normal equations' information
+    matrix and information vector, and the fitted impulse response — of an
+    ``lsfir`` ``FRFResult`` (``plot_lsfir_diagnostics(result)``) or the
+    three arrays, named as the result's attributes.
 
     Parameters
     ----------
-    Minfo : array_like
-        The ``information_matrix``.
-    Vinfo : array_like
-        The ``information_vector``.
-    g : array_like
-        The ``impulse_response``.
+    information_matrix : FRFResult or array_like
+        An ``lsfir`` result, or its ``information_matrix``.
+    information_vector : array_like, optional
+        The ``information_vector``, with array input.
+    impulse_response : array_like, optional
+        The ``impulse_response``, with array input.
     title : str, optional
         Title of the matrix panel. ``None`` draws the default caption.
     figsize : tuple, optional
-        Figure size (inches). Default ``(12, 8)``.
+        Size (inches) of a new figure; ``None`` is ``(12, 8)``.
+    fig : Figure or SubFigure, optional
+        Draw the three panels into this (a panel of a larger figure)
+        instead of a new figure; its size is then the caller's.
+
+    Returns
+    -------
+    fig, axes : Figure, list of Axes
+        The matrix, vector and impulse-response axes.
     """
-    from matplotlib.gridspec import GridSpec
-    fig = plt.figure(figsize=figsize)
-    gs = GridSpec(2, 2, width_ratios=[2, 1], height_ratios=[2, 1])
+    who = 'plot_lsfir_diagnostics'
+    if (_is_frf_result(information_matrix) and information_vector is None
+            and impulse_response is None):
+        result = information_matrix
+        if result.information_matrix is None:
+            raise ConfigurationError(
+                f"{who}: this FRFResult (method {result.method!r}) carries no "
+                f"normal equations; lsfir fits them.")
+        if isinstance(result.information_matrix, tuple):
+            raise ConfigurationError(
+                f"{who}: this lsfir result fitted "
+                f"{len(result.information_matrix)} measurements, one FIR "
+                f"each, so it holds one set of normal equations per "
+                f"measurement.",
+                remediation="Pick one: plot_lsfir_diagnostics("
+                            "r.information_matrix[i], "
+                            "r.information_vector[i], r.impulse_response[i]).")
+        information_matrix = result.information_matrix
+        information_vector = result.information_vector
+        impulse_response = result.impulse_response
+    elif information_vector is None or impulse_response is None:
+        raise ConfigurationError(
+            f"{who}: pass an lsfir FRFResult, or the three arrays "
+            f"information_matrix, information_vector, impulse_response.")
+    if fig is None:
+        fig = plt.figure(figsize=(12, 8) if figsize is None else figsize)
+    elif figsize is not None:
+        raise ConfigurationError(
+            f"{who}: figsize= sizes a new figure, and fig= hands in one that "
+            f"already has its size — give one of them.")
+    gs = fig.add_gridspec(2, 2, width_ratios=[2, 1], height_ratios=[2, 1])
     ax1 = fig.add_subplot(gs[0, 0])
-    im = ax1.imshow(Minfo, cmap="viridis", aspect="equal")
+    im = ax1.imshow(information_matrix, cmap="viridis", aspect="equal")
     ax1.set_title(_title_or(title, "Information Matrix"))
     ax1.set_xlabel("Index j")
     ax1.set_ylabel("Index i")
     fig.colorbar(im, ax=ax1, shrink=0.8, label="Correlation Value")
     ax2 = fig.add_subplot(gs[0, 1])
-    ax2.bar(np.arange(len(Vinfo)), Vinfo, color="skyblue", edgecolor="navy")
+    ax2.bar(np.arange(len(information_vector)), information_vector,
+            color="skyblue", edgecolor="navy")
     ax2.set_title("Information Vector")
     ax2.set_xlabel("Index i")
     ax2.set_ylabel("Cross-correlation Value")
     ax3 = fig.add_subplot(gs[1, :])
-    ax3.plot(g, color="red", linestyle="-", marker="o", markersize=4)
+    ax3.plot(impulse_response, color="red", linestyle="-", marker="o",
+             markersize=4)
     ax3.set_title("Impulse Response")
     ax3.set_xlabel("Time Index")
     ax3.set_ylabel("Amplitude")

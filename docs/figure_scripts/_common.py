@@ -29,17 +29,19 @@ SQUARE = (6.4, 5.2)
 TALL = (7.0, 6.4)
 
 
-def save(fig, stem: str, *, guide: bool = False) -> Path:
+def save(fig, stem: str, *, guide: bool = False,
+         directory: Path | None = None) -> Path:
     """Write ``fig`` as ``<stem>.png`` and close it. Returns the path.
 
-    The PNG goes to the page's figure directory, or to
-    ``$UACPY_FIGURE_OUTPUT`` when it is set (the test suite's run, which
-    leaves ``docs/`` untouched).
+    The PNG goes to the page's figure directory (``directory``, a module's
+    ``FIGURE_DIR``, when given), or to ``$UACPY_FIGURE_OUTPUT`` when it is
+    set (the test suite's run, which leaves ``docs/`` untouched).
     """
     import matplotlib.pyplot as plt
 
     override = os.environ.get('UACPY_FIGURE_OUTPUT')
     out_dir = (Path(override) if override
+               else Path(directory) if directory is not None
                else GUIDE_FIG_DIR if guide else FIG_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f'{stem}.png'

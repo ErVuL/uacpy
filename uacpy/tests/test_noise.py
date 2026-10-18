@@ -24,7 +24,8 @@ import inspect
 import numpy as np
 import pytest
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
+from uacpy.tests.conftest import recorded_warnings
 from uacpy.noise import wind_noise_level, WenzNoise
 from uacpy.noise import ambient as N
 
@@ -496,23 +497,23 @@ class TestMarineMammalWeighting:
         wenz = WenzNoise(f, wind_speed_kn=10.0, shipping_level='medium')
         unweighted = 10.0 * np.log10(np.trapezoid(10.0 ** (wenz.total / 10.0), f))
         assert unweighted == pytest.approx(97.5772, abs=5e-3)
-        assert weighted_level(wenz.total, frequency=f, group="LF") == pytest.approx(94.0292, abs=5e-3)
-        assert weighted_level(wenz.total, frequency=f, group="VHF") == pytest.approx(83.5095, abs=5e-3)
+        assert weighted_level(wenz.total, frequency=f, weighting="LF") == pytest.approx(94.0292, abs=5e-3)
+        assert weighted_level(wenz.total, frequency=f, weighting="VHF") == pytest.approx(83.5095, abs=5e-3)
 
     def test_apply_and_weighted_level(self):
         from uacpy.noise import apply_weighting, weighted_level, auditory_weighting
         import numpy as np
         f = np.array([100.0, 1000.0, 10000.0])
         lvl = np.array([120.0, 120.0, 120.0])
-        assert np.allclose(apply_weighting(lvl, frequency=f, group="LF"),
+        assert np.allclose(apply_weighting(lvl, frequency=f, weighting="LF"),
                            lvl + auditory_weighting(f, "LF"))
-        assert np.isfinite(weighted_level(lvl, frequency=f, group="LF"))
+        assert np.isfinite(weighted_level(lvl, frequency=f, weighting="LF"))
         # weighted_level integrates over frequency, so it must be independent
         # of the grid density (a bare sample-sum was not — it swung ~10 dB).
         f_coarse = np.linspace(20.0, 20000.0, 50)
         f_fine = np.linspace(20.0, 20000.0, 500)
-        wl_coarse = weighted_level(np.full(f_coarse.size, 120.0), frequency=f_coarse, group="LF")
-        wl_fine = weighted_level(np.full(f_fine.size, 120.0), frequency=f_fine, group="LF")
+        wl_coarse = weighted_level(np.full(f_coarse.size, 120.0), frequency=f_coarse, weighting="LF")
+        wl_fine = weighted_level(np.full(f_fine.size, 120.0), frequency=f_fine, weighting="LF")
         assert abs(wl_coarse - wl_fine) < 0.5
         # Hand anchor: a flat 120 dB/Hz spectrum LF-weighted over 20 Hz-20 kHz
         # is 120 + 10·log10(∫ 10^(W/10) df) = 160.9719 dB re 1 µPa² on the
@@ -525,11 +526,15 @@ class TestMarineMammalWeighting:
         error naming ``apply_weighting`` as the single-frequency form — not a
         bare IndexError (the scalar) or a silent
         10·log10(float-tiny) = -3076.5 dB (the one-element array)."""
-        from uacpy.noise import weighted_level
-        with pytest.raises(ConfigurationError, match='apply_weighting'):
-            weighted_level(120.0, frequency=1000.0, group="LF")
+        from uacpy.noise import apply_weighting, weighted_level
+        with pytest.raises(ConfigurationError, match='apply_weighting') as err:
+            weighted_level(120.0, frequency=1000.0, weighting="LF")
+        # The remedy, typed back, runs (keyword-only arguments).
+        assert 'apply_weighting(psd_dB, frequency=f, weighting=weighting)' in str(
+            err.value)
+        assert np.isfinite(apply_weighting(120.0, frequency=1000.0, weighting="LF"))
         with pytest.raises(ConfigurationError, match='at least two'):
-            weighted_level(np.array([120.0]), frequency=np.array([1000.0]), group="LF")
+            weighted_level(np.array([120.0]), frequency=np.array([1000.0]), weighting="LF")
 
     def test_weighted_level_accepts_the_two_frequency_boundary(self):
         """n = 2 — a single trapezoid interval — is the smallest valid grid:
@@ -538,8 +543,52 @@ class TestMarineMammalWeighting:
         from uacpy.noise import weighted_level
         f = np.array([1000.0, 2000.0])
         lvl = np.array([120.0, 120.0])
-        assert weighted_level(lvl, frequency=f, group="LF") == pytest.approx(
+        assert weighted_level(lvl, frequency=f, weighting="LF") == pytest.approx(
             149.9634445674845, abs=1e-9)
+
+
+class TestTheWeightedLevelTakesTheSpectraUacpyMakes:
+    """``weighted_level`` / ``apply_weighting`` take ``weighting=`` through
+    ``frequency_weighting``: a welch spectrum with its 0 Hz bin goes in as it
+    comes (no weight at DC), a function or a table weighs as a group does,
+    and an N-D density gives one level per spectrum along ``axis``."""
+
+    def test_a_welch_spectrum_with_its_dc_bin_is_weighted_as_it_comes(self):
+        from uacpy.acoustic_signal import welch
+        from uacpy.acoustics import power_to_dB
+        from uacpy.noise import weighted_level
+        rng = np.random.default_rng(0)
+        f, psd = welch(rng.standard_normal(48000), 48000.0, nperseg=1024)
+        assert f[0] == 0.0
+        level = power_to_dB(psd)
+        with_dc = weighted_level(level, frequency=f, weighting='HF')
+        assert np.isfinite(with_dc)
+        assert with_dc == pytest.approx(
+            weighted_level(level[1:], frequency=f[1:], weighting='HF'),
+            abs=1e-9)
+
+    def test_a_function_and_a_table_weigh_as_the_group_does(self):
+        from uacpy.noise import auditory_weighting, weighted_level
+        f = np.geomspace(100.0, 20000.0, 400)
+        lvl = np.full(f.size, 100.0)
+        group = weighted_level(lvl, frequency=f, weighting='LF')
+        fn = weighted_level(lvl, frequency=f,
+                            weighting=lambda x: auditory_weighting(x, 'LF'))
+        table = weighted_level(lvl, frequency=f,
+                               weighting=(f, auditory_weighting(f, 'LF')))
+        assert fn == pytest.approx(group, abs=1e-12)
+        assert table == pytest.approx(group, abs=1e-9)
+
+    def test_an_nd_density_gives_one_level_per_spectrum(self):
+        from uacpy.noise import weighted_level
+        f = np.geomspace(100.0, 20000.0, 200)
+        lvl = np.stack([np.full(f.size, 100.0), np.full(f.size, 110.0)])
+        got = weighted_level(lvl, frequency=f, weighting='VHF')
+        assert got.shape == (2,)
+        assert got[1] - got[0] == pytest.approx(10.0, abs=1e-9)
+        np.testing.assert_allclose(
+            weighted_level(lvl.T, frequency=f, weighting='VHF', axis=0), got,
+            rtol=1e-13)
 
 
 class TestWindNoiseRollOffAnchor:
@@ -839,17 +888,16 @@ class TestShipRadiatedNoiseGuardsRefuseNaN:
 
 
 def test_every_band_integrator_reads_an_empty_band_as_minus_inf():
-    """decidecade_band_levels, WenzNoise.band_level and weighted_level all
+    """band_levels, WenzNoise.band_level and weighted_level all
     integrate through
     core.acoustics.band_level, and a band that carries no power is -inf in
-    each (weighted_level floored it at -3076 dB, decidecade_band_levels
-    returned NaN)."""
-    from uacpy.acoustic_signal import decidecade_band_levels
+    each, neither a floored level nor NaN."""
+    from uacpy.acoustic_signal import band_levels
     from uacpy.noise import weighted_level
     f = np.fft.rfftfreq(4096, 1 / 8000.0)
     psd = np.zeros(f.size)
     psd[(f > 900) & (f < 1100)] = 1e-4
-    _, levels = decidecade_band_levels(psd, frequencies=f)
+    _, levels = band_levels(psd, frequencies=f)
     covered = ~np.isnan(levels)
     assert np.isneginf(levels[covered]).any()
     assert np.isfinite(levels[covered]).any()
@@ -857,7 +905,7 @@ def test_every_band_integrator_reads_an_empty_band_as_minus_inf():
                        shipping_level='no', rain_rate='no')
     assert silent.band_level(100.0, 1000.0, component='wind') == -np.inf
     fw = np.geomspace(10.0, 1e5, 50)
-    assert weighted_level(np.full(fw.size, -np.inf), frequency=fw, group='LF') == -np.inf
+    assert weighted_level(np.full(fw.size, -np.inf), frequency=fw, weighting='LF') == -np.inf
 
 
 def test_wenz_decidecade_levels_carry_their_bands_and_reference():
@@ -908,15 +956,37 @@ class TestTheMeanShipSourceSpectrumIsWalesAndHeitmeyer:
                                  r'frequency is empty\.'):
             ship_source_level_wales_heitmeyer([])
 
-    @pytest.mark.parametrize('f, refused', [(30.0, False), (29.9, True),
+    @pytest.mark.parametrize('f, outside', [(30.0, False), (29.9, True),
                                             (15000.0, False),
                                             (15000.1, True)])
-    def test_the_band_is_the_measured_and_extrapolated_one(self, f, refused):
+    def test_outside_the_measured_and_extrapolated_band_it_warns(self, f,
+                                                                 outside):
+        """Outside 30 Hz-15 kHz the expressions are evaluated with one
+        ValidityWarning naming both bands; inside, silently."""
         from uacpy.noise import ship_source_level_wales_heitmeyer
-        if refused:
-            with pytest.raises(ConfigurationError,
-                               match=r'^ship_source_level_wales_heitmeyer: '
-                                     r'frequency must lie in 30-15000 Hz'):
-                ship_source_level_wales_heitmeyer(f)
-        else:
-            assert np.isfinite(ship_source_level_wales_heitmeyer(f))
+        with recorded_warnings() as caught:
+            level = ship_source_level_wales_heitmeyer(f)
+        named = [w for w in caught if issubclass(w.category, ValidityWarning)
+                 and 'measured over 30-1200 Hz' in str(w.message)
+                 and 'extrapolated to 15000 Hz' in str(w.message)]
+        assert len(named) == (1 if outside else 0)
+        assert np.isfinite(level)
+
+    def test_below_30_Hz_it_is_equation_8_195_and_above_15_kHz_the_line(self):
+        from uacpy.noise import ship_source_level_wales_heitmeyer
+        with recorded_warnings():
+            low, high = ship_source_level_wales_heitmeyer([20.0, 20000.0])
+        assert low == pytest.approx(
+            230.0 - 35.94 * np.log10(20.0)
+            + 9.17 * np.log10(1.0 + (20.0 / 340.0) ** 2), abs=1e-9)
+        assert high == pytest.approx(
+            ship_source_level_wales_heitmeyer(15000.0)
+            - 23.0 * np.log10(20000.0 / 15000.0), abs=1e-9)
+
+    @pytest.mark.parametrize('f', [0.0, -10.0, np.nan, np.inf])
+    def test_a_frequency_without_a_logarithm_is_refused(self, f):
+        from uacpy.noise import ship_source_level_wales_heitmeyer
+        with pytest.raises(ConfigurationError,
+                           match=r'^ship_source_level_wales_heitmeyer: '
+                                 r'frequency must be finite and positive'):
+            ship_source_level_wales_heitmeyer([100.0, f])

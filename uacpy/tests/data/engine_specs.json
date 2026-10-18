@@ -823,7 +823,7 @@
     "none_receiver_modes": [],
     "pads_pulse_to_output_duration": true,
     "python_stacked_modes": [],
-    "receivers_reach_sediment": false,
+    "receivers_reach_sediment": true,
     "single_frequency_modes": [
      "ARRIVALS",
      "COHERENT_TL",

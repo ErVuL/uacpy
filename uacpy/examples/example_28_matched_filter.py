@@ -11,9 +11,7 @@ processing_gain_dB · analytic_signal · ambiguity_function · plot_ambiguity
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -30,7 +28,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 rng = np.random.default_rng(0xACED)
 fs = 20000.0
 freq_start, freq_end, pulse_length = 1000.0, 5000.0, 0.02
-t_tx, transmitted = lfm_chirp(freq_start, freq_end, pulse_length, sample_rate=fs)
+_, transmitted = lfm_chirp(freq_start, freq_end, pulse_length, sample_rate=fs)
 bandwidth = freq_end - freq_start
 
 # Two echoes, the second weaker and 25 ms later. The noise is drawn from the
@@ -57,29 +55,20 @@ lag_axis, doppler_axis, ambiguity = ambiguity_function(
     analytic_signal(transmitted), fs, n_doppler=121)
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-axes[0, 0].plot(t_tx * 1e3, transmitted, 'b-', lw=0.7)
-axes[0, 0].set_title('Transmitted LFM chirp', fontweight='bold')
-axes[0, 0].set_xlabel('Time (ms)')
-axes[0, 0].set_ylabel('Amplitude')
-axes[0, 0].grid(True, alpha=0.3)
-
-axes[0, 1].plot(t_rx * 1e3, received, 'g-', lw=0.6)
-axes[0, 1].set_title('Received (2 echoes + noise)', fontweight='bold')
-axes[0, 1].set_xlabel('Time (ms)')
-axes[0, 1].set_ylabel('Amplitude')
-axes[0, 1].grid(True, alpha=0.3)
-
-axes[1, 0].plot(lags * 1e3, 20 * np.log10(np.abs(compressed) + 1e-6), 'r-',
-                lw=0.8)
+uacpy.plot.plot_waveform(transmitted, fs, axes[0, 0], time_units='ms',
+                         color='b', lw=0.7, title='Transmitted LFM chirp')
+uacpy.plot.plot_waveform(received, fs, axes[0, 1], t0=float(t_rx[0]),
+                         time_units='ms', color='g', lw=0.6,
+                         title='Received (2 echoes + noise)')
+# The compressed output's envelope in dB re its peak; dashed lines at the
+# true echo delays.
+uacpy.plot.plot_waveform(compressed, fs, axes[1, 0], t0=float(lags[0]),
+                         value='envelope_dB', time_units='ms', color='r',
+                         lw=0.8,
+                         title='Matched-filter output (pulse compression)')
 for delay in delays:
     axes[1, 0].axvline(delay * 1e3, color='k', ls='--', alpha=0.5)
-axes[1, 0].set_title('Matched-filter output (pulse compression)',
-                     fontweight='bold')
-axes[1, 0].set_xlabel('Delay (ms)')
-axes[1, 0].set_ylabel('Level (dB)')
 axes[1, 0].set_xlim(0, 100)
-axes[1, 0].set_ylim(-60, 5)
-axes[1, 0].grid(True, alpha=0.3)
 
 # Log colour scale over |χ| from 1e-2 to 1 — the -40..0 dB window that shows
 # the sidelobe structure, not only the mainlobe.

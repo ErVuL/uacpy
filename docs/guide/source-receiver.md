@@ -197,7 +197,7 @@ those weights — `Σ wᵢ·pᵢ` on the shared grid:
 ```python
 >>> pair = uacpy.Source(depths=[40.0, 60.0], frequencies=200.0, weights=[1, -1])
 >>> field = Kraken().run(env, pair, receiver).superpose()   # antiphase pair
->>> field.metadata['superposed_sources']
+>>> field.superposed_sources
 {'depths': [40.0, 60.0], 'weights': [(1+0j), (-1+0j)], 'coherent': True}
 ```
 
@@ -209,7 +209,7 @@ the complex field the run returned, or add intensities with
 A **one-depth** `Source` has nothing to sum, so the run applies its weight
 itself — the one-source `superpose()` — and records it the same way:
 `Source(depths=25.0, frequencies=200.0, weights=2.0)` returns a field 6.02 dB
-louder than the unweighted run, with `metadata['superposed_sources']` =
+louder than the unweighted run, with `superposed_sources` =
 `{'depths': [25.0], 'weights': [(2+0j)]}`. In a mode that returns real dB
 (`INCOHERENT_TL`, `SEMICOHERENT_TL`, OAST's `COHERENT_TL`) the weight has
 nothing to scale, and the run refuses it before the engine starts.
@@ -378,7 +378,7 @@ inside ±15° flat and kills everything outside, converges harder still, to
 ```python
 >>> RAM().run(env, beamed, receiver)
 ConfigurationError: RAM does not read a source beam pattern; drop
-Source(beam_pattern=...) or use Bellhop or Kraken.
+Source(beam_pattern=...) or use one of Bellhop, Kraken.
 ```
 
 Two details that decide whether your pattern does what you meant:
@@ -392,6 +392,16 @@ Two details that decide whether your pattern does what you meant:
   with `10**(dB/20)` *before* interpolating between your samples
   (`beampattern.f90:59`), so a coarsely sampled pattern rounds off a steep
   roll-off. Sample finely across the shoulders.
+
+**On sources placed at a receiving array, the pattern is the elements' receive
+directivity.** "The directional response of the array as a transmitter is the
+same as its directional response as a receiver" (Medwin & Clay,
+*Fundamentals of Acoustical Oceanography*, §4.6). With the sources at the
+element depths ([which end carries the sources](#which-end-carries-the-sources)),
+`beam_pattern` weights what each element hears; `Receiver` carries no pattern.
+In `example_43` (5 km, 60 m), rejecting arrivals steeper than ±15° by 20 dB
+raises the element-mean TL from 63.52 dB to 64.99 dB, and keeping only those
+arrivals raises it to 67.37 dB.
 
 ---
 
@@ -477,6 +487,26 @@ same run (the 25 m, 200 Hz source of `shallow_water()`) — 52.5–53.3 dB at 30
 `np.linspace(50.0, 5000.0, 250)`, not `np.linspace(0.0, 5000.0, 250)` — and
 the warning is your cue when you forget.
 
+### Which end carries the sources
+
+A run reads a range-dependent section outward from its source at `r = 0`.
+For a receive array listening for a target at range, reciprocity — "if we
+exchange the positions of the source and a receiver in a given environment,
+the received field is unchanged" (Jensen, Kuperman, Porter & Schmidt,
+*Computational Ocean Acoustics*, §3.6.8, after §2.4.5.4 Eq. 2.194) — lets the
+run put its **sources at the array's element depths**, at `r = 0` where the
+array is, and its receivers over the candidate target positions: one run gives
+what every element hears from a target anywhere on the plane (`Field.p` over
+`source_depth`). The other arrangement, a source at the target depth and
+receivers on the array, stands the array at the far end of the section. On a
+flat bottom the two agree; on a slope they are two problems. `example_43`
+measures it on a sill-and-basin section at 200 Hz (coupled-mode Kraken,
+element-averaged TL, 4–20 km): the swapped arrangement differs from its true
+reciprocal (the same run on the section reversed about each range) by
+2.27 dB median and 8.19 dB at worst, against 0.47 dB and 1.17 dB between the
+array-at-the-origin run and that reciprocal; on a flat bottom the two
+arrangements agree to 0.0000 dB.
+
 ### Depths are positive down
 
 Depth is metres below the sea surface for both carriers, and negative values
@@ -551,20 +581,24 @@ for model in (Bellhop(n_beams=4000), Kraken(), RAM()):
 ```
 ValidityWarning: Bellhop: receiver depth 160.0 m is below the model's
 resolvable depth (100.0 m). It is accepted; the result there reflects the
-model's below-domain behaviour (a physical transmitted / evanescent field from
-Kraken and OASES; NaN from Bellhop, Scooter, SPARC and RAM).
+model's below-domain behaviour, which docs/guide/source-receiver.md lists per
+engine (a physical transmitted / evanescent field or NaN).
 ```
 
 A **receiver is an output**. Asking for a value under the seabed is a
 legitimate question — you want the transmitted field, or you are gridding
 uniformly and do not want to special-case the seafloor — and every model has a
 defined answer down there. So uacpy accepts it, warns once, and hands back the
-per-engine truth: Kraken and the OASES models mesh the sediment and return the
-physical transmitted / evanescent field, while Bellhop, Scooter, SPARC and RAM
-return `NaN` — their solvers clamp such a receiver onto the domain or stop
-meshing, so no field is actually evaluated at the asked depth, and a fabricated
-number there would misreport where the field was sampled. Different answers,
-all honest, none of them a bug.
+per-engine answer: Kraken and the OASES models mesh the sediment and return the
+physical transmitted / evanescent field; Scooter and SPARC compute through the
+sediment layers and return `NaN` only below the deepest modelled interface,
+where their mesh stops; RAM marches through the sediment and returns its field
+down to the top of its absorbing layer, which the PE places "deep within the
+sediment" (Collins & Siegmann, *Parabolic Wave Equations with Applications*,
+§1.2.5) — inside that layer, whose attenuation is artificial, it returns `NaN`
+with a warning; Bellhop returns `NaN` below the local seafloor
+(`Field.mask_below_seafloor`, the call that puts any engine on the water
+column alone).
 
 A **source is an input**. It injects the energy the whole solution is built
 from, and a model has no defined behaviour for energy injected outside the

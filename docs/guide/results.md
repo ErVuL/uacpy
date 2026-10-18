@@ -1,8 +1,10 @@
 # Results — what a model gives you back
 
-> `uacpy.core.results` · every public name re-exported on `uacpy.*`
-> · `Field` · `Rays` · `Arrivals` · `Modes` · `Covariance` · `Replicas`
-> · `ReflectionCoefficient` · `GreensFunction` · `ResultStack`
+> `uacpy.core.results` · re-exported on `uacpy.*`, except the
+> `ambiguity_field` builder · `Field` · `Rays` · `Arrivals` · `Modes` ·
+> `Covariance` · `Replicas` · `ReflectionCoefficient` · `GreensFunction` ·
+> `ResultStack` · the constructor inputs `SoundSpeeds` (`Field(speeds=)`) and
+> `MediaTable` (`Modes(media=)`)
 
 Every model in the package has the same shape: three carriers in
 ([environment](environment.md), [source and receiver](source-receiver.md)),
@@ -26,12 +28,12 @@ result = Bellhop().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
 
 | Type | `RunMode` that produces it | Payload | Models |
 |---|---|---|---|
-| `Field` | `COHERENT_TL`, `INCOHERENT_TL`, `SEMICOHERENT_TL`, `BROADBAND`, `TIME_SERIES` | gridded values + named axes | [Bellhop](../models/bellhop.md), [Kraken](../models/kraken.md), [Scooter](../models/scooter.md), [RAM](../models/ram.md), [SPARC](../models/sparc.md), [OAST / OASP](../models/oases.md) |
+| `Field` | `COHERENT_TL`, `INCOHERENT_TL`, `SEMICOHERENT_TL`, `BROADBAND`, `TIME_SERIES`, `REVERBERATION` | gridded values + named axes | [Bellhop](../models/bellhop.md), [Kraken](../models/kraken.md), [Scooter](../models/scooter.md), [RAM](../models/ram.md), [SPARC](../models/sparc.md), [OAST / OASP / OASS / OASSP](../models/oases.md) |
 | `Rays` | `RAYS`, `EIGENRAYS` | list of ray polylines | [Bellhop](../models/bellhop.md) |
 | `Arrivals` | `ARRIVALS` | flat list of arrival events | [Bellhop](../models/bellhop.md) |
 | `Modes` | `MODES` | `k` (wavenumbers) + `phi` (mode shapes) | [Kraken](../models/kraken.md) |
 | `ReflectionCoefficient` | `REFLECTION` | `R(θ)` magnitude + phase | [Bounce](../models/bounce.md), [OASR](../models/oases.md) |
-| `Covariance` | `COVARIANCE` | `C(f, i, j)` across an array | [OASN](../models/oases.md) |
+| `Covariance` | `COVARIANCE` | `C(f, i, j)` across an array | [OASN / OASS](../models/oases.md) |
 | `Replicas` | `REPLICA` | Green's functions per candidate position | [OASN](../models/oases.md) |
 | `GreensFunction` | none: `uacpy.io.read_grn_file` reads it from a `.grn` | `G(k, z)` on a phase-speed grid, before the transform to range | [Scooter](../models/scooter.md), [SPARC](../models/sparc.md) snapshot |
 | `ResultStack` | `RAYS`, `EIGENRAYS`, `ARRIVALS` with several source depths | a list of slabs + the coordinate they vary along | [Bellhop](../models/bellhop.md), [`run_parallel`](utilities.md) over non-field results |
@@ -97,8 +99,8 @@ side of the `.unit` axis:
 Field(Bellhop, pressure dB, frequency 200 Hz, 100 depths 1–99 m × 250 ranges 50–5000 m)
 ```
 
-`.kind` is `'pressure'` unless a model tags something else — reverberation
-level, for instance. Transmission loss is deliberately **not** its own kind:
+`.kind` is `'pressure'` unless a model tags something else — OASS
+reverberation loss, for instance. Transmission loss is deliberately **not** its own kind:
 `-20·log10|p|` is the same pressure field written in dB, and that difference
 is the `.unit` axis's job. The **domain** is not an axis either; it is already
 in `.coords`, as a `time` or `frequency` entry.
@@ -107,15 +109,16 @@ in `.coords`, as a `time` or `frequency` entry.
 |---|---|---|---|---|
 | complex | a `frequency` axis | `'pressure'` | `'Pa'` | `H(f)` |
 | real | a `time` axis, synthesised with a source | `'pressure'` | `'Pa'` | `p(t)` |
-| real | a `time` axis, `to_time_trace()` with no source, `impulse_response(fs)` | `'impulse_response'` | `'1/s'` | band-limited impulse response `h(t)` |
+| real | a `time` axis, `impulse_response(fs)`, `to_time_trace(sample_rate=fs)` with no waveform | `'impulse_response'` | `'1/s'` | band-limited impulse response `h(t)` |
 | complex | neither | `'pressure'` | `'Pa'` | complex pressure `p` |
 | real | neither | `'pressure'` | `'dB'` | transmission loss, dB |
 
 Real data alone does not mean dB — a time trace is linear, which is why
 `.unit` consults the axes too. The one row that is tagged rather than derived
-is the impulse response: `to_time_trace()` with no source spectrum or waveform
-returns `Σ H(f)·e^{2πift}·Δf`, a pressure ratio re the unit source times
-hertz, so per second; with a source it is the received pressure `p(t)`.
+is the impulse response: `impulse_response(fs)` (and `to_time_trace` with no
+waveform, one cell of it) returns `Σ H(f)·e^{2πift}·Δf`, a pressure ratio re
+the unit source times hertz, so per second; with a source waveform the trace
+is the received pressure `p(t)`.
 
 Nothing about dimensionality enters into it. `tl.at(depth=20)` is a 1-D range
 cut and still dB; `tl.max()` is a scalar and still dB.
@@ -141,7 +144,7 @@ H = Bellhop(n_beams=3000).run(env, source_bb, point,
                               run_mode=RunMode.BROADBAND)
 
 spectrum = H.isel(depth=0, range=0)
-trace = H.to_time_trace()
+trace = H.to_time_trace(sample_rate=4000.0)
 
 pressure.to_dB().plot(env=env)          # real    + {depth, range} → dB
 pressure.plot(env=env, value='phase')   # complex + {depth, range} → Pa
@@ -153,9 +156,10 @@ trace.plot()                            # real    + {time}         → h(t), 1/s
 
 Each axis answers a question the others cannot:
 
-- Loudness is the unit's question. A `Field.max` that inferred dB-ness from
-  the quantity would return the *quietest* cell of a reverberation dB grid
-  instead of the loudest.
+- Whether a value is in dB is the unit's question; for dB data, which way is
+  louder is the kind's (`is_loss`, below). A `Field.max` that inferred
+  dB-ness from the quantity, or direction from the unit alone, would return
+  the *quietest* cell of a reverberation dB grid instead of the loudest.
 - Comparability is the quantity's question. A `compare_models` keyed on
   representation would refuse a RAM TL field against a Kraken complex one — the
   ordinary cross-model comparison, since those are one quantity written two
@@ -164,8 +168,8 @@ Each axis answers a question the others cannot:
   `replica_bank_from_field` checks the dtype: a real TL field answers
   `kind='pressure'` and would pass a kind-only guard.
 
-So: compare on `.kind`, decide loudness on `.unit`, and require phase on the
-dtype.
+So: compare on `.kind`, read dB-ness on `.unit` and the loud direction of dB
+data on `is_loss(kind)`, and require phase on the dtype.
 
 ### Adding a quantity
 
@@ -203,8 +207,8 @@ cell, and a 1-D cut of either draws its value axis downward.
 
 The consequence worth internalising: **operations that change the dtype or the
 axes change what the field is**. `pressure.to_dB()` moves `Pa` to `dB`.
-`H.at(frequency=300)` drops the frequency axis. `H.to_time_trace()` returns to
-the time domain. You never declare any of it.
+`H.at(frequency=300)` drops the frequency axis. `H.impulse_response(fs)`
+returns to the time domain. You never declare any of it.
 
 ### Canonical layouts
 
@@ -217,8 +221,8 @@ uses the same order: `source_depth → depth → range → frequency` (or `time`
 | `{depth, range}`, real | `dB` | Kraken `INCOHERENT_TL`, OAST `COHERENT_TL`, any `.to_dB()` |
 | `{depth, range, frequency}` | `Pa` | `BROADBAND` |
 | `{depth, range, time}` | `Pa` | `TIME_SERIES` (natively from [SPARC](../models/sparc.md)) |
-| `{time}` | `Pa` | `to_time_trace()` on one cell, with a `source_waveform` or `source_spectrum` |
-| `{time}` | `1/s` | `to_time_trace()` on one cell with no source — the impulse response, `kind='impulse_response'` |
+| `{time}` | `Pa` | `to_time_trace(...)` on one cell, with a `source_waveform` |
+| `{time}` | `1/s` | `to_time_trace(...)` on one cell with no waveform — the impulse response, `kind='impulse_response'` |
 | `{depth, range, time}` | `1/s` | `Field.impulse_response(fs)`, `Arrivals.impulse_response(fs)` — every cell's `h(t)`, on the reduced time `t − r/c` (`.reduction_speed`) by default; `.apply(source_waveform=…, sample_rate=…)` turns it into `p(t)` in `Pa` |
 | `{source_depth, depth, range}` | `Pa` | a run over a multi-depth `Source` (§5), summed by `.superpose()`; the replica bank of [matched-field processing](sonar.md) (`replica_bank` returns a `Replicas`) |
 
@@ -419,8 +423,8 @@ Grid-level operations, all requiring the canonical `['depth', 'range']` layout
 
 | Method | What it does |
 |---|---|
-| `.resample_to(depths=…, ranges=…)` | interpolate onto a new grid; out-of-bounds is `NaN`. Keyword-only and depth-first. |
-| `.mask_below_seafloor(env)` | `NaN` out samples under the bathymetry; needs `depth` and `range` axes, and every other axis (`source_depth`, frequency, time) takes the mask of its receiver cell. On plain arrays: `uacpy.core.bathymetry.mask_below_seafloor(data, depths, ranges, bathymetry, *, paired=False)` |
+| `.resample_to(depths=…, ranges=…)` | interpolate onto a new `(depth, range)` grid, any other axis carried; out-of-bounds is `NaN`. Keyword-only and depth-first. `uacpy.acoustics.resample_depth_range` is the same on plain arrays. |
+| `.mask_below_seafloor(env)` | `NaN` out samples under the bathymetry; needs `depth` and `range` axes, and every other axis (`source_depth`, frequency, time) takes the mask of its receiver cell. On plain arrays: `uacpy.acoustics.mask_below_seafloor(data, depths, ranges, bathymetry, *, paired=False)` |
 | `.check_sampling(view='interpolate')` | warn when the grid is too coarse: `'interpolate'` against a quarter wavelength (what `eval` and `resample_to` check), `'phase'` against half a wavelength (what a phase, real or imaginary plot checks) |
 | `.extract_tone(f)` | steady-state complex pressure at one frequency from any field with a `time` axis (the other axes are kept; a single `{time}` trace gives one phasor) |
 | `.to_dict()` / `Field.from_dict(d)` | round-trip to plain arrays for caching or pickling; a `np.savez(f, **field.to_dict())` file reads back with `Field.from_dict(np.load(f, allow_pickle=True))` |
@@ -429,9 +433,9 @@ Grid-level operations, all requiring the canonical `['depth', 'range']` layout
 | `.values()` | the data as a **read-only** view; `.view(value)` is any derived view by name — `'dB'`, `'level'` (`20·log10\|p\|`, the `value='level'` a plotter draws), `'magnitude'`, `'phase'`, `'real'`, `'imag'` — so every plotted value is reachable without plotting |
 | `.copy()` | deep copy, symmetric with the carriers |
 
-`to_dict` is the supported way to transform a field's values and keep it a
-field — [SPARC's record section](../models/sparc.md) uses exactly that to
-apply a `√r` gain before plotting.
+`field.replace(data=…)` transforms a field's values and keeps it a field, its
+quantity and identity unchanged — [SPARC's record section](../models/sparc.md)
+uses exactly that to apply a `√r` gain before plotting.
 
 ---
 
@@ -493,7 +497,10 @@ complex field of one unit-amplitude source, the engines are linear in the
 source amplitude, so the weighted sum on the shared grid is the field of the
 weighted array. The sum drops the `source_depth` axis, keeps the grid and
 `phase_reference`, keeps `source_depths` as every depth it added and records
-the depths and weights in `metadata['superposed_sources']`. A `TIME_SERIES`
+the depths, the weights and how they were added in the Field's
+`superposed_sources` attribute, which `to_dict`, `to_xarray` and
+`to_netcdf` write and read back, so a reloaded total is still captioned as a
+sum of sources. A `TIME_SERIES`
 field sums its real traces with real weights. A field of real dB values has
 lost its phase and refuses the coherent sum — superpose the complex field the
 run returned, before `to_dB()`, or add its sources in intensity with
@@ -510,8 +517,10 @@ Fields of sources computed separately — two runs, or a
 [`run_parallel`](utilities.md) sweep over source depths — join into that same
 `Field` with **`uacpy.stack_fields(fields, coordinate)`**: one grid, one
 quantity and one identity apart from the axis it adds (`source_depth` by
-default; `coordinate_name='frequency'` stacks the fields of several
-frequencies). Nothing is resampled: fields on different grids are refused.
+default, as the leading axis; `coordinate_name='frequency'` stacks the
+fields of several frequencies onto a trailing axis, the `(depth, range,
+frequency)` grid a `BROADBAND` run returns and the synthesis takes). Nothing
+is resampled: fields on different grids are refused.
 
 ```python
 upper = Kraken().run(env, uacpy.Source(depths=40.0, frequencies=200.0), receiver)
@@ -536,7 +545,11 @@ sharing `model`, `backend` and every identity axis except the stacking one.
 | `stack.to_netcdf(path)` / `Result.from_netcdf(path)` | one NetCDF group per slab, read back whole |
 
 A `ResultStack` is a `Result` and saves as every result does; its slabs share
-no grid, so `to_xarray()` refuses and names `stack[i].to_xarray()`. Kraken's
+no grid, so `to_xarray()` refuses and names `stack[i].to_xarray()`. They share
+the identity the stack states (`model`, `backend`, `run_mode`,
+`phase_reference`, `source_level_dB`, `source_weights`; slabs that differ are
+refused), and `stack.run_settings` is `None` when their run records differ, as
+on a joined `Field`. Kraken's
 `MODES` returns one `Modes` for every depth (the mode set does not depend on
 the source depth; `source_depths` lists them). Every other non-field mode
 (`REFLECTION`, `COVARIANCE`, `REPLICA`, `REVERBERATION`) takes one source
@@ -564,19 +577,21 @@ These methods turn it into time:
 
 | Method | Input | Output |
 |---|---|---|
-| `.to_time_trace(depth=…, range=…)` | one `(depth, range)` cell | `Field`, `coords={'time'}` (`{'source_depth', 'time'}` for a multi-depth field: each source's trace) — the band-limited impulse response, or with `source_waveform=`/`sample_rate=` the received signal at exactly that rate |
+| `.to_time_trace(depth=…, range=…, sample_rate=…)` | one `(depth, range)` cell | `Field`, `coords={'time'}` (`{'source_depth', 'time'}` for a multi-depth field: each source's trace) — that cell's `impulse_response`, or with `source_waveform=` its `synthesize_time_series`, at exactly `sample_rate` on absolute time |
 | `.synthesize_time_series(source_waveform=…, sample_rate=…, t_start=None)` | a source waveform | `Field`, `coords={'depth', 'range', 'time'}` — every cell convolved on the circular `1/Δf` record, at exactly `sample_rate`; `t_start='reduced'` gives each range its own record on the reduced time `t − r/c` |
-| `.impulse_response(sample_rate, t_start='reduced')` | a rate | `Field` of `kind='impulse_response'` (1/s) on `(depth, range, time)` — every cell's `h(t)` at exactly that rate, each range on its own reduced-time record (`.reduction_speed` holds `c`) |
+| `.impulse_response(sample_rate, t_start='reduced')` | a rate | `Field` of `kind='impulse_response'` (1/s) on `(depth, range, time)` — every cell's `h(t)` at exactly that rate, each range on its own reduced-time record (`.reduction_speed` holds `c`); a number or `None` puts every range on one shared record, with a warning when the range span takes longer to cross than the record lasts |
 | `.apply(source_waveform=…, sample_rate=…)` on that impulse response | a waveform of any length | `Field` of `kind='pressure'` — the linear convolution, `N + M − 1` samples; one range comes back on absolute time |
-| `.truncate_response(duration, *, origin='peak', window=None)` | a pulse length | `Field`, same coords — `H(f)` with its impulse response cut to what a pulse that long can overlap. `H(f)` as a model returns it is the **continuous-wave** answer, every path at once; two copies of a `T`-long pulse interfere only where they overlap, so arrivals more than `T` apart arrive separately and do not add. The window reaches `duration` **either side** of the origin. Works on any model's `H`, which is the point — a wave model has no paths to drop, so it has to be found in the response. Warns when the `1/Δf` record has already folded the response, because a fold cannot be told from an early arrival |
+| `.truncate_response(duration, *, origin='peak', window='boxcar')` | a pulse length | `Field`, same coords — `H(f)` with its impulse response cut to what a pulse that long can overlap. `H(f)` as a model returns it is the **continuous-wave** answer, every path at once; two copies of a `T`-long pulse interfere only where they overlap, so arrivals more than `T` apart arrive separately and do not add. The window reaches `duration` **either side** of the origin. Works on any model's `H`, which is the point — a wave model has no paths to drop, so it has to be found in the response. Warns when the response is still live in the half of the `1/Δf` record furthest from the window, a sign of a fold (which cannot be told from an early arrival); a path just past the record's end folds near the origin and is not seen, so size the grid from the arrivals (`Arrivals.synthesis_band`) |
 
-Both require the canonical `['depth', 'range', 'frequency']` layout. With no
-arguments, `to_time_trace` takes the middle depth and the first range.
+They take the canonical `['depth', 'range', 'frequency']` layout, or a cell
+sliced out of it. `to_time_trace` names its receiver: on a grid holding several
+depths or ranges, `depth=` and `range=` pick the cell (the nearest stored
+sample, as `at` takes it), and a missing one is refused rather than guessed.
 
 **Channel simulation — one signal, one receiver.** There are two routes.
 The model-level one is `RunMode.TIME_SERIES` with `source_waveform=`
 and `sample_rate=` runs the solver straight to `p(t)` on Bellhop, Kraken,
-Scooter, RAM, SPARC and OASP — see
+Scooter, RAM, SPARC, OASP and OASSP — see
 [example 19](../../uacpy/examples/example_19_broadband_comparison.py), which
 reconstructs a chirp at one receiver across eight solvers.
 
@@ -589,10 +604,11 @@ trace = H.to_time_trace(depth=60, range=2000, source_waveform=tx, sample_rate=fs
 ```
 
 Use `synthesize_time_series` when you want every cell; this when you want a
-receiver. A `depth` or `range` outside the grid warns — the match is to the
-nearest stored coordinate, so a receiver past the panel's edge would
-otherwise become the edge cell and return a perfectly ordinary trace of the
-wrong place. Both return the waveform's own rate: `sample_rate/Δf` samples a
+receiver. A `depth` or `range` more than half a sample step past the grid
+warns, as `at` does — the match is to the nearest stored coordinate, so a
+receiver past the panel's edge would otherwise become the edge cell and
+return a perfectly ordinary trace of the wrong place. Both return the
+waveform's own rate: `sample_rate/Δf` samples a
 record when that is whole, the next whole number above it when not, every
 sample the band's sum at its own instant. A waveform longer than the record
 is refused — the Fourier synthesis would return it folded onto itself.
@@ -618,12 +634,20 @@ lands on absolute time. `synthesize_time_series(..., t_start='reduced')` puts
 a waveform's records on the same reduced axis. `to_transfer_function` and
 `extract_tone` read a reduced axis on the absolute clock (`time + |r|/c` per
 range), so they return what an absolute axis gives. For a signal that does
-not fit in memory, stream it through one cell's taps with
-[`acoustic_signal.apply_impulse_response_blocks`](signal.md#6-from-arrivals-to-a-received-signal)
-(`h = cell.data * cell.dt`); the yielded blocks carry no time axis, and the
-stream's first sample is at `cell.times[0] + abs(r) / cell.reduction_speed`
-on a reduced cell (`cell.times[0]` on an absolute one), where `cell.apply`
-puts it.
+not fit in memory, stream it through one cell, block by block, in a few
+megabytes:
+
+```python
+cell = ir.at(depth=60.0, range=2000.0)
+for out in cell.apply_blocks(read_blocks(), sample_rate=fs):   # Pa
+    ...                          # first sample at cell.stream_start
+```
+
+The yielded blocks, joined, are what `cell.apply` returns for the whole
+signal; they carry no time axis, and `cell.stream_start` states where the
+first sample lies — the cell's first time plus `|r|/c` on a reduced cell.
+On plain taps this is
+[`acoustic_signal.apply_impulse_response_blocks`](signal.md#6-from-arrivals-to-a-received-signal).
 
 **Size the frequency grid from the arrivals, not by eye.** The record is
 `1/Δf` long and circular, so a channel whose multipath outlasts it folds onto
@@ -676,7 +700,7 @@ spread = 65 symbols at 2 kBd).
 time-domain `Field` to `H(f)`, as a carrier rather than as raw arrays:
 
 ```python
-trace = H.to_time_trace(depth=50.0, range=5e3, window=None)
+trace = H.to_time_trace(depth=50.0, range=5e3, sample_rate=fs)
 back  = trace.to_transfer_function()     # same band, same numbers
 ```
 
@@ -685,17 +709,18 @@ returns every bin up to Nyquist, but a trace synthesised from a 100–995 Hz
 field supports nothing outside that — the rest are the synthesis's own edges,
 and returning them would invent data. The band comes from the Field's
 identity, or from `band=`. A trace synthesised from a grid — every
-`to_time_trace` and `synthesize_time_series` result — comes back at exactly
+`impulse_response`, `to_time_trace` and `synthesize_time_series` result —
+comes back at exactly
 that grid's frequencies, also when the grid does not start on a multiple of
 `Δf` (every default BROADBAND grid) and its lines fall between the record's
 `rfft` bins.
 
 The result is a complex `['…', 'frequency']` Field, so
 `plot_transfer_function`, `broadband_loss` and `truncate_response` all take
-it. Note that `window='hann'` (what `to_time_trace` uses for a bare
-impulse response) is a real modification of the signal: the round trip
-closes to 7e-16 with `window=None` and differs visibly with the window on,
-which is the window working, not the transform failing.
+it. Note that `window='hann'` is a real modification of the signal: the
+round trip closes to 7e-16 with the default `window='boxcar'` and differs
+visibly with the window on, which is the window working, not the transform
+failing.
 
 The method is a wrapper: the transform, the `t0` rotation and the band cut are
 [`transfer_function_from_impulse_response`](signal.md#61-going-back-h--h),
@@ -733,8 +758,8 @@ that (see §6).
 | Method | Returns | Question |
 |---|---|---|
 | `.broadband_loss(source_spectrum=None, *, source_waveform=None, sample_rate=None)` | `Field`, frequency axis gone, `kind='pressure'` `unit='dB'` — so `.tl` and `.plot()` treat it as the TL map it is | how much of the continuous-wave interference does my **bandwidth** survive? |
-| `.sound_exposure_level(*, source_waveform=None, sample_rate=None, weighting=None)` | `Field`, `kind='sound_exposure'` — a **level**, so it reads upward and never shares a colorbar with TL; weighted per [§6b](#6b-weighted-accumulated-and-moving-source-exposure) | how much **energy** does one transmission deliver? |
-| `.peak_sound_pressure_level(*, source_waveform=None, sample_rate=None)` | `Field`, `kind='peak_pressure'` — a level of its own kind, distinct from `'level'` | how loud is its **single loudest excursion**? |
+| `.sound_exposure_level(*, source_waveform=None, sample_rate=None, weighting=None)` | `Field`, `kind='sound_exposure'` — a **level**, so it reads upward and never shares a colorbar with TL; weighted per [§6b](#6b-weighted-accumulated-and-moving-source-exposure); a cell no path reached is the no-energy marker, −600 dB (`acoustics.no_energy_mask`) | how much **energy** does one transmission deliver? |
+| `.peak_sound_pressure_level(*, source_waveform=None, sample_rate=None)` | `Field`, `kind='peak_pressure'` — a level of its own kind, distinct from `'level'`; a cell no path reached is −600 dB as on the exposure map | how loud is its **single loudest excursion**? |
 
 `broadband_loss` is the frequency average of the **coherent** `|H|²`, weighted
 by `|source_spectrum|²`:
@@ -844,8 +869,8 @@ exactly invariant to the output sample rate (Parseval), while the peak is not
 **0.0615 dB** and the SEL **0.0000 dB**. Both are read off the trace at the
 waveform's own rate, the trace a recorder at that rate holds.
 
-Its band window defaults to `None`, as `synthesize_time_series`'s does,
-because a window removes energy the integral is defined to count: a
+Its band window defaults to `'boxcar'` (no taper), as `synthesize_time_series`'s
+does, because a window removes energy the integral is defined to count: a
 5-cycle 500 Hz burst over a 25 Hz–4 kHz band reads 52.675 dB flat and
 35.676 dB with a Hann, 17 dB light, purely because 500 Hz sits low in the
 band. A band narrower than the waveform costs the SEL the energy outside it,
@@ -897,31 +922,36 @@ the first path), whichever is longer and at most half; the rest of the record
 holds the paths behind it. It warns
 when it ends before `r / c` at the slowest stated water speed (`water_min`,
 else `surface`, else `waveguide_min`), since every later path then folds onto
-its start. `t_start=` replaces that placement, on `to_time_trace` /
-`synthesize_time_series` and on a model's `TIME_SERIES` run alike. The span
-check times the receiver ranges with `surface` (else `waveguide_min`).
-`Field.synthesis_floor` is the FFT length the producer's own transform used
-(mpiramS's `Nsam`, OASP's `NX`, OASSP's `NT`); the record of a bare impulse
-response, which has no sample rate of its own, is never shorter. Both are the Field's attributes, written by `to_dict()` and
-`to_xarray()`, and a `metadata=` naming one of them, or `c0` / `c_max` /
-`n_time_samples`, is refused.
+its start. That is a weaker test than Jensen et al.'s eq. 8.16, which sizes the
+record by the minimum modal group velocity over the band (*Computational Ocean
+Acoustics*, sect. 8.2.1.3) — below the water speed at the Airy phase (sect.
+2.4.5.2), and not known to the Field — so a quiet record can still cut a slower
+modal tail or a steep bottom-bounce multiple. `t_start=` replaces that placement, on `impulse_response` /
+`to_time_trace` / `synthesize_time_series` and on a model's `TIME_SERIES` run
+alike. The span check times the receiver ranges with `surface` (else
+`waveguide_min`). `Field.synthesis_floor` is the FFT length the producer's own
+transform used (mpiramS's `Nsam`, OASP's `NX`, OASSP's `NT`), a record of the
+run; the synthesis sizes its own record from `sample_rate` and `Δf`. Both are
+the Field's attributes, written by `to_dict()` and `to_xarray()`, and a
+`metadata=` naming one of them, or `c0` / `c_max` / `n_time_samples`, is
+refused.
 
 Other knobs: `window=` applies a spectral window across the whole band
-before the IFFT. It defaults to `None` whenever a waveform or source
-spectrum is given — the received signal is `S(f)·H(f)` with no extra filter
-(Jensen et al., *Computational Ocean Acoustics*, sect. 8.2.1.1), whereas a
-Hann there costs 0.8–7.7 dB on ordinary pulses — and to `'hann'` for a bare
-`to_time_trace` impulse response, whose hard band edges ring. A band that
+before the IFFT. It defaults to `'boxcar'`, no window, on every route
+(`None` takes that documented default too) — the received signal
+is `S(f)·H(f)` with no extra filter (Jensen et al., *Computational Ocean
+Acoustics*, sect. 8.2.1.1), whereas a Hann there costs 0.8–7.7 dB on
+ordinary pulses. A bare impulse response's hard band edges then ring
+(highest sidelobe 13 dB below the peak untapered, 32 dB with a Hann:
+Abraham, *Underwater Acoustic Signal Processing*, sect. 4.10 and 4.10.6), so
+pass `window='hann'` to display `h(t)` without that ringing. A band that
 cuts the waveform's spectrum warns: a synthesis, a trace or a peak map when
 the cut moves the pulse's peak by more than 0.1 dB, naming the waveform's
 support (its spectrum within 40 dB of its peak) and what `window='hann'`
 would weight the spectrum's peak by; an SEL map when the band holds more than
-0.1 dB less than the waveform's whole energy, stating the share it holds; a
-`source_spectrum=` given without its waveform when a band edge stands above
-−40 dB re the spectrum's peak. `t_start=` moves the time window. With a `sample_rate`
-the trace is at exactly that rate; a bare `to_time_trace()` impulse response
-picks more than eight samples a period at the band's top (Jensen et al.,
-eq. 8.17), and `nfft=` sets its record instead. Both methods tag their output
+0.1 dB less than the waveform's whole energy, stating the share it holds.
+`t_start=` moves the time window. Every trace is at exactly its
+`sample_rate`. The methods tag their output
 `phase_reference='time_domain_native'`, because from there on the payload is
 `p(t)` whatever convention `H(f)` carried.
 
@@ -946,7 +976,7 @@ it. DC never counts.
 | `uacpy.acoustics.sound_exposure_level(p, fs, weighting=)` | a pressure record (any shape, time on `axis`) |
 | `uacpy.acoustics.weighted_pressure(p, fs, weighting)` | returns `p_w(t)` itself, time-aligned |
 | `Field.sound_exposure_level(source_waveform=, sample_rate=, weighting=)` | `H(f)·10^(W/20)` before synthesis |
-| `Field.sound_exposure_level(weighting=)` on a **time-domain** Field | the traces it holds (TIME_SERIES runs, SPARC, synthesised output); no waveform |
+| `Field.sound_exposure_level(weighting=)` on a **time-domain** Field | the traces it holds (TIME_SERIES runs, SPARC, synthesised output), whole and at their own rate; no waveform, `sample_rate=`, `window=` or `t_start=` (cut the record first with `.window(time=…)`) |
 | `uacpy.acoustic_signal.sound_exposure(x, fs, weighting=)` | each FFT bin, so the decidecade bands hold the weighted exposure |
 | `uacpy.acoustics.frequency_weighting(f, weighting)` | evaluates any of the three forms on your grid |
 
@@ -984,9 +1014,11 @@ choice. The last value is `sound_exposure_level` of the record exactly.
 ```python
 from uacpy.acoustics import cumulative_sound_exposure_level
 
-t, sel = cumulative_sound_exposure_level(record, fs, step=1.0,
-                                         weighting='VHF', reset=86400.0)
+running = cumulative_sound_exposure_level(record, fs, step=1.0,
+                                          weighting='VHF', reset=86400.0)
+t, sel = running                                 # it unpacks as two arrays
 crossed = t[np.argmax(sel >= 140.0)] if sel[-1] >= 140.0 else None
+running.plot(criterion_dB=140.0)                 # plot_cumulative_exposure
 ```
 
 **Along a source track, `track_exposure`.** A source firing along a straight
@@ -1073,7 +1105,7 @@ shots' single-shot SELs to 0.01 dB.
 
 ```python
 point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-model = Bellhop(n_beams=4000, launch_angles=(-45.0, 45.0))
+model = Bellhop(n_beams=4000, launch_angles_deg=(-45.0, 45.0))
 eig = model.run(env, source, point, run_mode=RunMode.EIGENRAYS)
 arr = model.run(env, source, point, run_mode=RunMode.ARRIVALS)
 
@@ -1090,7 +1122,7 @@ back into a solver, so they chain freely:
 | `.is_eigen` | `True` for an eigenray solve, set from the run type |
 | `.filter_by_bounces(kind=…, top=…, bot=…)` | `'direct'` / `'surface'` / `'bottom'` / `'both'`, or exact counts / `(lo, hi)` ranges |
 | `.window(launch_angle_deg=(lo, hi))`, `.first_n(n)`, `.filter(predicate)` | subsets |
-| `.sorted_by_miss()`, `.top_n_by_miss(n)`, `.filter_by_miss_distance(max_miss)` | closest approach to the receiver; each kept ray gains `miss_distance_m`. Measured to the polyline's **segments**, not its vertices, so the number is the ray's geometry and not the ray step — a ray passing through the receiver misses by zero however coarsely it was sampled |
+| `.sorted_by_miss()`, `.top_n_by_miss(n)`, `.filter_by_miss_distance(max_miss)` | closest approach to the receiver; each kept ray gains `miss_distance`. Measured to the polyline's **segments**, not its vertices, so the number is the ray's geometry and not the ray step — a ray passing through the receiver misses by zero however coarsely it was sampled |
 | `.truncate_at_receiver()` | clip each polyline at its closest approach |
 
 `Rays`'s miss-distance helpers default their target to the receiver the run
@@ -1103,9 +1135,9 @@ a single point.
 | `.by_receiver` | the nested `[source][depth][range]` cells `read_arr_file` builds, regrouped from the table on each call |
 | `.delays`, `.delays_imag`, `.amplitudes`, `.phases`, `.n_top_bounces`, `.n_bot_bounces`, `.kinds` | bulk read-only views of the table — `phases` is converted to **radians** |
 | `.receiver_depth`, `.receiver_range` | the receiver (m) each arrival reaches; `.n_arrivals` the row count |
-| `.to_dataframe()` | the table, one row per arrival, with `receiver_depth`/`receiver_range` (pandas, from the `uacpy[xarray]` extra) |
+| `.to_dataframe()` | the table, one row per arrival, its columns named for one arrival (`delay`, `amplitude`, `phase`, `kind`, …), with the complex `received_amplitude` (absorption applied) and `receiver_depth`/`receiver_range` (pandas, from the `uacpy[xarray]` extra); the bulk accessors (`.delays`, `.amplitudes`, …) and `to_dict` keep the plural names |
 | `.received_amplitudes` | complex amplitude that actually **arrives**: `A·exp(ω·Im τ)·exp(i·phase)`. Use this to compare, sum or synthesise. `.amplitudes` is Bellhop's *geometric* column and carries no volume absorption — Bellhop keeps that in the imaginary travel time, so on that column a long absorbed path stands at its lossless height |
-| `.absorption` | the water-column law the arrivals' `Im τ` was traced with (recorded by Bellhop), or `None`. With `.f0` it scales the absorption to another frequency in `.transfer_function` and `.channel_taps` |
+| `.absorption` | the water-column absorption the arrivals' `Im τ` was traced with, as the environment held it (a law, or a measured `AbsorptionCoefficient`; recorded by Bellhop), or `None`. With `.f0` it scales the absorption to another frequency in `.transfer_function` and `.channel_taps` |
 | `.filter_by_bounces(…)`, `.window(delay=(t_min, t_max))`, `.filter(predicate)` | subsets |
 | `.sorted_by_amplitude()`, `.top_n_by_amplitude(n)` | rank by strength |
 | `.at_receiver(receiver=None)` / `.plot(receiver=None)` | one receiver cell's arrivals, as `Arrivals`, and the stem plot of that channel; a multi-cell set needs `receiver=(depth, range)` and is refused without it, as every channel statistic below is |
@@ -1114,18 +1146,18 @@ a single point.
 | `.synthesis_band(bandwidth=…, output_duration=…)` | frequency grid to synthesise these arrivals on — a record is `1/Δf` long, so the window, not the bandwidth, decides the spacing. State `output_duration` (seconds) or let it come from `energy_support`; anything left outside folds back onto the early trace, and it says so |
 | `.impulse_response(sample_rate, *, t_start='reduced', output_duration=None, band=None, receiver=None)` | every receiver's `h(t)` at exactly `sample_rate` as a `Field` of `kind='impulse_response'`: the real passband taps of `.transfer_function` on the record's own `rfft` grid — each path's received amplitude, phase and absorption at every frequency, never the geometric column — each range on its own record in reduced time `t − \|r\|/c`, `c` the fastest first arrival's `r/τ`, opening a margin before its first arrival; `.apply(source_waveform=…, sample_rate=…)` plays a signal of any length through it |
 | `.to_time_series(source_waveform=…, sample_rate=…, output_duration=None, t_start=None)` | every receiver's received waveform on ONE clock, as a time-domain `Field` on `(depth, range, time)` (a paired grid's receivers on `range`), silent where nothing arrived: each arrival's absorbed, phase-rotated copy of the waveform at its delay — every cell's own reception (`simulate_arrival_reception`: the waveform and its Hilbert transform through the cell's in-phase and quadrature taps), placed on the shared window |
-| `.transfer_function(frequencies, *, receiver=None)` | `H(f) = Σ aᵢ(f)·e^{iφᵢ}·e^{−i2πfτᵢ}` as a single-cell broadband `Field`, with `aᵢ(f)` the received amplitude at each `f`: the absorption in `Im τ`, exact at `f0`, is scaled to each `f` by `.absorption` (the traced environment's law, stamped by Bellhop) — as `α(f)/α(f0)` for Thorp and Francois-Garrison, exact; linearly in `f` for a constant dB/λ law (exact), a Biological layer or a hand-built list — the same expression `RunMode.BROADBAND` evaluates, reproduced to floating point. It exists separately because these arrivals can be **filtered first**: `arr.window(delay=(t0, t0 + T)).transfer_function(grid)` is the channel a `T`-long pulse sees, and which paths belong in the sum is a question about the signal, not about the channel |
+| `.transfer_function(frequencies, *, receiver=None)` | `H(f) = Σ aᵢ(f)·e^{iφᵢ}·e^{−i2πfτᵢ}` as a single-cell broadband `Field`, with `aᵢ(f)` the received amplitude at each `f`: the absorption in `Im τ`, exact at `f0`, is scaled to each `f` by `.absorption` (the traced environment's absorption, stamped by Bellhop) — as `α(f)/α(f0)` for Thorp and Francois-Garrison, exact; linearly in `f` for a constant dB/λ law (exact), a Biological layer, a measured table or a hand-built list — the same expression `RunMode.BROADBAND` evaluates, reproduced to floating point. It exists separately because these arrivals can be **filtered first**: `arr.window(delay=(t0, t0 + T)).transfer_function(grid)` is the channel a `T`-long pulse sees, and which paths belong in the sum is a question about the signal, not about the channel |
 | `.channel_taps(symbol_rate, fc=…, sps=1, pulse=None)` | the arrivals as a modem's baseband channel: `ChannelTaps` whose `.taps[k]` is `Σ aᵢ·e^{iφᵢ}·e^{−i2πf_cτᵢ}·g(kT − τᵢ)` with `aᵢ` the received amplitude at the carrier and `g` the pulse — by default the raised cosine at `sps=1` (transmit pulse times matched filter: the channel at the decision instants) and the root-raised-cosine transmit half above it; `pulse='nearest'` bins to the nearest sample, exactly `comms.multipath_channel`. `comms.simulate_link(..., channel=taps)` takes the `sps=1` set; a multi-cell result needs `receiver=(depth, range)` |
-| `.coherence_bandwidth(convention='inverse_spread', factor=None, receiver=None)`, `.channel_regime(symbol_rate, convention=…, factor=…, receiver=None)` | `1/(k·τ_rms)` with `k = 1` by default — the convention the corpus states (APL-UW TR 9407 §II.7.b: the inverse of the delay spread measures the coherence bandwidth; Abraham §8.8.1: `W < 1/σ_t`). Rappaport's 0.5- and 0.9-correlation rules are the named options `'rappaport_0.5'` (`k = 5`) and `'rappaport_0.9'` (`k = 50`), and `factor=k` sets any other. The regime is the verdict for one symbol rate: signal bandwidth, coherence bandwidth, ISI in symbols, the convention used and `frequency_selective` — true when the symbol band is wider than the coherence bandwidth |
+| `.coherence_bandwidth(convention='inverse_spread', factor=None, receiver=None)`, `.channel_regime(symbol_rate, convention=…, factor=…, receiver=None)` | `1/(k·τ_rms)` with `k = 1` by default — the convention APL-UW and Abraham state (APL-UW TR 9407 §II.7.b: the inverse of the delay spread measures the coherence bandwidth; Abraham §8.8.1: `W < 1/σ_t`). Rappaport's 0.5- and 0.9-correlation rules are the named options `'rappaport_0.5'` (`k = 5`) and `'rappaport_0.9'` (`k = 50`), and `factor=k` sets any other. The regime is the verdict for one symbol rate: signal bandwidth, coherence bandwidth, ISI in symbols, the convention used and `frequency_selective` — true when the symbol band is wider than the coherence bandwidth |
 | `len(arr)`, `for a in arr:` | count and iterate |
-| `.to_dict()` / `Arrivals.from_dict(d)` | one plain column per record key, named as the bulk views are (`delays`, `phases`, `amplitudes`, `delays_imag`, bounce counts, `source_angles`, `receiver_angles`, `kinds`, cell indices), plus the receiver grid and identity — a table or CSV away; `np.savez(f, **arr.to_dict())` reads back with `Arrivals.from_dict(np.load(f, allow_pickle=True))`, nested `by_receiver` view included |
+| `.to_dict()` / `Arrivals.from_dict(d)` | one plain column per record key, named as the bulk views are (`delays`, `phases`, `amplitudes`, `delays_imag`, bounce counts, `source_angles_deg`, `receiver_angles_deg`, `kinds`, cell indices), plus the receiver grid and identity — a table or CSV away; `np.savez(f, **arr.to_dict())` reads back with `Arrivals.from_dict(np.load(f, allow_pickle=True))`, nested `by_receiver` view included |
 
 `Arrivals` is the channel impulse response that
 [`uacpy.comms`](comms.md) simulates a modem link over. It holds one table,
 one row per arrival; the record list, the nested cells and every bulk view
 are read from it, so they cannot disagree.
 
-`Rays` has the per-ray views `.launch_angles` (deg), `.n_top_bounces`,
+`Rays` has the per-ray views `.launch_angles_deg` (deg), `.n_top_bounces`,
 `.n_bot_bounces`, `.kinds` (the multipath class `'direct'` / `'surface'` /
 `'bottom'` / `'both'`, by the rule `Arrivals.kinds`, `filter_by_bounces(kind=)`
 and the ray-fan plot's colours use), `.lengths` (path length, m) and
@@ -1143,8 +1175,9 @@ Every result type answers the same calls, derived from the arrays it holds:
 | `.values(name=None)` | a payload array (the primary one by default) as a read-only view |
 | `.to_dict()` / `Type.from_dict(d)` | plain arrays and the identity; `np.savez(path, **x.to_dict())` saves it and `Type.from_dict(dict(np.load(path, allow_pickle=True)))` reads it back |
 | `.to_xarray()` / `Type.from_xarray(obj)` | labelled: every array on its named dimensions, every coordinate on its axis, each with its CF `units` |
-| `.to_netcdf(path)` | NetCDF of `to_xarray()`, complex data as real and imaginary parts |
-| `.to_dataframe()` | one row per record, for the tabular types: `Arrivals`, `Rays`, `Modes` (`mode`, `k_real`, `k_imag`, `phase_speed`, `group_speed`, `attenuation_dB_per_km`) and `ReflectionCoefficient` (long form); a gridded type refuses it and names `to_xarray()` |
+| `.to_netcdf(path)` | NetCDF of `to_xarray()`, complex data as real and imaginary parts on a trailing `_pfnc_complex` dimension (index 0 real, 1 imaginary): `netCDF4.Dataset(path, auto_complex=True)` (netCDF4 >= 1.7) reads it back as complex |
+| `Type.from_netcdf(path)` / `uacpy.Result.from_netcdf(path)` | the result `.to_netcdf` wrote, identity and components included; `Result.from_netcdf` reads any type, the class the file names |
+| `.to_dataframe()` | one row per record, for the tabular types: `Arrivals`, `Rays`, `Modes` (`mode`, `k_real`, `k_imag`, `phase_speed`, `group_speed`, `attenuation_dB_per_km`) and `ReflectionCoefficient` (long form); `df.attrs['units']` maps every column to its unit (`''` for a count, a label or a ratio); a gridded type refuses it and names `to_xarray()` |
 
 The units are SI unsuffixed, angles in degrees, and each axis's unit is the
 one `uacpy.core.results.quantities.COORDINATE_UNITS` states.
@@ -1161,6 +1194,13 @@ modes.plot(n_modes=6)
 refl.plot(show_phase=True)
 ```
 
+**Beyond the tabulated depths.** A mode set read from a Kraken `.mod`
+(`Kraken().run(..., run_mode=RunMode.MODES)` or `uacpy.io.read_modes`) carries
+`modes.halfspace_tails`: for each acoustic half-space, `'top'` / `'bottom'`,
+the half-space wavenumber squared `k2`, the per-mode decay `gamma` and the
+mode at the interface `phi`, with which a mode continues as
+`phi * exp(-gamma * |z - z_interface|)` past the span (OALIB `read_modes.m`).
+
 **The modal physics takes plain arrays.** `Modes.with_attenuation` and
 `Modes.modal_pressure_field` are wrappers over
 `uacpy.acoustics.modal_attenuation` (JKPS Eq. 5.176 over the normalisation of Eq. 5.169, the first-order
@@ -1176,7 +1216,8 @@ tabulated element pattern as amplitude), behind `Source.array_factor` and
 ```python
 from uacpy.acoustics import modal_attenuation, modal_field
 
-alpha_m = modal_attenuation(k, phi, depths, 0.01, frequency=100.0)  # Np/m per mode
+alpha_m = modal_attenuation(k, phi, depths, 0.01, frequency=100.0,
+                            sound_speed_z=env.ssp.sound_speed_at(depths))  # Np/m per mode
 p = modal_field(k, phi[z_s_index], phi_at_receivers, ranges)        # complex Pa
 ```
 
@@ -1186,7 +1227,7 @@ The modal tables are on plain arrays as well:
 sound_speed)` (`arccos(c/v)`, NaN for a mode evanescent at `c`, behind
 `Modes.grazing_angles`) and `modal_excitation(phi_at_sources, weights,
 directivity=None)` (`Σ wₙ φₘ(zₙ)`, times the element response, behind
-`Modes.excitation`). `uacpy.core.bottom.medium_density_at(depth, tops,
+`Modes.excitation`). `uacpy.acoustics.medium_density_at(depth, tops,
 densities, bottom_depth, halfspace_density)` is the `ρ(z)` of a stack of
 media that `MediaTable.density_at` and a Kraken run both divide the modal sum
 by, and `polyline_miss_distance(ranges, depths, target_range, target_depth)`
@@ -1208,11 +1249,16 @@ which is what separates it from `power_to_dB`.
 
 Similarly `uacpy.acoustics.hankel_transform` turns a wavenumber-domain
 `G(k)` into a range-domain field (the direct trapezoidal DFT of
-`fieldsco.m`, not an FFT), and `wavenumber_taper` builds the `c_min`/`c_max`
+`fieldsco.m`, not an FFT), and `wavenumber_taper` builds the `c_low`/`c_high`
 phase-speed window that decides which physics a spectral run keeps. Both
-were private inside the `.grn` reader; they work on any `G(k)`.
+work on any `G(k)`, not only on a `.grn` file's. On a `.grn` file, the
+`attenuation=` to undo at frequency `f_i` is `gf.contour_attenuation(f_i)`,
+the value the `GreensFunction` transforms use: on a SCOOTER file that
+frequency's `Δk_i = k[1] − k[0]` of `gf.wavenumbers(f_i)` (0 when the header's
+`stabilizing_attenuation` is 0), since the header records the first
+frequency's only (`scooter.f90:123-137`).
 `alias_period(Δk)` gives the range at which such a transform wraps
-(`2π/Δk`), and `ranges_fit_alias_period(Δk, rmax_m)` answers whether the
+(`2π/Δk`), and `ranges_fit_alias_period(Δk, rmax)` answers whether the
 ranges you want sit inside it — necessary, not sufficient, and the one
 question nothing downstream of `G(k)` can answer for you, because folded
 energy is indistinguishable from real energy once it has landed and makes
@@ -1222,9 +1268,12 @@ the field too **loud**.
 `phi` (mode shapes, `(n_depths, n_modes)`) and `depths`. `n_modes` is derived
 from `len(k)`, so it can never desync. Beyond plotting it does real work:
 `first_n(n)` trims `k` and `phi` together, `phase_speeds` gives
-`ω/Re(k)`, `group_velocity_between(other)` differences two nearby frequencies,
-`with_attenuation(...)` applies a first-order perturbation, written as
-`Im k < 0` as Kraken writes its own losses — the mode normalisation and
+`ω/Re(k)`, `group_speeds_between(other)` differences two nearby frequencies,
+`with_attenuation(alpha_dB_per_m, sound_speed_z=…)` applies a first-order
+perturbation, written as `Im k < 0` as Kraken writes its own losses (the
+water's `c(z)` on `modes.depths` is required: every `α_m` scales as `1/c`,
+and a `Modes` records no water speed, so none is guessed) — the mode
+normalisation and
 the seabed-loss term run into the half-space given as `bottom=`, or,
 without it, into the fluid half-space `media` records (a Kraken `.mod`,
 tabulated down to the seabed); with neither, the returned attenuation is
@@ -1238,19 +1287,23 @@ The sum divides by the density at the source, which `Modes.media` (a
 density of every medium below it, so `media.density_at(z)` answers for a
 source in the water or in a sediment layer. Over a fluid half-space it also
 holds the seabed's speed and attenuation, `media.halfspace_sound_speed`
-(m/s) and `media.halfspace_attenuation` (dB/λ), and the repr counts the
-modes faster than that speed apart: `8 modes (7 trapped, 1 above the
-1800 m/s seabed)`.
+(m/s) and `media.halfspace_attenuation` (dB/λ). `modes.trapped` is then the
+mask of the modes slower than that speed, trapped in the duct; a mode at or
+above it radiates into the seabed (Jensen et al., *Computational Ocean
+Acoustics*, sect. 2.4.5.1). It is `None` without a recorded seabed speed, and
+the repr counts the split: `8 modes (7 trapped, 1 above the 1800 m/s
+seabed)`.
 
-`ReflectionCoefficient` holds `angles` (grazing, degrees), `magnitude` and
+`ReflectionCoefficient` holds `angles_deg` (grazing), `magnitude` and
 `phase` (radians), either 1-D or frequency-resolved (`is_broadband`). Its
 `.at` / `.isel` / `.eval` deliberately differ from `Field`'s: selecting one
 **frequency** collapses to a narrowband `R(θ)`, but selecting one **angle**
-keeps `angles` as a length-1 axis, because the angle is this type's permanent
+keeps `angles_deg` as a length-1 axis, because the angle is this type's permanent
 abscissa. Two derived views save the hand
 arithmetic: `.coefficient` is the complex `R·exp(iφ)` (the package's
 travelling-wave phase, comparable with `reflection_coeff`), and `.dB` is the
-bottom loss `-20·log10 R` (negative for a transmission table with `R > 1`).
+bottom loss `-20·log10 R` (negative for a transmission table with `R > 1`),
+which `rc.plot(value='loss')` draws.
 See [Bounce](../models/bounce.md).
 
 ### Covariance and Replicas
@@ -1269,8 +1322,14 @@ best = surface.max()               # the estimate, with its coordinates
 
 Both return an ambiguity `Field` in dB re its peak, whose `reference` is that
 peak power in the covariance's unit (Pa²/Hz for OASN), so
-`surface.reference * 10**(surface.data / 10)` is the linear surface.
-`uacpy.core.results.ambiguity_field` builds the same Field from any
+`surface.reference * 10**(surface.data / 10)` is the linear surface. `mvdr`
+loads the diagonal by the package's one MVDR default, `1e-2` of `tr(C)/N`
+(uacpy guidance, as `uacpy.sonar.mvdr`); a smaller loading sharpens the
+peaks and a larger one flattens the surface toward Bartlett's. Each
+frequency's slice is `sonar.mvdr` of that frequency up to a constant: this
+surface keeps the power across frequencies, `sonar.mvdr` scales each to its
+own peak.
+`uacpy.sonar.ambiguity_field` builds the same Field from any
 array-level surface. [`sonar.md`](sonar.md) covers matched-field processing
 properly, including building a replica bank out of ordinary `Field` results.
 
@@ -1287,7 +1346,7 @@ axis holds output times rather than frequencies.
 ```python
 gf = uacpy.io.read_grn_file(field.metadata['grn_file'])   # work_dir pinned
 k = gf.wavenumbers(200.0)                  # k = 2πf/c on the stored grid
-tl = gf.to_field(ranges, frequency=200.0)  # the Field the model returns
+tl = gf.to_field(ranges, frequency=200.0)  # range-domain field; a point source's is the model's in the water
 gf.plot()                                  # |G(k_r, z)|: the modes are its ridges
 ```
 
@@ -1333,7 +1392,7 @@ normalises at the wrapper boundary and records the answer:
 | Value | Meaning | Who tags it |
 |---|---|---|
 | `'travelling_wave'` | `H(f)` carries the engineering propagator `exp(-i k₀ r)`, so `2·Re[ifft(H)]` lands the causal arrival at `t = r/c₀` | every frequency-domain producer: Bellhop, Kraken, Scooter, RAM, OASES |
-| `'time_domain_native'` | the payload is already in time — `p(t)`, or `h(t)` from a sourceless `to_time_trace` | [SPARC](../models/sparc.md), and everything `to_time_trace` / `synthesize_time_series` returns |
+| `'time_domain_native'` | the payload is already in time — `p(t)`, or `h(t)` from `impulse_response` | [SPARC](../models/sparc.md), and everything `impulse_response` / `to_time_trace` / `synthesize_time_series` returns |
 
 This is what lets one IFFT path serve every model. It also lets that path
 refuse work it cannot do: handing a `'time_domain_native'` field to the
@@ -1347,8 +1406,10 @@ wave. `PhaseReference` subclasses `str`, so `result.phase_reference ==
 from that are results in their own right, under a fixed set of names
 (`Result.COMPONENT_NAMES`): `'arrivals'` (the `Arrivals` a Bellhop broadband
 or time-series field was synthesised from), `'bounce'` (the Bounce
-`ReflectionCoefficient` a routed seabed used) and `'mean_field'` (the OASES
-mean field a reverberation run scattered). It is empty when there are none.
+`ReflectionCoefficient` a routed seabed used), `'mean_field'` (the OASES
+mean field a reverberation run scattered) and `'native'` (the field on the
+engine's own grid when the result was resampled onto the receiver's: OAST's
+TL on its FFT range grid). It is empty when there are none.
 The values are the objects themselves, not copies. A derivation of the same
 quantity — `replace`, `window`, `at`, `isel`, `to_dB` and the rest built on
 `replace` — keeps them; one to another quantity, or a new result built from
@@ -1356,17 +1417,18 @@ quantity — `replace`, `window`, `at`, `isel`, `to_dB` and the rest built on
 
 ### `metadata` and `list_metadata()`
 
-`metadata` is a free-form bag — output-file paths under a pinned `work_dir`,
-solver settings the wrapper resolved for you, intermediate results.
+`metadata` holds what no setting states — output-file paths under a pinned
+`work_dir`, and what a reader or a run reports beside its numbers; the settings
+the run resolved are in `run_settings`, once (above).
 `list_metadata()` describes what is actually in it, so you do not have to grep
 the source:
 
 ```python
->>> p = SPARC(time_max=0.8).run(rigid_floor_env, source, point)   # SPARC takes vacuum / rigid floors only
->>> p.list_metadata()['dt']
-{'value_type': 'float',
- 'documented_type': 'float',
- 'description': 'Time-sample step (s) for TIME_SERIES output.'}
+>>> p = SPARC(time_max=0.8, work_dir='sparc_run').run(rigid_floor_env, source, point)   # SPARC takes vacuum / rigid floors only
+>>> p.list_metadata()['rts_file']
+{'value_type': 'str',
+ 'documented_type': 'str',
+ 'description': "SPARC received-time-series output (.rts, output_mode='R'/'D')."}
 ```
 
 Undocumented keys still appear, with `documented_type=None` and

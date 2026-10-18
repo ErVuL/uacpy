@@ -25,7 +25,7 @@ def test_a_value_is_read_at_the_level_nearest_the_mid_depth():
     assert value_at_depth(depths, values, 1800.0) == 7.9
 
 
-@pytest.mark.parametrize('bad', [2.7, '5', None, 1])
+@pytest.mark.parametrize('bad', [2.7, '5', 1])
 def test_a_max_points_that_is_no_whole_count_of_two_or_more_is_refused(bad):
     from uacpy.data._geo import checked_max_points
     with pytest.raises(ConfigurationError, match='max_points'):
@@ -36,6 +36,60 @@ def test_a_max_points_that_is_no_whole_count_of_two_or_more_is_refused(bad):
 def test_a_whole_max_points_of_two_or_more_is_accepted(good):
     from uacpy.data._geo import checked_max_points
     assert checked_max_points(good, 'fetch_x') == int(good)
+
+
+def _records(n):
+    from uacpy.data import SOURCES, DataProvenance
+    return tuple(DataProvenance(source=SOURCES['globsed'],
+                                requested_point=(30.0 + i, -40.0),
+                                data_point=(30.0 + i, -40.0))
+                 for i in range(n))
+
+
+def _track(provenance):
+    from uacpy.data import AlongTrack
+    return AlongTrack(ranges=[0.0, 1000.0], lats=[30.0, 31.0],
+                      lons=[-40.0, -40.0], data=[500.0, 400.0], unit='m',
+                      quantity='sediment_thickness', provenance=provenance)
+
+
+def test_an_along_track_holds_one_record_per_waypoint():
+    assert _track(_records(2)).provenance == _records(2)
+    assert _track(()).provenance == () and _track(None).provenance == ()
+    with pytest.raises(ConfigurationError, match='1 provenance records for 2'):
+        _track(_records(1))
+    with pytest.raises(ConfigurationError, match='not one record'):
+        _track(_records(1)[0])
+
+
+def test_the_per_waypoint_records_round_trip_through_every_writer(tmp_path):
+    from uacpy.data import AlongTrack
+    track = _track(_records(2))
+    assert AlongTrack.from_dict(track.to_dict()).provenance == track.provenance
+    pytest.importorskip('xarray')
+    assert AlongTrack.from_xarray(track.to_xarray()).provenance == \
+        track.provenance
+    import xarray
+    for engine, module in (('netcdf4', 'netCDF4'), ('h5netcdf', 'h5netcdf')):
+        pytest.importorskip(module)
+        path = tmp_path / f'track_{engine}.nc'
+        track.to_netcdf(path, engine=engine)
+        with xarray.open_dataset(path, engine=engine) as ds:
+            assert AlongTrack.from_xarray(ds).provenance == track.provenance
+
+
+def test_an_unset_max_points_budgets_auto_only():
+    from uacpy.data._geo import (DEFAULT_MAX_TRANSECT_POINTS, auto_budget,
+                                 checked_explicit_n_points,
+                                 checked_max_points)
+    assert checked_max_points(None, 'fetch_x') is None
+    assert auto_budget(None) == DEFAULT_MAX_TRANSECT_POINTS
+    assert auto_budget(40) == 40
+    assert checked_explicit_n_points(5000, None, 'fetch_x') == 5000
+    assert checked_explicit_n_points(40, 40, 'fetch_x') == 40
+    with pytest.raises(ConfigurationError,
+                       match=r'fetch_x: ssp_n_points=41 exceeds max_points=40'):
+        checked_explicit_n_points(41, 40, 'fetch_x', name='ssp_n_points')
 from uacpy.core.geo import as_coordinate, normalize_lon
 
 
@@ -162,13 +216,13 @@ def test_every_public_sample_count_is_keyword_only():
 
 def test_the_public_transect_waypoints_are_the_fetchers_geodesic():
     import uacpy.data as data
-    from uacpy.data.bathymetry import bathy_transect_plan
+    from uacpy.data.bathymetry import bathy_transect_sampling
     A, B = (48.2, -8.0), (45.6, -6.2)
     lats, lons, ranges = data.transect_waypoints(A, B, n_points=9)
-    plan = bathy_transect_plan(A, B, n_points=9)
+    plan = bathy_transect_sampling(A, B, n_points=9)
     np.testing.assert_array_equal(lats, plan['lats'])
     np.testing.assert_array_equal(lons, plan['lons'])
-    np.testing.assert_array_equal(ranges, plan['ranges_m'])
+    np.testing.assert_array_equal(ranges, plan['ranges'])
     assert data.transect_waypoints(A, B, n_points=2)[2][-1] == pytest.approx(
         data.transect_length(A, B))
     for bad in (1, 2.5, 'auto'):
@@ -176,8 +230,9 @@ def test_the_public_transect_waypoints_are_the_fetchers_geodesic():
                 ConfigurationError,
                 match='n_points must be >= 2|is not a sample count'):
             data.transect_waypoints(A, B, n_points=bad)
-    from uacpy.data.sound_speed import assemble_range_dependent
-    assert data.assemble_range_dependent is assemble_range_dependent
+    # The column stacker is the transect fetchers' own; a user's casts go
+    # through SoundSpeedProfile.from_casts.
+    assert 'assemble_range_dependent' not in data.__all__
 
 
 def test_env_max_range_matches_the_transect_length():
@@ -199,7 +254,7 @@ def test_geodesic_waypoints_rejects_antipodal_endpoints():
     # Antipodal endpoints are joined by infinitely many great circles, and the
     # slerp's 1/sin(ang) returned waypoints that did not lie on the ranges it
     # reported: (0, 0) → (0, 180) put waypoint 1 at 3921 km from the start
-    # while ranges_m called it 5004 km.
+    # while ranges called it 5004 km.
     from uacpy.core.geo import geodesic_waypoints
     antipodal = [((0.0, 0.0), (0.0, 180.0)),
                  ((45.0, 10.0), (-45.0, -170.0)),
@@ -214,9 +269,9 @@ def test_geodesic_waypoints_hold_their_ranges_just_short_of_antipodal():
     # for them, well inside the spherical model's own accuracy.
     from uacpy.core.geo import geodesic_waypoints, great_circle_km
     end = (0.0, 180.0 - np.degrees(1e-4))
-    lats, lons, ranges_m = geodesic_waypoints((0.0, 0.0), end, 5)
+    lats, lons, ranges = geodesic_waypoints((0.0, 0.0), end, 5)
     measured_m = great_circle_km(0.0, 0.0, lats, lons) * 1000.0
-    assert np.allclose(measured_m, ranges_m, atol=1.0)
+    assert np.allclose(measured_m, ranges, atol=1.0)
 
 
 def test_parse_date_accepts_iso_and_objects():

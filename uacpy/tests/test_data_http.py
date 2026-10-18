@@ -3,6 +3,7 @@
 import errno
 import http.client
 import pathlib
+import socket
 import ssl
 import urllib.error
 import urllib.request
@@ -163,6 +164,30 @@ def test_a_refused_connection_gets_one_quick_retry_not_the_ladder():
     with pytest.raises(DataFetchError, match='after 1 retries'):
         _http.http_get('http://127.0.0.1:9/grid.tif', timeout=10.0)
     assert _time.monotonic() - t0 < 5.0
+
+
+@pytest.mark.parametrize('failure, sleeps', [
+    (lambda: urllib.error.URLError(socket.gaierror(
+        socket.EAI_AGAIN, 'Temporary failure in name resolution')), [1.0]),
+    (lambda: urllib.error.URLError(ConnectionResetError(
+        errno.ECONNRESET, 'reset')), [1.5, 3.0, 6.0, 8.0]),
+], ids=['resolver-eai-again', 'connection-reset'])
+def test_a_temporary_resolver_failure_gets_one_quick_retry(
+        monkeypatch, failure, sleeps):
+    """A host without a network answers every lookup with EAI_AGAIN at
+    once, so an offline 'auto' chain would pay the 18.5 s ladder per live
+    URL before reaching its cache; the resolver failure gets the single
+    quick retry a refusal gets, while a reset keeps the full ladder."""
+    waits = []
+
+    def urlopen(request, timeout=None):
+        raise failure()
+
+    monkeypatch.setattr(_http.urllib.request, 'urlopen', urlopen)
+    monkeypatch.setattr(_http.time, 'sleep', waits.append)
+    with pytest.raises(DataFetchError, match='Could not reach'):
+        _http.http_get('http://example.invalid/x', timeout=5.0)
+    assert waits == sleeps
 
 
 class TestAHostThatDoesNotResolveFailsAtOnce:

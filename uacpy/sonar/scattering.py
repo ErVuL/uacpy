@@ -43,14 +43,19 @@ from uacpy.core.constants import DEFAULT_SOUND_SPEED
 LAMBERT_MU_DB = -27.0
 
 #: Energy conservation caps Lambert's coefficient at mu = 1/pi (-4.97 dB):
-#: the diffuse-scattering ceiling (sonar guide §7).
+#: JKPS §1.7.2 Eq. (1.85), ``S_B = -5 + 10 log sin^2 theta``, "the first term,
+#: -5 dB, is the proportionality constant arising from an assumption that all
+#: the incident energy is scattered and redistributed into the water column
+#: with no transmission into the bottom".
 _LAMBERT_MU_CEILING_DB = 10.0 * np.log10(1.0 / np.pi)
 
 #: Grazing angle past which Lambert's law stops matching the data. Etter
 #: Sect. 9.3.3: the relationship "appears to provide a good approximation to the
 #: observed data for many deep-water bottoms at grazing angles below about
-#: 45 deg". JKPS Sect. 1.7.2 gives the same law without an angular bound, so
-#: Etter is the source for this one.
+#: 45 deg". JKPS Sect. 1.7.2 finds the law fits the high-frequency MODEL
+#: curves of its Fig. 1.28b (APL-UW, 30 kHz) "for grazing angles up to
+#: 60-70°"; Etter's bound is the one set against observed deep-water data,
+#: and is used here.
 _LAMBERT_GOOD_GRAZING_DEG = 45.0
 
 #: Band Chapman & Harris (1962) FITTED. JKPS Sect. 1.7.1: the curves are
@@ -224,8 +229,8 @@ def perturbative_grazing_limit(frequency, rms_roughness, sound_speed=DEFAULT_SOU
     """
     f = np.asarray(frequency, dtype=float)
     sigma = np.asarray(rms_roughness, dtype=float)
-    # Without these an invalid input returned 90.0 -- "perturbative at every
-    # angle" -- which is the most reassuring answer the function can give.
+    # Without these an invalid input would return 90.0 -- "perturbative at
+    # every angle" -- the most reassuring answer the function can give.
     c = require_positive_finite_scalar(
         sound_speed, "perturbative_grazing_limit", "sound_speed", " m/s")
     if np.any(sigma < 0):
@@ -242,9 +247,9 @@ def perturbative_grazing_limit(frequency, rms_roughness, sound_speed=DEFAULT_SOU
     return np.degrees(np.arcsin(np.clip(sin_theta, 0.0, 1.0)))
 
 
-def non_perturbative_roughness_notice(who: str, frequency, rms_roughness,
-                                      sound_speed=DEFAULT_SOUND_SPEED,
-                                      grazing_deg=None) -> Optional[str]:
+def _non_perturbative_roughness_notice(who: str, frequency, rms_roughness,
+                                       sound_speed=DEFAULT_SOUND_SPEED,
+                                       grazing_deg=None) -> Optional[str]:
     """The notice for a perturbation treatment of roughness being
     over-driven, or ``None`` inside the theory.
 
@@ -305,7 +310,7 @@ def _warn_outside_chapman_harris_fit(theta, frequency_hz: float,
     span across which nothing in the return value marks which part was ever
     measured.
 
-    The two corpus sources do not agree on the grazing limit, so both are
+    The two sources do not agree on the grazing limit, so both are
     carried. JKPS Sect. 1.7.1 is the accuracy statement and sets the threshold
     (40-50 deg); Etter Sect. 9.3.1 reports the wider angle Chapman & Scott
     (1964) took DATA over (80 deg), which is a claim about measurement
@@ -397,9 +402,10 @@ def lambert_bottom(grazing_deg, mu_dB: float = LAMBERT_MU_DB):
         warnings.warn(
             f"lambert_bottom: mu_dB={mu_dB:g} dB is above "
             f"{_LAMBERT_MU_CEILING_DB:.2f} dB (mu = 1/pi), the ceiling energy "
-            f"conservation puts on Lambert's coefficient, so the bottom "
-            f"scatters back more than it receives. Measured deep-water values "
-            f"sit near {LAMBERT_MU_DB:g} dB.",
+            f"conservation puts on Lambert's coefficient (JKPS §1.7.2, Eq. "
+            f"1.85: all incident energy scattered back into the water), so "
+            f"the bottom scatters back more than it receives. Measured "
+            f"deep-water values sit near {LAMBERT_MU_DB:g} dB.",
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if np.any(~np.isfinite(theta_deg) | ~(theta_deg >= 0)):
         warnings.warn(
@@ -524,7 +530,7 @@ def chapman_harris_surface(*, frequency: float, grazing_deg,
         return 3.3 * beta * np.log10(theta / 30.0) - 42.4 * np.log10(beta) + 2.6
 
 
-def column_scattering_strength(sv_dB, thickness_m: float):
+def column_scattering_strength(sv_dB, thickness: float):
     """Integrate a volume scattering strength to a column (area) strength.
 
     ``S_col = S_v + 10*log10(thickness)`` — turns ``S_v`` (dB re 1/m, per unit
@@ -535,7 +541,7 @@ def column_scattering_strength(sv_dB, thickness_m: float):
     ----------
     sv_dB : float or array
         Volume scattering strength (dB re 1/m).
-    thickness_m : float
+    thickness : float
         Layer thickness (m), > 0.
     """
     # Negated admissible condition so a NaN thickness is refused instead of
@@ -543,12 +549,12 @@ def column_scattering_strength(sv_dB, thickness_m: float):
     # half of the message's "and finite": ``inf > 0`` is True, so an infinitely
     # thick layer returned an infinite column strength, which then poisons any
     # boundary strength it is combined with.
-    if not np.isfinite(thickness_m) or not (thickness_m > 0.0):
+    if not np.isfinite(thickness) or not (thickness > 0.0):
         raise ConfigurationError(
-            f"column_scattering_strength: thickness_m must be > 0 and finite; "
-            f"got {thickness_m!r}."
+            f"column_scattering_strength: thickness must be > 0 and finite; "
+            f"got {thickness!r}."
         )
-    return np.asarray(sv_dB, dtype=float) + 10.0 * np.log10(thickness_m)
+    return np.asarray(sv_dB, dtype=float) + 10.0 * np.log10(thickness)
 
 
 # ── APL-UW TR 9407 sea-surface backscatter (10-100 kHz) ──────────────────────

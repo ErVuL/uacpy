@@ -343,10 +343,21 @@ class TestTheTwoBeamformingSurfacesDifferAsDocumented:
     def _linear(field):
         return field.reference * 10 ** (field.data / 10)
 
-    def test_the_two_covariance_names_are_one_estimate(self):
-        from uacpy.acoustic_signal.beamforming import sample_covariance
+    def test_the_csdm_loading_adds_its_fraction_of_the_average_eigenvalue(
+            self):
         d = self._snapshots()
-        np.testing.assert_array_equal(csdm(d), sample_covariance(d))
+        K = csdm(d)
+        loaded = csdm(d, diagonal_loading=0.25)
+        ridge = 0.25 * np.trace(K).real / self.N
+        np.testing.assert_allclose(loaded - K, ridge * np.eye(self.N),
+                                   atol=1e-12 * ridge)
+        np.testing.assert_array_equal(csdm(d, diagonal_loading=0.0), K)
+
+    @pytest.mark.parametrize('loading', [-1e-3, np.nan, np.inf, 'a', True])
+    def test_a_loading_that_is_not_a_non_negative_number_is_refused(
+            self, loading):
+        with pytest.raises(ConfigurationError, match='csdm: diagonal_loading'):
+            csdm(self._snapshots(), diagonal_loading=loading)
 
     def test_the_bartlett_surfaces_differ_by_the_trace(self):
         from uacpy.acoustic_signal import bartlett as power
@@ -395,16 +406,13 @@ class TestTheTwoBeamformingSurfacesDifferAsDocumented:
         np.testing.assert_allclose(mvdr(K, bank, diagonal_loading=1e-2).data,
                                    mvdr(K, bank, diagonal_loading=1e-2).data)
 
-    def test_the_loading_defaults_are_deliberately_different(self):
+    def test_the_matched_field_mvdr_default_is_the_one_labelled_constant(
+            self):
         import inspect
-        from uacpy.acoustic_signal import mvdr as power
-        sonar_default = inspect.signature(
-            mvdr).parameters['diagonal_loading'].default
-        arrays_default = inspect.signature(
-            power).parameters['diagonal_loading'].default
-        assert sonar_default == 1e-2
-        assert arrays_default == 1e-6
-        assert sonar_default / arrays_default == pytest.approx(1e4)
+        from uacpy.core._beamforming import MVDR_DIAGONAL_LOADING
+        assert MVDR_DIAGONAL_LOADING == 1e-2
+        assert inspect.signature(mvdr).parameters[
+            'diagonal_loading'].default is MVDR_DIAGONAL_LOADING
 
 
 @pytest.mark.parametrize("fn, n_arrays", [(synthesize_replica, 3),

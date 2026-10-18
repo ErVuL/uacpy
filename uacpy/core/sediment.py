@@ -94,7 +94,7 @@ from uacpy.core._validate import canonical_choice
 __all__ = ['DEFAULT_GRAIN_SIZE_ENVIRONMENT', 'DEFAULT_GRAIN_SIZE_MODEL',
            'GRAIN_SIZE_ENVIRONMENTS',
            'GRAIN_SIZE_MODELS', 'GRAIN_SIZE_MODEL_RANGES',
-           'GRAIN_SIZE_SOURCE_RANGES', 'canonical_grain_size_selection',
+           'GRAIN_SIZE_SOURCE_RANGES',
            'grain_size_from_density', 'grain_size_to_geoacoustics',
            'apl_uw_density_ratio', 'apl_uw_sound_speed_ratio',
            'hamilton_attenuation']
@@ -185,6 +185,16 @@ _HB_T_REF_RHOW = 1.026
 # uacpy evaluates over rests on a different document: see
 # ``GRAIN_SIZE_SOURCE_RANGES``.
 _HB_T_PHI_RANGE = (1.0, 9.0)
+# TR 9407 §IV.A.4: relations (2)-(5) "are defined only for -1 <= Mz <= 9"
+# (p. IV-8). One equation set, so all three quantities share one domain.
+_APL_UW_PHI_RANGE = (-1.0, 9.0)
+# uacpy evaluates the (T) regressions over -1 to 9 ϕ, and the two halves of that
+# interval rest on two different documents. 1 to 9 ϕ is Hamilton & Bachman's own
+# limit (p. 1902). Coarse of 1 ϕ the authority is TR 9407, which states these
+# same polynomials as its own branch over -1 <= M_z < 1 (p. IV-8, and the
+# coefficient arithmetic above) and declares -1 its floor. Past either end the
+# quadratics are not evaluated: ϕ is held at the edge and the call says so.
+_HB_T_EVALUATED_RANGE = (_APL_UW_PHI_RANGE[0], _HB_T_PHI_RANGE[1])
 #: Hamilton & Bachman's three environments, ``{name: {...}}``. Each carries its
 #: own velocity and density coefficients (ascending powers of Mz), the standard
 #: errors of estimate printed beside them, the ϕ interval that paper declares
@@ -203,7 +213,8 @@ GRAIN_SIZE_ENVIRONMENTS = {
     'continental-terrace': {
         'velocity': _HB_T_VELOCITY, 'sigma_velocity': 29.0,
         'density': _HB_T_DENSITY, 'sigma_density': 0.11,
-        'published_range': _HB_T_PHI_RANGE, 'evaluated_range': (-1.0, 9.0),
+        'published_range': _HB_T_PHI_RANGE,
+        'evaluated_range': _HB_T_EVALUATED_RANGE,
     },
     'abyssal-hill': {
         'velocity': (1594.3, -10.2), 'sigma_velocity': 12.0,
@@ -235,7 +246,9 @@ GRAIN_SIZE_MODELS = ('hamilton', 'apl-uw')
 #: :mod:`uacpy.sonar.bottom_scattering`, whose APL-UW backscattering model is a
 #: 10-100 kHz model and evaluates the APL-UW relations by construction; and no
 #: code applies it from a frequency, because a grain-size conversion is never
-#: given one. A caller working above 10 kHz passes ``model='apl-uw'``.
+#: given one. Above 10 kHz the band-and-depth rule points to
+#: ``model='apl-uw'``; :func:`grain_size_to_geoacoustics` sets that against
+#: APL-UW's density being a fitted, not a measured, value.
 DEFAULT_GRAIN_SIZE_MODEL = 'hamilton'
 # Seawater each model's ratios are carried back to when the caller gives no
 # in-situ values: the package's one water — the nominal DEFAULT_SOUND_SPEED
@@ -259,18 +272,6 @@ _MODEL_WATER_REFERENCE = {
     'hamilton': (DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3),
     'apl-uw': (DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3)}
 _HAMILTON_KP_PHI_RANGE = (0.0, 9.5)
-# TR 9407 §IV.A.4: relations (2)-(5) "are defined only for -1 <= Mz <= 9"
-# (p. IV-8). One equation set, so all three quantities share one domain.
-_APL_UW_PHI_RANGE = (-1.0, 9.0)
-# uacpy evaluates the (T) regressions over -1 to 9 ϕ, and the two halves of that
-# interval rest on two different documents. 1 to 9 ϕ is Hamilton & Bachman's own
-# limit (p. 1902). Coarse of 1 ϕ the authority is TR 9407, which states these
-# same polynomials as its own branch over -1 <= M_z < 1 (p. IV-8, and the
-# coefficient arithmetic above) and declares -1 its floor. Past either end the
-# quadratics are not evaluated: ϕ is held at the edge and the call says so.
-_HB_T_EVALUATED_RANGE = (_APL_UW_PHI_RANGE[0], _HB_T_PHI_RANGE[1])
-GRAIN_SIZE_ENVIRONMENTS['continental-terrace']['evaluated_range'] = (
-    _HB_T_EVALUATED_RANGE)
 
 
 def _source_ranges(model: str, hamilton_fit: str) -> Dict[str, tuple]:
@@ -401,9 +402,9 @@ def _canonical_pair(model, hamilton_fit, who, model_argument,
                              who, environment_argument))
 
 
-def canonical_grain_size_selection(model, hamilton_fit, *, who: str,
-                                   model_argument: str = 'model',
-                                   environment_argument: str = 'hamilton_fit'):
+def _canonical_grain_size_selection(model, hamilton_fit, *, who: str,
+                                    model_argument: str = 'model',
+                                    environment_argument: str = 'hamilton_fit'):
     """``(model, hamilton_fit)`` checked by :func:`_check_grain_size_selection`
     and in their canonical spellings (``'Hamilton'`` → ``'hamilton'``), for an
     entry point to use from then on. ``hamilton_fit=None`` stays ``None``
@@ -484,14 +485,13 @@ def grain_size_from_density(
     "is intended for computing c or rho, given the grain size M_z. Bachman
     (1985) advises against its use for any other purpose, including the reverse
     conversion from c or rho to M_z. Instead Bachman provides separate
-    correlation equations for this". Those separate equations are not in hand
-    -- Bachman, *JASA* 78, 616-621 (1985) is not in the corpus -- so this
-    function inverts the forward fit, which is a different estimator: a fit of
-    rho on phi minimises residuals in rho, so reading it backwards compresses
-    the spread in phi and biases a phi estimated from a noisy density toward
-    the middle of the range. Treat what comes back as an index, not as a
-    measurement; if Bachman (1985) is ever ingested, this is the first thing to
-    replace.
+    correlation equations for this" (Bachman, *JASA* 78, 616-621, 1985).
+    This function inverts the forward fit instead, which is a different
+    estimator: a fit of rho on phi minimises residuals in rho, so reading it
+    backwards compresses the spread in phi and biases a phi estimated from a
+    noisy density toward the middle of the range. Treat what comes back as an
+    index, not as a measurement; Bachman's (1985) separate equations are
+    what would replace it.
 
     Parameters
     ----------
@@ -867,10 +867,16 @@ def grain_size_to_geoacoustics(
     match. That is also why the attenuations agree: attenuation was taken from
     Hamilton, only the ratios were refitted.
 
-    Which gives the rule: ``'hamilton'`` when the geoacoustics are the
-    product — a propagation model's seabed — and ``'apl-uw'`` when driving the
-    APL-UW scattering model those parameters were fitted for. Past -1 ϕ both stop, and the honest
-    answer for gravel is a sediment class from :mod:`uacpy.core.materials`.
+    So the sources give two considerations, and the choice is the caller's.
+    The band-and-depth rule of the module docstring (Ainslie §4.4.1.3: above
+    10 kHz the near-surface transition layer matters) points to ``'apl-uw'``
+    for a field that reads the top centimetres, and to ``'hamilton'`` where it
+    penetrates metres; and an ``'apl-uw'`` density above 1 ϕ is a parameter
+    fitted to acoustic data, not a measured density, so a study that needs
+    the seabed's measured bulk properties takes ``'hamilton'`` whatever the
+    band. The APL-UW scattering model evaluates the ``'apl-uw'`` relations by
+    construction. Past -1 ϕ both stop, and the honest answer for gravel is a
+    sediment class from :mod:`uacpy.core.materials`.
 
     Four places in uacpy answer an out-of-range grain size differently, and
     the difference is in what each one is *given* rather than in what each one
@@ -897,8 +903,26 @@ def grain_size_to_geoacoustics(
       so the two surveys stay on one route; only a DECK41 lithology word
       takes a preset.
     """
-    model, hamilton_fit = canonical_grain_size_selection(
-        model, hamilton_fit, who='grain_size_to_geoacoustics')
+    result, report = _grain_size_to_geoacoustics(
+        grain_size_phi, model=model, hamilton_fit=hamilton_fit,
+        water_sound_speed=water_sound_speed, water_density=water_density,
+        who='grain_size_to_geoacoustics')
+    if report:
+        warnings.warn(f"grain_size_to_geoacoustics: {report}.",
+                      ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return result
+
+
+def _grain_size_to_geoacoustics(grain_size_phi, *, model, hamilton_fit,
+                                water_sound_speed, water_density, who):
+    """``(result, report)``: :func:`grain_size_to_geoacoustics`'s result and
+    the text of the substitution report it warns with (``''`` when there is
+    none), emitting no warning itself, so a caller that converts on the
+    user's behalf can give the report under its own name without opening a
+    process-wide ``warnings.catch_warnings`` window. ``who`` names the call
+    in a refusal of ``model`` / ``hamilton_fit``."""
+    model, hamilton_fit = _canonical_grain_size_selection(
+        model, hamilton_fit, who=who)
     ref_cw, ref_rhow = _MODEL_WATER_REFERENCE[model]
     if water_sound_speed is None:
         water_sound_speed = ref_cw
@@ -948,7 +972,4 @@ def grain_size_to_geoacoustics(
             f"({sum(counts[p] for p in listed)} of {phis.size} values), "
             f"{text}" + (f"; {_clamp_note(clamp, raws)}" if raws else "")
             for (text, _clamped), (listed, raws) in groups.items())
-    if report:
-        warnings.warn(f"grain_size_to_geoacoustics: {report}.",
-                      ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    return result
+    return result, report

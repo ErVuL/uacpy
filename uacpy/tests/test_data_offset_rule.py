@@ -211,7 +211,8 @@ def test_a_sea_ice_cell_is_measured_on_the_ground():
     # The NSIDC North grid: 448 rows x 304 columns.
     m = {'tf': {h: seaice_local._pyproj_transformer(
         seaice_local._GRID[h]['epsg']) for h in ('N', 'S')},
-        'N': np.zeros((12, 448, 304)), 'S': np.zeros((12, 332, 316))}
+        'N': np.zeros((12, 448, 304)), 'S': np.zeros((12, 332, 316)),
+        'years': [2019, 2023]}
 
     def own_cell_km(lat):
         rc = seaice_local._rowcol(m, 'N', lat, -45.0)
@@ -403,13 +404,13 @@ def test_an_argo_cast_warns_past_5_days(monkeypatch, day, warns):
 
 
 def test_a_transect_keeps_each_columns_date_offset():
-    from uacpy.data.sound_speed import assemble_range_dependent
+    from uacpy.data.sound_speed import _assemble_range_dependent
     import uacpy
     columns = [uacpy.SoundSpeedProfile(
         depths=[0.0, 100.0], sound_speed=[1500.0, 1490.0],
         data_sources=(_dated('argo', d, '2025-02-14'),))
         for d in ('2025-02-14', '2025-02-12', '2025-02-09')]
-    ssp = assemble_range_dependent(columns, [0.0, 1000.0, 2000.0])
+    ssp = _assemble_range_dependent(columns, [0.0, 1000.0, 2000.0])
     assert [p.offset_days for p in ssp.data_sources] == [0, 2, 5]
     from uacpy.data.sources import citations
     assert '0–5 days from requested' in citations(ssp)
@@ -419,7 +420,7 @@ def test_the_date_fields_survive_the_dict_and_netcdf_round_trips(tmp_path):
     import uacpy
     rec = DataProvenance(source=SOURCES['woa23'],
                          data_date='month 02 (climatology)',
-                         requested_date='2025-02-14', split_depth_m=1500.0,
+                         requested_date='2025-02-14', split_depth=1500.0,
                          period_below='annual mean')
     assert DataProvenance.from_dict(rec.to_dict()) == rec
     env = uacpy.Environment(bathymetry=3000.0, ssp=uacpy.SoundSpeedProfile(

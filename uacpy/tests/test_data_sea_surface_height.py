@@ -15,9 +15,9 @@ from uacpy.data import sea_surface, waves as waves_mod, wind_live
 
 
 def _capture_surface(monkeypatch, seen):
-    def fake_surface(rmax_m, wind_kn, n_points=500, **_draw):
+    def fake_surface(rmax, wind_kn, n_points=500, **_draw):
         seen['wind'] = wind_kn
-        return np.column_stack([np.linspace(0.0, rmax_m, n_points),
+        return np.column_stack([np.linspace(0.0, rmax, n_points),
                                 np.zeros(n_points)])
     monkeypatch.setattr(sea_surface, 'generate_sea_surface', fake_surface)
 
@@ -37,7 +37,7 @@ def test_wind_branch_scales_u10_to_reference_height(monkeypatch):
     seen = {}
     _capture_surface(monkeypatch, seen)
     alt = sea_surface.fetch_sea_surface(
-        (50.0, 0.0), date='2020-01-01', rmax_m=5000.0, n_points=32,
+        (50.0, 0.0), date='2020-01-01', rmax=5000.0, n_points=32,
         rng=np.random.default_rng(1))
     assert alt.data_sources[0].source.id == 'nbs'
     # the faked wind_at answers 10 kn; the PM wind is that scaled to 19.5 m
@@ -53,7 +53,7 @@ def test_waves_branch_wind_not_scaled(monkeypatch):
     seen = {}
     _capture_surface(monkeypatch, seen)
     alt = sea_surface.fetch_sea_surface(
-        (50.0, 0.0), date='2020-01-01', rmax_m=5000.0, n_points=32,
+        (50.0, 0.0), date='2020-01-01', rmax=5000.0, n_points=32,
         rng=np.random.default_rng(1))
     assert alt.data_sources[0].source.id == 'waverys'
     assert seen['wind'] == pytest.approx(sea_surface.hs_to_pm_wind(2.1))
@@ -65,6 +65,6 @@ def test_the_sea_surface_source_matches_in_any_case(monkeypatch):
                              requested_point=tuple(point))))
     _capture_surface(monkeypatch, {})
     alt = sea_surface.fetch_sea_surface(
-        (50.0, 0.0), date='2020-01-01', rmax_m=5000.0, n_points=32,
+        (50.0, 0.0), date='2020-01-01', rmax=5000.0, n_points=32,
         rng=np.random.default_rng(1), source='NBS')
     assert alt.data_sources[0].source.id == 'nbs'

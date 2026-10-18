@@ -33,13 +33,14 @@ import numpy as np
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, FileFormatError, IOWarning,
-    UnsupportedFeatureError,
+    MissingFileError, UnsupportedFeatureError,
 )
 from uacpy.core.units import km_to_m
 from uacpy.io.bellhop_writer import BELLHOP_SSP_GUARD_RANGE_FACTOR
 from uacpy.core.deck_limits import AT_DB_PER_NEPER, AT_LAST_SSP_POINT_EPS_M
 from uacpy.io.at_codes import (
-    BOUNDARY_TYPES_BY_CODE, SSP_INTERP_BY_CODE, AttenuationUnits,
+    BELLHOP_RUN_TYPES, BOUNDARY_TYPES_BY_CODE, SSP_INTERP_BY_CODE,
+    AttenuationUnits,
 )
 from uacpy.io._fortran_helpers import (
     PARSE_ERRORS, _read_vector_values, expand_repeat_counts, fortran_float,
@@ -507,8 +508,10 @@ def _sibling_flp(flp: Path):
     title, option, ``MLimit``, profiles, then the receiver grid; parsed by
     :func:`~uacpy.io.oalib_reader.read_flp`. Scooter's ``fields.exe``
     (``Scooter/fields.f90:61-97``): option, then the receiver ranges in km;
-    the depths are the ``.env``'s. The second record tells them apart: a
-    quoted option for ``field.exe``, a range count for ``fields.exe``.
+    the depths are the ``.env``'s. The second record tells them apart: an
+    option word (quoted or not) for ``field.exe``, an integer range count
+    for ``fields.exe``
+    (:func:`~uacpy.io.oalib_reader._is_fields_exe_flp`).
 
     Returns ``(option, depths, ranges)``, ``depths`` None for the Scooter
     layout; ``option[0] == 'X'`` is a line source in both, and a ``'*'`` in
@@ -517,8 +520,8 @@ def _sibling_flp(flp: Path):
     with open(flp, 'r', encoding='utf-8', errors='replace') as fid:
         first = _record(fid, 'first', flp)
         second = _record(fid, 'second', flp)
-        if second.lstrip()[:1] in ("'", '"'):
-            from uacpy.io.oalib_reader import _parse_flp
+        from uacpy.io.oalib_reader import _is_fields_exe_flp, _parse_flp
+        if not _is_fields_exe_flp(second):
             data = _parse_flp(flp)
             opt = data['opt'].ljust(4)
             pos = data['pos']['r']
@@ -532,10 +535,76 @@ def _sibling_flp(flp: Path):
     return opt[0], opt[3] == '*', None, km_to_m(ranges_km)
 
 
+#: SPARC's output modes, TopOpt(5): snapshot, vertical array, horizontal
+#: array (``Scooter/sparc.f90:281-302``).
+_SPARC_OUTPUT_MODES = ('S', 'D', 'R')
+
+
+def _next_record_is_quoted(fid) -> bool:
+    """Whether the next non-blank record opens with a quoted literal; the
+    file position is left where it was."""
+    if not _skip_blank(fid):
+        return False
+    pos = fid.tell()
+    line = fid.readline()
+    fid.seek(pos)
+    return line.lstrip()[:1] in ("'", '"')
+
+
+def _sparc_tail(fid, path,
+                output_mode: str) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """SPARC after the receiver depths (``Scooter/sparc.f90:106-168``): the
+    pulse code, ``fMin fMax``, the receiver ranges (km), the output times
+    and ``tStart tMult alpha beta V``. Returns the receiver ranges (m) and
+    the rest under the keywords
+    :func:`~uacpy.io.oalib_writer.write_sparc_env_file` takes.
+
+    That writer states the output times as ``0 .. time_max`` evenly
+    spaced and ``alpha = beta = V = 0``, so a deck outside that form cannot
+    be written back and raises :class:`UnsupportedFeatureError` rather
+    than being approximated."""
+    # READ(ENVFile, *) Pulse takes the record's first item (sparc.f90:106);
+    # fMin fMax is the next READ, which may wrap across records (:107).
+    pulse = strip_fortran_quotes(split_fortran_tokens(
+        strip_fortran_comment(_record(fid, 'pulse', path)))[0])
+    freq_min, freq_max = read_list_directed_values(
+        fid, 2, 'fMin fMax', path)
+    ranges_km = np.sort(_vector(fid, 'receiver ranges', path))
+    times = np.sort(_vector(fid, 'output times', path))
+    t_start, t_mult, alpha, beta, v = read_list_directed_values(
+        fid, 5, 'tStart tMult alpha beta V', path)
+    n = times.size
+    if n == 0 or times[0] != 0.0 or (n > 2 and not np.allclose(
+            np.diff(times), times[-1] / (n - 1), rtol=1e-6, atol=0.0)):
+        raise UnsupportedFeatureError(
+            'read_env', f"{path}: SPARC output times "
+            f"{times[0]:g} .. {times[-1]:g} s ({n} values); "
+            f"write_sparc_env_file states them as 0 .. time_max evenly "
+            f"spaced, so the deck could not be written back",
+            alternatives=["output times from 0, evenly spaced"],
+            alternatives_label='decks')
+    if alpha != 0.0 or beta != 0.0 or v != 0.0:
+        raise UnsupportedFeatureError(
+            'read_env', f"{path}: SPARC integration record alpha = "
+            f"{alpha:g}, beta = {beta:g}, V = {v:g} (sparc.f90:161-168); "
+            f"write_sparc_env_file writes the lumped-mass explicit march "
+            f"with no convection (all three 0)",
+            alternatives=["alpha = beta = V = 0"],
+            alternatives_label='decks')
+    return km_to_m(ranges_km), dict(
+        output_mode=output_mode, pulse_type=pulse,
+        freq_min=float(freq_min), freq_max=float(freq_max),
+        n_time_samples=int(n),
+        time_max=float(times[-1]) if n > 1 else 0.0,
+        march_start=float(t_start), courant_factor=float(t_mult))
+
+
 def _kraken_tail(fid, path, topopt: str) -> Dict[str, Any]:
     """KRAKEN / Scooter / SPARC after the bottom: ``cLow cHigh``, ``RMax``,
-    source and receiver depths, and the frequency vector of a broadband
-    (TopOpt(6) ``'B'``) deck."""
+    source and receiver depths, then the frequency vector of a broadband
+    (TopOpt(6) ``'B'``) deck, or SPARC's own records (:func:`_sparc_tail`)
+    when TopOpt(5) is a SPARC output mode and a quoted pulse code follows
+    the receiver depths."""
     c_low, c_high = _values(_record(fid, 'cLow cHigh', path))[:2]
     rmax_km = _values(_record(fid, 'RMax', path))[0]
     if not _skip_blank(fid):
@@ -548,12 +617,18 @@ def _kraken_tail(fid, path, topopt: str) -> Dict[str, Any]:
             alternatives_label='readers')
     tail: Dict[str, Any] = {
         'options': {'c_low': c_low, 'c_high': c_high,
-                    'rmax_m': float(km_to_m(rmax_km))},
+                    'rmax': float(km_to_m(rmax_km))},
         'source_depths': _vector(fid, 'source depths', path),
         'receiver_depths': _vector(fid, 'receiver depths', path),
         'receiver_ranges': None,
     }
-    if topopt[5] == 'B':
+    if (topopt[4] in _SPARC_OUTPUT_MODES
+            and _next_record_is_quoted(fid)):
+        tail['receiver_ranges'], sparc_options = _sparc_tail(
+            fid, path, topopt[4])
+        tail['options'].update(sparc_options)
+        tail['sparc'] = True
+    elif topopt[5] == 'B':
         tail['frequencies'] = _vector(fid, 'frequencies', path)
     return tail
 
@@ -570,7 +645,7 @@ def _bellhop_tail(fid, path) -> Dict[str, Any]:
     run = _option(_record(fid, 'RunType', path), 7)
     # ReadRunType (ReadEnvironmentBell.f90:361-377) stops on any other
     # RunType(1); a record that is not one is not a 2-D Bellhop tail.
-    if run[0] not in 'REISCAa':
+    if run[0] not in BELLHOP_RUN_TYPES:
         raise FileFormatError(
             f"read_env: {path} has {run!r} where the Bellhop RunType "
             f"record belongs; RunType(1) is one of R E I S C A a.")
@@ -581,6 +656,22 @@ def _bellhop_tail(fid, path) -> Dict[str, Any]:
     if angles.size == 0:
         raise FileFormatError(
             f"read_env: {path} gives no beam angles after NBeams.")
+    # Bellhop sorts the fan (angleMod.f90:60-61); an explicit list holds
+    # every angle, and the carriers hold a fan as its two ends.
+    angles = np.sort(angles)
+    if angles.size > 2 and (
+            (n_beams > 0 and angles.size != n_beams)
+            or not np.allclose(np.diff(angles),
+                               (angles[-1] - angles[0]) / (angles.size - 1),
+                               rtol=1e-6, atol=1e-9)):
+        raise UnsupportedFeatureError(
+            'read_env', f"{path}: an explicit launch-angle list of "
+            f"{angles.size} angles that is not one evenly spaced fan of "
+            f"NBeams = {n_beams} (angleMod.f90:54-61 keeps the list as "
+            f"given); write_bellhop_env_file writes a fan as its two ends",
+            alternatives=["a fan given as its first and last angle "
+                          "('a b /')"],
+            alternatives_label='decks')
     # One READ takes all three (ReadEnvironmentBell.f90:146), wrapping
     # across records: AT's decks write them on one line, uacpy's on two.
     step, z_box, r_box_km = read_list_directed_values(
@@ -589,7 +680,7 @@ def _bellhop_tail(fid, path) -> Dict[str, Any]:
         run_type=run[0], beam_type=run[1], source_type=run[3],
         grid_type=run[4], source_beam_pattern=run[2] == '*',
         beam_shift=run[6] == 'S', n_beams=n_beams,
-        launch_angles=(float(angles[0]), float(angles[-1])), ray_step=float(step),
+        launch_angles_deg=(float(angles[0]), float(angles[-1])), ray_step=float(step),
         z_box=float(z_box), r_box=float(km_to_m(r_box_km)))
     # ReadEnvironmentBell.f90:192-221 reads the two Cerveny records for a
     # 'C'/'R' beam unless the run is a ray trace; uacpy's writer emits them
@@ -647,13 +738,20 @@ def read_env(
     dB/wavelength it equals at each row's own wave speed; Bellhop's
     ``'G'`` grain-size boundary becomes the half-space its formulas give.
 
+    A SPARC deck (TopOpt(5) ``'R'``/``'D'``/``'S'`` and a quoted pulse code
+    after the receiver depths) is read to its end: its receiver ranges, and
+    its pulse, band, output times and time march under
+    ``write_sparc_env_file``'s keywords. A KRAKEN deck with more than one
+    profile block (a range-dependent run, ``kraken.f90:42-46``) is refused.
+
     A sibling ``.flp`` supplies the receivers of a KRAKEN-family deck. For
     ``field.exe``'s layout the receivers come from the ``.flp`` and the
     ``.env``'s receiver depths — the mode-tabulation grid — go to
     ``options['mode_depths']``; for Scooter's ``fields.exe`` layout the
     ``.flp`` gives the ranges. Its option makes a line source (``'X'``) or
     points ``beam_pattern`` at the ``.sbp`` (``'*'``). Without a readable
-    one the ``.env`` depths are the receivers and no ranges are known.
+    one the ``.env`` depths are the receivers and, but for SPARC, no ranges
+    are known.
 
     uacpy's own Bellhop decks read back as the Environment they were
     written from: the ``.ssp`` guard columns (a copy of the first profile
@@ -665,7 +763,8 @@ def read_env(
     filepath : str or Path
         The ``.env`` file.
     model : {'kraken', 'bellhop'}, optional
-        Which program's tail to read after the bottom block. ``None`` tells
+        Which program's tail to read after the bottom block: ``'kraken'``
+        is the KRAKEN family's (Kraken, Scooter, SPARC). ``None`` tells
         them apart by the first record after it: KRAKEN's ``cLow cHigh``
         holds two values, Bellhop's source-depth count one.
 
@@ -688,23 +787,36 @@ def read_env(
         deck); Bellhop's RunType(4) ``'X'`` makes it a line source and
         RunType(3) ``'*'`` points ``beam_pattern`` at the sibling ``.sbp``.
     receiver : Receiver
-        Receiver depths, and ranges from the deck (Bellhop) or the ``.flp``.
-        A KRAKEN-family deck with no ``.flp`` carries no ranges: the
-        Receiver holds the single range 0 m and an ``IOWarning`` says so.
+        Receiver depths, and ranges from the deck (Bellhop, SPARC) or the
+        ``.flp``. A Kraken or Scooter deck with no ``.flp`` carries no
+        ranges: the Receiver holds the single range 0 m and an
+        ``IOWarning`` says so.
     options : dict
-        ``'model'`` and ``'title'``, which describe the deck and are not
-        writer keywords, and the solver settings under the keyword names
-        the matching writer takes: ``interp_ssp``, and ``n_mesh`` (one per
-        medium, water first) and ``c_low``/``c_high``/``rmax_m`` (KRAKEN), or
+        ``'model'`` (``'kraken'``, ``'sparc'`` or ``'bellhop'``) and
+        ``'title'``, which describe the deck and are not writer keywords,
+        and the solver settings under the keyword names the matching writer
+        takes: ``interp_ssp``, and ``n_mesh`` (one per medium, water first)
+        and ``c_low``/``c_high``/``rmax`` (KRAKEN family); for a SPARC deck
+        also ``output_mode``/``pulse_type``/``freq_min``/``freq_max``/
+        ``n_time_samples``/``time_max``/``march_start``/``courant_factor``;
+        ``topopt_extra`` when the deck carries TopOpt(7) (``'0'``, which
+        only SCOOTER reads, ``scooter.f90:130``); or
         ``run_type``/``beam_type``/``source_type``/``grid_type``/
         ``source_beam_pattern``/``beam_shift``/``n_beams``/
-        ``launch_angles``/``ray_step``/``z_box``/``r_box`` (Bellhop, metres),
-        plus the Cerveny/Gaussian beam-shape entries when the deck has them,
-        and ``mode_depths`` for a KRAKEN deck read beside its ``.flp``. With
-        ``'model'`` and ``'title'`` left out they write the deck back:
-        ``write_kraken_env_file(path, env, source, receiver, **settings)``.
-        A Bellhop deck's per-medium mesh counts are informational there
-        (Bellhop sizes no mesh) and are not returned.
+        ``launch_angles_deg``/``ray_step``/``z_box``/``r_box`` (Bellhop, metres),
+        plus the Cerveny/Gaussian beam-shape entries when the deck has them.
+        A KRAKEN deck read beside a ``field.exe`` ``.flp`` adds
+        ``'mode_depths'``, the ``.env``'s own receiver depths (the
+        Receiver holds the ``.flp``'s), which also describes the deck.
+        With ``'model'``, ``'title'`` and ``'mode_depths'`` left out they
+        write the deck back:
+        ``write_kraken_env_file(path, env, source, receiver, **settings)``,
+        ``write_scooter_env_file`` for a deck with ``topopt_extra``,
+        ``write_sparc_env_file`` for SPARC; pass
+        ``Receiver(depths=mode_depths, …)`` to write the
+        ``.env`` of a ``.flp`` pair exactly. A Bellhop deck's per-medium
+        mesh counts are informational there (Bellhop sizes no mesh) and are
+        not returned.
 
     Raises
     ------
@@ -717,8 +829,11 @@ def read_env(
         analytic (``'A'``) or 3-D hexahedral (``'H'``) SSP, a BELLHOP3D
         deck, a gradient sediment medium, a depth-varying water density, a
         depth-varying water attenuation on repeated depths, a long-format ``.ati`` under an ``'A'`` top, a BOUNCE
-        deck (no source/receiver block), an unknown boundary or option
-        code.
+        deck (no source/receiver block), a multi-profile KRAKEN deck, a
+        SPARC tail ``write_sparc_env_file`` cannot write back (output times
+        not ``0 .. time_max`` evenly spaced, a non-zero ``alpha``/``beta``/
+        ``V``), a Bellhop launch-angle list that is not one evenly spaced
+        fan, an unknown boundary or option code.
     ConfigurationError
         No file at ``filepath``, or values an Environment, Source or
         Receiver refuses (e.g. receivers above the surface, a water density
@@ -739,7 +854,7 @@ def read_env(
 
     path = Path(filepath)
     if not path.is_file():
-        raise ConfigurationError(
+        raise MissingFileError(
             f"read_env: no file at {str(path)!r}.",
             remediation="Check the path; a deck is read exactly as named.")
     if model is not None and model not in ('kraken', 'bellhop'):
@@ -834,6 +949,20 @@ def read_env(
                                   "uacpy.io.read_ssp_3d for its .ssp"],
                     alternatives_label='readers') from None
             raise
+        # KRAKEN reads one environment block per profile until the file
+        # ends (kraken.f90:42-46): a quoted title after the tail opens the
+        # next range segment's block. (A numeric record there, the range
+        # vector some SCOOTER decks carry, is one no reader of the tail
+        # takes.)
+        if model == 'kraken' and _next_record_is_quoted(fid):
+            raise UnsupportedFeatureError(
+                'read_env', f"{path}: a second title follows the deck's tail, "
+                f"the next profile of a multi-profile (range-dependent) "
+                f"KRAKEN deck, which kraken.f90 reads block by block "
+                f"(:42-46); an Environment from the first block alone would "
+                f"drop the range dependence",
+                alternatives=["one .env per profile, each read on its own"],
+                alternatives_label='decks')
 
     if model == 'kraken' and 'G' in (top_code, botopt[0]):
         raise UnsupportedFeatureError(
@@ -842,14 +971,19 @@ def read_env(
             f".f90 refuses it)",
             alternatives=sorted(set(_BOUNDARY_CODE_TO_TYPE) - {'G'}),
             alternatives_label='codes')
+    sparc = tail.get('sparc', False)
     options: Dict[str, Any] = {
-        'model': model, 'title': title,
+        'model': 'sparc' if sparc else model, 'title': title,
         'interp_ssp': SSP_INTERP_BY_CODE[ssp_code],
         # Bellhop reads the medium lines' NMesh and sizes no mesh with it;
         # its writer takes no n_mesh.
         **({} if model == 'bellhop' else {'n_mesh': n_mesh}),
         **tail['options'],
     }
+    # TopOpt(7:) only SCOOTER reads: '0' turns its stabilising attenuation
+    # off (Scooter/scooter.f90:130), write_scooter_env_file's topopt_extra.
+    if model == 'kraken' and not sparc and topopt[6:].strip():
+        options['topopt_extra'] = topopt[6:].rstrip()
     frequencies: Union[float, np.ndarray] = tail.get('frequencies', freq)
     source_depths = tail['source_depths']
     receiver_depths = tail['receiver_depths']
@@ -905,7 +1039,7 @@ def read_env(
     if absorption is None and np.any(alpha_water != 0.0):
         if np.allclose(alpha_water, alpha_water[0]):
             absorption = ConstantAbsorption(
-                value_dB_per_wavelength=float(alpha_water[0]))
+                value=float(alpha_water[0]))
         elif np.all(np.diff(water_depths) > 0):
             # The column as the deck states it: dB/wavelength per row at the
             # deck frequency, which the Environment takes as a table.

@@ -5,19 +5,19 @@ three ways: the conventional Bartlett beamformer, the adaptive MVDR (Capon)
 estimator, and the subspace MUSIC estimator. Bartlett's beamwidth sets the
 classical resolution limit; the other two are built to beat it.
 
-Uses: acoustic_signal.steering_vectors · sample_covariance ·
-bartlett · mvdr · music_spectrum
+Uses: acoustic_signal.steering_vectors · sonar.csdm ·
+bartlett · mvdr · music_spectrum · plot.plot_beam_power
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
+import uacpy
 from uacpy.acoustic_signal import (bartlett, music_spectrum, mvdr,
-                                   sample_covariance, steering_vectors)
+                                   steering_vectors)
+from uacpy.sonar import csdm
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -39,7 +39,7 @@ for angle in true_angles:
 data += 0.05 * (rng.standard_normal(data.shape)
                 + 1j * rng.standard_normal(data.shape))
 
-covariance = sample_covariance(data)
+covariance = csdm(data)
 angles = np.linspace(-40, 40, 801)
 replicas = steering_vectors(positions, angles, frequency, c)
 conventional = bartlett(covariance, replicas)
@@ -60,16 +60,12 @@ for name, spectrum in (('Bartlett', conventional), ('MVDR', capon),
 fig, ax = plt.subplots(figsize=(11, 6))
 for label, spectrum in (('Bartlett (conventional)', conventional),
                         ('MVDR / Capon', capon), ('MUSIC', music)):
-    ax.plot(angles, 10 * np.log10(spectrum / spectrum.max()), label=label)
+    uacpy.plot.plot_beam_power(
+        angles, spectrum, ax=ax, label=label, dynamic_range_dB=50,
+        title='Direction-of-arrival spectra (16-element line array)')
 for angle in true_angles:
     ax.axvline(angle, color='k', ls='--', alpha=0.4)
-ax.set_title('Direction-of-arrival spectra (16-element line array)',
-             fontweight='bold')
-ax.set_xlabel('Angle from broadside (deg)')
-ax.set_ylabel('Normalised power (dB)')
-ax.set_ylim(-50, 2)
 ax.legend()
-ax.grid(True, alpha=0.3)
 
 fig.tight_layout()
 fig.savefig(OUT / 'example_29_array_processing.png', dpi=150,

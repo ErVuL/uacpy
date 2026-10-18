@@ -23,14 +23,14 @@ from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, FileFormatError, ModelExecutionError,
     NumericsWarning, ValidityWarning,
 )
-from uacpy.io.ramsurf_writer import write_ramin
+from uacpy.io.ramsurf_writer import write_ram_in
 from uacpy.io._parsers import parse_pcomplex_grid, parse_tl_grid
 from uacpy.models.ram._settings import RamGrid
-from uacpy.core.bathymetry import mask_below_seafloor
 from uacpy.models.ram._interp import interp_envelope_to_receiver_grid
 from uacpy.models.ram._domain import (
     COLLINS_SAMPLES_PER_BEAT,
     absorbing_layer_thickness,
+    absorber_floor_attenuation,
     check_source_inside_the_domain,
     check_source_row_is_solved,
     compute_zmax,
@@ -43,6 +43,7 @@ from uacpy.models.ram._domain import (
     depth_index_base,
     is_seafloor_relative,
     launch_grid,
+    mask_absorbing_layer,
     max_shear_speed,
     min_shear_speed,
     modal_beat_wavenumber,
@@ -84,17 +85,10 @@ from uacpy.models._extract import (
 
 # Collins-family PE numerics constants.
 #
-# LAMBDA_PER_DZ_FLOOR — depth samples per acoustic wavelength at which the
-#   automatic depth search STARTS (``dz = c_min/(15·f)`` where the optimiser
-#   asked for finer); it bounds the cost of the depth grid on a seabed whose
-#   trapped modes it resolves, which Lytaev's error model on its own does
-#   not. It is not where the search stops: when the steepest trapped mode
-#   scores at or above ``TRAPPED_MODE_SCORE_LIMIT`` on the floored grid, dz
-#   is refined until it passes, within ``MAX_DEPTH_POINTS``. The value is
-#   the Acoustics Toolbox RAM writers' λ/15 (``grid.LAMBDA_PER_DZ_FLOOR``).
-# RAMS_DR_LAMBDA_CAP — empirical upper stability bound on dr for rams0.5's
-#   rotated Padé elastic march, expressed as a divisor of c_min/freq.
-#   ``dr ≤ c_min / (RAMS_DR_LAMBDA_CAP·f)`` ≈ 0.2 λ per step.
+# The depth-search start (``grid.LAMBDA_PER_DZ_FLOOR``, λ/15, refined below
+# it for the trapped modes) and the rams0.5 range-step cap
+# (``grid.RAMS_DR_LAMBDA_CAP``, ≈ 0.2 λ) are documented beside their
+# definitions in grid.py.
 # Fortran array dimensions of the Collins binaries (``parameter (mr=…,mz=…)``
 # at the top of each source): rams0.5 and ramgeo carry uacpy's enlargement,
 # ramsurf1.5 keeps upstream's stock mz=20002, the size ramgeo is matched to — see
@@ -168,10 +162,10 @@ def resolve_collins_tl(env, source, receiver, kind: str, *,
     grid = resolve_collins_launch(
         env, source, receiver, kind=kind, freq=fc, theta=theta,
         notices=notices, knobs=knobs, log=log)
-    return dict(fc=None, q_factor=None, record_duration=None, bandwidth_hz=None, df_hz=None,
+    return dict(fc=None, q_factor=None, record_duration=None, bandwidth=None, df=None,
                 marched_frequencies=[fc], requested_frequencies=None,
                 zmax_frequency=fc,
-                stability_range_m=collins_stability_range(kind, knobs=knobs),
+                stability_range=collins_stability_range(kind, knobs=knobs),
                 grids=(grid,))
 
 
@@ -181,14 +175,15 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
     """Stage 3 of a Collins BROADBAND / TIME_SERIES run: one launch per
     frequency, every one on the band's grid.
 
-    A caller-supplied frequency array is marched bin for bin; otherwise
+    A caller-supplied frequency array is marched bin for bin, in the order
+    given (the band's edges are its smallest and largest bins); otherwise
     the vector matches mpiramS's convention: ``fc`` from
     :func:`_band.resolve_broadband_grid`, half-bandwidth ``fc/Q`` (the band
     spans ``2·fc/Q``) and frequency resolution ``df = 1/T``.
     ``require_uniform=False`` (BROADBAND) accepts a non-uniform array,
     which only the TIME_SERIES synthesis cannot use.
 
-    ``rams_rotation_angle`` may be a callable; when it is, ``theta`` is
+    ``rams_rotation_angle_deg`` may be a callable; when it is, ``theta`` is
     resolved per frequency by ``_stability.theta_for_freq`` — useful when the
     elastic stability angle has to vary across the band.
     """
@@ -208,13 +203,13 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
         bw = fc / Q_used
         df = 1.0 / T_used
     else:
-        bw = 0.5 * float(frequencies[-1] - frequencies[0])
+        bw = 0.5 * float(np.max(frequencies) - np.min(frequencies))
         df = None
 
     # Pick numerics ONCE for the whole broadband loop, both at freq_max —
     # the smallest wavelength in the band, which is the end that binds. A
     # step sized lower in the band is under-resolved for every bin above
-    # it, which `_resolve_mpirams_grid` states and the mpiramS path already
+    # it, which `mpirams.resolve_mpirams_grid` states and the mpiramS path already
     # honours for both steps.
     #
     # EXCEPT on rams0.5, where dr stays at freq_min, so every bin above it
@@ -235,8 +230,8 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
     # Pekeris guide (1700/1.7/0.5) against Scooter at 500 Hz, ramgeo with
     # dr sized at freq_min = 100 Hz (54.05 m) is 8.85 dB rms / 16.86 dB max
     # out, against 1.64 / 5.24 with dr sized at freq_max (12.81 m).
-    freq_min = float(frequencies[0])
-    freq_max = float(frequencies[-1])
+    freq_min = float(np.min(frequencies))
+    freq_max = float(np.max(frequencies))
     # A pinned accuracy holds for every bin, so it sizes dr at freq_max on
     # rams too: the freq_min dr above is the default chooser's cost choice.
     dr_sizing_freq = (freq_min if kind == 'rams' and not knobs.accuracy_pinned
@@ -246,6 +241,12 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
     dr_band = float(knobs.dr) if knobs.dr is not None else None
     dz_band = float(knobs.dz) if knobs.dz is not None else None
     zs_band = float(np.min(source.depths))
+    if dr_band is None and dz_band is None and dr_sizing_freq == freq_max:
+        # Both steps sized at freq_max: one Lytaev search answers both.
+        dr_band, dz_band = compute_grid_lytaev(
+            env, freq_max, max_range=rmax_band, kind=kind, zs=zs_band,
+            notices=notices, knobs=knobs, log=log
+        )
     if dr_band is None:
         dr_band, _ = compute_grid_lytaev(
             env, dr_sizing_freq, max_range=rmax_band, kind=kind,
@@ -272,7 +273,7 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
     top_wavelength = speed_bounds(env)[0] / freq_max
     log(
         f"{kind} broadband: {len(frequencies)} frequencies, "
-        f"{frequencies[0]:.2f}-{frequencies[-1]:.2f} Hz, "
+        f"{freq_min:.2f}-{freq_max:.2f} Hz, "
         f"df={'non-uniform' if df is None else f'{df:.2f} Hz'}, "
         f"bw={bw:.2f} Hz, "
         f"dr={dr_band:.2f}m ({dr_band / top_wavelength:.2f} λ at "
@@ -293,17 +294,17 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
             dr_override=dr_band, dz_override=dz_band,
             zmax_override=zmax_band,
             # dr_band is the band's one-grid-for-all override; it is
-            # caller-set only when self.dr is.
+            # caller-set only when knobs.dr is.
             dr_override_pinned=(knobs.dr is not None),
             deck_base=deck_base, notices=notices, knobs=knobs, log=log
         )
         for freq, theta in zip(frequencies, thetas))
     report_band_grid_cost(env, kind, grids[0], freq_min, freq_max,
                           notices=notices, knobs=knobs, log=log)
-    return dict(fc=fc, q_factor=Q_used, record_duration=T_used, bandwidth_hz=2.0 * bw,
-                df_hz=df, marched_frequencies=frequencies,
+    return dict(fc=fc, q_factor=Q_used, record_duration=T_used, bandwidth=2.0 * bw,
+                df=df, marched_frequencies=frequencies,
                 requested_frequencies=None, zmax_frequency=freq_min,
-                stability_range_m=collins_stability_range(kind, knobs=knobs),
+                stability_range=collins_stability_range(kind, knobs=knobs),
                 grids=grids)
 
 
@@ -394,7 +395,7 @@ def resolve_collins_launch(
         dz, zmax_deck, ndz, kind)
     z_deepest = collins_deepest_output(zmplt, dz, ndz, kind)
     # Receivers below the deepest stored output sample come back NaN from
-    # ``interp_to_receiver_grid`` (fill_value=nan); warn so the empty
+    # ``resample_depth_range`` (fill_value=nan); warn so the empty
     # rows are attributable. Reachable only when ``zmax`` clamps ``zmplt``.
     if target_depth > z_deepest:
         # expected; not in filterwarnings — emerges to user
@@ -455,7 +456,7 @@ def resolve_collins_launch(
     zr_line = min(target_depth, max(0.0, (nz_march - 1) * dz))
     return RamGrid(frequency=fc, dr=float(dr), dz=float(dz),
                    zmax=float(zmax), n_depth_points=nz_march,
-                   theta=float(theta), ndr=int(ndr),
+                   theta_deg=float(theta), ndr=int(ndr),
                    rmax_march=float(rmax_march), zmplt=float(zmplt),
                    zr_line=float(zr_line))
 
@@ -467,12 +468,12 @@ def resolve_collins_grid(env, fc, kind, max_range,
     """Resolve the PE numerics grid ``(dr, dz, zmax)`` for one Collins run.
 
     Explicit overrides (from the broadband loop, which picks one set for the
-    whole band — matching mpiramS) take priority, then user-set ``self.*``,
+    whole band — matching mpiramS) take priority, then user-set ``knobs.*``,
     then the Lytaev Padé-error optimizer for whatever is still ``None``. The
     rams shear-stability dz floor and the 5× rams ``dr`` safety factor are
     applied to the optimizer's output (see ``grid.compute_grid_lytaev``).
 
-    ``self.dz`` alone decides whether ``dz`` counts as caller-pinned: the
+    ``knobs.dz`` alone decides whether ``dz`` counts as caller-pinned: the
     broadband override is the band's Lytaev grid whenever the caller left
     ``dz`` unset, and equals ``self.dz`` when they did set it.
     """
@@ -584,7 +585,7 @@ def resolve_collins_grid(env, fc, kind, max_range,
 
 def write_collins_deck(inputs: StageInputs, *, knobs) -> Path:
     """Stage 4 of one Collins launch: ``ram.in`` / ``rams.in`` /
-    ``ramgeo.in`` written by :func:`~uacpy.io.ramsurf_writer.write_ramin`
+    ``ramgeo.in`` written by :func:`~uacpy.io.ramsurf_writer.write_ram_in`
     from the launch's :class:`RamGrid` and the deck geometry
     (:func:`collins_deck_geometry`) at its frequency."""
     engine = inputs.settings.engine
@@ -598,18 +599,18 @@ def write_collins_deck(inputs: StageInputs, *, knobs) -> Path:
         env, kind, grid.zmax, fc, grid.dz, max_range,
         deck_base=inputs.prepared, knobs=knobs)
     ram_in = inputs.work_dir / collins_in_name(kind)
-    write_ramin(
+    write_ram_in(
         str(ram_in),
         kind=kind,
         frequency=fc, zs=zs, zr_line=grid.zr_line,
-        rmax_march=grid.rmax_march, dr=grid.dr, ndr=grid.ndr,
+        rmax_march=grid.rmax_march, dr=grid.dr, range_decimation=grid.ndr,
         zmax=deck_depth(grid.zmax, knobs=knobs), dz=grid.dz,
         depth_decimation=max(1, int(knobs.depth_decimation)), zmplt=grid.zmplt,
         c0=engine.c0, n_pade=int(knobs.n_pade),
         n_stability=stability_terms(knobs),
-        stability_range_m=float(engine.stability_range_m or 0.0),
+        stability_range=float(engine.stability_range or 0.0),
         rams_rotation=int(knobs.rams_rotation),
-        rams_rotation_angle=float(grid.theta),
+        rams_rotation_angle_deg=float(grid.theta_deg),
         bathymetry=bathymetry,
         surface=surface,
         range_segments=range_segments,
@@ -646,7 +647,7 @@ def read_collins_output(inputs: StageInputs, *, knobs) -> dict:
         np.atleast_1d(receiver.depths).astype(float),
         np.atleast_1d(receiver.ranges).astype(float),
         carrier_rate=collins_carrier_rate(
-            env, kind, grid.frequency, grid.theta, knobs=knobs))
+            env, kind, grid.frequency, grid.theta_deg, knobs=knobs))
     return {'psi': psi, 'report': reports[0] if reports else None,
             'frequency': grid.frequency, 'dr': grid.dr, 'dz': grid.dz,
             'zmax': grid.zmax}
@@ -677,11 +678,11 @@ def read_collins_grid(inputs: StageInputs, *, knobs) -> dict:
     # from ndz (third_party/ramsurf/{rams0.5,ramsurf1.5}.f outpt).
     depth_index_offset = depth_index_base(kind)
     ranges, depths, tl = parse_tl_grid(
-        tlgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
+        tlgrid, dr=dr, range_decimation=ndr, dz=dz, depth_decimation=ndz,
         depth_index_offset=depth_index_offset
     )
     _, _, pcomplex = parse_pcomplex_grid(
-        pcgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
+        pcgrid, dr=dr, range_decimation=ndr, dz=dz, depth_decimation=ndz,
         depth_index_offset=depth_index_offset
     )
     # The same ``outpt`` call writes both files on one (z, r) grid, so
@@ -699,7 +700,7 @@ def read_collins_grid(inputs: StageInputs, *, knobs) -> dict:
                 "timeout, or an external kill)."
             ),
         )
-    # ``interp_to_receiver_grid`` NaN-fills out-of-grid ranges, so a
+    # ``resample_depth_range`` NaN-fills out-of-grid ranges, so a
     # march that ended short of the farthest receiver — a truncated
     # tl.grid, or a binary that exited 0 without finishing — would
     # otherwise return a partly-NaN Field that ``np.nanmean`` reduces
@@ -737,15 +738,16 @@ def read_collins_grid(inputs: StageInputs, *, knobs) -> dict:
 
     return {'tl': tl, 'pcomplex': pcomplex, 'depths': depths,
             'ranges': ranges, 'dr': dr, 'dz': dz, 'zmax': grid.zmax,
-            'frequency': grid.frequency, 'theta': grid.theta}
+            'frequency': grid.frequency, 'theta': grid.theta_deg}
 
 
 def assemble_collins_tl_field(inputs: StageInputs,
                                raw: dict, *, model_name, provenance,
-                               cleanup) -> Field:
+                               cleanup, knobs) -> Field:
     """Stage 5 of a Collins COHERENT_TL run: the receiver-grid envelope
     of :func:`read_collins_output` as a :class:`Field` of
-    travelling-wave pressure."""
+    travelling-wave pressure, NaN inside the absorbing layer
+    (:func:`_domain.mask_absorbing_layer`)."""
     engine = inputs.settings.engine
     kind = engine.backend
     env = inputs.env
@@ -761,14 +763,16 @@ def assemble_collins_tl_field(inputs: StageInputs,
     pressure = psi_to_travelling_wave(
         raw['psi'],
         convention=deck_convention(kind),
-        ranges_m=rcv_r,
+        ranges=rcv_r,
         range_axis=1,
         k0=2.0 * np.pi * fc / engine.c0,
         apply_radial=False,
     ).astype(np.complex128)
 
-    # Mask sub-seafloor samples with NaN (same semantics as every backend).
-    pressure = mask_below_seafloor(pressure, rcv_d, rcv_r, env.bathymetry)
+    pressure = mask_absorbing_layer(
+        f"RAM:{kind}", pressure, rcv_d, collins_absorber_top(
+            env, collins_deck_base(env, kind, raw['zmax'], knobs=knobs),
+            rcv_r, fc, kind=kind, knobs=knobs))
 
     field = Field(
         data=pressure,
@@ -795,12 +799,13 @@ def assemble_collins_tl_field(inputs: StageInputs,
 
 def assemble_collins_band_field(inputs: StageInputs,
                                  raws, *, model_name, provenance,
-                                 cleanup) -> Field:
+                                 cleanup, knobs) -> Field:
     """Stage 5 of a Collins band: the per-bin receiver-grid envelopes
     stacked into ``(n_d, n_r, n_f)`` and converted to the engineering
     travelling-wave H(f) every other broadband-capable model returns
     (the carrier ``exp(-i k0 r)`` baked in), with one warning for the
-    non-finite samples of the whole band."""
+    non-finite samples of the whole band; NaN inside each bin's absorbing
+    layer (:func:`_domain.mask_absorbing_layer`)."""
     settings = inputs.settings
     engine = settings.engine
     kind = engine.backend
@@ -829,15 +834,18 @@ def assemble_collins_band_field(inputs: StageInputs,
     H = psi_to_travelling_wave(
         H,
         convention=deck_convention(kind),
-        ranges_m=rcv_r,
+        ranges=rcv_r,
         range_axis=1,
         k0=omega / c0,
         freq_axis=2,
         apply_radial=False,
     )
 
-    # Mask sub-seafloor samples with NaN (same semantics as every backend).
-    H = mask_below_seafloor(H, rcv_d, rcv_r, env.bathymetry)
+    H = mask_absorbing_layer(
+        f"RAM:{kind}", H, rcv_d, np.stack([
+            collins_absorber_top(env, inputs.prepared, rcv_r, f, kind=kind,
+                                 knobs=knobs)
+            for f in frequencies], axis=-1))
 
     field = Field(
         data=H,
@@ -905,13 +913,13 @@ def mark_non_finite_collins_samples(raw: dict, env: Environment,
             stab = rams_stability(
                 env, float(raw['frequency']), dr=float(raw['dr']),
                 theta=theta, knobs=knobs)
-            if stab is not None and stab['margin']['excess'] > 0.0:
+            if stab is not None and stab['margin'].excess > 0.0:
                 m = stab['margin']
                 advice = (
                     f"The rotated Crank-Nicolson step at dr="
                     f"{float(raw['dr']):.4g} m amplifies the steepest "
-                    f"propagating components at {m['growth']:.2e} Np/m "
-                    f"against the {m['leak']:.2e} Np/m this seabed leaks "
+                    f"propagating components at {m.growth:.2e} Np/m "
+                    f"against the {m.leak:.2e} Np/m this seabed leaks "
                     f"them at. "
                     + (f"Use dr <= {stab['dr']:.4g} m (dr=None picks it)."
                        if stab['dr'] is not None
@@ -1036,7 +1044,7 @@ def collins_deck_geometry(env: Environment, kind: str,
     at ``freq``), the bathymetry anchored at the origin, and ramsurf's
     surface — each cut to what a march to ``max_range`` consumes
     (:func:`within_march`). Past their last node the binaries hold both
-    constant themselves (``rb = 2·rmax``, ``ramgeo1.5.f:113-114``,
+    constant themselves (``rb = 2·rmax``, ``ramgeo1.5.f:115-116``,
     ``ramsurf1.5.f:87, :95``; ``rmax + 2·dr``, ``rams0.5.f:116-117``),
     as ``env.bathymetry`` / ``env.altimetry`` evaluate. ``water=False``
     leaves the water-attenuation block out, for callers that read only
@@ -1611,7 +1619,7 @@ def section_cells(ranges, switches) -> list:
     whose breakpoint is itself a switch, where ``Bottom.at`` ties — at its
     own middle (just past its start when it runs to the end of the
     track), so each carries the column nearest to every range it covers.
-    Section 0 is the initial profile; ``write_ramin`` ignores its marker.
+    Section 0 is the initial profile; ``write_ram_in`` ignores its marker.
     """
     sections = []
     for i, rng in enumerate(ranges):
@@ -1956,6 +1964,61 @@ def bathy_anchor_ranges(env, bottom) -> list:
     return out
 
 
+def absorber_start(z_sediment_base, z_bottom,
+                   absorbing_width) -> Optional[float]:
+    """Depth at which a Collins section's absorbing layer starts,
+    ``max(z_sediment_base, z_bottom - absorbing_width)``, in the section's
+    frame; ``None`` when the section carries no layer (no width, or the
+    modelled sediment reaches the domain floor)."""
+    if absorbing_width <= 0.0:
+        return None
+    z_abs = max(float(z_sediment_base),
+                float(z_bottom) - float(absorbing_width))
+    return z_abs if z_abs < float(z_bottom) else None
+
+
+def collins_absorber_top(env: Environment, base: dict, ranges, freq: float,
+                         *, kind: str, knobs) -> np.ndarray:
+    """Geometric depth (m) of the top of the absorbing layer a Collins
+    deck ramps into at each of ``ranges`` (m), at ``freq`` (Hz); ``inf``
+    where the section in force carries no layer.
+
+    ``base`` is the deck's :func:`collins_deck_base` payload. The section
+    in force at range r is the last whose marker is at or before r: the
+    binaries read the next profile once the march reaches it
+    (``ramgeo1.5.f:359``, ``ramsurf1.5.f:364``, ``rams0.5.f:332``,
+    ``if(r.ge.rp)``). rams0.5 holds the layer at its absolute depth.
+    ramgeo / ramsurf index the bottom block from the grid node below the
+    local seafloor (``matrc``, ``ramgeo1.5.f:262-268``), which ``updat``
+    moves with the bathymetry (``ramgeo1.5.f:348-354``), so there the top
+    follows the seafloor inside a section, to within one depth cell.
+    """
+    width = absorbing_layer_thickness(env, freq, knobs=knobs)
+    rr = np.atleast_1d(np.asarray(ranges, dtype=float))
+    markers = np.array([seg['range'] for seg in base['segments']])
+    active = np.clip(np.searchsorted(markers, rr, side='right') - 1,
+                     0, len(markers) - 1)
+    seafloor_relative = is_seafloor_relative(kind)
+    local = np.asarray(env.bathymetry.eval(range=rr), dtype=float)
+    top = np.full(rr.shape, np.inf)
+    for j, i in enumerate(active):
+        _, z_sediment_base, z_bottom, seafloor = base['ramps'][i]
+        z_abs = absorber_start(z_sediment_base, z_bottom, width)
+        if z_abs is None:
+            continue
+        if not seafloor_relative:
+            top[j] = z_abs
+            continue
+        # The deck maps the section's block through deck_block (absolute
+        # depth, re-referenced to the mapped section seafloor); the binary
+        # hangs it under the mapped local seafloor.
+        offset = (deck_depth(seafloor + z_abs, knobs=knobs)
+                  - deck_depth(seafloor, knobs=knobs))
+        top[j] = deck_depth_inverse(
+            deck_depth(local[j], knobs=knobs) + offset, knobs=knobs)
+    return top
+
+
 def ramp_absorbing_attenuation(pairs, z_sediment_base, z_bottom,
                                 absorbing_width, *, knobs):
     """Ramp a Collins attenuation block into the artificial absorbing layer.
@@ -1971,17 +2034,13 @@ def ramp_absorbing_attenuation(pairs, z_sediment_base, z_bottom,
     ``attn[-1] = absorber_attenuation`` at ``zmax`` over its own linearly
     interpolated sediment profile.
 
-    The ramp starts at ``max(z_sediment_base, z_bottom - absorbing_width)``
-    so it never eats into the modelled sediment column. Depths are in
-    whichever frame the backend reads (seafloor-relative for
-    ramgeo/ramsurf, absolute for rams0.5).
+    The ramp starts at :func:`absorber_start`, so it never eats into the
+    modelled sediment column. Depths are in whichever frame the backend
+    reads (seafloor-relative for ramgeo/ramsurf, absolute for rams0.5).
     """
     pairs = [(float(d), float(v)) for d, v in pairs]
-    if not pairs or absorbing_width <= 0.0:
-        return pairs
-    z_abs = max(float(z_sediment_base),
-                float(z_bottom) - float(absorbing_width))
-    if not z_abs < float(z_bottom):
+    z_abs = absorber_start(z_sediment_base, z_bottom, absorbing_width)
+    if not pairs or z_abs is None:
         return pairs
     # Keep every control point down to and including z_abs. The block
     # carries duplicated abscissae at each interface — ``(base, layer)``
@@ -1996,7 +2055,7 @@ def ramp_absorbing_attenuation(pairs, z_sediment_base, z_bottom,
                                        [v for _, v in pairs])))
     if not head or head[-1][0] < z_abs:
         head = head + [(z_abs, attn_local)]      # pin the ramp's start
-    attn_floor = max(attn_local, float(knobs.absorber_attenuation))
+    attn_floor = float(absorber_floor_attenuation(attn_local, knobs=knobs))
     return head + [(float(z_bottom), attn_floor)]
 
 

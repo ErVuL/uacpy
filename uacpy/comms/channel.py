@@ -26,58 +26,55 @@ from uacpy.core.exceptions import (
 
 class ChannelTaps(ResultTuple, namedtuple(
         'ChannelTaps',
-        'taps delays_s symbol_rate fc sps first_arrival_s')):
+        'taps delays symbol_rate fc sps first_arrival')):
     """Discrete-time baseband channel, as :meth:`Arrivals.channel_taps` and
     :func:`pulse_shaped_taps` return it.
 
     ``taps[k]`` multiplies the baseband sample ``k`` samples after the one
-    the first arrival delivers; ``delays_s[k]`` is that tap's time relative
+    the first arrival delivers; ``delays[k]`` is that tap's time relative
     to the first arrival's centre (negative for the leading skirt of a
     pulse), ``symbol_rate`` and ``fc`` are the rate and carrier frequency
     the taps were built for (``fc`` is ``None`` for taps built from
     amplitudes already at baseband, which no carrier rotated), ``sps`` the samples per symbol they are spaced at,
-    and ``first_arrival_s`` the absolute travel time the delays were
+    and ``first_arrival`` the absolute travel time the delays were
     re-referenced from. ``comms.apply_channel`` and ``comms.simulate_link``
     take the whole tuple or its ``.taps``.
 
     On the export protocol: ``to_dict`` / ``from_dict``, and
-    ``to_xarray`` / ``to_netcdf`` with the taps on the ``delays_s`` axis.
+    ``to_xarray`` / ``to_netcdf`` with the taps on the ``delays`` axis.
     """
 
     __slots__ = ()
 
-    def __new__(cls, taps, delays_s, symbol_rate, fc, sps,
-                first_arrival_s):
+    def __new__(cls, taps, delays, symbol_rate, fc, sps,
+                first_arrival):
         # The scalars as Python numbers, so a record read back from a
         # file (0-d arrays) is the record that was written.
         return super().__new__(
-            cls, np.asarray(taps), np.asarray(delays_s, dtype=float),
+            cls, np.asarray(taps), np.asarray(delays, dtype=float),
             float(symbol_rate), None if fc is None else float(fc), int(sps),
-            float(first_arrival_s))
+            float(first_arrival))
 
     def _field_units(self):
-        return {'taps': None, 'delays_s': 's', 'symbol_rate': 'Hz',
-                'fc': 'Hz', 'sps': '', 'first_arrival_s': 's'}
+        return {'taps': None, 'delays': 's', 'symbol_rate': 'Hz',
+                'fc': 'Hz', 'sps': '', 'first_arrival': 's'}
 
     def _axes(self):
         # Each tap sits at its delay, so the delays are the one axis.
-        return {name: (('delays_s',) if value.ndim == 1 else ())
+        return {name: (('delays',) if value.ndim == 1 else ())
                 for name, value in self._arrays().items()}
 
     def plot(self, **kwargs):
         """Draw these taps through :func:`uacpy.plot.plot_channel`.
 
-        The plotter takes this whole carrier, so it reads both the things it
-        needs that are not fields of it: the sample rate, which taps at
-        ``sps`` per symbol at ``symbol_rate`` symbols per second sit at
-        (``symbol_rate * sps`` Hz), and the delay axis, which is
-        :attr:`delays_s` and not ``arange(n)/fs`` — the grid starts on the
-        transmit pulse's leading skirt, ahead of the first arrival.
-        ``kwargs`` reach the plotter.
+        The plotter takes this whole carrier, so it reads the delay axis,
+        which is :attr:`delays` and not ``arange(n)/fs`` — the grid starts
+        on the transmit pulse's leading skirt, ahead of the first arrival.
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``.
 
-        Returns ``(fig, ax)`` where ``ax`` is a **pair** — ``plot_channel``
-        draws the delay and frequency panels side by side — unlike the
-        single axis the rest of the family returns.
+        The frequency response is its own result,
+        ``uacpy.acoustic_signal.channel_response(taps)`` (at the taps' rate,
+        ``symbol_rate * sps`` Hz), whose ``.plot()`` draws ``|H(f)|``.
         """
         return plotter('plot_channel')(self, **kwargs)
 
@@ -110,7 +107,9 @@ def awgn(signal, snr_dB, *, rng=None):
         at ``sps=8``, ``rolloff=0.25`` (``B = 1.25`` x symbol rate) reads
         8.06 dB above ``snr_dB`` in-band (measured 8.07 dB). At one sample
         per symbol, as :func:`simulate_link` runs, the sampled band is the
-        symbol-rate band and the two coincide.
+        symbol-rate band and the two coincide. ``+inf`` adds no noise; NaN
+        and ``-inf`` are refused (every output sample would be NaN or
+        infinite).
     rng : numpy.random.Generator, optional
         Random generator for the noise realisation. Pass a seeded generator
         for a reproducible result.
@@ -122,6 +121,10 @@ def awgn(signal, snr_dB, *, rng=None):
     """
     x = np.asarray(signal)
     rng = require_generator(rng, "awgn")
+    if np.isnan(float(snr_dB)) or float(snr_dB) == -np.inf:
+        raise ConfigurationError(
+            f"awgn: snr_dB={snr_dB!r} would make every output sample NaN or "
+            f"infinite; pass a number of dB (+inf for no noise).")
     p = np.mean(np.abs(x) ** 2)
     if p == 0:
         warnings.warn(
@@ -231,7 +234,7 @@ def snr_to_ebn0_dB(snr_dB, *, bits_per_symbol, symbol_rate, sample_rate,
     return float(out) if out.ndim == 0 else out
 
 
-def pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc',
+def pulse_shaped_taps(amplitudes, delays, symbol_rate, *, pulse='rc',
                       rolloff=0.25, sps=1, span=8):
     """Symbol-rate tap vector from sparse arrivals, through a pulse shape.
 
@@ -254,7 +257,7 @@ def pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc',
     ----------
     amplitudes : array_like
         Complex path amplitudes, carrying per-path phase.
-    delays_s : array_like
+    delays : array_like
         Path delays (s), finite and non-negative, measured from the origin
         the tap grid is built around. They are used as given: subtract the
         first arrival yourself if the taps should start there. A negative
@@ -277,16 +280,16 @@ def pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc',
     Returns
     -------
     ChannelTaps
-        The taps (``.taps``) on their delay axis (``.delays_s``, starting at
+        The taps (``.taps``) on their delay axis (``.delays``, starting at
         ``-span/(2*symbol_rate)`` by construction), with the ``symbol_rate``
         and ``sps`` they are spaced at, ``fc=None`` (the amplitudes are
-        already baseband) and ``first_arrival_s=0.0`` (the delays are used
+        already baseband) and ``first_arrival=0.0`` (the delays are used
         as given) — the type :meth:`Arrivals.channel_taps` returns, which
         :func:`simulate_link` and :func:`uacpy.plot.plot_channel` read.
     """
     return _pulse_shaped_taps(
         amplitudes,
-        delays_s,
+        delays,
         symbol_rate,
         pulse=pulse,
         rolloff=rolloff,
@@ -294,15 +297,15 @@ def pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc',
         span=span)
 
 
-def _pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc',
+def _pulse_shaped_taps(amplitudes, delays, symbol_rate, *, pulse='rc',
                       rolloff=0.25, sps=1, span=8,
                       who: str = "pulse_shaped_taps"):
     """:func:`pulse_shaped_taps` reporting its refusals as ``who``."""
     amplitudes = np.asarray(amplitudes)
-    rel = np.asarray(delays_s, dtype=float).ravel()
+    rel = np.asarray(delays, dtype=float).ravel()
     if amplitudes.size != rel.size:
         raise ConfigurationError(
-            f"{who}: amplitudes and delays_s must have the same length; got "
+            f"{who}: amplitudes and delays must have the same length; got "
             f"{amplitudes.size} and {rel.size}.")
     if pulse not in ('rc', 'rrc'):
         raise ConfigurationError(
@@ -322,16 +325,16 @@ def _pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc',
             f"{who}: no arrivals; a channel no path reaches has no taps.")
     if not np.all(np.isfinite(rel)):
         raise ConfigurationError(
-            f"{who}: delays_s must be finite; an arrival with a non-finite "
+            f"{who}: delays must be finite; an arrival with a non-finite "
             f"delay has no place on the tap grid.")
     if np.any(rel < 0.0):
         # The grid opens span/2 symbols before 0, so an earlier path would
         # lose the leading part of its pulse, or all of it.
         raise ConfigurationError(
-            f"{who}: delays_s reaches {rel.min():g} s, before 0; the tap "
+            f"{who}: delays reaches {rel.min():g} s, before 0; the tap "
             f"grid starts {span / (2.0 * symbol_rate):g} s (span/2 symbols) "
             f"before 0 and would cut that path's pulse. Pass delays from the "
-            f"earliest arrival: delays_s - min(delays_s).")
+            f"earliest arrival: delays - min(delays).")
     fs = symbol_rate * sps
     half = span * sps / 2.0
     # The 1e-9 keeps an arrival a rounding error past a sample instant
@@ -352,11 +355,11 @@ def _pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc',
         # the 1e-9 keeps rounding from dropping an end tap.
         g[np.abs(arg) > span / 2.0 + 1e-9] = 0.0
         taps += gain * g / norm
-    return ChannelTaps(taps=taps, delays_s=times, symbol_rate=symbol_rate,
-                       fc=None, sps=sps, first_arrival_s=0.0)
+    return ChannelTaps(taps=taps, delays=times, symbol_rate=symbol_rate,
+                       fc=None, sps=sps, first_arrival=0.0)
 
 
-def multipath_channel(amplitudes, delays_s, *, sample_rate, fractional=False):
+def multipath_channel(amplitudes, delays, *, sample_rate, fractional=False):
     """Static FIR tap vector from sparse arrivals ``(gain, delay)``.
 
     Adapter over :func:`uacpy.acoustic_signal.impulse_response` — same
@@ -377,7 +380,7 @@ def multipath_channel(amplitudes, delays_s, *, sample_rate, fractional=False):
     ----------
     amplitudes : array_like
         Path amplitudes, complex to carry a phase.
-    delays_s : array_like
+    delays : array_like
         Path delays (s).
     sample_rate : float
         Sample rate of the tap vector (Hz).
@@ -385,7 +388,7 @@ def multipath_channel(amplitudes, delays_s, *, sample_rate, fractional=False):
         Place a delay between samples with a fractional-delay kernel instead
         of the nearest tap. Default False.
     """
-    _, h = impulse_response(amplitudes, delays_s, sample_rate=sample_rate, fractional=fractional)
+    _, h = impulse_response(amplitudes, delays, sample_rate=sample_rate, fractional=fractional)
     return h.astype(complex)
 
 
@@ -394,8 +397,8 @@ def apply_channel(signal, h):
 
     ``h`` is a tap vector or a
     :class:`ChannelTaps`, whose ``.taps`` are
-    used: tap 0 is its ``delays_s[0]``, on the pulse's leading skirt, so the
-    first arrival reaches the output ``-delays_s[0]*symbol_rate*sps``
+    used: tap 0 is its ``delays[0]``, on the pulse's leading skirt, so the
+    first arrival reaches the output ``-delays[0]*symbol_rate*sps``
     samples in.
 
     The convolution is :func:`uacpy.acoustic_signal.apply_impulse_response`'s:
@@ -428,20 +431,22 @@ def apply_channel(signal, h):
     return received
 
 
-def fading_taps(n_taps, n_samples, doppler_hz, *, sample_rate, rician_k=0.0,
+def fading_taps(n_taps, n_samples, doppler_shift_max, *, sample_rate, rician_k=0.0,
                 rng=None):
     """Time-varying complex tap gains ``H`` of shape ``(n_taps, n_samples)``.
 
     Each tap is a band-limited complex-Gaussian process (max Doppler
-    ``doppler_hz``) — Rayleigh fading; ``rician_k > 0`` adds a line-of-sight
+    ``doppler_shift_max``, its Doppler spectrum flat over ``±doppler_shift_max``: uacpy
+    guidance) — Rayleigh fading; ``rician_k > 0`` adds a
+    line-of-sight
     component with the given Rice K-factor (linear). Unit average power over
-    the ensemble, not per realisation. ``doppler_hz = 0`` is the static limit:
+    the ensemble, not per realisation. ``doppler_shift_max = 0`` is the static limit:
     only the DC bin survives, so each tap is a single complex-Gaussian draw
-    held constant over the block; a negative ``doppler_hz`` raises
+    held constant over the block; a negative ``doppler_shift_max`` raises
     :class:`~uacpy.core.exceptions.ConfigurationError`.
 
     The Doppler band is resolved to ``sample_rate/n_samples``, so it spans
-    ``2·doppler_hz·n_samples/sample_rate`` DFT bins. That bin count is the
+    ``2·doppler_shift_max·n_samples/sample_rate`` DFT bins. That bin count is the
     process's degrees of freedom: below a handful the block is too short to
     realise the requested spread and the envelope is not Rayleigh, which
     warns.
@@ -453,7 +458,7 @@ def fading_taps(n_taps, n_samples, doppler_hz, *, sample_rate, rician_k=0.0,
     n_samples : int
         Block length in samples, one column of ``H`` each. It also sets the
         Doppler resolution, ``sample_rate/n_samples``.
-    doppler_hz : float
+    doppler_shift_max : float
         Maximum Doppler shift in Hz — the half-width of the flat Doppler
         band. ``0`` is the static limit; negative raises
         :class:`~uacpy.core.exceptions.ConfigurationError`.
@@ -475,14 +480,15 @@ def fading_taps(n_taps, n_samples, doppler_hz, *, sample_rate, rician_k=0.0,
     fs = float(sample_rate)
     n = int(n_samples)
     # Written as the negation of the admissible condition so NaN is refused
-    # too: `doppler_hz < 0` is False for NaN, which then made `|f| <= nan`
-    # all-False and every tap NaN. `isfinite` is the other half — `|f| <= inf`
-    # is all-True, which disables the Doppler low-pass entirely and returns
-    # unfiltered white noise that looks like a plausible fading process.
-    if not (np.isfinite(doppler_hz) and doppler_hz >= 0):
+    # too: `doppler_shift_max < 0` is False for NaN, and `|f| <= nan` is all-False,
+    # which would make every tap NaN. `isfinite` is the other half —
+    # `|f| <= inf` is all-True, which disables the Doppler low-pass entirely
+    # and returns unfiltered white noise that looks like a plausible fading
+    # process.
+    if not (np.isfinite(doppler_shift_max) and doppler_shift_max >= 0):
         raise ConfigurationError(
-            f"fading_taps: doppler_hz must be >= 0 Hz and finite; got "
-            f"{doppler_hz!r} (0 is the static limit — a constant complex gain "
+            f"fading_taps: doppler_shift_max must be >= 0 Hz and finite; got "
+            f"{doppler_shift_max!r} (0 is the static limit — a constant complex gain "
             f"per tap).")
     # Negated so NaN fails too: `rician_k > 0` below is False for NaN and for
     # a negative K, which would hand back pure Rayleigh in silence.
@@ -491,21 +497,21 @@ def fading_taps(n_taps, n_samples, doppler_hz, *, sample_rate, rician_k=0.0,
             f"fading_taps: rician_k must be >= 0 and finite (a linear power "
             f"ratio; 0 is Rayleigh); got {rician_k!r}.")
     # White complex Gaussian per tap, low-pass filtered to the Doppler
-    # bandwidth. doppler_hz = 0 keeps the DC bin alone, so each tap is one
+    # bandwidth. doppler_shift_max = 0 keeps the DC bin alone, so each tap is one
     # complex-Gaussian draw held constant over the block.
     H = (rng.standard_normal((n_taps, n)) + 1j * rng.standard_normal((n_taps, n)))
     f = np.fft.fftfreq(n, d=1.0 / fs)
-    mask = (np.abs(f) <= float(doppler_hz)).astype(float)
+    mask = (np.abs(f) <= float(doppler_shift_max)).astype(float)
     n_bins = int(mask.sum())
     H = np.fft.ifft(np.fft.fft(H, axis=1) * mask[None, :], axis=1)
-    if doppler_hz > 0 and n_bins < _MIN_DOPPLER_BINS:
+    if doppler_shift_max > 0 and n_bins < _MIN_DOPPLER_BINS:
         warnings.warn(
-            f"fading_taps: doppler_hz={float(doppler_hz):g} spans {n_bins} DFT "
+            f"fading_taps: doppler_shift_max={float(doppler_shift_max):g} spans {n_bins} DFT "
             f"bin(s) at sample_rate/n_samples={fs / n:g} Hz resolution, so the "
             f"tap process is drawn from fewer than {_MIN_DOPPLER_BINS} degrees "
             f"of freedom and its envelope statistics are not Rayleigh. Lengthen "
-            f"n_samples to at least {int(np.ceil(_MIN_DOPPLER_BINS * fs / (2.0 * float(doppler_hz))))} "
-            f"samples, or raise doppler_hz.",
+            f"n_samples to at least {int(np.ceil(_MIN_DOPPLER_BINS * fs / (2.0 * float(doppler_shift_max))))} "
+            f"samples, or raise doppler_shift_max.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
     # Normalise by the filter's analytic gain, not per realisation: dividing each
     # tap by its own RMS pins |H| to a constant when few bins survive, which is a
@@ -524,9 +530,11 @@ def apply_fading_channel(signal, taps, delays_samples):
     (``taps[i, m]`` multiplies ``x[m]``), which is why ``taps`` only needs
     ``len(signal)`` columns. The textbook tap-delay line samples the gain at
     the output time instead (``taps[i, n]·x[n-d_i]``); the two differ only
-    by a per-tap gain shift of ``d_i`` samples and are statistically
-    indistinguishable when Doppler × delay spread ≪ 1 — always true for a
-    physical underwater channel.
+    by a shift of ``d_i`` samples in each tap's gain history. For taps from
+    :func:`fading_taps` — independent, stationary processes — a shifted
+    history is a draw of the same process, so the two forms have the same
+    statistics whatever the Doppler and delay spreads; for gains given as a
+    deterministic history, the shift is the difference.
 
     ``taps`` is ``(n_taps, >=len(signal))``; ``delays_samples`` the integer tap
     delays. Returns ``y`` of length ``len(signal) + max(delay)``.
@@ -573,11 +581,11 @@ def _channel_array(h):
     """The tap vector of a channel given as taps or as a
     :class:`ChannelTaps`.
 
-    A ``ChannelTaps`` is its ``.taps``: tap 0 sits at ``delays_s[0]``, on the
+    A ``ChannelTaps`` is its ``.taps``: tap 0 sits at ``delays[0]``, on the
     transmit pulse's leading skirt, so every channel consumer here treats the
     taps as the causal channel from that tap on, exactly as it treats the
     bare ``.taps``. Only :func:`uacpy.comms.simulate_link`, which reads the
-    received symbols at fixed positions, reads ``delays_s`` too, to start at
+    received symbols at fixed positions, reads ``delays`` too, to start at
     the zero-delay tap.
     """
     return np.asarray(h.taps if isinstance(h, ChannelTaps) else h)

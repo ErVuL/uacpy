@@ -23,7 +23,7 @@ from uacpy.acoustic_signal import (
     ambiguity_function,
     analytic_signal,
     cwt,
-    decidecade_band_levels,
+    band_levels,
     envelope,
     fk_transform,
     gaussian_pulse,
@@ -33,7 +33,7 @@ from uacpy.acoustic_signal import (
     inverse_fk,
     lfm_chirp,
     make_bandlimited_noise,
-    modal_group_velocity,
+    modal_group_speeds,
     m_sequence,
     nwave,
     processing_gain_dB,
@@ -157,7 +157,7 @@ def _bellhop_arrivals():
     env, _, _ = shallow_water()
     source = uacpy.Source(depths=25.0, frequencies=3000.0)
     point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-    return Bellhop(n_beams=6000, launch_angles=(-60.0, 60.0)).run(
+    return Bellhop(n_beams=6000, launch_angles_deg=(-60.0, 60.0)).run(
         env, source, point, run_mode=RunMode.ARRIVALS)
 
 
@@ -240,7 +240,7 @@ def ambiguity_surfaces():
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.4), sharey=True)
     for ax, sig, name in [(axes[0], lfm, 'lfm_chirp'), (axes[1], hfm, 'hfm_chirp')]:
         delays, dop, chi = ambiguity_function(
-            analytic_signal(sig), fs, doppler_hz=doppler)
+            analytic_signal(sig), fs, doppler_shifts=doppler)
         im = ax.imshow(_dB(chi, floor=-30.0), aspect='auto', origin='lower',
                        extent=_cell_edge_extent(delays * 1e3, dop),
                        vmin=-30.0, vmax=0.0, cmap='viridis')
@@ -369,7 +369,7 @@ def _vertical_array_gather():
     depths = np.linspace(4.0, 96.0, 64)
     source = uacpy.Source(depths=25.0, frequencies=250.0)
     receiver = uacpy.Receiver(depths=depths, ranges=1000.0)
-    field = Bellhop(n_beams=6000, launch_angles=(-80.0, 80.0)).run(
+    field = Bellhop(n_beams=6000, launch_angles_deg=(-80.0, 80.0)).run(
         env, source, receiver, run_mode=RunMode.TIME_SERIES,
         source_waveform=pulse, sample_rate=fs, t_start=0.62,
         output_duration=0.2)
@@ -447,7 +447,7 @@ def _ideal_waveguide():
 def modal_warping():
     """Kraken dispersion, the transient it produces, and the warp that undoes it."""
     env = _ideal_waveguide()
-    c, depth, range_m = 1500.0, 100.0, 5000.0
+    c, depth, trial_range = 1500.0, 100.0, 5000.0
     cutoffs = [(2 * m - 1) * c / (4.0 * depth) for m in range(1, 8)]
 
     sweep = np.linspace(30.0, 70.0, 40)
@@ -456,7 +456,7 @@ def modal_warping():
           for f in sweep]
     n_modes = min(len(k) for k in kr)
     k_matrix = np.real(np.array([k[:n_modes] for k in kr]))
-    v_group = modal_group_velocity(sweep, k_horizontal=k_matrix)
+    v_group = modal_group_speeds(sweep, k_horizontal=k_matrix)
 
     fs, n = 150.0, 2048
     df = fs / n
@@ -464,12 +464,12 @@ def modal_warping():
     frequencies = bins * df
     H = Kraken().run(env,
                      uacpy.Source(depths=20.0, frequencies=frequencies),
-                     uacpy.Receiver(depths=50.0, ranges=range_m),
+                     uacpy.Receiver(depths=50.0, ranges=trial_range),
                      run_mode=RunMode.BROADBAND)
     _, h = impulse_response_from_transfer_function(
         np.asarray(H.data).ravel(), frequencies=frequencies, sample_rate=fs, n_samples=n)
-    arrival = h[int(round(range_m / c * fs)):]
-    warped, t_warp = warp_signal(arrival, fs, range_m, c)
+    arrival = h[int(round(trial_range / c * fs)):]
+    t_warp, warped = warp_signal(arrival, fs, trial_range, c)
     fs_warp = 1.0 / float(t_warp[1] - t_warp[0])
 
     fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2))
@@ -477,13 +477,13 @@ def modal_warping():
         axes[0].plot(sweep, v_group[:, m], lw=1.4, label=f'mode {m + 1}')
     axes[0].set_xlabel('Frequency (Hz)')
     axes[0].set_ylabel('Group velocity (m/s)')
-    axes[0].set_title('modal_group_velocity(f, kr) from Kraken',
+    axes[0].set_title('modal_group_speeds(f, kr) from Kraken',
                       fontweight='bold', fontsize=10)
     axes[0].legend(fontsize=8, loc='lower right')
     axes[0].grid(alpha=0.3)
 
     f_a, t_a, S_a = spectrogram(arrival, fs, nperseg=128, noverlap=124)
-    axes[1].pcolormesh(t_a + range_m / c, f_a, _power_dB(S_a, floor=-30.0),
+    axes[1].pcolormesh(t_a + trial_range / c, f_a, _power_dB(S_a, floor=-30.0),
                        shading='auto', cmap='magma', vmin=-30.0, vmax=0.0)
     axes[1].set_xlabel('Time (s)')
     axes[1].set_ylabel('Frequency (Hz)')
@@ -520,12 +520,14 @@ def spectra_and_bands():
     level_dB += 12.0 * np.exp(-0.5 * ((np.log10(f_target / 300.0)) / 0.02) ** 2)
     target = 1e-12 * 10.0 ** (level_dB / 10.0)          # Pa²/Hz
 
-    _, x, fs = synthesize_noise_from_psd(
-        target, f_target, duration=30.0, sample_rate=25_000,
-        nfft=65536, interp='log', rng=rng)
+    fs = 25_000.0
+    _, x = synthesize_noise_from_psd(
+        target, f_target, duration=30.0, sample_rate=fs, interp='log',
+        rng=rng)
     frequencies, power = welch(x, fs, nperseg=32768)
     band = (frequencies >= 20.0) & (frequencies <= 11_000.0)
-    centers, levels = decidecade_band_levels(power[band], frequencies=frequencies[band])
+    bands = band_levels(power[band], frequencies=frequencies[band])
+    centers = bands.centers
 
     shown = frequencies >= 10.0
     fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.4))
@@ -535,11 +537,11 @@ def spectra_and_bands():
              title='synthesize_noise_from_psd → welch')
     plot_psd(f_target, target, ax=axes[0], label='target PSD', ymin=55,
              ymax=125, color='#f0ad4e', lw=2.0, ls='--')
-    plot_band_levels(centers, levels, ax=axes[1], color='#1f4e79',
-                     title='decidecade_band_levels(power, frequencies)')
+    plot_band_levels(bands, ax=axes[1], color='#1f4e79',
+                     title='band_levels(power, frequencies)')
     density_at_center = np.interp(centers, frequencies, 10.0 * np.log10(
         np.maximum(power, 1e-30) / 1e-12))
-    axes[1].plot(np.log10(centers), density_at_center, color='#f0ad4e', lw=2.0,
+    axes[1].plot(centers, density_at_center, color='#f0ad4e', lw=2.0,
                  label='density level at the same frequency')
     axes[1].set_ylim(55, 125)
     axes[1].legend(fontsize=8, loc='lower left')

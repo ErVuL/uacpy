@@ -328,6 +328,37 @@ def test_rough_surface_is_dropped_for_solvers_that_reject_it():
     assert env.surface.roughness == 2.0
 
 
+@pytest.mark.parametrize('flag', ['rough_surface', 'rough_bottom',
+                                  'source_beam_pattern'])
+def test_the_engines_offered_for_a_feature_are_the_ones_declaring_it(flag):
+    """The advice a dropped or refused feature gives reads the registry
+    (``_registry.engines_supporting``), so a new engine's declaration
+    reaches it with no edit to shared code — adding an engine must need
+    none: exactly the engines whose ``spec.supports`` holds the flag. OASR,
+    whose deck has no sea surface, declares no ``rough_surface`` and is not
+    offered for one."""
+    from uacpy.models._registry import engine_classes, engines_supporting
+    declared = sorted(cls.__name__ for cls in engine_classes().values()
+                      if flag in cls.spec.supports)
+    assert engines_supporting(flag) == declared
+    assert ('OASR' in declared) is (flag == 'rough_bottom')
+
+
+@pytest.mark.requires_binary
+def test_a_dropped_rough_surface_names_the_engines_that_keep_it():
+    import warnings
+    env = _reference_environment()
+    env.surface.roughness = 2.0
+    from uacpy.models._registry import engines_supporting
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        RAM(verbose=False)._project_environment(env)
+    said = [str(x.message) for x in w if 'rough sea surface' in str(x.message)]
+    assert len(said) == 1
+    assert ', '.join(engines_supporting('rough_surface')) in said[0]
+    assert 'OASR' not in said[0]
+
+
 @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
 def test_the_multi_source_depth_flag_is_read_off_the_native_modes(model_name):
     """``_supports_multi_source_depth`` is True exactly for the models that
@@ -350,25 +381,27 @@ def test_the_multi_source_depth_flag_is_read_off_the_native_modes(model_name):
     assert 'multi_source_depth' not in type(m).spec.supports
 
 
-def test_multi_source_depth_declared_in_the_spec_is_refused():
-    """The flag is read off ``spec.traits.native_multi_depth_modes``; declaring it in
-    ``spec.supports`` as well would give one question two answers, so the
-    declaration is refused at construction."""
+@pytest.mark.parametrize('flag', ['multi_source_depth',
+                                  'volume_attenuation'])
+def test_a_derived_flag_declared_in_the_spec_is_refused(flag):
+    """``multi_source_depth`` is read off ``spec.traits.native_multi_depth_modes``
+    and ``volume_attenuation`` mirrors ``spec.traits.consumes_volume_absorption``;
+    declaring either in ``spec.supports`` as well would give one question two
+    answers, so the declaration is refused when the class is defined (DEV.md
+    §2.5: a malformed declaration fails on import), before any instance."""
     from uacpy.core.run_settings import RunMode
     from uacpy.models.base import PropagationModel
     from uacpy.models._spec import ModelSpec
 
     def _never_launched(self, *args):
-        raise AssertionError('refused at construction')
+        raise AssertionError('refused at class definition')
 
-    class _Declares(PropagationModel):
-        spec = ModelSpec(modes=(RunMode.COHERENT_TL,),
-                         supports={'multi_source_depth'})
-        provenance_id = 'acoustics_toolbox'
-        _write_input = _launch = _read_output = _to_result = _never_launched
-
-    with pytest.raises(ConfigurationError, match='multi_source_depth'):
-        _Declares()
+    with pytest.raises(ConfigurationError, match=flag):
+        class _Declares(PropagationModel):
+            spec = ModelSpec(modes=(RunMode.COHERENT_TL,), supports={flag})
+            provenance_id = 'acoustics_toolbox'
+            _write_input = _launch = _read_output = _to_result = \
+                _never_launched
 
 
 @pytest.mark.requires_binary

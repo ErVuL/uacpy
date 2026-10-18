@@ -16,7 +16,7 @@ import numpy as np
 import warnings
 
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, ProvenanceWarning, ValidityWarning)
+    ConfigurationError, FallbackWarning, ValidityWarning)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._plotting import plotter
 from uacpy.core._validate import real_scalar_or_none, sanitize_title
@@ -33,7 +33,7 @@ from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.altimetry import Altimetry
 from uacpy.core.surface import Surface
 from uacpy.core.absorption import (
-    Absorption, AbsorptionCoefficient, FrancoisGarrison, _TabulatedAbsorption,
+    Absorption, AbsorptionCoefficient, FrancoisGarrison, _absorption_law,
 )
 from uacpy.core.constants import (
     DEFAULT_WATER_DENSITY_G_CM3, REFERENCE_SALINITY_PSU,
@@ -44,10 +44,12 @@ from uacpy.core.geo import as_coordinate, great_circle_midpoint, parse_date
 
 
 def _check_absorption(value):
-    """The law ``value`` stands for: an :class:`Absorption` law as it is, a
-    measured :class:`AbsorptionCoefficient` (``model=None``) as a tabulated
-    law, ``None`` as it is. A table a law computed is refused: the law is
-    the one object, and the environment takes it."""
+    """The absorption an environment stores for ``value``: an
+    :class:`Absorption` law as it is, a measured
+    :class:`AbsorptionCoefficient` (``model=None``) as the checked copy the
+    table rules give (:func:`~uacpy.core.absorption._absorption_law`),
+    ``None`` as it is. A table a law computed is refused: the law is the one
+    object, and the environment takes it."""
     if isinstance(value, AbsorptionCoefficient):
         if value.model is not None:
             raise ConfigurationError(
@@ -58,7 +60,7 @@ def _check_absorption(value):
                             "<law>), e.g. Thorp() or FrancoisGarrison(...). "
                             "A measured alpha(f, z) is an "
                             "AbsorptionCoefficient with model=None.")
-        return _TabulatedAbsorption(measured=value)
+        return _absorption_law(value).measured
     if value is not None and not isinstance(value, Absorption):
         raise ConfigurationError(
             f"Environment: absorption must be an Absorption law "
@@ -70,11 +72,11 @@ def _check_absorption(value):
 
 
 def _warn_if_table_misses_water(absorption, depth: float) -> None:
-    """Say so when a tabulated law's rows do not reach the whole water
+    """Say so when a measured table's rows do not reach the whole water
     column ``0..depth``: the rows beyond them are held, not extrapolated."""
-    if not isinstance(absorption, _TabulatedAbsorption):
+    if not isinstance(absorption, AbsorptionCoefficient):
         return
-    gaps = absorption._water_past_rows(0.0, float(depth))
+    gaps = _absorption_law(absorption)._water_past_rows(0.0, float(depth))
     if gaps:
         warnings.warn(
             f"Environment: the measured absorption table does not reach "
@@ -85,8 +87,9 @@ def _warn_if_table_misses_water(absorption, depth: float) -> None:
 
 #: How far (°C, psu) a water's temperature or salinity stands from the
 #: reference water before an absorption on the reference water is called
-#: clearly wrong for it. A threshold choice: 2 °C or 1 psu moves the
-#: Francois-Garrison absorption by about 10 % at 10 kHz.
+#: clearly wrong for it. uacpy guidance; measured at the reference water
+#: (10 °C, 35 psu, 0 m), 2 °C moves the Francois-Garrison absorption at
+#: 10 kHz by -5.6 % and 1 psu by +2.7 %.
 _REFERENCE_WATER_GAP_C = 2.0
 _REFERENCE_WATER_GAP_PSU = 1.0
 
@@ -123,7 +126,7 @@ def _warn_if_reference_water_replaces(old, new) -> None:
         f"environment does not hold. Keep the law it had, or build one from "
         f"the column: Environment(absorption=FrancoisGarrison."
         f"from_temperature_salinity(z, T, S)).",
-        ProvenanceWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 def _coerce_water_density(value) -> float:
@@ -304,7 +307,7 @@ class Environment(DeepCopyMixin, CarrierExport):
         (:meth:`SoundSpeedProfile.extend_to`); one that reaches past the
         seabed is kept whole.
     altimetry : Altimetry or array-like, optional
-        Surface altimetry as ``[(range, height_m), …]`` (height
+        Surface altimetry as ``[(range, height), …]`` (height
         positive up), or an :class:`Altimetry`. Default ``None`` (flat
         surface).
     bottom : Bottom, SeabedColumn, BoundaryProperties, float, or str, optional
@@ -313,12 +316,13 @@ class Environment(DeepCopyMixin, CarrierExport):
         (``bottom='sand'``), and a ``BoundaryProperties`` / ``SeabedColumn`` /
         ``Bottom`` is copied into one. Default is a generic fluid half-space
         (``sound_speed=1600`` m/s, ``density=1.5`` g/cm³,
-        ``attenuation=0.5`` dB/wavelength) that matches no preset. For a perfectly reflecting bottom,
+        ``attenuation=0.5`` dB/wavelength; uacpy guidance, matching no
+        preset and no published case). For a perfectly reflecting bottom,
         pass ``BoundaryProperties(acoustic_type='rigid')``.
     surface : Surface, BoundaryProperties, or list, optional
         Top boundary. Coerced to a :class:`Surface`: a single
         ``BoundaryProperties`` is a uniform surface, a
-        ``[(range_m, BoundaryProperties), …]`` list is a range-dependent one
+        ``[(range, BoundaryProperties), …]`` list is a range-dependent one
         (e.g. a marginal ice zone), and a ``Surface`` is copied.
         Default vacuum (pressure release).
     absorption : Absorption or AbsorptionCoefficient, optional
@@ -329,12 +333,14 @@ class Environment(DeepCopyMixin, CarrierExport):
         :class:`uacpy.core.absorption.ConstantAbsorption` — or a measured
         α(f, z): an :class:`~uacpy.core.absorption.AbsorptionCoefficient`
         with ``model=None``, used as tabulated (that class's docstring has
-        the rules). The table a law computes (``law.table(f)``) is refused:
-        pass the law. Default ``None`` (no volume absorption). Models inspect this
+        the rules); ``env.absorption`` is then that table, the environment's
+        copy, whose ``.plot()`` draws it. The table a law computes
+        (``law.table(f)``) is refused: pass the law. Default ``None`` (no
+        volume absorption). Models inspect this
         field to set ``TopOpt`` position 4 and write the supporting
         per-formula lines, or α per SSP row for a law with no letter.
         Replacing a Francois-Garrison law with one on the reference water
-        that clearly differs from it gives a ``ProvenanceWarning``; the
+        that clearly differs from it gives a ``ValidityWarning``; the
         check sees only the water such a law carries, never the water
         behind a plain sound-speed profile.
     water_density : float, keyword-only
@@ -345,7 +351,7 @@ class Environment(DeepCopyMixin, CarrierExport):
         ratios — the RAM codes and BOUNCE — receive each seabed density
         divided by it. Default ``None`` is
         :data:`~uacpy.core.constants.DEFAULT_WATER_DENSITY_G_CM3` (1.027);
-        ``uacpy.core.acoustics.density(T, S) / 1000`` gives the value for a
+        ``uacpy.acoustics.density(T, S)`` (g/cm³) gives the value for a
         measured column. Seabed densities stay absolute g/cm³ (Hamilton's
         tables), so the impedance contrast the engines see is ρ_b/ρ_w
         rather than ρ_b/1 — 2.7 % less, a few tenths of a dB per bottom
@@ -408,7 +414,7 @@ class Environment(DeepCopyMixin, CarrierExport):
     altimetry: Optional[Altimetry] = None
     bottom: Bottom = _RESOLVED_DEFAULT
     surface: Surface = _RESOLVED_DEFAULT
-    absorption: Optional[Absorption] = None
+    absorption: Optional[Union[Absorption, AbsorptionCoefficient]] = None
     _: KW_ONLY
     name: str = 'unnamed'
     location: Optional[Tuple[float, float]] = None
@@ -439,7 +445,8 @@ class Environment(DeepCopyMixin, CarrierExport):
                 Surface, BoundaryProperties,
                 List[Tuple[float, BoundaryProperties]],
             ]] = None,
-            absorption: Optional[Absorption] = None,
+            absorption: Optional[Union[
+                Absorption, AbsorptionCoefficient]] = None,
             *,
             name: str = 'unnamed',
             location: Optional[Tuple[float, float]] = None,
@@ -531,7 +538,7 @@ class Environment(DeepCopyMixin, CarrierExport):
         write_netcdf_groups(
             [(None, root),
              *((name, getattr(self, name).to_xarray()) for name in groups)],
-            path, who='Environment.to_netcdf', **kwargs)
+            path, **kwargs)
 
     @classmethod
     def from_netcdf(cls, path, **kwargs) -> 'Environment':
@@ -628,7 +635,7 @@ class Environment(DeepCopyMixin, CarrierExport):
         ``data_sources`` in the order bathymetry → ssp → bottom → surface,
         then :attr:`extra_data_sources`, then the altimetry's, exact repeats
         removed: a transect keeps one record per column read, each with its
-        ``range_m``. It is read from the carriers each time, so a reassigned
+        ``range``. It is read from the carriers each time, so a reassigned
         carrier brings its own records."""
         return dedupe_records(
             dedupe_provenance((self.bathymetry, self.ssp, self.bottom,
@@ -720,8 +727,9 @@ class Environment(DeepCopyMixin, CarrierExport):
             bits.append(f"surface {surface.nodes[0]._short()}")
         if self.altimetry is not None:
             bits.append(f"altimetry={extent(self.altimetry.heights, 'm')}")
-        bits.append('no absorption' if self.absorption is None
-                    else f"absorption={self.absorption._short()}")
+        law = _absorption_law(self.absorption)
+        bits.append('no absorption' if law is None
+                    else f"absorption={law._short()}")
         bits.append(f"ρw={qty(self.water_density, 'g/cm³')}")
         if self.transect is not None:
             (la0, lo0), (la1, lo1) = self.transect

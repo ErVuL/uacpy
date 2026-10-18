@@ -14,6 +14,7 @@ __all__ = [
     'InvalidDepthError',
     'UnsupportedFeatureError',
     'ConfigurationError',
+    'MissingFileError',
     'DataFetchError',
     'FileFormatError',
     'OutputContractError',
@@ -184,13 +185,19 @@ class ModelExecutionError(UACPYError):
 
 class InvalidDepthError(UACPYError):
     """Raised when a source or receiver depth exceeds the depth a model can
-    resolve. For most models that is the water depth; for spectral solvers
-    (Scooter/SPARC) it includes the sediment column, so the message says
+    resolve. For most models that is the water depth; for a solver that
+    computes the field in the sediment (an engine whose traits set
+    ``receivers_reach_sediment``: Kraken, Scooter, SPARC, RAM and the OASES
+    models) it includes the sediment column, so the message says
     "resolvable depth" rather than "environment depth"."""
 
     def __init__(self, depth: float, depth_max: float, context: str):
-        message = f"{context} depth ({depth:.1f}m) exceeds resolvable depth ({depth_max:.1f}m)"
-        remediation = f"Set {context.lower()} depth to ≤ {depth_max:.1f}m"
+        message = (f"{context} depth ({depth:.1f} m) exceeds resolvable depth "
+                   f"({depth_max:.1f} m), the deepest point the model's domain "
+                   f"reaches: the seafloor, or the bottom of the modelled "
+                   f"sediment for a solver that computes the field in the "
+                   f"sediment")
+        remediation = f"Set {context.lower()} depth to ≤ {depth_max:.1f} m"
         super().__init__(message, remediation)
         self.depth = depth
         self.depth_max = depth_max
@@ -238,6 +245,16 @@ class ConfigurationError(UACPYError):
     pass
 
 
+class MissingFileError(ConfigurationError, FileNotFoundError):
+    """Raised by every reader handed a path that names no file: a deck or a
+    recording the user wrote, or the output a model run should have left.
+    The path is the argument's fault, so it is a
+    :class:`ConfigurationError`; it is also a :class:`FileNotFoundError`, so
+    ``except FileNotFoundError`` and ``except OSError`` written the standard
+    Python way catch it too."""
+    pass
+
+
 class DataFetchError(UACPYError):
     """Raised when the data layer cannot supply an environment value
     (bathymetry, SSP, sediment, wind, …) for the requested location: the
@@ -262,14 +279,11 @@ class DataFetchError(UACPYError):
 
 
 class FileFormatError(UACPYError):
-    """Raised when a model I/O file (``.shd``, ``.mod``, ``.grn``, …) is
-    absent, malformed, truncated, or otherwise cannot be parsed — typically a
-    sign the model run failed or produced corrupt/unexpected output. Distinct
-    from :class:`ConfigurationError` (bad user input) since the file is not
-    something the user supplied: a missing file the *user* named is a
-    ``ConfigurationError``, a missing file a *model* should have written is a
-    ``FileFormatError``. Catch via ``except FileFormatError`` or, more
-    broadly, ``except UACPYError``."""
+    """Raised when a file (``.shd``, ``.mod``, ``.grn``, …) is malformed,
+    truncated, or otherwise cannot be parsed — for a model output, typically
+    a sign the run failed or produced corrupt/unexpected output. A path that
+    names no file is a :class:`MissingFileError` instead. Catch via
+    ``except FileFormatError`` or, more broadly, ``except UACPYError``."""
     pass
 
 

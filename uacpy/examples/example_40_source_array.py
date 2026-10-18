@@ -21,14 +21,12 @@ Uses: Source(depths=[...], weights=, source_level_dB=, beam_pattern=) ·
 Field over source_depth: .plot / .superpose(coherent=True|False) ·
 Field.at_source_level ·
 Source.array_factor / .array_beam_pattern · Modes.excitation ·
-plot_mode_excitation · Kraken (one launch for every depth) vs RAM (one march
+Modes.excitation_pattern · Kraken (one launch for every depth) vs RAM (one march
 per depth, same contract)
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -70,7 +68,7 @@ array = uacpy.Source(depths=depths, frequencies=FREQ, weights=weights,
 # would be a modelling error the incoherent path warns about.
 fleet = uacpy.Source(depths=depths, frequencies=FREQ,
                      source_level_dB=180.0)
-kraken = uacpy.Kraken(verbose=False)
+kraken = uacpy.Kraken()
 
 # ── 1. one field per source ─────────────────────────────────────────────
 # Kraken writes every depth into ONE deck and the .shd reader splits it, so
@@ -92,7 +90,7 @@ plt.close(fig)
 
 # The same Source on a PE gives the same shape of answer through the looped
 # path, which is what makes the two engines comparable cell by cell.
-ram_sources = uacpy.RAM(verbose=False).run(env, array, receiver)
+ram_sources = uacpy.RAM().run(env, array, receiver)
 print(f"RAM   : {ram_sources.coords['source_depth'].size} fields, looped one "
       f"march per depth")
 
@@ -105,12 +103,14 @@ incoherent = fleet_sources.superpose(coherent=False)
 
 one = kraken.run(env, uacpy.Source(depths=float(depths[2]), frequencies=FREQ,
                                    source_level_dB=180.0), receiver)
-med = lambda f: float(np.nanmedian(np.asarray(f.dB)))
-print(f"median loss, one source         : {med(one):6.2f} dB")
-print(f"median loss, coherent total     : {med(coherent):6.2f} dB "
-      f"({med(one) - med(coherent):+.2f} dB of array gain)")
-print(f"median loss, incoherent total   : {med(incoherent):6.2f} dB "
-      f"({med(one) - med(incoherent):+.2f} dB)")
+median_one = np.nanmedian(one.dB)
+median_coherent = np.nanmedian(coherent.dB)
+median_incoherent = np.nanmedian(incoherent.dB)
+print(f"median loss, one source         : {median_one:6.2f} dB")
+print(f"median loss, coherent total     : {median_coherent:6.2f} dB "
+      f"({median_one - median_coherent:+.2f} dB of array gain)")
+print(f"median loss, incoherent total   : {median_incoherent:6.2f} dB "
+      f"({median_one - median_incoherent:+.2f} dB)")
 
 # ── 3. the level, not the loss ──────────────────────────────────────────
 # at_source_level() needs no argument: the Source carried 180 dB, so every
@@ -140,10 +140,10 @@ modes = kraken.compute_modes(env, uacpy.Source(depths=depths,
                                                frequencies=FREQ))
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 4.4))
-uacpy.plot.plot_mode_excitation(modes, array, ax=axes[0], sound_speed=C_REF,
-                           title='Omnidirectional elements')
-uacpy.plot.plot_mode_excitation(modes, shaded, ax=axes[1], sound_speed=C_REF,
-                           title='Directional elements — P = f·A')
+modes.excitation_pattern(array, sound_speed=C_REF).plot(
+    ax=axes[0], title='Omnidirectional elements')
+modes.excitation_pattern(shaded, sound_speed=C_REF).plot(
+    ax=axes[1], title='Directional elements — P = f·A')
 fig.tight_layout()
 fig.savefig(OUT / 'example_40_array_response.png', dpi=140,
             bbox_inches='tight')

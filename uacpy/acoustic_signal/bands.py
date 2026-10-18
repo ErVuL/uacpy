@@ -21,7 +21,7 @@ from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import (
     refuse_non_finite_samples, require_finite_signal,
-    require_increasing_axis, require_positive_finite_scalar,
+    require_positive_finite_scalar, require_strictly_increasing,
 )
 from uacpy.acoustic_signal._results import PlottedResult, level_unit
 from uacpy.acoustic_signal.spectral import (
@@ -94,10 +94,12 @@ def _ladder_position(f, fraction, base):
 
 def _overlapping_bands(freq_min, freq_max, fraction, base, who):
     """Every band of the 1/``fraction``-octave ladder of ``base`` that
-    overlaps ``[freq_min, freq_max]``, as ``(lower, centers, upper)``."""
-    if freq_min <= 0 or freq_max <= freq_min:
+    overlaps ``[freq_min, freq_max]``, as ``(lower, centers, upper)``. A
+    one-point range (``freq_min == freq_max``) gives the band holding that
+    frequency, or every band bounded by it when it is a band edge."""
+    if not 0 < freq_min <= freq_max:
         raise ConfigurationError(
-            f"{who}: need 0 < freq_min < freq_max; "
+            f"{who}: need 0 < freq_min <= freq_max; "
             f"got freq_min={freq_min!r}, freq_max={freq_max!r}.")
     # One band of margin each side of the log position; the overlap test
     # below is what selects.
@@ -120,12 +122,13 @@ def octave_bands(freq_min, freq_max, *, base=10):
     ``centre * 2**(±1/2)`` (Pierce, *Acoustics*, §2.2); the two part by
     0.24 % a step, 15.85 kHz against 16 kHz four octaves up. Returns three
     arrays of equal length covering every band that overlaps the requested
-    range.
+    range; ``octave_bands(f, f)`` is the band holding ``f`` (every band
+    bounded by ``f`` when ``f`` is a band edge).
 
     Parameters
     ----------
     freq_min, freq_max : float
-        The frequency range (Hz).
+        The frequency range (Hz), ``0 < freq_min <= freq_max``.
     base : {10, 2}, optional
         IEC base-10 octaves or exact octaves (see above). Default 10.
     """
@@ -141,12 +144,14 @@ def decidecade_bands(freq_min, freq_max):
 
     Centre frequencies are ``1000 * 10^(n/10)`` (IEC 61260-1 base-10); band edges
     are ``center * 10^(±1/20)``. Returns three arrays of equal length covering
-    every band that overlaps the requested range.
+    every band that overlaps the requested range; ``decidecade_bands(f, f)``
+    is the band holding ``f`` (every band bounded by ``f`` when ``f`` is a
+    band edge).
 
     Parameters
     ----------
     freq_min, freq_max : float
-        The frequency range (Hz).
+        The frequency range (Hz), ``0 < freq_min <= freq_max``.
     """
     return _overlapping_bands(freq_min, freq_max, *_LADDERS["decidecade"],
                               "decidecade_bands")
@@ -471,6 +476,10 @@ class BandLevels(PlottedResult, namedtuple("BandLevels", "centers levels")):
     ``centers, levels = ...`` unpacks it; :meth:`plot` draws it with
     :func:`~uacpy.plot.plot_band_levels` against its own ``ref``.
 
+    ``levels`` carries the bands on its LAST axis: one value per band for one
+    spectrum, one band row per channel for a multichannel one (the layout
+    :func:`welch` returns spectra in).
+
     What the levels are stated on rides on attributes: ``lower`` and
     ``upper``, the band edges (Hz); ``band_type``, the ladder
     (``'decidecade'`` or ``'octave'``); and ``ref``, the
@@ -480,7 +489,7 @@ class BandLevels(PlottedResult, namedtuple("BandLevels", "centers levels")):
     _attrs = ("lower", "upper", "band_type", "ref")
     _plotter = "plot_band_levels"
     _plot_fields = ("centers", "levels")
-    _plot_defaults = ("ref", "band_type")
+    _plot_defaults = ("ref", "band_type", "lower", "upper")
 
     def __new__(cls, centers, levels, *, lower, upper, band_type, ref):
         self = super().__new__(cls, centers, levels)
@@ -493,8 +502,48 @@ class BandLevels(PlottedResult, namedtuple("BandLevels", "centers levels")):
     def _field_units(self):
         return {"centers": "Hz", "levels": level_unit(self.ref, "spectrum")}
 
+    def _declared_dims(self):
+        # The bands are the last axis whatever the channel count, so a
+        # channel axis as long as the band axis is not read as the bands.
+        ndim = np.ndim(self.levels)
+        return {"levels": tuple(f"levels_dim{i}" for i in range(ndim - 1))
+                + ("centers",)}
 
-def _band_levels(psd, frequencies, band_type, ref, who):
+    def plot(self, *, channel=None, **kwargs):
+        """Draw the band levels with :func:`~uacpy.plot.plot_band_levels`.
+        For a multichannel result, ``channel`` (an index, or a tuple of
+        indices, into the axes before the bands) picks the row drawn.
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``."""
+        levels = np.asarray(self.levels)
+        if channel is None and levels.ndim > 1:
+            raise ConfigurationError(
+                f"BandLevels.plot: levels holds one band row per channel "
+                f"(shape {levels.shape}, bands last), and one row is drawn.",
+                remediation="Pass channel=i (a tuple of indices for more "
+                            "than one channel axis) to draw row i.")
+        if channel is not None:
+            if levels.ndim < 2:
+                raise ConfigurationError(
+                    f"BandLevels.plot: channel={channel!r} selects a row of "
+                    f"a multichannel result, and these levels are one band "
+                    f"row (shape {levels.shape}).",
+                    remediation="Drop channel=.")
+            try:
+                row = levels[channel]
+            except (IndexError, TypeError) as exc:
+                raise ConfigurationError(
+                    f"BandLevels.plot: channel={channel!r} is not a row of "
+                    f"levels shaped {levels.shape} (bands last).") from exc
+            if np.ndim(row) != 1:
+                raise ConfigurationError(
+                    f"BandLevels.plot: channel={channel!r} leaves levels of "
+                    f"shape {np.shape(row)}; index every axis before the "
+                    f"bands (levels shape {levels.shape}).")
+            return self._replace(levels=row).plot(**kwargs)
+        return super().plot(**kwargs)
+
+
+def _band_levels(psd, frequencies, band_type, ref, axis, who):
     """:func:`band_levels` for ``who``, which its messages name."""
     if band_type not in _LADDERS:
         raise ConfigurationError(
@@ -505,6 +554,15 @@ def _band_levels(psd, frequencies, band_type, ref, who):
     psd = np.asarray(psd, dtype=float)
     frequencies = np.asarray(frequencies, dtype=float)
     ref = require_positive_finite_scalar(ref, who, "ref", " Pa")
+    if psd.ndim == 0:
+        raise ConfigurationError(
+            f"{who}: psd is a scalar; pass one value per frequency.")
+    try:
+        psd = np.moveaxis(psd, int(axis), -1)
+    except (np.exceptions.AxisError, TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{who}: axis={axis!r} is not an axis of psd shaped "
+            f"{np.shape(psd)}.") from exc
     if np.any(psd < 0):
         raise ConfigurationError(
             f"{who}: psd contains negative values; a power "
@@ -512,10 +570,14 @@ def _band_levels(psd, frequencies, band_type, ref, who):
             "or a signed spectrum, whose band integral is not a band level. "
             f"Got {int(np.count_nonzero(psd < 0))} negative value(s), "
             f"minimum {psd.min():g}.")
-    if frequencies.shape != psd.shape:
+    if frequencies.ndim != 1 or frequencies.size != psd.shape[-1]:
         raise ConfigurationError(
-            f"{who}: psd shape {psd.shape} and frequencies "
-            f"shape {frequencies.shape} differ.")
+            f"{who}: frequencies (shape {frequencies.shape}) must be one "
+            f"axis as long as psd along axis={axis} ({psd.shape[-1]} "
+            f"values).",
+            remediation="Pass the 1-D frequency axis, and axis= naming the "
+                        "frequency axis of psd (the last one by default, as "
+                        "welch returns spectra).")
     if frequencies.size > 1 and np.any(np.diff(frequencies) <= 0):
         raise ConfigurationError(
             f"{who}: frequencies must be strictly increasing. "
@@ -524,11 +586,10 @@ def _band_levels(psd, frequencies, band_type, ref, who):
             f"{int(np.count_nonzero(np.diff(frequencies) <= 0))} "
             f"non-increasing step(s), first at index "
             f"{int(np.argmax(np.diff(frequencies) <= 0))}.")
-    require_increasing_axis(frequencies, f"{who}: frequencies")
+    require_strictly_increasing(frequencies, f"{who}: frequencies")
     if frequencies.size < 2:
-        # A one-point axis has freq_min == freq_max, which would reach the ladder
-        # as "need 0 < freq_min < freq_max" — an error naming two arguments this
-        # caller never passed.
+        # A one-point axis has no width, so there is no band to integrate
+        # over, however the ladder would place the point.
         raise ConfigurationError(
             f"{who}: frequencies needs at least 2 samples to "
             f"span a band; got {frequencies.size}. A single point has no "
@@ -536,8 +597,7 @@ def _band_levels(psd, frequencies, band_type, ref, who):
     pos = frequencies > 0
     # Tested after the DC bin is dropped: a two-sample rfftfreq grid passes
     # the size guard above yet leaves a single positive frequency, which has
-    # no width for a band and would reach the ladder as freq_min == freq_max
-    # — an error naming two arguments this caller never passed.
+    # no width for a band.
     if int(np.count_nonzero(pos)) < 2:
         raise ConfigurationError(
             f"{who}: frequencies "
@@ -550,15 +610,16 @@ def _band_levels(psd, frequencies, band_type, ref, who):
     freq_max = frequencies[pos].max()
     lower, centers, upper = _overlapping_bands(freq_min, freq_max,
                                                *_LADDERS[band_type], who)
-    levels = np.full(centers.size, np.nan)
+    rows = psd.reshape(-1, frequencies.size)
+    levels = np.full((rows.shape[0], centers.size), np.nan)
     n_coarse = 0
     for i, (lo, hi) in enumerate(zip(lower, upper)):
         # Integrate over [lo, hi] itself: splice the edges into the in-band
         # grid points and interpolate the PSD onto them.
         #
-        # A band the supplied grid does not fully cover is left ``nan``.
-        # Clipping the nodes to the support instead returned the integral over
-        # the covered part, which is not that band's level — measured 3.8 dB
+        # A band the supplied grid does not fully cover is left ``nan``:
+        # clipping the nodes to the support would give the integral over the
+        # covered part, which is not that band's level — measured 3.8 dB
         # (first band) and 3.2 dB (last) off their own trend on a flat PSD,
         # and 5.5 dB low on the realistic psd -> band_levels path.
         if (lo < freq_min * (1.0 - BAND_EDGE_RTOL)
@@ -567,10 +628,11 @@ def _band_levels(psd, frequencies, band_type, ref, who):
         interior = frequencies[(frequencies > lo) & (frequencies < hi)]
         if interior.size < 2:
             n_coarse += 1
-        power = integrate_psd(psd, frequencies, lo, hi)
+        power = np.array([integrate_psd(row, frequencies, lo, hi)
+                          for row in rows])
         # A covered band with no power is -inf, as every empty band is.
         with np.errstate(divide='ignore'):
-            levels[i] = 10.0 * np.log10(power / ref ** 2)
+            levels[:, i] = 10.0 * np.log10(power / ref ** 2)
     if n_coarse:
         warnings.warn(
             f"{who}: {n_coarse} band(s) hold fewer than two "
@@ -579,25 +641,29 @@ def _band_levels(psd, frequencies, band_type, ref, who):
             "finer-resolution PSD for a fully integrated level.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
-    return BandLevels(centers, levels, lower=lower, upper=upper,
-                      band_type=band_type, ref=ref)
+    return BandLevels(centers, levels.reshape(psd.shape[:-1] + (centers.size,)),
+                      lower=lower, upper=upper, band_type=band_type, ref=ref)
 
 
 def band_levels(psd, frequencies, *, band_type="decidecade",
-                ref=REFERENCE_PRESSURE_WATER):
+                ref=REFERENCE_PRESSURE_WATER, axis=-1):
     """Integrate a one-sided PSD into the band levels of a standard ladder.
 
     Parameters
     ----------
     psd : array_like
-        One-sided power spectral density [pressure²/Hz, e.g. Pa²/Hz].
+        One-sided power spectral density [pressure²/Hz, e.g. Pa²/Hz], one
+        spectrum or one per channel, frequency along ``axis``.
     frequencies : array_like
-        Frequencies [Hz] matching ``psd`` (monotonic, > 0).
+        The 1-D frequency axis [Hz] of ``psd`` (strictly increasing).
     band_type : {'decidecade', 'octave'}
         The ladder: :func:`decidecade_bands` (the default) or
         :func:`octave_bands`, both IEC 61260-1 base-10.
     ref : float
         Reference pressure (default ``1e-6`` Pa = 1 µPa, the water standard).
+    axis : int, optional
+        The frequency axis of ``psd``; default ``-1``, the last, where
+        :func:`welch` puts it.
 
     Returns
     -------
@@ -605,7 +671,9 @@ def band_levels(psd, frequencies, *, band_type="decidecade",
         ``centers`` [Hz] and ``levels`` [dB re ``ref²``] of every band of the
         ladder overlapping the grid, with the band edges, ``band_type`` and
         ``ref``; bands with no spectral support are ``nan``, and a covered
-        band that carries no power is ``-inf``.
+        band that carries no power is ``-inf``. ``levels`` carries the bands
+        LAST: shape ``(n_bands,)`` for one spectrum, the other axes of
+        ``psd`` followed by the bands for several.
 
     Notes
     -----
@@ -636,29 +704,4 @@ def band_levels(psd, frequencies, *, band_type="decidecade",
     overlap-weighted bin sums do, so the two carry the same band widths on
     the same ladder.
     """
-    return _band_levels(psd, frequencies, band_type, ref, "band_levels")
-
-
-def decidecade_band_levels(psd, frequencies, *, ref=REFERENCE_PRESSURE_WATER):
-    """Integrate a one-sided PSD into decidecade band levels:
-    :func:`band_levels` on the default ``band_type='decidecade'`` ladder.
-
-    Parameters
-    ----------
-    psd : array_like
-        One-sided power spectral density [pressure²/Hz, e.g. Pa²/Hz].
-    frequencies : array_like
-        Frequencies [Hz] matching ``psd`` (monotonic, > 0).
-    ref : float
-        Reference pressure (default ``1e-6`` Pa = 1 µPa, the water standard).
-
-    Returns
-    -------
-    BandLevels
-        ``centers`` [Hz] and ``levels`` [dB re ``ref²``], with the band edges;
-        bands with no spectral support are ``nan`` (normally the first and
-        last, see :func:`band_levels`), and a covered band that carries no
-        power is ``-inf``.
-    """
-    return _band_levels(psd, frequencies, "decidecade", ref,
-                        "decidecade_band_levels")
+    return _band_levels(psd, frequencies, band_type, ref, axis, "band_levels")

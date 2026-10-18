@@ -66,8 +66,8 @@ uacpy/
     │   └── oases/           OAST / OASN / OASP / OASR / OASS / OASSP
     ├── io/                  File-format readers and writers (§4)
     ├── data/                External-data fetch layer (GPS → Environment, §7.1)
-    ├── acoustic_signal/     generate, estimate, arrays, detect, channel
-    ├── comms/               modulate, link, receive, janus — the modem chain
+    ├── acoustic_signal/     generate, spectral/cqt/timefreq/bands, beamforming, detect, channel (§7)
+    ├── comms/               constellations, coding, ofdm, phy, link, sync, equalize, janus — the modem chain
     ├── sonar/               Sonar equation, reverberation, detection, MFP
     ├── noise/               Wenz curves, wind noise, ship noise
     ├── visualization/       plot_* functions and the .plot() dispatch table
@@ -78,7 +78,6 @@ uacpy/
     ├── parallel.py          run_parallel / Job — parallel batch runner
     ├── metrics.py           tl_rmse / tl_max_error / tl_bias (core.metrics shim)
     ├── _log.py              Single log channel + warning formatter
-    ├── _stack.py            Child-only RLIMIT_STACK raise for model binaries
     ├── __main__.py          `python -m uacpy`: version, engine_status table, verdict
     ├── acoustics.py, plot.py, materials.py, units.py
     │                        the public facades over core / visualization (§7)
@@ -151,7 +150,7 @@ The signature is **fixed and minimal** — no `**kwargs` anywhere, so an
 unknown keyword raises Python's standard `TypeError` at the call site. Every
 engine takes exactly these parameters; a keyword a run mode does not read is
 refused or warned about by the base, not silently dropped. The one sanctioned
-extension is the keyword-only `c_low`/`c_high`/`rmax_m` of
+extension is the keyword-only `c_low`/`c_high`/`rmax` of
 `Bellhop.run_with_bounce` — a *different method*, which tabulates the BOUNCE
 reflection table a single call consumes.
 
@@ -181,7 +180,7 @@ are joined, split and summed in `core/results/_superposition.py`.
 | 3 resolve | one `RunSettings`: run mode, frequency grid, source-depth loop, time grid, output declaration; the engine's own record; each `Notice` of that record warned once |
 | 4 execute | per source depth, per launch: write the deck, launch the binary, read its output |
 | 5 extract | the result built, then checked against `outputs[run_mode]` |
-| 6 stamp | `run_mode` and the `RunSettings` recorded on the result |
+| 6 stamp | `run_mode` and the `RunSettings` recorded on the result, with the notes stage 5 left on it (`models._extract.add_run_note`: what the run found, such as a count the binary chose) appended to `notes` |
 
 An engine supplies what is its own by overriding a hook. The table below is
 every member of `PropagationModel` an engine may override (`_ENGINE_HOOKS` in
@@ -205,15 +204,15 @@ code (a hook added, removed or newly overridden fails it).
 | `_multi_frequency_refusal` | 2 | a `ConfigurationError` pointing at `BROADBAND` / `TIME_SERIES` | Bounce, OAST |
 | `_validate_geometry` | 2 | beam pattern, multi-depth source, source depths, receiver grid | Bellhop, Bounce |
 | `_check_source_depths` | 2 | refuses a source below `_max_receiver_depth` | RAM |
-| `_max_receiver_depth` | 2 | the seafloor, or the deepest interface with `spec.traits.receivers_reach_sediment` | RAM |
+| `_max_receiver_depth` | 2 | the seafloor, or the deepest interface with `spec.traits.receivers_reach_sediment` | — |
 | `_source_below_domain_note` | 2 | `None`: no paragraph added to the source-depth refusal | — |
 | `_receiver_grid_is_paired` | 2 | `False`: the deck spans the depth-by-range product | Bellhop |
-| `_validate_engine` | 2 | nothing to refuse | Bellhop, Bounce, Kraken, OASP, OASS, OASSP, OAST, RAM, SPARC, Scooter |
+| `_validate_engine` | 2 | nothing to refuse | Bellhop, Bounce, Kraken, OASN, OASP, OASR, OASS, OASSP, OAST, RAM, SPARC, Scooter |
 | `_broadband_band_knobs` | 3 | `(None, None)`: the package's band defaults | Bellhop |
 | `_requested_frequencies` | 3 | `_band.resolve_band` with the band knobs | OASP, OASSP, RAM, SPARC |
 | `_resolve_engine_settings` | 3 | `None`: no settings of its own | every engine |
 | `_announce_engine_settings` | 3 | one warning per notice of `settings.engine.notices` | OASS, OASSP |
-| `_marched_frequencies` | 3 | `settings.frequencies` | OASP, OASSP, SPARC |
+| `_marched_frequencies` | 3 | `settings.frequencies` | OASP, OASSP, RAM, SPARC |
 | `_n_launches` | 4 | 1 | Bellhop, Kraken, OASS, OASSP, RAM, SPARC |
 | `_prepare_launches` | 4 | `None`: nothing built once for every launch | Bellhop, Kraken, OASS, OASSP, RAM |
 | **`_write_input`** | 4 | abstract | every engine |
@@ -339,7 +338,7 @@ class Scooter(PropagationModel):
         modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
         supports={'layered_bottom', 'elastic_media', 'rough_surface'},
         source_types=frozenset({'point', 'line', 'scaled'}),
-        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+        collapse={'ssp': 'mean'},
         traits=EngineTraits(
             consumes_volume_absorption=True,
             native_multi_depth_modes=frozenset({RunMode.COHERENT_TL}),
@@ -582,14 +581,13 @@ writer imports them from there at its file boundary.
   `_fortran_helpers.py` to auto-detect; do not hard-code `<i` / `<d`.
 - **Reader-side translation.** When a reader returns a dict with keys
   the model wrapper passes into `Result.metadata`, rename to the
-  documented schema (`Nsam → n_samples`, `cmin → c_min`,
-  `bw → bandwidth_hz`, `df → df_hz`, `n_pts → n_points`).
+  documented schema (`Nsam → n_samples`, `cmin → water_min` in the mpiramS
+  reader, `bw → bandwidth`, `n_pts → n_points`).
 - **Third-party formats are upstream contracts.** Before touching any
   reader/writer for `.shd`, `.mod`, `.trf`, `.dat`, …, consult the
   upstream documentation (`uacpy/third_party/.../doc/*.tex` for OASES,
   the PDFs in `docs/` for AT, the source comments for RAM). The format
-  doc is authoritative; the existing code may have bugs (the audit
-  found several).
+  doc is authoritative over the existing code.
 
 ---
 
@@ -640,16 +638,21 @@ These are the physics-agnostic primitives every model consumes:
   (`absorption_<model>`, dB/km, `core/acoustics/attenuation.py`) are the computation it
   calls. Formulas compute numbers; objects are what models take, plot, save and cite; the object calls the formula. `Environment(absorption=...)` takes a law, or a measured
   `AbsorptionCoefficient` with no law behind it (`model=None`), which
-  becomes the private `_TabulatedAbsorption`; a table a law computed is
+  `env.absorption` keeps as the user's table; a table a law computed is
   refused (pass the law) — no second public type, and no second path to a
-  law. `warn_if_band_absorption_frozen` (with its `BAND_ABSORPTION_*`
-  thresholds and `minimax_anchor_frequency`'s `MINIMAX_ANCHOR_GRID`) is
+  law. Every reader that evaluates `env.absorption` (deck writers, RAM's
+  water block, the band checks, `arrival_absorption_exponent`) takes it
+  through the one adapter `core/absorption.py::_absorption_law`, which
+  makes a table the private `_TabulatedAbsorption` and passes a law
+  through. `_warn_if_band_absorption_frozen` (with its `_BAND_ABSORPTION_*`
+  thresholds and `minimax_anchor_frequency`'s `_MINIMAX_ANCHOR_GRID`) is
   engine-facing: the one check every engine that freezes the law at one
   frequency runs, taking that engine's own mechanism and remediation
-  sentences. It is public because the Bellhop and OASES models and the AT
-  deck writers import it across layers.
-  The engines read a law through generic methods, never
-  its type: `alpha_dB_per_m`, `alpha_dB_per_wavelength(f, z, c)` (what an AT
+  sentences. It is private and imported across layers by the Bellhop and
+  OASES models and the AT deck writers, each import declared in
+  `test_packaging.py`'s `_CROSS_PACKAGE_PRIVATES`.
+  The engines read a law through generic private methods, never
+  its type: `_alpha_dB_per_m_at_frequency`, `_alpha_dB_per_wavelength_at_frequency(f, z, c)` (what an AT
   `alphaI` row and a RAM water block carry), and the private hooks
   `_breakpoint_depths` (where α bends: an engine samples there),
   `_scales_by_frequency_ratio` (Bellhop's one-trace band synthesis scales by
@@ -670,12 +673,17 @@ These are the physics-agnostic primitives every model consumes:
   `boundaries.py` (`reflection_coeff`, `bottom_loss_curve`,
   `pekeris_root`), `bubbles.py` (resonance, bubbly-water speed, surface
   loss), `levels.py` (volts → Pa → dB), `wavenumber.py` (Hankel transform,
-  alias period) and `modal.py` (mode shapes at depths, modal sum). Every
+  alias period), `modal.py` (mode shapes at depths, modal sum),
+  `arrays.py` (free-field line-array physics), `attenuation.py` (seawater
+  volume attenuation formulas), `ray_geometry.py` (how close a ray polyline
+  comes to a point) and `weighting.py` (frequency weighting of a level). Every
   public name is re-exported from the package (and by the root
   `uacpy/acoustics.py` module), so callers write
-  `uacpy.acoustics.sound_speed_mackenzie` and never name a sub-module. **Not**
-  imported by the model wrappers; safe to use from notebooks. Some
-  functions are arlpy-adapted; see `third_party/arlpy/NOTICE`.
+  `uacpy.acoustics.sound_speed_mackenzie` and never name a sub-module. Two
+  model modules import it, both for `reflection_coeff`
+  (`models/pe_grid.py`, `models/ram/_domain.py`); it holds no model state, so
+  it is safe to use from notebooks. Some functions are arlpy-adapted; see
+  `third_party/arlpy/NOTICE`.
 - `materials.py` — named-material presets for `BoundaryProperties`,
   keyed (case-insensitively) in the `MATERIALS` dict and looked up via
   `get_material(name)` / enumerated via `list_materials()`. Keys are
@@ -697,8 +705,11 @@ These are the physics-agnostic primitives every model consumes:
 - `_beamforming.py` — the single Bartlett/MVDR numerical core behind
   `acoustic_signal.bartlett` / `mvdr`, which every matched-field surface
   (`sonar.bartlett` / `mvdr`, `Covariance.bartlett` / `mvdr`) wraps, and the
-  snapshot covariance behind `sample_covariance` and `sonar.csdm`. Change the
+  snapshot covariance behind `sonar.csdm` and `Snapshots.covariance`. Change the
   algebra here, not in a caller.
+- `_fourier.py` — `dtft_at`, the transform of a record at one frequency on any
+  sample times (`Σ x w e^{-2πift}`, memory-bounded), behind
+  `snapshot_frequency_component` and `tone_phasor`, each with its own gain.
 - `_repr.py` — the one-line repr formatting every public class shares
   (§5.2): the axis, quantity and record helpers and the `FieldsRepr` /
   `SettingsRepr` mixins.
@@ -722,8 +733,11 @@ These are the physics-agnostic primitives every model consumes:
   `core/geo.py`, `BoundaryType` in `core/boundary.py`, model defaults in
   `models/_defaults.py` (`DEFAULT_C_MIN`, `DEFAULT_BROADBAND_N_FREQUENCIES`,
   `DEFAULT_BROADBAND_BANDWIDTH_FACTOR`), the phase-speed search factors
-  (`C_LOW_FACTOR`, `C_HIGH_FACTOR`, `DEFAULT_C_MAX_UNBOUNDED`) beside their
-  one resolver in `models/_window.py`, and the AT deck letters
+  (`C_HIGH_FACTOR`, `DEFAULT_C_MAX_UNBOUNDED`) beside their
+  one resolver in `models/_window.py`, the `c_low` rule every
+  wavenumber integration and its deck writer share (`C_LOW_FACTOR`,
+  `C_LOW_FACTOR_ELASTIC`, `default_c_low`) in `core/engine_defaults.py`,
+  and the AT deck letters
   (`AttenuationUnits`, `parse_boundary_type`) in `io/at_codes.py`.
 - `exceptions.py` — `UACPYError` (the base every other one derives
   from, so `except UACPYError` is the catch-all) plus
@@ -883,7 +897,7 @@ by construction. **Never pass both** — the skip walk starts from the frame
 than either intends. A bare `warnings.warn(msg)` blames this package.
 `tests/test_warning_attribution.py` gates all three rules.
 
-### 6.3 Stack limit for the binaries — `uacpy/_stack.py`
+### 6.3 Stack limit for the binaries — `uacpy/models/_launch.py`
 
 SPARC-class solvers blow the default 8 MiB stack on first large
 allocation. `_run_subprocess` prefixes every launch with
@@ -896,7 +910,7 @@ file, no execute bit, unrecognised format) before the launch, so a broken
 install still arrives as `ExecutableNotFoundError`. `UACPY_NO_STACK_RAISE=1`
 drops the prefix.
 
-The same module supplies the outer wrapper, `parent_death_prefix()` —
+The same module (its last section) supplies the outer wrapper, `parent_death_prefix()` —
 `setpriv --pdeathsig TERM --` on Linux, checked once per process — so the argv
 is setpriv → the stack-limit shell → the binary. Binaries run in their own
 session (`start_new_session`, so a timeout can reap the whole tree), which
@@ -944,12 +958,13 @@ Every class lives in `core/exceptions.py` and is re-exported at `uacpy` and
 | Exception | Raised when |
 |---|---|
 | `UACPYError` | base of all of them (`except UACPYError` is the catch-all); takes a `remediation=` rendered as a "How to fix:" paragraph |
-| `ConfigurationError` | the user's input is wrong: a value, a combination, a malformed environment, a file the user named |
+| `ConfigurationError` | the user's input is wrong: a value, a combination, a malformed environment |
+| `MissingFileError` | a reader is handed a path that names no file (a deck the user wrote or an output a run should have left); a `ConfigurationError` and a `FileNotFoundError` |
 | `UnsupportedFeatureError` | a legal request this engine cannot satisfy; `alternatives` lists what can |
 | `InvalidDepthError` | a source or receiver depth outside what the engine resolves |
 | `ExecutableNotFoundError` | a binary is absent or present but not runnable (`reason=`) |
 | `ModelExecutionError` | a binary failed, timed out or never launched; keeps `stdout` / `stderr` / `return_code` |
-| `FileFormatError` | a file an engine should have written is absent, truncated or malformed |
+| `FileFormatError` | a file is truncated or malformed |
 | `OutputContractError` | an engine's result is not what its `outputs` declaration states: a defect in the engine wrapper, never in the call |
 | `DataFetchError` | the data layer cannot supply a value at a location, whatever the cause |
 
@@ -977,12 +992,12 @@ warn alike and `validate_inputs()` stays silent.
 These are orthogonal to the model layer. They consume `Result`
 objects (typically `Field`) or raw arrays.
 
-**Five modules, one question each.** The package re-exports every name flat
-(`uacpy.acoustic_signal.welch`), so these boundaries are for maintainers, not
-callers:
+**Five questions, one or more modules each** (the five in italics below). The
+package re-exports every name flat (`uacpy.acoustic_signal.welch`), so these
+boundaries are for maintainers, not callers:
 
 - `acoustic_signal/generate.py` — *give me a signal*: parametric waveforms
-  (Ricker, Gaussian, M-wave, chirps — the same alphabet as AT `cans.f90`
+  (Ricker, Gaussian, N-wave, the 'M' "Miracle wave", chirps — the same alphabet as AT `cans.f90`
   where possible), coded sequences (m-sequences, BPSK probes) and noise built
   to a target spectrum.
 - `acoustic_signal/spectral.py` — *measure this signal*: one estimator per
@@ -1039,15 +1054,17 @@ plotting lives in `uacpy.visualization.plots`**, reached as `uacpy.plot`
   the plotter its class names in `_plotter` (`_draws_env` says whether that
   view takes `env=`; `Field._plotter_name()` picks among a field's views by
   what it holds: one panel per source depth, the track plan view, the sonar
-  maps, the ambiguity surface): `plot_result(result, env=…)` for a result, to
-  the private per-type renderers (`_plot_rays`, `_plot_arrivals`,
-  `_plot_mode_functions`, …), and `plot_carrier(carrier)` for a carrier, to
+  maps, the difference map, the ambiguity surface): `plot_result(result,
+  env=…)` for a result, to the public per-type renderers (`plot_rays`,
+  `plot_arrivals`, `plot_mode_shapes`, …; a Field's two through their
+  labelled twins `_plot_field_as` / `_plot_source_depth_panels`, whose
+  refusals name the call made), and `plot_carrier(carrier)` for a carrier, to
   the public `plot_environment`, `plot_ssp`, `plot_range_profile` and
   `plot_absorption`; a signal result's `.plot()` calls its plotter
   directly. Public free functions remain
   for the grid/flexible renderers (`plot_field`, `plot_transfer_function`,
   `plot_impulse_response`), alternate views
-  (`plot_bottom_properties`, `plot_bottom_loss`, `plot_mode_wavenumbers`,
+  (`plot_bottom_properties`, `plot_mode_wavenumbers`,
   `plot_modes_heatmap`, `plot_beam_power`),
   composition (`compare`, `compare_models`, `plot_overview`, maps), and the
   raw-array DSP/comms plotters.
@@ -1120,7 +1137,7 @@ downloaded by `install.sh --data`, `*_live.py` calls a web service:
   `fetch_bathy_grid`): the installed GEBCO grid first, else GEBCO via
   OpenTopoData; GMRT and the EMODnet DTM live.
 - `sound_speed.py` — WOA23 (`fetch_ssp`, `fetch_ssp_transect`, `fetch_ts_profile`)
-  + the shared `assemble_range_dependent(columns, ranges)` helper.
+  + the private `_assemble_range_dependent(columns, ranges)` helper both transect fetchers share.
 - `copernicus.py` — Copernicus Marine operational SSP (`copernicusmarine` is an
   optional extra, `pip install -e ".[copernicus]"`, lazy-imported; needs a free
   Copernicus account + `copernicusmarine login`).
@@ -1453,9 +1470,11 @@ Worth knowing:
 - Promote any new "magic number" to a named constant in the module of its
   owner (`core/constants.py` only for the physics reference every layer
   reads).
-- Default to writing no comments. Only add one when the *why* is
-  non-obvious (a hidden invariant, a workaround for a specific bug,
-  behavior that would surprise a reader). Do **not** comment on code
+- Comments state what the code does, in the form "<what it does>
+  (<constraint or reason>)", and add the *why* when it is non-obvious (a
+  hidden invariant, a workaround for a specific bug, behavior that would
+  surprise a reader). When code moves into a shared helper, keep a comment
+  at the call site saying what happens there. Do **not** comment on code
   evolution ("this replaces the old…", "after the fix…"). Do **not**
   pin to current line numbers in nearby files; cite source-of-truth
   files (`AttenMod.f90:78`) instead.
@@ -1483,6 +1502,9 @@ Worth knowing:
     citations it skipped as external or as ambiguous (a bare basename
     shipping twice, e.g. `sspMod.f90`) so the gate's coverage stays
     visible.
+  - `external:` marks source code only. A literature citation names the
+    work — author, year, title, section or equation — and nothing about
+    where the work was read.
 - A leading underscore means **not public API** — it does not mean
   module-private. Underscore-prefixed names are imported across *package*
   boundaries in several directions, and each such import is a deliberate
@@ -1622,7 +1644,7 @@ step is skipped.
    the change is meant. uacpy reads only records this version writes, so no
    default is needed for a record saved before the field existed.
 4. Spell it by the house rules: `<quantity>_max` / `_min`, `dB` never `db`,
-   `_mps` for m/s and `_s` for seconds, a default equal to a package constant
+   a unit suffix from §10's list (`_s` for seconds, …), a default equal to a package constant
    written as that constant (`tests/test_harmonisation_gates.py`,
    `tests/test_architecture.py`). The deck writer that carries it takes a
    parameter of the same name and no default of its own.
@@ -1678,11 +1700,15 @@ and take the change of default as its own decision.
    listing every array field in `_ARRAY_FIELDS` and any tabular ones in
    `_TABLE_FIELDS`. `TestEveryRecordFreezesEveryArrayField` finds every
    record subclass by itself.
-3. A file an engine should have written and did not is a `FileFormatError`; a
-   file the user named is a `ConfigurationError`. Decorate the reader with
-   `@typed_format_error` and start it with `require_model_output(path,
-   name)` or `require_user_input(path, name)` (all three in
-   `io/_fortran_helpers.py`), which raise the right one. Add the reader to
+3. A path that names no file is a `MissingFileError` (a `ConfigurationError`
+   and a `FileNotFoundError`), whoever should have written it. Decorate the
+   reader with `@typed_format_error` and start it with
+   `require_model_output(path, name)` (an engine's output: the remediation
+   says the run may have failed) or `require_user_input(path, name)` (a file
+   the user writes), all three in `io/_fortran_helpers.py`; where the reason
+   a run writes no such file is known, raise the `MissingFileError` with a
+   remediation that names it instead (the OASES readers name the option
+   letter, `parse_oasp_trf` the run's stdout). Add the reader to
    `_model_output_readers()` or `_user_input_readers()` in
    `tests/test_exceptions.py`;
    `test_every_public_reader_states_what_an_absent_file_is` fails until every

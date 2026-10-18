@@ -168,7 +168,7 @@ class TestCepstralLifterMask:
         c = np.arange(1.0, 9.0)
         np.testing.assert_allclose(_apply_lifter(c, 2.0 * np.ones(8)),
                                    2.0 * c, rtol=0)
-        with pytest.raises(ConfigurationError, match="must match"):
+        with pytest.raises(ConfigurationError, match="must be one weight per quefrency"):
             _apply_lifter(c, np.ones(7))
 
 

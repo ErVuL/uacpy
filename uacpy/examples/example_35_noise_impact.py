@@ -19,27 +19,26 @@ Thorp.table · plot_source_level · plot_weighting
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.acoustics import sound_speed_unesco, sum_levels_dB
 from uacpy.acoustic_signal import decidecade_bands
-from uacpy.noise import (apply_weighting, monopole_source_level,
+from uacpy.noise import (apply_weighting, auditory_weighting,
+                         monopole_source_level,
                          nominal_source_depth, radiated_noise_level)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
 OUT.mkdir(parents=True, exist_ok=True)
 
-temperature, salinity, depth_m = 12.0, 35.0, 50.0
-sound_speed = sound_speed_unesco(temperature, salinity, depth=depth_m)
+temperature, salinity, depth = 12.0, 35.0, 50.0
+sound_speed = sound_speed_unesco(temperature, salinity, depth=depth)
 _, band_centers, _ = decidecade_bands(10, 25000)
 print(f"  site c (UNESCO, {temperature}°C, S={salinity}, "
-      f"{depth_m:.0f} m): {sound_speed:.2f} m/s")
+      f"{depth:.0f} m): {sound_speed:.2f} m/s")
 
 # A merchant ship: a typical measured received spectrum at the ISO 17208
 # geometry, back to radiated noise, then to an equivalent monopole.
@@ -64,7 +63,7 @@ print(f"  received level at {range_m / 1000:.0f} km: "
       f"{received.max():.1f} dB re 1 µPa (band peak)")
 
 groups = {"LF": "baleen whale", "VHF": "harbour porpoise"}
-weighted = {group: apply_weighting(received, frequency=band_centers, group=group)
+weighted = {group: apply_weighting(received, frequency=band_centers, weighting=group)
             for group in groups}
 # Southall et al. (2019) state non-impulsive criteria as weighted SEL; a
 # level held for T seconds has SEL = level + 10·log10(T / 1 s) (ISO 18405).
@@ -82,7 +81,11 @@ axes[0, 0].semilogx(band_centers, radiated, "--", color="gray",
                     label="RNL (measured)")
 axes[0, 0].legend()
 
-uacpy.plot.plot_weighting(list(groups), ax=axes[0, 1])
+f_weighting = np.logspace(1.0, 5.5, 400)
+for group in groups:
+    uacpy.plot.plot_weighting(f_weighting,
+                              auditory_weighting(f_weighting, group),
+                              ax=axes[0, 1], label=group)
 
 axes[1, 0].semilogx(band_centers, received, "k-", label="unweighted RL @ 2 km")
 for group, animal in groups.items():

@@ -15,7 +15,9 @@ fetch it from one or more **sources**
 (``ssp_sources`` / ``bathymetry_sources`` / ``bottom_sources`` /
 ``surface_sources``). If both are given for an axis the source is fetched first
 and the literal is the **fallback** when the fetch yields nothing (no coverage,
-service down). ``*_sources`` are ordered fallback lists (a bare string is a
+service down, no installed cache), announced by a ``FallbackWarning`` naming
+why. A source asked for without an argument it needs (``date=``,
+``transect_to=``) is refused whether or not a literal is given. ``*_sources`` are ordered fallback lists (a bare string is a
 1-element list, ``'auto'`` the best-available preset, ``'local'`` the
 best-available *cached* source — local data only, no network); bathymetry and
 SSP default to fetching ``'gebco'`` / ``'woa23'`` when neither form is given,
@@ -52,25 +54,28 @@ from uacpy.core.exceptions import (
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.geo import Coordinate, as_coordinate, great_circle_km
 from uacpy.data._geo import (
-    DEFAULT_MAX_TRANSECT_POINTS, checked_max_days, checked_max_distance,
-    checked_offset, mid_depth,
+    checked_explicit_n_points, checked_max_days, checked_max_distance,
+    checked_max_points, checked_n_points, checked_offset, mid_depth,
 )
 from uacpy.core.acoustics.seawater import pressure_dbar_to_depth
-from uacpy.data._chain import first_answer, lower_source_spec, source_tuple
+from uacpy.data._chain import (MissingPrerequisiteError, first_answer,
+                               lower_source_spec, source_tuple)
 from uacpy.data.bathymetry import (
     _refuse_a_dry_point, _bathymetry_vintage,
     _BATHY_CHAIN, transect_length,
 )
 from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
-                                 canonical_grain_size_selection)
-from uacpy.data.sediment import (bottom_from_class, bottom_from_grain_size,
-                                  transect_fetcher)
+                                 _canonical_grain_size_selection)
+from uacpy.data.sediment import transect_fetcher
+from uacpy.data.seaice_local import SEA_ICE_EDGE_CONCENTRATION
 from uacpy.data.sound_speed import (
     DEFAULT_SOUND_SPEED_FORMULA, _SSP_CHAIN, _fetch_ts_profile_backend,
     extend_ssp_below_data, fetch_ssp, fetch_ts_profile,
 )
 from uacpy.data.sources import SOURCES, DataProvenance
-from uacpy.data._provenance_notice import (one_provenance_notice,
+from uacpy.data._provenance_notice import (licence_notice_text,
+                                           one_provenance_notice,
+                                           provenance_fallback,
                                            provenance_notice)
 
 __all__ = ['fetch_environment', 'fetch_bottom', 'fetch_bottom_transect']
@@ -136,17 +141,18 @@ def fetch_environment(
     bottom_hamilton_fit: Optional[str] = None,
     surface: Optional[BoundaryProperties] = None,
     surface_sources: Union[str, Sequence[str], None] = None,
+    surface_threshold: Optional[float] = None,
     altimetry=None,
     altimetry_sources: Optional[str] = None,
     altimetry_n_points: Optional[int] = None,
     altimetry_rng: Optional[np.random.Generator] = None,
     transect_to: Optional[Coordinate] = None,
-    n_points: Union[int, str] = 50,
-    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    n_points: Union[int, str, None] = None,
+    max_points: Optional[int] = None,
     range_dependent_ssp: Optional[bool] = None,
     ssp_n_points: Union[int, str] = 'auto',
     range_dependent_bottom: Optional[bool] = None,
-    bottom_n_points: Union[int, str] = 6,
+    bottom_n_points: Union[int, str, None] = None,
     range_dependent_surface: Optional[bool] = None,
     surface_n_points: Union[int, str] = 'auto',
     with_absorption: bool = False,
@@ -171,7 +177,7 @@ def fetch_environment(
     ssp : SoundSpeedProfile or float or sequence, optional
         A **literal** sound-speed profile supplied directly (same forms as
         :class:`Environment`'s ``ssp=``: a ``SoundSpeedProfile``, a scalar c in
-        m/s → isovelocity, or ``(depth_m, c_m_per_s)`` pairs). If ``ssp_sources``
+        m/s → isovelocity, or ``(depth, c_m_per_s)`` pairs). If ``ssp_sources``
         is *also* given, the source is fetched first and this literal is the
         **fallback** when the fetch yields nothing; on its own, SSP is not
         fetched at all. A literal is not deepened: one that stops above the
@@ -193,7 +199,7 @@ def fetch_environment(
         else WOA23.
     bathymetry : float or array, optional
         A **literal** depth (m, scalar) or range-dependent ``(N, 2)``
-        ``(range_m, depth_m)`` array — depth positive down — supplied directly.
+        ``(range, depth)`` array — depth positive down — supplied directly.
         If ``bathymetry_sources`` is *also* given, the source is fetched first
         and this literal is the **fallback**; on its own, bathymetry is not
         fetched.
@@ -217,7 +223,8 @@ def fetch_environment(
         ``bottom_sources`` — which is why the two are separate args.)
 
         A class name is the material's **fluid** preset, as ``Environment``
-        reads it (pass ``bottom_from_class(name)`` for the elastic one). A
+        reads it (pass ``BoundaryProperties.from_preset(name, elastic=True)``
+        for the elastic one). A
         number is a grain size, not the half-space sound speed
         ``Environment(bottom=1800)`` reads: a number with ``|ϕ| > 20`` (a
         grain coarser than 1 km or finer than 1 nm) is refused as a likely
@@ -266,12 +273,10 @@ def fetch_environment(
         same seabed the high-frequency scattering models in
         :mod:`uacpy.sonar` are built on (``BottomParameters.from_environment``
         reads it back). Both scale the sediment SOUND SPEED to the in-situ
-        water at the seafloor; the DENSITY ratio is carried against
-        ``DEFAULT_WATER_DENSITY_G_CM3`` (1.027 g/cm³), while the deck's water
-        density is the fetched IES-80 value when absorption is fetched, so the
-        seabed/water density ratio the deck sees is off the published one by
-        1.027/rho_w (+0.4 % in 25 degC surface water, about 0.03 dB of bottom
-        loss). A
+        water at the seafloor and carry the DENSITY ratio against the water
+        density the deck carries: the site's IES-80 value when
+        ``with_absorption`` fetches the T/S column, else
+        ``DEFAULT_WATER_DENSITY_G_CM3`` (1.027 g/cm³). A
         class-name literal, a ``BoundaryProperties`` and the hard-substrate
         presets some sources return (EMODnet rock, DECK41 ``'rock'``) carry
         their own numbers and are not affected. See
@@ -281,12 +286,19 @@ def fetch_environment(
         ``(lat, lon)`` to here (range-dependent); otherwise a single depth.
     n_points : int or 'auto', optional
         Bathymetry transect sample count (used only with ``transect_to``).
-        Default 50. ``'auto'`` targets GEBCO native resolution (bathymetry is
-        continuous, so it is not duplicate-collapsed), bounded by ``max_points``.
+        An int is used as given; ``None`` (default) is 50 (uacpy guidance),
+        within ``max_points`` when that is set. ``'auto'`` targets GEBCO
+        native resolution (bathymetry is continuous, so it is not
+        duplicate-collapsed), bounded by ``max_points``.
     max_points : int, optional
-        Ceiling on the points sampled along a transect *before* the ``'auto'``
-        reduction — the fetch budget; the reduced grid is never larger. Default
-        1000. Applies to bathymetry, SSP, and bottom transects.
+        The sampling budget of the bathymetry, SSP, bottom and surface
+        transects: the points an ``'auto'`` count samples *before* its
+        reduction (the reduced grid is never larger), and the ceiling of an
+        unset count. ``None`` (default) is 1000 for ``'auto'`` (uacpy
+        guidance). An explicit count (``n_points``, ``ssp_n_points``,
+        ``bottom_n_points``, ``surface_n_points``) is used as given, and
+        refused when it exceeds an explicit ``max_points`` (the two
+        contradict each other).
     range_dependent_ssp : bool, optional
         Whether the SSP varies along the transect. **Default (``None``): a
         transect makes the SSP range-dependent** (a single point is always
@@ -297,13 +309,12 @@ def fetch_environment(
         next source on a transect.
     ssp_n_points : int or 'auto', optional
         SSP columns along the transect when ``range_dependent_ssp``. Default
-        ``'auto'``: the transect is sampled at the **distinct WOA23 cells** it
-        crosses (one column per cell — WOA's native range resolution, found
-        analytically so no duplicate column is fetched), capped at
-        ``max_points``. For the Copernicus source, which exposes no cheap cell
-        identity, ``'auto'`` maps to 6 evenly-spaced columns (capped at
-        ``max_points``). Pass an int for exactly that many evenly-spaced
-        columns.
+        ``'auto'``: the transect is sampled at the **distinct grid cells** it
+        crosses (one column per cell — the source's native range resolution,
+        so no duplicate column is fetched), probing ``max_points`` waypoints:
+        the WOA23 cells found analytically, the Copernicus 1/12° cells from
+        the dataset's own axes (each column one remote read). Pass an int for
+        exactly that many evenly-spaced columns.
     range_dependent_bottom : bool, optional
         Whether a fetched seafloor varies along the transect. A bottom is fetched
         only when requested (``bottom_sources=`` given, or this flag ``True``).
@@ -318,7 +329,8 @@ def fetch_environment(
         covered waypoint's seabed, with a warning.
     bottom_n_points : int or 'auto', optional
         Seabed samples along the transect when ``range_dependent_bottom``.
-        Default 6 (explicit) — unlike SSP, the bottom sources expose no cheap
+        ``None`` (default) is 6 (uacpy guidance), within ``max_points`` when
+        that is set — unlike SSP, the bottom sources expose no cheap
         sample identity, so ``'auto'`` must *fetch* at every probe point (cheap
         for the local sample DBs, but up to ``max_points`` live calls for the
         EMODnet WFS). Opt into ``'auto'`` for native resolution on local sources.
@@ -337,8 +349,8 @@ def fetch_environment(
         Default ``'auto'``: probe the local NSIDC grid (cheap) and collapse
         each run of identical ice/open-water zones to the samples bracketing
         its edges (the marginal ice zone at native scale, each edge within one
-        probe step, no staircase), capped at ``max_points``. Pass an int for
-        exactly that many waypoints.
+        probe step, no staircase), probing ``max_points`` waypoints. Pass an
+        int for exactly that many waypoints.
     surface : BoundaryProperties, optional
         A **literal** top-boundary override supplied directly (e.g. a custom ice
         canopy). If ``surface_sources`` is *also* given, the source is fetched
@@ -350,7 +362,7 @@ def fetch_environment(
         ``'local'`` both == ``('seaice',)``): requires ``date=`` and
         the cached ``seaice`` climatology (``install.sh --data seaice``), and
         sets the surface from the NSIDC concentration at the point for
-        ``date``'s month — an ice-covered point (≥15 %, the NSIDC ice-edge) gets
+        ``date``'s month — an ice-covered point (≥ ``surface_threshold``) gets
         a homogeneous elastic ice canopy (cp 3500 m/s, cs 1800 m/s, ρ 0.9 g/cm³,
         αp/αs 0.4/1.0 dB/λ — *Computational Ocean Acoustics*); open water keeps
         the default free surface (no provenance). The canopy is an elastic
@@ -366,8 +378,17 @@ def fetch_environment(
         :func:`uacpy.data.sea_ice_surface`); a site roughness needs an
         explicit ``surface=`` literal, e.g. built with
         ``sea_ice_surface(conc, roughness=...)``.
+    surface_threshold : float, optional
+        The lowest sea-ice concentration (a fraction 0-1) a fetched surface
+        takes as ice cover, at the point and at every transect waypoint.
+        ``None`` (default) is 0.15: NSIDC's ice edge for its extent
+        statistics (Sea Ice Index G02135 user guide), used as the acoustic
+        switch as uacpy guidance — no acoustic source sets a concentration
+        bound (Etter §2.4.2 separates pack ice, the marginal ice zone and open
+        ocean with none). A set value with no sea-ice surface fetched gives a
+        ``FallbackWarning`` that it was not used.
     altimetry : array-like, optional
-        A **literal** rough-surface wave profile ``[(range_m, height_m), …]``
+        A **literal** rough-surface wave profile ``[(range, height), …]``
         (height positive up; same as :class:`Environment`'s ``altimetry=``).
         If ``altimetry_sources`` is *also* given, the source is fetched first and
         this is the **fallback**. Default ``None`` (flat).
@@ -414,7 +435,8 @@ def fetch_environment(
         levels, when installed (``install.sh --data glodap``); one value at
         the column's mid-depth from Copernicus BGC on that branch; else the
         reference-water default (8.0). The water density is the mid-depth
-        row's.
+        row's, and every grain-size seabed (fetched or a ϕ literal) is
+        converted against it.
         Default ``False``: ``env.absorption`` is ``None``, lossless water.
     max_distance_km : float, optional
         Largest offset (km) between ``point`` (each waypoint, on a transect)
@@ -471,14 +493,21 @@ def fetch_environment(
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_environment')
     if max_days is not None:
         max_days = checked_max_days(max_days, 'fetch_environment')
+    if transect_to is not None:
+        _check_transect_counts(max_points, n_points=n_points,
+                               ssp_n_points=ssp_n_points,
+                               bottom_n_points=bottom_n_points,
+                               surface_n_points=surface_n_points)
     ssp_sources, bathymetry_sources, bottom_sources, surface_sources = (
         _checked_source_specs(ssp=ssp_sources, bathymetry=bathymetry_sources,
                               bottom=bottom_sources, surface=surface_sources))
-    bottom_model, bottom_hamilton_fit = canonical_grain_size_selection(
+    bottom_model, bottom_hamilton_fit = _canonical_grain_size_selection(
         bottom_model, bottom_hamilton_fit, who='fetch_environment',
         model_argument='bottom_model',
         environment_argument='bottom_hamilton_fit')
     _check_bottom_literal(bottom)
+    surface_threshold = _checked_surface_threshold(
+        surface_threshold, surface_sources, range_dependent_surface)
 
     # Each axis is a literal (ssp=/bathymetry=/bottom=) and/or fetched from
     # source(s) (*_sources). When both are given the source is fetched first and
@@ -500,11 +529,12 @@ def fetch_environment(
         where=(point,) if transect_to is None else (point, transect_to),
         request=dict(n_points=n_points, max_points=max_points,
                      timeout=timeout, verbose=verbose),
-        fallback_warning=None if transect_to is None else (
-            "fetch_environment: range-dependent bathymetry fetch failed "
-            "({exc}); falling back to the supplied bathymetry= literal. A "
-            "range-independent literal reduces the transect to a single "
-            "depth."))
+        fallback_warning=(
+            "fetch_environment: bathymetry fetch failed ({exc}); falling "
+            "back to the supplied bathymetry= literal." + (
+                "" if transect_to is None else
+                " A range-independent literal reduces the transect to a "
+                "single depth.")))
 
     plan = _resolve_range_dependence(
         transect_to, ssp=range_dependent_ssp, bottom=range_dependent_bottom,
@@ -524,19 +554,33 @@ def fetch_environment(
                      max_distance_km=max_distance_km, max_days=max_days,
                      n_points=ssp_n_points, max_points=max_points,
                      seafloor=seafloor, timeout=timeout, verbose=verbose),
-        fallback_warning=None if not plan.rd_ssp else (
-            "fetch_environment: range-dependent SSP fetch failed ({exc}); "
-            "falling back to the supplied ssp= literal. A single-profile "
-            "literal reduces the transect to range-independent."))
+        fallback_warning=(
+            "fetch_environment: SSP fetch failed ({exc}); falling back to the "
+            "supplied ssp= literal." + (
+                "" if not plan.rd_ssp else
+                " A single-profile literal reduces the transect to "
+                "range-independent.")))
     ssp = _reconcile_ssp(
         fetched_ssp, seafloor, bathy, point, date=date, formula=formula,
         resolution=resolution, max_distance_km=max_distance_km,
         timeout=timeout, verbose=verbose)
 
+    # ── Absorption (optional): the site's T/S column, whose water density
+    # the grain-size seabed is converted against, so it precedes the bottom ──
+    absorption = (_fetch_absorption(
+        point, date=date, ssp_source=fetched_ssp.source,
+        ssp_backend=fetched_ssp.backend,
+        cache_only=fetched_ssp.cache_only, resolution=resolution,
+        max_distance_km=max_distance_km, max_days=max_days,
+        timeout=timeout, verbose=verbose) if with_absorption
+        else (None, None, None))
+    water_density = _site_water_density(absorption[0])
+
     # ── Bottom (optional): fetch from bottom_sources / 'auto', else literal ──
     bottom_props, bottom_kw = _fetch_bottom_axis(
         plan, bottom, bottom_sources, ssp, seafloor, point, transect_to,
         model=bottom_model, hamilton_fit=bottom_hamilton_fit,
+        water_density=water_density,
         max_distance_km=max_distance_km, n_points=bottom_n_points,
         max_points=max_points, timeout=timeout, verbose=verbose)
 
@@ -544,7 +588,7 @@ def fetch_environment(
     surface_props, surface_src = _fetch_surface_axis(
         plan, surface, surface_sources, point, transect_to, date=date,
         n_points=surface_n_points, max_points=max_points,
-        max_distance_km=max_distance_km)
+        threshold=surface_threshold, max_distance_km=max_distance_km)
 
     # ── Altimetry (sea surface, optional): fetch a wave/wind-driven surface ──
     altimetry_result = _fetch_altimetry_axis(
@@ -557,9 +601,48 @@ def fetch_environment(
         bottom_props=bottom_props, bottom_kw=bottom_kw,
         surface_props=surface_props, surface_src=surface_src,
         altimetry=altimetry_result, bathy_src=bathy.source,
-        fetched_ssp=fetched_ssp, with_absorption=with_absorption,
-        resolution=resolution, max_distance_km=max_distance_km,
-        max_days=max_days, timeout=timeout, verbose=verbose)
+        ssp_src=fetched_ssp.source, absorption=absorption,
+        water_density=water_density)
+
+
+def _checked_surface_threshold(threshold, surface_sources,
+                               range_dependent_surface):
+    """``surface_threshold`` as the fetched surface takes it: ``None`` →
+    :data:`~uacpy.data.seaice_local.SEA_ICE_EDGE_CONCENTRATION`; a fraction
+    outside [0, 1] refused; a set value with no sea-ice surface fetched
+    announced as unused."""
+    if threshold is None:
+        return SEA_ICE_EDGE_CONCENTRATION
+    if not (isinstance(threshold, (int, float, np.integer, np.floating))
+            and not isinstance(threshold, bool)
+            and np.isfinite(threshold) and 0.0 <= threshold <= 1.0):
+        raise ConfigurationError(
+            f"fetch_environment: surface_threshold={threshold!r} is not a "
+            f"concentration fraction in [0, 1].",
+            remediation="Pass the lowest ice concentration taken as ice "
+                        "cover as a fraction, e.g. 0.15 for 15 %.")
+    if surface_sources is None and range_dependent_surface is not True:
+        warnings.warn(
+            f"fetch_environment: surface_threshold={threshold} was not used: "
+            f"no sea-ice surface is fetched. Pass surface_sources='seaice' to "
+            f"fetch one, or drop the argument.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return float(threshold)
+
+
+def _check_transect_counts(max_points, **counts):
+    """Refuse an invalid transect count, or one above an explicit
+    ``max_points``, before any axis fetches — a ``*=`` literal stands in for
+    data a valid request could not get, never for a refused argument."""
+    max_points = checked_max_points(max_points, 'fetch_environment')
+    for name, count in counts.items():
+        if count is None:
+            continue                 # unset: the fetcher's default, budgeted
+        count = checked_n_points(count, 'fetch_environment', allow_auto=True,
+                                 name=name)
+        if count != 'auto':
+            checked_explicit_n_points(count, max_points, 'fetch_environment',
+                                      name=name)
 
 
 def _checked_source_specs(**specs):
@@ -606,14 +689,16 @@ def _chain_call(chain, where, request):
 
 
 def _fetch_chain_axis(chain, spec, literal, *, default, where, request,
-                      force_default=False, fallback_warning=None):
+                      fallback_warning, force_default=False):
     """Resolve a mandatory chained axis (bathymetry, SSP).
 
     ``spec`` (a ``*_sources`` value) is fetched through ``chain``; without
     one, ``default`` is fetched when there is no ``literal`` (or when
     ``force_default``), else the literal is used as given. A failed fetch
-    falls back to the literal, warning ``fallback_warning`` (formatted with
-    the failure as ``exc``) when one is given; with no literal the failure
+    falls back to the literal with a ``FallbackWarning``,
+    ``fallback_warning`` formatted with the failure as ``exc``, so the
+    literal never stands in for requested data unannounced; with no literal,
+    or when the failure is a :class:`MissingPrerequisiteError`, the failure
     propagates.
     """
     cache_only = False
@@ -628,11 +713,10 @@ def _fetch_chain_axis(chain, spec, literal, *, default, where, request,
         value, (src, backend) = _resolve_cached(
             _chain_call(chain, where, request), order, axis=chain.axis)
     except (DataFetchError, ConfigurationError) as exc:
-        if literal is None:
+        if literal is None or isinstance(exc, MissingPrerequisiteError):
             raise
-        if fallback_warning is not None:
-            warnings.warn(fallback_warning.format(exc=exc),
-                          FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        warnings.warn(fallback_warning.format(exc=exc),
+                      FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
         return _AxisFetch(literal, None, None, cache_only, False)
     return _AxisFetch(value, src, backend, cache_only, True)
 
@@ -716,16 +800,20 @@ def _reconcile_ssp(fetched_ssp, seafloor, bathy, point, *, date, formula,
 
 
 def _fetch_bottom_axis(plan, bottom, bottom_sources, ssp, seafloor, point,
-                       transect_to, *, model, hamilton_fit, max_distance_km,
-                       n_points, max_points, timeout, verbose):
+                       transect_to, *, model, hamilton_fit, water_density,
+                       max_distance_km, n_points, max_points, timeout,
+                       verbose):
     """``(bottom, source id)``: fetched from ``bottom_sources`` / ``'auto'``
     when asked, else the ``bottom=`` literal, else ``(None, None)`` with a
-    warning (the hamilton_fit then takes its generic half-space)."""
+    warning (the hamilton_fit then takes its generic half-space). A grain
+    size is converted against ``water_density`` (``None``: the package's
+    one water)."""
     lat, lon = as_coordinate(point)
     if not plan.want_bottom:
         if bottom is not None:
             return _resolve_bottom(
                 bottom, water_sound_speed=_seabed_sound_speed(ssp, seafloor),
+                water_density=water_density,
                 model=model, hamilton_fit=hamilton_fit), None
         # The seabed is opt-in; without either argument the Environment takes
         # its generic half-space, which is no data and carries no provenance.
@@ -752,6 +840,7 @@ def _fetch_bottom_axis(plan, bottom, bottom_sources, ssp, seafloor, point,
                 water_sound_speed=_seabed_sound_speed_along(
                     ssp, seafloor, (lat, lon)),
                 depth=_seabed_depth_along(seafloor, (lat, lon)),
+                water_density=water_density,
                 model=model, hamilton_fit=hamilton_fit,
                 max_distance_km=max_distance_km,
                 n_points=n_points, max_points=max_points,
@@ -759,7 +848,7 @@ def _fetch_bottom_axis(plan, bottom, bottom_sources, ssp, seafloor, point,
             )
         return _fetch_bottom(
             order, point, transect=False, cache_only=cache_only,
-            water_sound_speed=water_c,
+            water_sound_speed=water_c, water_density=water_density,
             depth=float(seafloor.eval(range=0.0)),
             model=model, hamilton_fit=hamilton_fit,
             max_distance_km=max_distance_km,
@@ -768,22 +857,21 @@ def _fetch_bottom_axis(plan, bottom, bottom_sources, ssp, seafloor, point,
     except (DataFetchError, ConfigurationError) as exc:
         if bottom is None:
             raise
-        if plan.rd_bottom:
-            uniform = ("" if isinstance(bottom, Bottom) else
-                       " A uniform literal makes the bottom "
-                       "range-independent.")
-            warnings.warn(
-                f"fetch_environment: range-dependent bottom fetch failed "
-                f"({exc}); falling back to the supplied bottom= "
-                f"literal.{uniform}",
-                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        uniform = ("" if not plan.rd_bottom or isinstance(bottom, Bottom)
+                   else " A uniform literal makes the bottom "
+                        "range-independent.")
+        warnings.warn(
+            f"fetch_environment: bottom fetch failed ({exc}); falling back "
+            f"to the supplied bottom= literal.{uniform}",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
         return _resolve_bottom(  # fall back to the literal
-            bottom, water_sound_speed=water_c, model=model,
-            hamilton_fit=hamilton_fit), None
+            bottom, water_sound_speed=water_c, water_density=water_density,
+            model=model, hamilton_fit=hamilton_fit), None
 
 
 def _fetch_surface_axis(plan, surface, surface_sources, point, transect_to,
-                        *, date, n_points, max_points, max_distance_km=None):
+                        *, date, n_points, max_points, threshold,
+                        max_distance_km=None):
     """``(surface, source id)``: NSIDC sea ice when asked, else the
     ``surface=`` literal.
 
@@ -805,22 +893,22 @@ def _fetch_surface_axis(plan, surface, surface_sources, point, transect_to,
                 f"fetch_environment: unknown surface source {s!r}.",
                 remediation="Use 'seaice' or 'auto'.",
             )
-    # The date guard sits inside the try so a supplied surface= literal is
-    # the fallback for a missing date, like any other fetch failure.
+    # A missing date is the caller's input, not a failed fetch: no
+    # surface= literal stands in for it.
+    if date is None:
+        raise MissingPrerequisiteError(
+            "fetch_environment: surface_sources='seaice' needs date= to "
+            "pick the climatological sea-ice month.",
+            remediation="Pass date='YYYY-MM-DD', or drop surface_sources= "
+                        "(a surface= literal is then used as given).",
+        )
     try:
-        if date is None:
-            raise ConfigurationError(
-                "fetch_environment: surface_sources='seaice' needs date= to "
-                "pick the climatological sea-ice month.",
-                remediation="Pass date='YYYY-MM-DD', or supply surface= / "
-                            "drop it.",
-            )
         if plan.rd_surface:
             from uacpy.data.seaice_local import sea_ice_surface_transect
             fetched = sea_ice_surface_transect(
                 point, transect_to, date=date,
                 n_points=n_points, max_points=max_points,
-                max_distance_km=max_distance_km)
+                threshold=threshold, max_distance_km=max_distance_km)
             # A transect that is open water everywhere → leave the default
             # free surface (no provenance), matching the point case.
             if fetched.is_elastic:
@@ -828,13 +916,18 @@ def _fetch_surface_axis(plan, surface, surface_sources, point, transect_to,
         else:
             from uacpy.data.seaice_local import fetch_sea_ice_surface
             fetched = fetch_sea_ice_surface(point, date=date,
+                                            threshold=threshold,
                                             max_distance_km=max_distance_km)
             if fetched is not None:                 # None = open water
                 return fetched, 'seaice'
-    except (DataFetchError, ConfigurationError):
+    except (DataFetchError, ConfigurationError) as exc:
         if surface is None:
             raise
-        return surface, None                        # literal fallback
+        warnings.warn(
+            f"fetch_environment: sea-ice surface fetch failed ({exc}); "
+            f"falling back to the supplied surface= literal.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        return surface, None
     return None, None
 
 
@@ -850,39 +943,54 @@ def _fetch_altimetry_axis(altimetry, altimetry_sources, site, transect_to,
     if altimetry_sources is None:
         return altimetry
     from uacpy.data.sea_surface import fetch_sea_surface
-    # The transect/date guards sit inside the try so a supplied altimetry=
-    # literal is the fallback for a missing prerequisite, like any other
-    # fetch failure.
+    # A missing transect or date is the caller's input, not a failed fetch:
+    # no altimetry= literal stands in for it.
+    if transect_to is None:
+        raise MissingPrerequisiteError(
+            "fetch_environment: altimetry_sources requires transect_to= "
+            "(the sea-surface realization spans the transect range).",
+            remediation="Pass transect_to=(lat, lon), or drop "
+                        "altimetry_sources= (an altimetry= literal is then "
+                        "used as given).")
+    if date is None:
+        raise MissingPrerequisiteError(
+            "fetch_environment: altimetry_sources needs date= (sea "
+            "state is time-specific).",
+            remediation="Pass date='YYYY-MM-DD'.")
     try:
-        if transect_to is None:
-            raise ConfigurationError(
-                "fetch_environment: altimetry_sources requires transect_to= "
-                "(the sea-surface realization spans the transect range).",
-                remediation="Pass transect_to=(lat, lon), or supply "
-                            "altimetry= directly for a single point.")
-        if date is None:
-            raise ConfigurationError(
-                "fetch_environment: altimetry_sources needs date= (sea "
-                "state is time-specific).",
-                remediation="Pass date='YYYY-MM-DD'.")
         return fetch_sea_surface(
             site, date=date,
-            rmax_m=transect_length(site, transect_to),
+            rmax=transect_length(site, transect_to),
             n_points=n_points, rng=rng,
             source=altimetry_sources, max_days=max_days,
             max_distance_km=max_distance_km, timeout=timeout, verbose=verbose)
-    except (DataFetchError, ConfigurationError):
+    except (DataFetchError, ConfigurationError) as exc:
         if altimetry is None:
             raise
-        return altimetry                            # literal fallback
+        warnings.warn(
+            f"fetch_environment: sea-surface fetch failed ({exc}); falling "
+            f"back to the supplied altimetry= literal.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        return altimetry
+
+
+def _site_water_density(absorption):
+    """The one water density (g/cm³) the decks carry for a fetched
+    absorption: IES-80 of the T/S row nearest the column's mid-depth;
+    ``None`` without a fetched Francois-Garrison law."""
+    if not isinstance(absorption, FrancoisGarrison):
+        return None
+    column = absorption.profile_depths
+    mid = mid_depth(column) if column is not None else 0.0
+    return float(density(*_water_at(absorption, mid)))
 
 
 def _assemble(point, transect_to, *, name, date, seafloor, ssp, bottom_props,
               bottom_kw, surface_props, surface_src, altimetry, bathy_src,
-              fetched_ssp, with_absorption, resolution, max_distance_km,
-              max_days, timeout, verbose):
+              ssp_src, absorption, water_density):
     """The ``Environment`` of the resolved axes, with the site's absorption
-    and water density when ``with_absorption``, and its provenance."""
+    ``(law, T/S source, pH source)`` and its ``water_density`` when fetched,
+    and its provenance."""
     lat, lon = as_coordinate(point)
     kwargs = dict(
         name=name or f"{lat:.3f}, {lon:.3f}",
@@ -903,26 +1011,14 @@ def _assemble(point, transect_to, *, name, date, seafloor, ssp, bottom_props,
         kwargs['surface'] = surface_props
     if altimetry is not None:
         kwargs['altimetry'] = altimetry
-    ph_src, ts_src = None, None
-    if with_absorption:
-        kwargs['absorption'], ts_src, ph_src = _fetch_absorption(
-            point, date=date, ssp_source=fetched_ssp.source,
-            ssp_backend=fetched_ssp.backend,
-            cache_only=fetched_ssp.cache_only, resolution=resolution,
-            max_distance_km=max_distance_km, max_days=max_days,
-            timeout=timeout, verbose=verbose,
-        )
-    absorption = kwargs.get('absorption')
-    if isinstance(absorption, FrancoisGarrison):
-        # The T/S row nearest the column's mid-depth sets the one water
-        # density the decks carry (IES-80, kg/m³ -> g/cm³).
-        column = absorption.profile_depths
-        mid = mid_depth(column) if column is not None else 0.0
-        kwargs['water_density'] = float(density(
-            *_water_at(absorption, mid))) / 1000.0
+    law, ts_src, ph_src = absorption
+    if law is not None:
+        kwargs['absorption'] = law
+    if water_density is not None:
+        kwargs['water_density'] = water_density
     env = Environment(**kwargs)
 
-    _record_provenance(env, bathy_src, fetched_ssp.source, bottom_kw,
+    _record_provenance(env, bathy_src, ssp_src, bottom_kw,
                        bottom_props, surface_src, ph_src, ts_src)
     return env
 
@@ -959,12 +1055,12 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
     licence used."""
     def catalogue(ids):
         # The bare catalogue id in a DataProvenance, so env.data_sources is
-        # uniformly DataProvenance — no date/coords, just the source (plus the
-        # climatology vintage where the cache records it). A record the
+        # uniformly DataProvenance — no date/coords, just the source, for a
+        # carrier that arrives unstamped (the sea-ice canopy arrives stamped
+        # with its climatology period by its own fetcher). A record the
         # fetcher already built (the pH node read) is kept as it is.
         return tuple(i if isinstance(i, DataProvenance) else
-                     DataProvenance(source=SOURCES[i],
-                                    data_date=_climatology_vintage(i))
+                     DataProvenance(source=SOURCES[i])
                      for i in ids if i is not None)
 
     if not env.bathymetry.data_sources and bathy_src is not None:
@@ -991,40 +1087,7 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
     for src in {prov.source.id: prov.source
                 for prov in env.data_sources}.values():
         if not src.commercial_use:
-            provenance_notice(
-                f"fetch_environment: data source {src.id!r} ({src.name}) does "
-                f"not permit commercial use without verification — see "
-                f"uacpy.data.citations(env) for its licence/attribution.")
-
-
-#: Cached monthly climatologies whose reference period is recorded in the
-#: ``.npz`` itself (see each module's ``climatology_period``). Everything else
-#: is either dated per fetch or has no period to state.
-_CLIMATOLOGY_PERIOD_SOURCES = {
-    'seaice': 'uacpy.data.seaice_local',
-}
-
-
-def _climatology_vintage(src_id):
-    """Reference period of a cached climatology, for the provenance
-    ``data_date``, or ``None``.
-
-    The sea-ice cache derives its default ``years`` from ``date.today()`` at
-    build time, so the vintage differs per build; the cache records it and
-    this reads it back for an un-stamped sea-ice layer (the NBS wind
-    climatology is dated by :mod:`uacpy.data.sea_surface` itself). ``None``
-    covers every other source, a cache written without the key, and any read
-    failure — an unstated vintage must never turn a working fetch into an
-    error.
-    """
-    module_name = _CLIMATOLOGY_PERIOD_SOURCES.get(src_id)
-    if module_name is None:
-        return None
-    import importlib
-    try:
-        return importlib.import_module(module_name).climatology_period()
-    except Exception:              # no cache installed, or unreadable
-        return None
+            provenance_notice(licence_notice_text(src))
 
 
 def _bathymetry_provenance(bathy, point, *, max_distance_km=None):
@@ -1040,8 +1103,8 @@ def _bathymetry_provenance(bathy, point, *, max_distance_km=None):
         from uacpy.data import gebco_local
         try:
             grid = gebco_local._grid()
-        except (ConfigurationError, DataFetchError, FileNotFoundError):
-            grid = None             # a stubbed backend: no grid to read
+        except (ConfigurationError, DataFetchError):
+            grid = None             # no readable grid to read the node from
         if grid is not None:
             return grid.node_provenance(
                 'gebco', lat, lon, who='fetch_environment',
@@ -1080,7 +1143,8 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
     if cache_only:
         ts = _fetch_ts_profile_backend(
             point, date=date, backend='local', resolution=resolution,
-            timeout=timeout, verbose=verbose, max_distance_km=max_distance_km)
+            timeout=timeout, verbose=verbose, max_distance_km=max_distance_km,
+            who='fetch_environment')
         depths, temp, sal = ts.depths, ts.temperature, ts.salinity
     elif ssp_source == 'copernicus':
         from uacpy.data.copernicus import fetch_ts_profile_operational
@@ -1111,7 +1175,7 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
         ts = _fetch_ts_profile_backend(
             point, date=date, resolution=resolution, timeout=timeout,
             verbose=verbose, backend=ssp_backend,
-            max_distance_km=max_distance_km)
+            max_distance_km=max_distance_km, who='fetch_environment')
         depths, temp, sal = ts.depths, ts.temperature, ts.salinity
     # GLODAP gives its pH column, (depth, pH) pairs on its own levels;
     # Copernicus BGC one value, read at the T/S column's mid-depth.
@@ -1143,13 +1207,23 @@ def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,
     the cached GLODAP climatology, whose ``source`` is the
     :class:`DataProvenance` record of the node read (its point and offset),
     and finally to the model default (``REFERENCE_PH``, ``None``). pH is cache/best-effort like every
-    other axis: a run without any pH source silently keeps the default rather
-    than failing, and so does one whose pH cells stand past
-    ``max_distance_km``.
+    other axis: a run without any pH source keeps the default rather than
+    failing, and so does one whose pH cells stand past ``max_distance_km`` —
+    with a ``provenance_fallback`` item naming why, so the substituted pH is
+    announced in the call's notice.
     """
     from uacpy.core.constants import REFERENCE_PH
     from uacpy.data.glodap_local import fetch_ph_profile
     lat, lon = as_coordinate(point)
+    failures = []
+
+    def reference_ph():
+        provenance_fallback(
+            f"fetch_environment: the absorption takes the reference pH "
+            f"{REFERENCE_PH:g} at ({lat:.4f}, {lon:.4f}), because no pH source "
+            f"answered ({'; '.join(failures)}).")
+        return REFERENCE_PH, None
+
     if ssp_source == 'copernicus' and not cache_only and date is not None:
         from uacpy.data.copernicus import fetch_ph_operational
         try:
@@ -1159,18 +1233,20 @@ def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,
             log_message('copernicus', f"pH {pH:.3f} from Copernicus BGC at "
                         f"{lat:.3f}, {lon:.3f}", verbose=verbose)
             return pH, 'copernicus_bgc'
-        except (DataFetchError, ConfigurationError):
-            pass                                    # fall through to GLODAP
+        except (DataFetchError, ConfigurationError) as exc:
+            failures.append(f"Copernicus BGC: {exc.message}")  # then GLODAP
     try:
         profile = fetch_ph_profile(point, max_distance_km=max_distance_km)
-    except (DataFetchError, ConfigurationError):
-        return REFERENCE_PH, None
+    except (DataFetchError, ConfigurationError) as exc:
+        failures.append(f"GLODAP: {exc.message}")
+        return reference_ph()
     z = np.asarray(profile.depths, dtype=float)
     ph = np.asarray(profile.ph, dtype=float)
     keep = np.isfinite(z) & np.isfinite(ph)
     z_u, first = np.unique(z[keep], return_index=True)
     if z_u.size == 0:
-        return REFERENCE_PH, None
+        failures.append("GLODAP: no finite pH level in the column read")
+        return reference_ph()
     pairs = np.column_stack([z_u, ph[keep][first]])
     log_message('glodap', f"pH {pairs[:, 1].min():.3f}-{pairs[:, 1].max():.3f} "
                 f"over {len(pairs)} levels from GLODAP at {lat:.3f}, "
@@ -1354,8 +1430,8 @@ def _bottom_order(bottom_source, who='fetch_environment'):
 #: provider option of the same name is refused rather than overriding them.
 _SUPPLIED_BOTTOM_KEYWORDS = frozenset({
     'cache_only', 'max_distance_km', 'depth', 'model',
-    'water_sound_speed', 'roughness', 'n_points', 'max_points', 'timeout',
-    'verbose'})
+    'water_sound_speed', 'water_density', 'roughness', 'n_points',
+    'max_points', 'timeout', 'verbose'})
 
 
 def _check_source_options(order, source_options, *, transect, who):
@@ -1451,7 +1527,15 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
 
     def call(name, cached):
         provider = _BOTTOM_BY_ID[name]
-        call_kwargs = dict(kwargs, **(source_options or {}))
+        # Resolution happens per attempt, so a live backend's module is only
+        # imported when the cached attempt has failed.
+        point_fn, transect_fn = provider.resolve(
+            *(() if cached is None else (cached,)))
+        fn = transect_fn if transect else point_fn
+        # The keywords fetch_bottom supplies reach a fetcher only where it
+        # takes them (an offline backend takes no timeout); source options
+        # were checked against every fetcher of the chain before any fetch.
+        call_kwargs = dict(_taken_by(fn, kwargs), **(source_options or {}))
         if max_distance_km is not None:
             call_kwargs['max_distance_km'] = max_distance_km
         if provider.accepts_depth and depth is not None:
@@ -1464,11 +1548,6 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
             # be dropped on the way to a fetcher.
             if hamilton_fit is not None:
                 call_kwargs['hamilton_fit'] = hamilton_fit
-        # Resolution happens per attempt, so a live backend's module is only
-        # imported when the cached attempt has failed.
-        point_fn, transect_fn = provider.resolve(
-            *(() if cached is None else (cached,)))
-        fn = transect_fn if transect else point_fn
         return fn(*args, **call_kwargs)
 
     # A cached twin that read an answer ends its provider; only an absent or
@@ -1478,9 +1557,24 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
     return bottom, name
 
 
+def _taken_by(fn, kwargs):
+    """``kwargs`` restricted to the keywords ``fn`` takes (all of them when
+    it takes ``**kwargs``); a transect sampled from a point fetcher
+    (:func:`~uacpy.data.sediment.transect_fetcher`) takes its own named
+    ones and whatever its point fetcher takes."""
+    import inspect
+    names = set(inspect.signature(fn).parameters)
+    reader = getattr(fn, 'point_fetcher', fn)
+    params = inspect.signature(reader).parameters
+    if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs)
+    names |= set(params)
+    return {k: v for k, v in kwargs.items() if k in names}
+
+
 def _fetch_bottom_per_waypoint(order, start, end, *, cache_only,
                                max_distance_km, depth, model, hamilton_fit,
-                               water_sound_speed=None, n_points=6,
+                               water_sound_speed=None, n_points=None,
                                max_points=None, source_options=None,
                                who='fetch_environment', **kwargs):
     """Range-dependent bottom from a source chain, resolved at each waypoint.
@@ -1532,6 +1626,8 @@ def _bottom_request(source, who):
     return _bottom_order(lower_source_spec(source), who)
 
 
+@one_provenance_notice(subject="the seabed's data",
+                       record='uacpy.data.citations(bottom)')
 def fetch_bottom(
     point: Coordinate,
     *,
@@ -1563,7 +1659,9 @@ def fetch_bottom(
     model, hamilton_fit, water_sound_speed
         The grain-size relations, Hamilton & Bachman fit and in-situ water
         sound speed (m/s) at the seabed, for every source that converts a
-        grain size (see :func:`uacpy.core.sediment.grain_size_to_geoacoustics`).
+        grain size (see :func:`uacpy.core.sediment.grain_size_to_geoacoustics`);
+        ``'crust1'`` carries measured layer speeds, so a ``water_sound_speed``
+        it answers gives a ``FallbackWarning`` that the value was not used.
     depth : float, optional
         Water depth (m) for the depth-driven ``'pelagic'`` source; fetched
         from GEBCO when ``None``.
@@ -1597,7 +1695,7 @@ def fetch_bottom(
     ConfigurationError
         An unknown source, or no source whose cache is installed.
     """
-    model, hamilton_fit = canonical_grain_size_selection(
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who='fetch_bottom')
     order, cache_only = _bottom_request(source, 'fetch_bottom')
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_bottom')
@@ -1610,6 +1708,7 @@ def fetch_bottom(
         hamilton_fit=hamilton_fit, water_sound_speed=water_sound_speed,
         roughness=roughness, timeout=timeout, verbose=verbose,
         source_options=source_options, who='fetch_bottom')
+    _unused_water_sound_speed_notice(water_sound_speed, _name, 'fetch_bottom')
     return bottom
 
 
@@ -1620,8 +1719,8 @@ def fetch_bottom_transect(
     end: Coordinate,
     *,
     source: Union[str, Sequence[str]] = 'auto',
-    n_points: Union[int, str] = 6,
-    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    n_points: Union[int, str, None] = None,
+    max_points: Optional[int] = None,
     model: str = DEFAULT_GRAIN_SIZE_MODEL,
     hamilton_fit: Optional[str] = None,
     water_sound_speed=None,
@@ -1638,7 +1737,7 @@ def fetch_bottom_transect(
     at every waypoint — each takes the first source that covers it, and each
     column cites that source; a single source fills a waypoint it does not
     cover from the nearest covered one, with a warning. ``n_points`` is the
-    waypoint count (default 6), or ``'auto'`` to probe ``max_points``
+    waypoint count, used as given, or ``'auto'`` to probe ``max_points``
     waypoints and keep those bracketing each change of seabed.
     ``water_sound_speed`` and ``depth`` also take ``(lat, lon) -> value``
     callables, so each column scales to the water over its own seafloor. The
@@ -1652,9 +1751,13 @@ def fetch_bottom_transect(
     source : str or sequence of str, optional
         As on :func:`fetch_bottom`. Default ``'auto'``.
     n_points : int or 'auto', optional
-        Waypoints, or ``'auto'`` (see above). Default 6.
+        Waypoints, or ``'auto'`` (see above). ``None`` (default) is 6 (uacpy
+        guidance), within ``max_points`` when that is set.
     max_points : int, optional
-        Waypoints ``'auto'`` probes. Default 1000.
+        The sampling budget: waypoints ``'auto'`` probes, and the ceiling of
+        an unset ``n_points``; ``None`` (default) is 1000 for ``'auto'``
+        (uacpy guidance). An explicit ``n_points`` above an explicit
+        ``max_points`` is refused.
     model, hamilton_fit : optional
         The grain-size relations and their Hamilton & Bachman fit, as on
         :func:`fetch_bottom`.
@@ -1678,7 +1781,7 @@ def fetch_bottom_transect(
         Ranges measured from ``start`` (``'crust1'`` returns its layered
         columns).
     """
-    model, hamilton_fit = canonical_grain_size_selection(
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who='fetch_bottom_transect')
     order, cache_only = _bottom_request(source, 'fetch_bottom_transect')
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_bottom_transect')
@@ -1690,7 +1793,23 @@ def fetch_bottom_transect(
         n_points=n_points, max_points=max_points, timeout=timeout,
         verbose=verbose, source_options=source_options,
         who='fetch_bottom_transect')
+    _unused_water_sound_speed_notice(water_sound_speed, _name,
+                                     'fetch_bottom_transect')
     return bottom
+
+
+def _unused_water_sound_speed_notice(water_sound_speed, name, who):
+    """A ``FallbackWarning`` when the caller's ``water_sound_speed`` reached
+    a source that converts no grain size — CRUST1.0 carries measured layer
+    speeds — so the value changed nothing."""
+    if water_sound_speed is None or _BOTTOM_BY_ID[name].accepts_grain_size_model:
+        return
+    warnings.warn(
+        f"{who}: water_sound_speed= was not used: source {name!r} answered, "
+        f"and it carries measured layer speeds rather than converting a "
+        f"grain size. Drop the argument, or choose a source that converts a "
+        f"grain size.",
+        FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 def _seabed_sound_speed(ssp, seafloor, range_m=0.0):
@@ -1776,8 +1895,8 @@ def _check_bottom_literal(bottom):
         )
 
 
-def _resolve_bottom(bottom, *, water_sound_speed=None, model=DEFAULT_GRAIN_SIZE_MODEL,
-                    hamilton_fit=None):
+def _resolve_bottom(bottom, *, water_sound_speed=None, water_density=None,
+                    model=DEFAULT_GRAIN_SIZE_MODEL, hamilton_fit=None):
     """The ``bottom=`` literal as a seabed: a ready ``BoundaryProperties``,
     ``SeabedColumn`` or ``Bottom`` passes unchanged with its own provenance
     (``Environment`` coerces it), a class name takes its fluid preset (as
@@ -1788,7 +1907,7 @@ def _resolve_bottom(bottom, *, water_sound_speed=None, model=DEFAULT_GRAIN_SIZE_
                                              Bottom)):
         return bottom
     if isinstance(bottom, str):
-        return bottom_from_class(bottom, elastic=False)
-    return bottom_from_grain_size(
+        return BoundaryProperties.from_preset(bottom)
+    return BoundaryProperties.from_grain_size(
         float(bottom), model=model, hamilton_fit=hamilton_fit,
-        water_sound_speed=water_sound_speed)
+        water_sound_speed=water_sound_speed, water_density=water_density)

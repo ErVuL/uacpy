@@ -13,7 +13,7 @@ storage puts on ``dω/dk_r`` is
 and shrinking the frequency step raises it. Measured on an analytic Pekeris
 guide (D = 100 m, c 1500/1800 m/s, ρ 1.0/1.8, f₀ = 100 Hz) with exact
 longdouble roots and a complex-step reference, against
-``Modes.group_velocity_between``:
+``Modes.group_speeds_between``:
 
     Δf (Hz)      steps      floor      measured error of v_g
        1.0      140844    7.1e-06                   7.29e-06
@@ -52,7 +52,7 @@ arrived in, so a float32-sourced array that a caller has already promoted to
 float64 is still measured against the float32 spacing.
 
 This module sits in ``core`` because :meth:`uacpy.core.results.Modes.
-group_velocity_between` and :func:`uacpy.acoustic_signal.modal_group_velocity`
+group_speeds_between` and :func:`uacpy.acoustic_signal.modal_group_speeds`
 both difference the same wavenumbers, from different layers.
 """
 
@@ -105,7 +105,7 @@ def storage_spacing(kr):
     return np.spacing(kr)
 
 
-def group_velocity_relative_floor(kr_ref, dk):
+def group_speed_relative_floor(kr_ref, dk):
     """Relative error the storage of ``kr_ref`` puts on ``dω/dk``.
 
     ``kr_ref`` is the wavenumber the difference ``dk`` was taken at (any
@@ -158,7 +158,7 @@ def coarser_step_multiple(omega, kr):
         near, far = v_k[k:k + m], v_2k[:m]
         with np.errstate(divide='ignore', invalid='ignore'):
             moved = np.abs(far - near) / np.abs(near)
-        floor = group_velocity_relative_floor(
+        floor = group_speed_relative_floor(
             kr[:m], kr[2 * k:2 * k + m] - kr[:m])
         moved = moved[np.isfinite(moved)]
         floor = floor[np.isfinite(floor)]
@@ -181,7 +181,7 @@ def warn_if_storage_under_resolves(kr_ref, dk, v_g, who, *, grid=None):
     prescribing a step, because a step prescribed from the floor alone is wrong
     more often than it is right (measured: worse in 14 of 30 firings).
     """
-    floor = group_velocity_relative_floor(kr_ref, dk)
+    floor = group_speed_relative_floor(kr_ref, dk)
     under = np.isfinite(np.asarray(v_g, dtype=float)) & (
         floor > GROUP_VELOCITY_REL_FLOOR)
     if not np.any(under):

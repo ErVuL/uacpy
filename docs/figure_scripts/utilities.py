@@ -16,10 +16,9 @@ import numpy as np
 from figure_scripts._common import WIDE, shallow_water
 
 import uacpy
-from uacpy.core import acoustics
+from uacpy import acoustics
 from uacpy.metrics import tl_bias, tl_max_error, tl_rmse
 from uacpy.models import Bellhop, Kraken, RunMode
-from uacpy.plot import plot_field_difference
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
 GUIDE = True
@@ -57,12 +56,9 @@ def bottom_loss():
     """What the preset numbers buy you: reflection loss vs grazing angle."""
     fig, ax = plt.subplots(figsize=WIDE)
     for name in ['clay', 'silt', 'sand', 'gravel', 'limestone']:
-        angles, loss_dB = acoustics.bottom_loss_curve(name)
-        ax.plot(angles, loss_dB, linewidth=1.7, label=name)
-        c_p = uacpy.get_material(name)['sound_speed']
-        if c_p > 1500.0:
-            ax.axvline(np.degrees(np.arccos(1500.0 / c_p)),
-                       color='gray', linestyle=':', linewidth=0.8)
+        acoustics.bottom_loss_curve(name).plot(
+            value='loss', ax=ax, label=name, mark_critical=True,
+            linewidth=1.7)
     ax.set_xlim(0.0, 90.0)
     ax.set_xlabel('Grazing angle (deg)')
     ax.set_ylabel('Bottom loss $-20\\log_{10}|R|$ (dB)')
@@ -158,8 +154,8 @@ def cross_model_metrics():
     # three times the width plot_field gives its own, so the difference panel
     # came out narrower than the two TL panels it sits under and the ranges
     # did not line up down the column.
-    plot_field_difference(bellhop, kraken, ax=axes[2], env=env,
-                          diff_vmax=20.0, title='Bellhop − Kraken (dB)')
+    uacpy.metrics.tl_difference(bellhop, kraken).plot(
+        ax=axes[2], env=env, diff_vmax=20.0, title='Bellhop − Kraken (dB)')
     axes[2].set_title('Bellhop − Kraken (dB)', fontweight='bold',
                       fontsize=11)
     for ax in axes:

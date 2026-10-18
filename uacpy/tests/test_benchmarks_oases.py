@@ -138,7 +138,7 @@ def oasn_halfspace_covariance():
         ssp=SoundSpeedProfile.from_pairs([(0.0, C_W), (_NOISE_DEPTH, C_W)]),
         bottom=BoundaryProperties(acoustic_type='half-space', sound_speed=C_W,
                                   density=RHO_WATER, attenuation=0.0))
-    cov = _quiet(OASN(surface_noise_level=_NOISE_LEVEL_DB, timeout=300)
+    cov = _quiet(OASN(surface_noise_level_dB=_NOISE_LEVEL_DB, timeout=300)
                  .compute_covariance, env,
                  Source(depths=5.0, frequencies=_NOISE_F),
                  Receiver(depths=_NOISE_ARRAY, ranges=[0.0]))

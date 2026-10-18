@@ -5,10 +5,14 @@ Builds on uacpy's propagation outputs (TL fields, normal modes) and noise
 spectra to assemble active/passive sonar performance: scattering-strength laws,
 cell-scattering reverberation, the sonar equation (signal excess, figure of
 merit, detection range, with :class:`SonarBudget` holding one budget's
-terms), and detection-theory thresholds. The ``*_field``
+terms), detection-theory thresholds, and target strength of simple shapes
+(:func:`ts_sphere`, :func:`ts_convex`, :func:`ts_ellipsoid`,
+:func:`ts_cylinder`, :func:`ts_plate`; the submodule ``target_strength``
+holds them and is not itself callable). The ``*_field``
 helpers map the sonar equation over a model TL
 :class:`~uacpy.core.results.Field` — signal-excess and detection-probability
-maps over ``(depth, range)``, plus the per-depth detection-range profile.
+maps over ``(depth, range)``, plus the detection ranges of such a map
+(:func:`detection_ranges_field`).
 
 ``matched_field`` adds source localization by matched-field processing:
 replica vectors synthesized directly from a KRAKEN
@@ -17,7 +21,8 @@ replica vectors synthesized directly from a KRAKEN
 run (:func:`replica_bank_from_field`), a cross-spectral density matrix from
 array snapshots (:func:`csdm`), and the Bartlett / MVDR ambiguity-surface
 processors (:func:`bartlett`, :func:`mvdr`), which return the surface as an
-ambiguity :class:`~uacpy.core.results.Field`. Self-contained — KRAKEN modes
+ambiguity :class:`~uacpy.core.results.Field`; :func:`ambiguity_field` builds
+the same Field from a surface any other processor computed. Self-contained — KRAKEN modes
 or a ``Field`` plus numpy, no OASES dependency.
 """
 
@@ -40,7 +45,6 @@ from .scattering import (
 )
 from .reverberation import (
     boundary_reverberation,
-    total_reverberation,
     volume_reverberation,
 )
 from .sonar_equation import (
@@ -48,10 +52,8 @@ from .sonar_equation import (
     active_signal_excess,
     active_signal_excess_field,
     detection_annuli,
-    detection_range,
-    detection_ranges_by_depth,
-    detection_range_from_field,
     detection_ranges,
+    detection_ranges_field,
     echo_level,
     figure_of_merit,
     noise_background,
@@ -68,6 +70,7 @@ from .detection import (
     per_look_false_alarm,
     scan_false_alarm,
     probability_of_detection,
+    RocCurve,
     roc_curve,
 )
 from .target_strength import (
@@ -85,6 +88,9 @@ from .matched_field import (
     bartlett,
     mvdr,
 )
+# The ambiguity Field of a surface your own processor computed, the Field
+# bartlett and mvdr return; built where that result lives.
+from uacpy.core.results import ambiguity_field
 
 # Imported so each submodule is reachable as an attribute; not in __all__.
 from . import (  # noqa: F401
@@ -108,7 +114,6 @@ __all__ = [
     "apl_uw_surface_backscatter",
     "boundary_reverberation",
     "volume_reverberation",
-    "total_reverberation",
     "SonarBudget",
     "echo_level",
     "noise_background",
@@ -118,16 +123,15 @@ __all__ = [
     "active_signal_excess_field",
     "figure_of_merit",
     "detection_annuli",
-    "detection_range",
-    "detection_ranges_by_depth",
-    "detection_range_from_field",
     "detection_ranges",
+    "detection_ranges_field",
     "transition_probability_field",
     "transition_probability",
     "deflection_coefficient",
     "detection_index",
     "probability_of_detection",
     "roc_curve",
+    "RocCurve",
     "albersheim_snr",
     "detection_threshold_energy",
     "per_look_false_alarm",
@@ -143,4 +147,5 @@ __all__ = [
     "csdm",
     "bartlett",
     "mvdr",
+    "ambiguity_field",
 ]

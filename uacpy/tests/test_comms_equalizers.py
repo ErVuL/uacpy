@@ -78,7 +78,7 @@ class TestEqualizerFloorsAreScaleInvariant:
 
     def test_the_relative_floor_matches_a_fixed_1e_12_on_a_unit_peak_channel(self):
         # The floor is 1e-12 of the peak |H|**2, so a channel normalized to
-        # unit peak power reproduces the old fixed 1e-12 exactly, and a
+        # unit peak power reproduces a fixed 1e-12 floor exactly, and a
         # healthy subcarrier of any other channel moves by ~1e-11 at most.
         for h in (np.array([1.0], dtype=complex), self.H4):
             H = np.fft.fft(h, self.NSC)
@@ -165,7 +165,7 @@ class TestBlockMMSEEqualizerIsScaleInvariant:
 
     def test_regularizer_matches_the_bare_form_for_a_unit_power_channel(self):
         # mean(|H|**2) == sum(|h|**2) by Parseval, so a unit-energy channel
-        # reproduces the old bare 1/snr exactly.
+        # reproduces the bare 1/snr regularizer exactly.
         h = np.array([1.0])
         H = np.fft.fft(h, 256)
         h2 = np.abs(H) ** 2
@@ -263,7 +263,7 @@ class TestAdaptiveEqualisersAreScaleInvariant:
     samples at the record's amplitude, feedback decisions at constellation
     amplitude — so one normalised-LMS divisor over-corrects the feedback half
     and starves the feedforward half, which measured as NaN on a quiet record.
-    ``OFDMReceiver`` was already invariant through its pilot-derived channel;
+    ``OFDMReceiver`` is invariant through its pilot-derived channel;
     this is the single-carrier half of the same contract.
     """
 

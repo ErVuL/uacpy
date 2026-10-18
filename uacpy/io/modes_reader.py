@@ -21,7 +21,7 @@ from uacpy.core.acoustics import pekeris_root
 from uacpy.core.deck_limits import AT_DB_PER_NEPER
 from uacpy.core.results import MediaTable, Modes
 from uacpy.core.exceptions import (
-    ConfigurationError, FileFormatError,
+    ConfigurationError, FileFormatError, MissingFileError,
 )
 from uacpy.core.acoustics import (
     absorption_francois_garrison, absorption_thorp,
@@ -245,9 +245,10 @@ def _read_modes_asc_payload(
 
     Raises
     ------
+    ~uacpy.core.exceptions.MissingFileError
+        The file is absent.
     ~uacpy.core.exceptions.FileFormatError
-        The file is absent or malformed, or a declared count is
-        non-positive.
+        The file is malformed, or a declared count is non-positive.
 
     Notes
     -----
@@ -286,7 +287,7 @@ def _read_modes_asc_payload(
     """
     filename = Path(filename)
     if not filename.exists():
-        raise FileFormatError(
+        raise MissingFileError(
             f"read_modes: mode file not found: {filename}.",
             remediation="Check the path; the ASCII .moa is written by the "
                         "AT Matlab tools, not by the shipped solvers.",
@@ -436,7 +437,7 @@ class _ModFile(DirectAccessFile):
 
         ``kraken.f90:106-113`` writes the count, the halfspace record,
         ``M`` eigenfunction records and the folded eigenvalue records.
-        A zero-mode run never reaches that writer: ``kraken.f90:958-961``
+        A zero-mode run never reaches that writer: ``kraken.f90:958-962``
         writes the profile header, puts ``M`` at ``iRecProfile + 6`` and
         calls ERROUT, which STOPs (``misc/FatalError.f90:30``). This
         reader reads the halfspace slot before it tests ``M``, so
@@ -660,10 +661,12 @@ def _read_modes_payload(
     - The canonical extension is ``.mod`` (binary direct-access produced by
       Kraken). Any explicit extension on ``filename`` is honoured;
       otherwise ``.mod`` is appended.
-    - An absent file (after that resolution) and a malformed or truncated
-      one both raise a typed :class:`FileFormatError`
-      (``require_model_output`` / ``typed_format_error``) rather than a
-      bare ``FileNotFoundError`` / ``IndexError`` / ``struct.error``.
+    - An absent file (after that resolution) raises
+      :class:`~uacpy.core.exceptions.MissingFileError`
+      (``require_model_output``), a :class:`FileNotFoundError` too; a
+      malformed or truncated one raises a typed :class:`FileFormatError`
+      (``typed_format_error``) rather than a bare ``IndexError`` /
+      ``struct.error``.
     - Modes are stored in Fortran unformatted direct-access binary.
     - Record length (lrecl) is determined from first 4 bytes.
     - Mode indices are 1-indexed (MATLAB/Fortran convention).
@@ -834,7 +837,7 @@ def _read_modes_with_halfspace(
     profile: int = 1,
 ) -> Dict[str, Any]:
     """
-    Read mode data from a KRAKEN binary ``.mod`` file and attach the
+    Read mode data from a KRAKEN binary ``.mod`` file and compute the
     halfspace parameters the modal-sum evaluators need.
 
     Parameters
@@ -857,15 +860,18 @@ def _read_modes_with_halfspace(
     Returns
     -------
     modes_data : dict
-        Mode data dictionary with fields from :func:`_read_modes_payload`,
-        plus computed halfspace parameters:
-        - 'Top': dict with top halfspace properties (k2, gamma, phi)
-        - 'Bot': dict with bottom halfspace properties (k2, gamma, phi)
+        Mode data dictionary with fields from :func:`_read_modes_payload`
+        (``'Top'`` / ``'Bot'`` the file's half-space records as written),
+        plus ``'tails'``: per acoustic half-space (``'top'`` / ``'bottom'``),
+        the computed ``k2``, ``gamma`` and ``phi`` that
+        :attr:`~uacpy.core.results.Modes.halfspace_tails` carries.
 
     Notes
     -----
     ``Modes['M']`` is the number of modes returned (``len(Modes['k'])``);
     the halfspace parameters below are computed only when it is non-zero.
+    A vacuum or rigid half-space has no medium and so no tail; it has no
+    entry in ``'tails'``.
 
     For acoustic halfspaces (boundary condition 'A'), computes:
     - k²: wavenumber squared in halfspace
@@ -886,13 +892,14 @@ def _read_modes_with_halfspace(
 
     **Halfspace extension and sign convention.** Below the deepest
     tabulated depth ``D`` an 'A'-halfspace mode continues analytically as
-    ``phi(z) = Bot['phi'] * exp(-Bot['gamma'] * (z - D))``, with
-    ``gamma**2 = k**2 - Bot['k2']`` and the root chosen with
+    ``phi(z) = tails['bottom']['phi'] * exp(-tails['bottom']['gamma'] *
+    (z - D))``, with ``gamma**2 = k**2 - tails['bottom']['k2']`` and the
+    root chosen with
     ``Re(gamma) >= 0`` (decay into the halfspace; ``pekeris_root``, the
     branch ``KrakenField/ReadModes.f90:254-272`` uses). The overall sign
     of each mode follows KRAKEN's convention that ``phi`` is positive at
     the mode's turning point (``Kraken/kraken.f90:808-809`` flips the
-    scale factor to enforce it). The mirrored ``Top`` entries extend
+    scale factor to enforce it). The mirrored ``'top'`` entry extends
     above the shallowest tabulated depth the same way.
 
     The frequency index is found by searching for the closest match to
@@ -903,7 +910,7 @@ def _read_modes_with_halfspace(
     Examples
     --------
     >>> payload = _read_modes_with_halfspace('test.mod', frequency=100.0)
-    >>> print(payload['Bot']['gamma'])
+    >>> print(payload['tails']['bottom']['gamma'])
     """
     fileroot, ext = os.path.splitext(filename)
 
@@ -932,33 +939,20 @@ def _read_modes_with_halfspace(
     # Title(1:7) and :254-272 switches on it.
     k_gamma = (Modes["k"] if str(Modes["title"])[:7].upper() == "KRAKENC"
                else np.real(Modes["k"]))
+    # A non-acoustic halfspace (vacuum, rigid) has no medium and so no
+    # evanescent tail; its record keeps the file's values (a vacuum or rigid
+    # boundary stores rho = 0.0, misc/ReadEnvironmentMod.f90:280).
+    tails = {}
     if Modes["M"] != 0:
-        if Modes["Top"]["BC"] == "A":
-            k_top = 2.0 * np.pi * f_selected / Modes["Top"]["cp"]
-            Modes["Top"]["k2"] = k_top**2
-            gamma2 = k_gamma ** 2 - Modes["Top"]["k2"]
-            Modes["Top"]["gamma"] = pekeris_root(gamma2)
-            Modes["Top"]["phi"] = Modes["phi"][0, :]
-        else:
-            # A non-acoustic halfspace carries no evanescent tail, so its
-            # interface terms are zeroed. The coupled-mode evaluator divides
-            # the interface mode value by rho (``Matlab/Kraken/evalcm.m:192,
-            # 197``); rho = 1 keeps that a well-defined zero whatever the file
-            # stores for a vacuum or rigid boundary (read_modes.m:87,98).
-            Modes["Top"]["rho"] = 1.0
-            Modes["Top"]["gamma"] = np.zeros_like(Modes["k"])
-            Modes["Top"]["phi"] = np.zeros_like(Modes["phi"][0, :])
-        if Modes["Bot"]["BC"] == "A":
-            k_bot = 2.0 * np.pi * f_selected / Modes["Bot"]["cp"]
-            Modes["Bot"]["k2"] = k_bot**2
-            gamma2 = k_gamma ** 2 - Modes["Bot"]["k2"]
-            Modes["Bot"]["gamma"] = pekeris_root(gamma2)
-            Modes["Bot"]["phi"] = Modes["phi"][-1, :]
-        else:
-            Modes["Bot"]["rho"] = 1.0
-            Modes["Bot"]["gamma"] = np.zeros_like(Modes["k"])
-            Modes["Bot"]["phi"] = np.zeros_like(Modes["phi"][-1, :])
-
+        for side, record, row in (("top", Modes["Top"], 0),
+                                  ("bottom", Modes["Bot"], -1)):
+            if record["BC"] != "A":
+                continue
+            k2 = (2.0 * np.pi * f_selected / record["cp"]) ** 2
+            tails[side] = {"k2": k2,
+                           "gamma": pekeris_root(k_gamma ** 2 - k2),
+                           "phi": Modes["phi"][row, :]}
+    Modes["tails"] = tails
     return Modes
 
 
@@ -1046,21 +1040,25 @@ def read_modes(
         (m), ``frequencies`` = the entry read. ``media`` is the
         :class:`~uacpy.core.results.MediaTable` of a ``.mod``: the top
         depth (m) and density (g/cm³) of every medium, the base of the last
-        medium, the density below it, the water density and, for a fluid
+        medium, the density below it (``None`` for a vacuum or rigid floor,
+        which has no half-space medium), the water density and, for a fluid
         bottom half-space (boundary ``'A'`` with no shear speed), its
         compressional speed (m/s) and its own attenuation (dB/wavelength:
         the imaginary part of its complex speed less the volume law the
         ``.env`` beside the file names, :func:`_seabed_attenuation`;
         ``None`` without that deck); ``media`` is ``None`` for a ``.moa`` read with
-        no ``water_density``. ``metadata`` carries the
-        file's ``title``, the ``.mod``'s ``top_halfspace`` /
-        ``bottom_halfspace`` records (boundary code, ``cp``/``cs``/``rho``,
-        and the ``k2``, ``gamma``, ``phi`` interface terms) and
-        ``media_types``.
+        no ``water_density``. ``halfspace_tails`` holds, for each acoustic
+        half-space of a ``.mod``, the ``k2``, ``gamma`` and ``phi`` its
+        evanescent tail continues with
+        (:attr:`~uacpy.core.results.Modes.halfspace_tails`); ``None`` for a
+        ``.moa``. ``metadata`` carries the file's ``title``, the ``.mod``'s
+        ``top_halfspace`` / ``bottom_halfspace`` records (boundary code,
+        ``cp``/``cs``/``rho`` as the file holds them) and ``media_types``.
     """
     root, ext = os.path.splitext(os.fspath(filepath))
     metadata: Dict[str, Any] = {}
     media = None
+    tails = None
     if ext == '.moa':
         if profile != 1:
             raise ConfigurationError(
@@ -1072,6 +1070,7 @@ def read_modes(
     else:
         payload = _read_modes_with_halfspace(filepath, frequency, modes,
                                              profile=profile)
+        tails = payload['tails']
         metadata['top_halfspace'] = payload['Top']
         metadata['bottom_halfspace'] = payload['Bot']
         metadata['media_types'] = list(payload.get('Mater', []))
@@ -1096,7 +1095,11 @@ def read_modes(
             tops=[float(d) for d in payload['depth']],
             densities=[float(r) for r in payload['rho']],
             bottom_depth=float(bottom['depth']),
-            halfspace_density=float(bottom['rho']),
+            # A vacuum or rigid floor has no half-space medium, so no
+            # density (the .mod's 0.0 there is a placeholder,
+            # misc/ReadEnvironmentMod.f90:280).
+            halfspace_density=(float(bottom['rho']) if bottom['BC'] == 'A'
+                               else None),
             halfspace_sound_speed=(bottom['cp'].real if fluid_halfspace
                                    else None),
             halfspace_attenuation=(
@@ -1119,4 +1122,4 @@ def read_modes(
     else:
         phi = None
     return _modes_from_payload(payload, phi=phi, metadata=metadata,
-                               media=media)
+                               media=media, halfspace_tails=tails)

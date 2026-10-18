@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
 from uacpy.core._export import ExportRecord
-from uacpy.core.exceptions import FileFormatError
+from uacpy.core.exceptions import FileFormatError, MissingFileError
 
 
 @dataclass(frozen=True, eq=False)
@@ -123,7 +123,7 @@ def read_psif(filepath: Union[str, Path]) -> PsifFile:
     psif_file = filepath / 'psif.dat' if filepath.is_dir() else filepath
 
     if not psif_file.exists():
-        raise FileFormatError(f"mpiramS output not found: {psif_file}.")
+        raise MissingFileError(f"mpiramS output not found: {psif_file}.")
 
     # ``psif.dat`` is written by mpiramS on this host during the same run, so
     # its byte order is the host's; ``FortranFile`` reads native endianness,

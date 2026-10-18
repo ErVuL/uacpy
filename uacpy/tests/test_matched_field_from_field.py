@@ -218,7 +218,7 @@ def _modes():
     return Modes(k=np.array([0.40 + 1e-5j, 0.39 + 2e-5j]),
                  phi=np.arange(6.0).reshape(3, 2),
                  depths=np.array([1.0, 2.0, 3.0]),
-                 group_velocity=np.array([1490.0, 1480.0]),
+                 group_speeds=np.array([1490.0, 1480.0]),
                  frequencies=100.0, model='Kraken')
 
 

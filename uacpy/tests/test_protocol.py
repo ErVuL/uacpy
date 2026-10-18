@@ -26,6 +26,7 @@ from uacpy.core.boundary import BoundaryProperties
 from uacpy.core.bottom import SeabedColumn
 from uacpy.core.boundary import SedimentLayer
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core.exceptions import ValidityWarning
 from uacpy.core.exceptions import UnsupportedFeatureError
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Field
@@ -596,15 +597,26 @@ class TestSelectBackendIsPureIntrospection:
         assert model.select_backend(elastic) == 'krakenc'
         assert model.select_backend(fluid) == 'kraken'
 
-    def test_forcing_kraken_on_elastic_media_raises_without_disk(
+    def test_forcing_kraken_on_elastic_media_names_kraken_without_disk(
             self, monkeypatch):
+        """kraken.exe runs elastic media when forced (kraken.f90:177-195):
+        the name decision reads no disk and says nothing, and the run's
+        settings carry the one ValidityWarning stating what it computes."""
         model = Kraken(verbose=False, backend='kraken')
         monkeypatch.setattr(launch_module, 'find_executable_in_paths',
                             self._no_disk)
         elastic = self._env(make_halfspace(1800.0, shear_speed=400.0,
                                        shear_attenuation=0.5))
-        with pytest.raises(ConfigurationError, match='elastic media'):
-            model.select_backend(elastic)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            assert model.select_backend(elastic) == 'kraken'
+        with pytest.warns(ValidityWarning, match='over elastic media'):
+            settings = model.run_settings(
+                elastic, Source(depths=50.0, frequencies=100.0),
+                Receiver(depths=[50.0], ranges=[1000.0]))
+        said = [n for n in settings.engine.notices
+                if n.category is ValidityWarning]
+        assert len(said) == 1 and 'over elastic media' in said[0].message
 
     def test_a_malformed_irc_bottom_is_refused_by_validation_not_by_select_backend(
             self, tmp_path):
@@ -1165,7 +1177,7 @@ class TestMissingVolumeAbsorptionIsAnnounced:
         from uacpy.core.absorption import Thorp
         env, src, rcv = self._triple(40e3, 1000.0)
         alpha = float(np.atleast_1d(
-            Thorp().alpha_dB_per_m(40e3, 0.0))[0])
+            Thorp()._alpha_dB_per_m_at_frequency(40e3, 0.0))[0])
         expected = alpha * 1000.0
         msg = self._warnings_for(env, src, rcv)[0]
         assert f"{expected:.1f}" in msg, msg

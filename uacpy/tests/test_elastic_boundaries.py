@@ -236,7 +236,7 @@ class TestBounceReflectionCoefficients:
 
     def test_bounce_output_files(self, elastic_env, source, receiver_bounce, tmp_path):
         """Test that BOUNCE creates both .brc and .irc files."""
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0, work_dir=tmp_path)
+        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
 
         result = bounce.run(
             env=elastic_env,
@@ -258,7 +258,7 @@ class TestBounceReflectionCoefficients:
         self, elastic_env, source, receiver_bounce, tmp_path,
     ):
         """Test that BOUNCE returns valid reflection coefficient data."""
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0, work_dir=tmp_path)
+        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
 
         result = bounce.run(
             env=elastic_env,
@@ -266,7 +266,7 @@ class TestBounceReflectionCoefficients:
             receiver=receiver_bounce,
         )
 
-        angles = result.angles
+        angles = result.angles_deg
         R_mag = result.magnitude
         phases = result.phase
 
@@ -322,7 +322,7 @@ class TestBounceToScooterWorkflow:
         table/half-space mismatch shows up.
         """
         # Workflow 1: BOUNCE → SCOOTER
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0, work_dir=tmp_path)
+        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
         bounce_result = bounce.run(
             env=elastic_env,
             source=source,
@@ -377,7 +377,7 @@ class TestWorkflowComparison:
         result_kraken = kraken.compute_field(elastic_env, source, receiver_10x10)
 
         # Approach 2: BOUNCE → SCOOTER
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0, work_dir=tmp_path)
+        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
         receiver_bounce = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
         bounce_result = bounce.run(

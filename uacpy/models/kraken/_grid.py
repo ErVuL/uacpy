@@ -28,8 +28,7 @@ from uacpy.models.kraken._window import phase_speed_window
 #: first mesh (``kraken.f90:80``). Against a converged run at 100 Hz to 10 km
 #: it gave 0.27 dB median, 3.7 dB max |dTL| and a 1.09 rad mode phase error at
 #: 10 km on a 100 m Pekeris guide (1700 m/s), 0.016 dB median, 0.17 dB max and
-#: 0.24 rad over a 1550 m/s mud seabed, where 100 km gave none
-#: (AUDIT_2026-10-10_fresh/IMPL_fix3_misc.md, Round 14).
+#: 0.24 rad over a 1550 m/s mud seabed, where 100 km gave none.
 KRAKEN_RMAX_NO_RANGE_M = 100_000.0
 
 
@@ -86,7 +85,7 @@ MODE_POINTS_PER_METER_FLOOR = 1.5
 _MERGE_VECTORS_TOL_M = 100.0 * float(np.finfo(np.float32).eps)
 
 
-_RMAX_PINNED = 'Kraken(rmax_m=…)'
+_RMAX_PINNED = 'Kraken(rmax=…)'
 
 
 def merge_depths(grid, extra, max_depth):
@@ -281,7 +280,7 @@ def dense_mode_depths(env, source, *, pinned_mode_depths,
     return np.linspace(0.0, float(total_depth), n_pts), notice
 
 
-def compute_rmax_m(receiver) -> float:
+def compute_rmax(receiver) -> float:
     """The mode solver's RMax (m) from the receiver ranges: the farthest
     one — ``doc/kraken.htm`` (8), 678: "the largest range for which a field
     calculation will be desired" — or :data:`KRAKEN_RMAX_NO_RANGE_M` (100 km)
@@ -306,33 +305,33 @@ def _farthest_range_m(receiver) -> Optional[float]:
     return farthest if farthest > 0.0 else None
 
 
-def rmax_zero_notice(rmax_m, *, model_name) -> Optional[Notice]:
-    """``(note, warning)`` for an ``rmax_m`` of 0 the caller set, else
+def rmax_zero_notice(rmax, *, model_name) -> Optional[Notice]:
+    """``(note, warning)`` for an ``rmax`` of 0 the caller set, else
     ``None``: the mode solver's refinement loop ends on its first mesh
     (``kraken.f90:80`` / ``krakenc.f90:82``, ``Error*1000*RMax < 1``)."""
-    if rmax_m is None or float(rmax_m) != 0.0:
+    if rmax is None or float(rmax) != 0.0:
         return None
     return Notice(
         "RMax 0: no mesh doubling",
-        f"{model_name}(rmax_m=0): no mesh doublings will be performed "
+        f"{model_name}(rmax=0): no mesh doublings will be performed "
         f"(doc/kraken.htm (8); kraken.f90:80 ends the refinement on the "
         f"first mesh).", NumericsWarning)
 
 
-def resolve_rmax_m(receiver, *, pinned_rmax_m) -> Tuple[float, str]:
-    """``(rmax_m, origin)``: the deck's ``RMax`` (:func:`compute_rmax_m`,
+def resolve_rmax(receiver, *, pinned_rmax) -> Tuple[float, str]:
+    """``(rmax, origin)``: the deck's ``RMax`` (:func:`compute_rmax`,
     or the caller's) and where it came from."""
-    if pinned_rmax_m is not None:
-        return float(pinned_rmax_m), _RMAX_PINNED
-    rmax_m = compute_rmax_m(receiver)
+    if pinned_rmax is not None:
+        return float(pinned_rmax), _RMAX_PINNED
+    rmax = compute_rmax(receiver)
     if _farthest_range_m(receiver) is None:
-        return rmax_m, "100 km: the receiver has no positive range"
-    return rmax_m, "the farthest receiver range (doc/kraken.htm (8))"
+        return rmax, "100 km: the receiver has no positive range"
+    return rmax, "the farthest receiver range (doc/kraken.htm (8))"
 
 
 def resolve_modes_launch(env, source, receiver, *, tabulation_depths,
                          backend, collapse, leaky_modes, log, pinned_c_high,
-                         pinned_c_low, pinned_n_mesh, pinned_rmax_m):
+                         pinned_c_low, pinned_n_mesh, pinned_rmax):
     """The one launch of a MODES run, or of a single-frequency mode
     count: the modes deck tabulating the modes at ``tabulation_depths``,
     with ``RMax`` from ``receiver.ranges`` (100 km with no receiver).
@@ -347,8 +346,8 @@ def resolve_modes_launch(env, source, receiver, *, tabulation_depths,
     freq0 = float(np.atleast_1d(
         np.asarray(source.frequencies, dtype=float))[0])
     n_mesh = single_profile_n_mesh(env, pinned_n_mesh, freq0)
-    rmax_m, rmax_origin = resolve_rmax_m(receiver,
-                                         pinned_rmax_m=pinned_rmax_m)
+    rmax, rmax_origin = resolve_rmax(receiver,
+                                     pinned_rmax=pinned_rmax)
     c_low, c_highs, c_low_origin, c_high_origin = \
         phase_speed_window(env, [env], backend=backend,
                            coupled=False, collapse=collapse,
@@ -359,10 +358,10 @@ def resolve_modes_launch(env, source, receiver, *, tabulation_depths,
         deck_frequency=freq0,
         marched_frequencies=None,
         tabulation_depths=np.asarray(tabulation_depths, dtype=float),
-        profile_ranges_m=None,
+        profile_ranges=None,
         c_low=c_low,
         c_high=c_highs,
-        rmax_m=rmax_m,
+        rmax=rmax,
         n_mesh=n_mesh,
         field_option=None,
     )
@@ -669,11 +668,11 @@ def segment_env_for_field(env, freq=None, *, log, mode_coupling, n_segments):
     """Segment a range-dependent env into per-range profiles for the
     multi-profile kraken field run.
 
-    Returns ``(segments, n_profiles, profile_ranges_m, max_total_depth)``.
+    Returns ``(segments, n_profiles, profile_ranges, max_total_depth)``.
     ``max_total_depth`` is the shared bottom ``write_multi_profile_env``
     will declare, taken from the same planner the writer uses so the two
     cannot drift apart: the mode-tabulation grid is built to span
-    ``[0, max_total_depth]``, and ``EvaluateCMMod.f90:313`` stops a coupled
+    ``[0, max_total_depth]``, and ``EvaluateCMMod.f90:312-316`` stops a coupled
     run outright unless that grid ends *exactly* on the declared bottom.
     """
     segments = segment_environment_by_range(
@@ -681,7 +680,7 @@ def segment_env_for_field(env, freq=None, *, log, mode_coupling, n_segments):
     n_profiles = len(segments)
     _, max_total_depth, _ = plan_multi_profile_media(segments)
 
-    profile_ranges_m = np.array([s[0] for s in segments])
+    profile_ranges = np.array([s[0] for s in segments])
     log(f"Range-dependent: {n_profiles} profiles, "
               f"mode_coupling={mode_coupling}")
-    return segments, n_profiles, profile_ranges_m, max_total_depth
+    return segments, n_profiles, profile_ranges, max_total_depth

@@ -138,11 +138,9 @@ class _Climatology:
                 self.lat = data['lat']
                 self.lon = data['lon']
                 self.speed = data['speed']
-                # Optional: caches built before the key existed, and the
-                # synthetic ones the tests write, carry no reference period.
-                # Absent is not an error — the vintage is simply unstated.
-                self.years = ([int(y) for y in data['years']]
-                              if 'years' in data.files else None)
+                # The years averaged, which download_wind_db writes: the
+                # climatology's reference period.
+                self.years = [int(y) for y in data['years']]
         self._lat0 = float(self.lat[0])
         self._lon0 = float(self.lon[0])
         self._dlat = float(self.lat[1] - self.lat[0])
@@ -187,16 +185,9 @@ def _clim():
 
 
 def climatology_period():
-    """Reference period of the installed climatology, or ``None``.
-
-    A string such as ``'1991-2020 (climatology)'`` for the provenance
-    ``data_date``. ``None`` where the cache predates the ``years`` key or was
-    written without one — the grid is still usable, its vintage is simply not
-    recorded.
-    """
+    """Reference period of the installed climatology: a string such as
+    ``'1991-2020 (climatology)'`` for the provenance ``data_date``."""
     years = _clim().years
-    if not years:
-        return None
     return f"{min(years)}-{max(years)} (climatology)"
 
 

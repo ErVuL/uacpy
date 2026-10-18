@@ -1,6 +1,7 @@
 """Tests for the plane-wave bottom-loss helper
-:func:`uacpy.core.acoustics.bottom_loss_curve` and the matching plot
-helper :func:`uacpy.plot.plot_bottom_loss`."""
+:func:`uacpy.acoustics.bottom_loss_curve`, which returns the seabed's
+reflection as a ``ReflectionCoefficient``, and the loss view of that
+result's ``.plot()``."""
 
 import warnings
 
@@ -9,20 +10,28 @@ import pytest
 
 from uacpy.core.exceptions import FallbackWarning
 
-from uacpy.core.acoustics import (
-    bottom_loss_curve, reflection_coeff)
+from uacpy.acoustics import bottom_loss_curve
+from uacpy.core.acoustics import reflection_coeff
 from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.results import ReflectionCoefficient
 
 # The water density every deck writes (1.027 g/cm³), which is also the
 # wrapper's default; the closed forms below are evaluated against it.
 _RHO_W = DEFAULT_WATER_DENSITY_G_CM3
 
 
+def _curve(material, **kwargs):
+    """``(grazing angles, bottom loss in dB)`` of ``bottom_loss_curve``'s
+    table: its ``angles_deg`` and its ``dB`` view."""
+    rc = bottom_loss_curve(material, **kwargs)
+    return rc.angles_deg, rc.dB
+
+
 
 class TestBottomLossCurve:
     def test_returns_matched_arrays(self):
-        ang, loss = bottom_loss_curve('sand')
+        ang, loss = _curve('sand')
         assert ang.shape == loss.shape
         assert ang[0] == 0.0
         assert ang[-1] == 90.0
@@ -31,7 +40,7 @@ class TestBottomLossCurve:
         # At grazing=0° all energy reflects → zero loss; at normal
         # incidence some transmits → finite loss for a fluid bottom
         # denser & faster than water.
-        _, loss = bottom_loss_curve('sand')
+        _, loss = _curve('sand')
         assert loss[0] == pytest.approx(0.0, abs=1e-6)
         assert loss[-1] > 0.5
 
@@ -42,7 +51,7 @@ class TestBottomLossCurve:
         # interface), so for fluid 'sand' c_2=1650 over c_1=1500 the critical
         # grazing angle is arccos(c1/c2) ≈ 24.6°; the 20°/30° windows below
         # straddle it without touching it.
-        ang, loss = bottom_loss_curve('sand')
+        ang, loss = _curve('sand')
         below = loss[ang < 20.0].mean()
         above = loss[(ang > 30.0) & (ang < 60.0)].mean()
         assert below < above
@@ -52,19 +61,19 @@ class TestBottomLossCurve:
         # take exactly the code path the preset name takes — identical
         # arrays, not merely finite ones.
         m = dict(sound_speed=1650.0, density=1.9 * _RHO_W, attenuation=0.8)
-        ang_d, loss_d = bottom_loss_curve(m)
-        ang_p, loss_p = bottom_loss_curve('sand')
+        ang_d, loss_d = _curve(m)
+        ang_p, loss_p = _curve('sand')
         np.testing.assert_array_equal(ang_d, ang_p)
         np.testing.assert_array_equal(loss_d, loss_p)
         # A dict with different values still yields a finite curve.
         other = dict(sound_speed=1700.0, density=1.8, attenuation=0.3)
-        _, loss_o = bottom_loss_curve(other)
+        _, loss_o = _curve(other)
         assert np.all(np.isfinite(loss_o))
         assert not np.allclose(loss_o, loss_p)
 
     def test_custom_angle_grid(self):
         custom = np.linspace(5.0, 85.0, 41)
-        ang, loss = bottom_loss_curve('limestone', grazing_angles_deg=custom)
+        ang, loss = _curve('limestone', grazing_angles_deg=custom)
         assert np.array_equal(ang, custom)
 
 
@@ -79,7 +88,7 @@ class TestPresetBottomLossAnchors:
     alone (13.98 dB), 13.9 dB at 10°."""
 
     def test_sand_per_bounce_losses_at_10_and_24_degrees(self):
-        _, loss = bottom_loss_curve('sand',
+        _, loss = _curve('sand',
                                     grazing_angles_deg=np.array([10.0, 24.0]))
         # Computed 0.719 / 2.042 dB; the doc rounds to 0.7 / 2.0.
         assert loss[0] == pytest.approx(0.72, abs=0.02)
@@ -93,7 +102,7 @@ class TestPresetBottomLossAnchors:
         # below (1.54 dB) — sand's absorption keeps the sub-critical floor
         # well above zero, so the factual ratio is ~2.5, not "several".
         g = np.linspace(crit - 5.0, crit + 5.0, 101)
-        _, loss = bottom_loss_curve('sand', grazing_angles_deg=g)
+        _, loss = _curve('sand', grazing_angles_deg=g)
         assert loss[g > crit].mean() > 2.0 * loss[g < crit].mean()
 
     def test_clay_reflects_the_bare_density_contrast(self):
@@ -103,7 +112,7 @@ class TestPresetBottomLossAnchors:
         # |R| = (1.5-1)/(1.5+1) = 0.2 -> 13.98 dB — flat at every angle
         # steeper than a few degrees (attenuation perturbs the 3rd digit:
         # 13.88 dB at 10°).
-        ang, loss = bottom_loss_curve('clay')
+        ang, loss = _curve('clay')
         steep = ang >= 10.0
         R = 10.0 ** (-loss[steep] / 20.0)
         np.testing.assert_allclose(R, 0.2, atol=3e-3)
@@ -114,12 +123,12 @@ class TestPresetBottomLossAnchors:
         # The remedy for a rho_w = 1 benchmark: the ratio itself as density,
         # in water of density 1.0, is the same seabed the preset is in the
         # deck water — and an absolute 1.5 read against 1.027 water is not.
-        ang, textbook = bottom_loss_curve(
+        ang, textbook = _curve(
             dict(sound_speed=1500.0, density=1.5, attenuation=0.2),
             water_density=1.0)
-        _, preset = bottom_loss_curve('clay')
+        _, preset = _curve('clay')
         np.testing.assert_allclose(textbook, preset, atol=1e-10)
-        _, absolute = bottom_loss_curve(
+        _, absolute = _curve(
             dict(sound_speed=1500.0, density=1.5, attenuation=0.2))
         R = 10.0 ** (-absolute[ang >= 10.0] / 20.0)
         np.testing.assert_allclose(R, (1.5 - _RHO_W) / (1.5 + _RHO_W),
@@ -148,7 +157,7 @@ class TestSlowBottomIntromission:
         grazing_intro = self._closed_form_intromission_grazing(_RHO_W)
         assert grazing_intro == pytest.approx(16.61, abs=0.01)  # doc's 16.6°
         g = np.linspace(10.0, 20.0, 2001)
-        _, loss = bottom_loss_curve(self.MUD, grazing_angles_deg=g)
+        _, loss = _curve(self.MUD, grazing_angles_deg=g)
         assert g[np.argmax(loss)] == pytest.approx(grazing_intro, abs=0.02)
 
     def test_textbook_water_density_moves_the_dip_to_the_coa_angle(self):
@@ -157,7 +166,7 @@ class TestSlowBottomIntromission:
         grazing_intro = self._closed_form_intromission_grazing(1.0)
         assert grazing_intro == pytest.approx(15.68, abs=0.01)
         g = np.linspace(10.0, 20.0, 2001)
-        _, loss = bottom_loss_curve(self.MUD, grazing_angles_deg=g,
+        _, loss = _curve(self.MUD, grazing_angles_deg=g,
                                     water_density=1.0)
         assert g[np.argmax(loss)] == pytest.approx(grazing_intro, abs=0.02)
 
@@ -166,7 +175,7 @@ class TestSlowBottomIntromission:
         # 0 at the exact angle, 16.61°, so the sub-1e-3 bound is the robust
         # pin on a grid that need not land on it).
         g = np.linspace(16.0, 17.5, 2001)
-        _, loss = bottom_loss_curve(self.MUD, grazing_angles_deg=g)
+        _, loss = _curve(self.MUD, grazing_angles_deg=g)
         assert 10.0 ** (-loss.max() / 20.0) < 1e-3
         # The curve PEAKS there rather than saturating: both window edges
         # are far below the dip's loss.
@@ -191,7 +200,7 @@ class TestReflectionCoeffCrossCheck:
     def test_same_curve_from_the_presets_numbers(self):
         from uacpy.core.materials import get_material
         g = np.linspace(1.0, 89.0, 89)
-        _, loss = bottom_loss_curve('sand', grazing_angles_deg=g)
+        _, loss = _curve('sand', grazing_angles_deg=g)
         sand = get_material('sand')
         R = reflection_coeff(g, sound_speed=sand['sound_speed'],
                              density=sand['density'],
@@ -235,7 +244,7 @@ class TestTheTwoEntryPointsShareOneWater:
         assert R_default == R_explicit
 
     def test_the_two_entry_points_give_one_curve(self):
-        g, loss = bottom_loss_curve(
+        g, loss = _curve(
             dict(sound_speed=1700.0, density=1.8, attenuation=0.0))
         R = reflection_coeff(g, sound_speed=1700.0, density=1.8)
         np.testing.assert_allclose(
@@ -288,7 +297,7 @@ class TestAnIgnoredShearSpeedIsAnnounced:
         import warnings
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            bottom_loss_curve(material, grazing_angles_deg=[30.0, 60.0])
+            _curve(material, grazing_angles_deg=[30.0, 60.0])
         return [w for w in caught
                 if issubclass(w.category, FallbackWarning)]
 
@@ -331,7 +340,7 @@ class TestShearLossMagnitude:
                            m['shear_speed'], m['density'],
                            ap_dbl=m['attenuation'],
                            as_dbl=m['shear_attenuation'])
-        _, fluid = bottom_loss_curve(name, grazing_angles_deg=self.G)
+        _, fluid = _curve(name, grazing_angles_deg=self.G)
         return -20.0 * np.log10(np.abs(R)) - fluid
 
     def test_reference_reduces_to_the_fluid_curve_without_shear(self):
@@ -339,7 +348,7 @@ class TestShearLossMagnitude:
         # curve — validates the test-local closed form against the code.
         R = _fluid_solid_R(self.G, 1500.0, _RHO_W, 1650.0, 0.0,
                            1.9 * _RHO_W, ap_dbl=0.8)
-        _, fluid = bottom_loss_curve('sand', grazing_angles_deg=self.G)
+        _, fluid = _curve('sand', grazing_angles_deg=self.G)
         np.testing.assert_allclose(-20.0 * np.log10(np.abs(R)), fluid,
                                    atol=1e-10)
 
@@ -404,124 +413,137 @@ class TestReflectionCoeffSpeaksThePackagesUnits:
     def test_bottom_loss_curve_names_the_water_speed_water_sound_speed(self):
         with pytest.raises(TypeError,
                            match="unexpected keyword argument 'water_speed'"):
-            bottom_loss_curve('sand', water_speed=1490.0)
-        g, loss = bottom_loss_curve('sand', water_sound_speed=1490.0)
+            _curve('sand', water_speed=1490.0)
+        g, loss = _curve('sand', water_sound_speed=1490.0)
         assert np.all(np.isfinite(loss))
 
 
-class TestPlotBottomLoss:
-    """The plotter that draws what ``bottom_loss_curve`` computes. Before it
-    existed every caller -- example 25 included -- looped and called
-    ``ax.plot`` itself."""
+class TestTheBottomLossIsAReflectionCoefficient:
+    """``bottom_loss_curve`` returns the table, and the table draws itself:
+    its loss view overlays several seabeds through ``label=`` and ``ax=``,
+    and ``mark_critical=True`` rules the critical angle it carries."""
 
     @staticmethod
     def _close(fig):
         import matplotlib.pyplot as plt
         plt.close(fig)
 
-    def test_one_curve_per_material_named_after_it(self):
-        from uacpy.plot import plot_bottom_loss
-        fig, ax = plot_bottom_loss(['sand', 'silt', 'basalt'])
+    def test_it_is_the_complex_rayleigh_coefficient(self):
+        g = np.array([10.0, 45.0, 80.0])
+        rc = bottom_loss_curve('sand', grazing_angles_deg=g)
+        assert isinstance(rc, ReflectionCoefficient) and not rc.is_broadband
+        np.testing.assert_allclose(
+            rc.coefficient,
+            reflection_coeff(g, sound_speed=1650.0, density=1.9 * _RHO_W,
+                             attenuation=0.8), rtol=1e-12)
+        assert rc.critical_angle_deg == pytest.approx(
+            np.degrees(np.arccos(1500.0 / 1650.0)), rel=1e-12)
+
+    def test_the_loss_view_draws_the_tables_dB(self):
+        rc = bottom_loss_curve('sand', water_sound_speed=1490.0)
+        fig, ax = rc.plot(value='loss')
         try:
-            assert len(ax.lines) == 3
-            assert [l.get_label() for l in ax.lines] == ['sand', 'silt', 'basalt']
+            np.testing.assert_allclose(ax.lines[0].get_xdata(), rc.angles_deg)
+            np.testing.assert_allclose(ax.lines[0].get_ydata(), rc.dB)
             assert 'Grazing angle' in ax.get_xlabel()
             assert 'dB' in ax.get_ylabel()
         finally:
             self._close(fig)
 
-    def test_a_property_dict_is_drawn_beside_the_presets(self):
-        from uacpy.plot import plot_bottom_loss
-        fetched = dict(sound_speed=1521.0, density=1.52, attenuation=0.11)
-        fig, ax = plot_bottom_loss({'sand': 'sand', 'fetched': fetched})
+    def test_the_phase_view_draws_the_tables_phase(self):
+        fig = ax = None
+        for name in ('sand', 'basalt'):
+            fig, ax = bottom_loss_curve(name).plot(value='phase', label=name,
+                                                   ax=ax)
         try:
-            assert [l.get_label() for l in ax.lines] == ['sand', 'fetched']
-            # the dict curve is a real curve, not an empty one
-            assert np.nanmax(ax.lines[1].get_ydata()) > 1.0
+            for line, name in zip(ax.lines, ('sand', 'basalt')):
+                rc = bottom_loss_curve(name)
+                np.testing.assert_allclose(line.get_xdata(), rc.angles_deg)
+                np.testing.assert_allclose(line.get_ydata(), rc.phase)
+            assert ax.get_ylabel() == 'Phase of R (rad)'
         finally:
             self._close(fig)
 
-    def test_a_label_mapping_is_not_read_as_one_property_dict(self):
-        """Both are dicts. Only the property keys tell them apart, and
-        getting it wrong sends the whole mapping to ``bottom_loss_curve``
-        as though it described one seabed."""
-        from uacpy.plot import plot_bottom_loss
-        fig, ax = plot_bottom_loss({'a': 'sand', 'b': 'silt', 'c': 'basalt'})
+    def test_the_phase_view_with_show_phase_is_refused_naming_both(self):
+        with pytest.raises(ConfigurationError,
+                           match=r"value='phase'.*show_phase=True"):
+            bottom_loss_curve('sand').plot(value='phase', show_phase=True)
+
+    def test_the_phase_view_of_a_broadband_table_is_refused(self):
+        rc = ReflectionCoefficient(angles_deg=[0.0, 45.0, 90.0],
+                                   magnitude=np.full((3, 2), 0.5),
+                                   phase=np.zeros((3, 2)),
+                                   frequencies=[100.0, 200.0])
+        assert rc.is_broadband
+        with pytest.raises(ConfigurationError, match='broadband') as err:
+            rc.plot(value='phase')
+        assert 'rc.at(frequency=f)' in str(err.value.remediation)
+
+    def test_seabeds_overlay_named_by_their_labels(self):
+        fig = ax = None
+        names = ['sand', 'silt', 'basalt']
+        for name in names:
+            fig, ax = bottom_loss_curve(name).plot(value='loss', label=name,
+                                                   ax=ax)
         try:
-            assert len(ax.lines) == 3
-            assert [l.get_label() for l in ax.lines] == ['a', 'b', 'c']
+            assert [l.get_label() for l in ax.lines] == names
+            assert [t.get_text() for t in ax.get_legend().get_texts()] == names
         finally:
             self._close(fig)
-
-    def test_the_curve_is_bottom_loss_curve_verbatim(self):
-        from uacpy.plot import plot_bottom_loss
-        angles, loss = bottom_loss_curve('sand', water_sound_speed=1490.0)
-        fig, ax = plot_bottom_loss('sand', water_sound_speed=1490.0)
-        try:
-            np.testing.assert_allclose(ax.lines[0].get_xdata(), angles)
-            np.testing.assert_allclose(ax.lines[0].get_ydata(), loss)
-        finally:
-            self._close(fig)
-
-    def test_the_water_speed_is_named_water_sound_speed(self):
-        """One name for the water's speed across the package; the retired
-        spelling is not quietly forwarded to matplotlib."""
-        from uacpy.core.exceptions import ConfigurationError
-        from uacpy.plot import plot_bottom_loss
-        with pytest.raises(ConfigurationError, match='water_speed'):
-            plot_bottom_loss('sand', water_speed=1490.0)
 
     def test_mark_critical_rules_the_fast_seabeds_only(self):
         """A seabed slower than the water has no critical angle, so it gets
         no rule rather than one at an angle it does not have."""
-        from uacpy.plot import plot_bottom_loss
-        # clay is 1500 m/s: slower than 1510 water, faster than 1480
-        fig, ax = plot_bottom_loss(['clay', 'basalt'], water_sound_speed=1510.0,
-                                   mark_critical=True)
+        # clay is 1500 m/s: slower than 1510 water
+        fig = ax = None
+        for name in ('clay', 'basalt'):
+            fig, ax = bottom_loss_curve(name, water_sound_speed=1510.0).plot(
+                value='loss', label=name, mark_critical=True, ax=ax)
         try:
             rules = [l for l in ax.lines if l.get_linestyle() == ':']
             assert len(rules) == 1          # basalt only
-            x = rules[0].get_xdata()[0]
-            assert x == pytest.approx(
+            assert rules[0].get_xdata()[0] == pytest.approx(
                 np.degrees(np.arccos(1510.0 / 5250.0)), abs=1e-6)
+            assert rules[0].get_color() == ax.lines[1].get_color()
         finally:
             self._close(fig)
 
-    def test_the_packages_own_seabed_objects_are_drawn(self):
-        """``env.bottom`` and a ``BoundaryProperties`` failed with a raw
-        ``TypeError: ... is not iterable``. A carrier, alone or in a list or
-        mapping, draws the curve its three properties give; a layered or
-        range-dependent Bottom, which has no single half-space reflection, is
-        refused naming ``halfspace_at``."""
+    def test_without_mark_critical_there_are_no_rules(self):
+        fig, ax = bottom_loss_curve('basalt').plot(value='loss')
+        try:
+            assert not [l for l in ax.lines if l.get_linestyle() == ':']
+        finally:
+            self._close(fig)
+
+    def test_a_table_without_its_critical_angle_is_refused_the_rule(self):
+        rc = ReflectionCoefficient(angles_deg=[0.0, 45.0, 90.0],
+                                   magnitude=[1.0, 0.5, 0.3],
+                                   phase=[0.0, 0.1, 0.2])
+        assert rc.critical_angle_deg is None
+        with pytest.raises(ConfigurationError, match='critical_angle'):
+            rc.plot(mark_critical=True)
+
+    def test_the_packages_own_seabed_objects_are_read(self):
+        """``env.bottom`` (an unlayered, range-independent Bottom) is read at
+        its half-space; a layered or range-dependent Bottom, which has no
+        single half-space reflection, is refused, the layered one pointing
+        at the routes that model the layers."""
         import uacpy
         from uacpy.core.boundary import BoundaryProperties
-        from uacpy.core.exceptions import ConfigurationError
-        from uacpy.plot import plot_bottom_loss
         props = dict(sound_speed=1650.0, density=1.8, attenuation=0.8)
-        _, expected = bottom_loss_curve(props)
+        expected = bottom_loss_curve(props).dB
         bp = BoundaryProperties(acoustic_type='half-space', **props)
-        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0,
-                                bottom=bp)
-        for materials in (bp, [bp], {'site': bp, 'sand': 'sand'},
-                          env.bottom):
-            fig, ax = plot_bottom_loss(materials, mark_critical=True)
-            try:
-                np.testing.assert_allclose(ax.lines[0].get_ydata(), expected)
-                rule = [l for l in ax.lines if l.get_linestyle() == ':'][0]
-                assert rule.get_xdata()[0] == pytest.approx(
-                    np.degrees(np.arccos(1500.0 / 1650.0)))
-            finally:
-                self._close(fig)
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom=bp)
+        for material in (bp, env.bottom):
+            np.testing.assert_allclose(bottom_loss_curve(material).dB,
+                                       expected)
         from uacpy.core.bottom import Bottom
         rd = Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1600.0, 1700.0],
                                     density=[1.8, 1.8], attenuation=[0.8, 0.8])
         assert rd.is_range_dependent
         with pytest.raises(ConfigurationError, match='range-dependent') as rd_err:
-            plot_bottom_loss(rd)
+            bottom_loss_curve(rd)
         assert 'halfspace_at(range=r)' in str(rd_err.value.remediation)
-        # A layered seabed is refused on its own: its half-space alone is a
-        # different reflection, so the remedy names the routes that model
-        # the layers, not halfspace_at.
         from uacpy.core.boundary import SedimentLayer
         from uacpy.core.bottom import SeabedColumn
         layered = Bottom.from_column(SeabedColumn(
@@ -530,33 +552,26 @@ class TestPlotBottomLoss:
             halfspace=bp))
         assert layered.is_layered and not layered.is_range_dependent
         with pytest.raises(ConfigurationError, match='layered Bottom') as err:
-            plot_bottom_loss(layered)
+            bottom_loss_curve(layered)
         assert 'Bounce' in str(err.value.remediation)
         assert 'halfspace_at' not in str(err.value.remediation)
-        with pytest.raises(ConfigurationError, match='cannot draw a int'):
-            plot_bottom_loss(3)
 
-    def test_without_mark_critical_there_are_no_rules(self):
-        from uacpy.plot import plot_bottom_loss
-        fig, ax = plot_bottom_loss(['sand', 'basalt'], water_sound_speed=1500.0)
-        try:
-            assert not [l for l in ax.lines if l.get_linestyle() == ':']
-        finally:
-            self._close(fig)
+    def test_a_partial_property_dict_is_refused_by_name(self):
+        with pytest.raises(ConfigurationError, match=r"missing \['density'\]"):
+            bottom_loss_curve(dict(sound_speed=1650.0, attenuation=0.8))
 
-    def test_an_empty_material_list_is_refused(self):
-        from uacpy.plot import plot_bottom_loss
-        from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError, match='no materials'):
-            plot_bottom_loss([])
+    def test_the_critical_angle_survives_a_save(self):
+        rc = bottom_loss_curve('sand')
+        assert ReflectionCoefficient.from_dict(
+            rc.to_dict()).critical_angle_deg == rc.critical_angle_deg
+        assert rc.at(angle=30.0).critical_angle_deg == rc.critical_angle_deg
 
 
 class TestTheCriticalAngleHasAnEntryPointOfItsOwn:
-    """`arccos(c_water / c_bottom)` used to be spelled only inside
-    `plot_bottom_loss`, which ruled it on the axes. The number could not be
-    obtained without drawing the figure — `critical` appeared in no public
-    name in `uacpy`, `uacpy.core.acoustics` or `uacpy.sonar`.
-    """
+    """`arccos(c_water / c_bottom)` is `uacpy.acoustics.critical_angle`, the
+    one formula: `bottom_loss_curve` carries its value on the table and the
+    loss view rules that value, so the number is obtained without drawing
+    the figure."""
 
     def test_a_faster_seabed_has_one(self):
         import uacpy
@@ -580,17 +595,18 @@ class TestTheCriticalAngleHasAnEntryPointOfItsOwn:
             uacpy.acoustics.critical_angle(0.0, 1500.0)
 
     def test_the_figure_rules_exactly_what_the_function_returns(self):
-        """One formula: the plotter asks, it does not re-derive."""
+        """One formula: the table carries it, the plotter draws it."""
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         import uacpy
         from uacpy.core.materials import get_material
-        from uacpy.plot import plot_bottom_loss
 
         names = ['sand', 'granite', 'clay']
-        fig, ax = plot_bottom_loss(names, mark_critical=True,
-                                   water_sound_speed=1500.0)
+        fig = ax = None
+        for name in names:
+            fig, ax = bottom_loss_curve(name, water_sound_speed=1500.0).plot(
+                value='loss', label=name, mark_critical=True, ax=ax)
         try:
             ruled = sorted(float(l.get_xdata()[0]) for l in ax.lines
                            if l.get_linestyle() == ':')
@@ -615,14 +631,14 @@ class TestBottomLossCurveReadsTheSeabedCarriers:
     def test_a_boundary_properties_gives_the_dict_curve(self):
         from uacpy.core.boundary import BoundaryProperties
         hs = BoundaryProperties(acoustic_type='half-space', **self.props)
-        np.testing.assert_array_equal(bottom_loss_curve(hs)[1],
-                                      bottom_loss_curve(self.props)[1])
+        np.testing.assert_array_equal(bottom_loss_curve(hs).dB,
+                                      bottom_loss_curve(self.props).dB)
 
     def test_a_sediment_layer_gives_the_dict_curve(self):
         from uacpy.core.boundary import SedimentLayer
         layer = SedimentLayer(thickness=5.0, **self.props)
-        np.testing.assert_array_equal(bottom_loss_curve(layer)[1],
-                                      bottom_loss_curve(self.props)[1])
+        np.testing.assert_array_equal(bottom_loss_curve(layer).dB,
+                                      bottom_loss_curve(self.props).dB)
 
     def test_an_object_without_the_properties_is_refused(self):
         with pytest.raises(ConfigurationError, match='bottom_loss_curve'):
@@ -639,21 +655,23 @@ class TestANonHalfSpaceCarrierIsNotReadAsOne:
     half-space they drew a 12-13 dB loss curve for a boundary that
     reflects totally."""
 
-    @pytest.mark.parametrize('kind', ['rigid', 'vacuum'])
-    def test_a_totally_reflecting_boundary_loses_nothing(self, kind):
+    @pytest.mark.parametrize('kind, R', [('rigid', 1.0), ('vacuum', -1.0)])
+    def test_a_totally_reflecting_boundary_loses_nothing(self, kind, R):
+        """Rigid reflects with R = +1, pressure-release with R = -1."""
         from uacpy.core.boundary import BoundaryProperties
-        angles, loss = bottom_loss_curve(
-            BoundaryProperties(acoustic_type=kind),
-            grazing_angles_deg=[10.0, 45.0, 90.0])
-        np.testing.assert_array_equal(angles, [10.0, 45.0, 90.0])
-        np.testing.assert_array_equal(loss, [0.0, 0.0, 0.0])
+        rc = bottom_loss_curve(BoundaryProperties(acoustic_type=kind),
+                               grazing_angles_deg=[10.0, 45.0, 90.0])
+        np.testing.assert_array_equal(rc.angles_deg, [10.0, 45.0, 90.0])
+        np.testing.assert_array_equal(rc.dB, [0.0, 0.0, 0.0])
+        np.testing.assert_allclose(rc.coefficient, [R, R, R], atol=1e-15)
+        assert np.isnan(rc.critical_angle_deg)
 
     def test_the_environment_route_of_the_docstring_agrees(self):
         import uacpy
         from uacpy.core.boundary import BoundaryProperties
         env = uacpy.Environment(
             bathymetry=100.0, bottom=BoundaryProperties(acoustic_type='rigid'))
-        _, loss = bottom_loss_curve(env.bottom.halfspace_at(range=0.0))
+        loss = bottom_loss_curve(env.bottom.halfspace_at(range=0.0)).dB
         assert np.all(loss == 0.0) and loss.size == 181
 
     def test_a_reflection_table_boundary_is_refused(self):
@@ -666,9 +684,9 @@ class TestANonHalfSpaceCarrierIsNotReadAsOne:
         hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1650.0,
                                 density=1.9, attenuation=0.8)
         np.testing.assert_array_equal(
-            bottom_loss_curve(hs)[1],
+            bottom_loss_curve(hs).dB,
             bottom_loss_curve({'sound_speed': 1650.0, 'density': 1.9,
-                               'attenuation': 0.8})[1])
+                               'attenuation': 0.8}).dB)
 
 
 def test_the_quoted_water_density_difference_on_sand_is_the_computed_one():
@@ -676,9 +694,8 @@ def test_the_quoted_water_density_difference_on_sand_is_the_computed_one():
     1.027 g/cm³ default water and the textbook 1.0 on 'sand'. Recomputed
     here so the figure cannot drift from the curve: Z ratio 3219.6/1540.5
     against 3219.6/1500 at normal incidence is 0.28 dB."""
-    from uacpy.core.acoustics.boundaries import bottom_loss_curve
-    angles, default = bottom_loss_curve('sand')
-    _, textbook = bottom_loss_curve('sand', water_density=1.0)
+    angles, default = _curve('sand')
+    _, textbook = _curve('sand', water_density=1.0)
     gap = np.abs(np.asarray(default) - np.asarray(textbook))
     assert angles[int(np.argmax(gap))] == pytest.approx(90.0)
     assert f"at most {gap.max():.2f} dB, at normal incidence" in \

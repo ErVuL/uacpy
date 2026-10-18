@@ -18,10 +18,8 @@ actually ran) · env altimetry · SeabedColumn with shear
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -93,22 +91,13 @@ for ax, (label, env) in zip(axes, cases.items()):
     # RAM's depth grid at 100 Hz (dz ≈ 1.0 m, from its λ/15 cost floor) is
     # coarse beside the 3 m corrugation, so ramsurf staircases it by up to a
     # cell, and the surface asked at 1.6 m at r = 0 sits on the node above
-    # it, about 0.6 m higher. Both notices are printed, and any other
-    # warning is shown as usual. Where the surface dips below 2 m, the 2 m
-    # receivers sit above it and read no field: the dark band along the top
-    # of the rough panel.
+    # it, about 0.6 m higher; both notices are printed. Where the surface dips
+    # below 2 m, the 2 m receivers sit above it and read no field: the dark
+    # band along the top of the rough panel.
     with warnings.catch_warnings(record=True) as caught:
-        field = ram.run(env, source, receiver,
-                        run_mode=uacpy.RunMode.COHERENT_TL)
+        field = ram.run(env, source, receiver)
     for warning in caught:
-        text = ' '.join(str(warning.message).split())
-        if 'staircased' in text:
-            print(f"  noted: {text.split(';')[0]}")
-        elif 'zeroes every row' in text:
-            print(f"  noted: {text.split('. dz=')[0]}.")
-        else:
-            warnings.showwarning(warning.message, warning.category,
-                                 warning.filename, warning.lineno)
+        print(f"  noted: {str(warning.message).splitlines()[0]}")
     uacpy.plot.plot_field(field, ax=ax, env=env, vmin=30, vmax=110,
                      title=f"{label}\nbackend={field.backend}")
 fig.tight_layout()

@@ -27,7 +27,7 @@ class TestReflectionCoefficientCarriesTransmissionValuesAboveOne:
         theta = np.linspace(0.0, 90.0, 5)
         R = np.array([0.3, 0.8, self.ABOVE_ONE, 0.9, 0.0])
         return ReflectionCoefficient(
-            angles=theta, magnitude=R, phase=np.zeros_like(R),
+            angles_deg=theta, magnitude=R, phase=np.zeros_like(R),
             model='OASR', frequencies=100.0,
             reflection_type='transmission',
         )
@@ -45,7 +45,7 @@ class TestReflectionCoefficientCarriesTransmissionValuesAboveOne:
         from uacpy.core.results import ReflectionCoefficient
         R = np.array([0.3, 0.8, 0.95, 0.9, 0.0])
         rc = ReflectionCoefficient(
-            angles=np.linspace(0.0, 90.0, 5), magnitude=R, phase=np.zeros_like(R),
+            angles_deg=np.linspace(0.0, 90.0, 5), magnitude=R, phase=np.zeros_like(R),
             model='OASR', frequencies=100.0,
             reflection_type='P-P',
         )
@@ -63,7 +63,7 @@ class TestReflectionCoefficientChainAccessors:
         R = np.outer(np.cos(np.deg2rad(theta)), np.ones(3)) ** 2
         phi = np.zeros_like(R)
         return ReflectionCoefficient(
-            angles=theta, magnitude=R, phase=phi,
+            angles_deg=theta, magnitude=R, phase=phi,
             frequencies=freqs, model='Test',
         )
 
@@ -80,19 +80,19 @@ class TestReflectionCoefficientChainAccessors:
         rc = self._broadband_rc()
         sliced = rc.at(angle=45.0)
         assert isinstance(sliced, ReflectionCoefficient)
-        assert sliced.angles.shape == (1,)
+        assert sliced.angles_deg.shape == (1,)
         assert sliced.magnitude.shape == (1, 3)
 
     def test_at_both_collapses_to_single_value(self):
         rc = self._broadband_rc()
         sliced = rc.at(angle=45.0, frequency=100.0)
-        assert sliced.angles.shape == (1,)
+        assert sliced.angles_deg.shape == (1,)
         assert sliced.magnitude.shape == (1,)
 
     def test_at_frequency_on_narrowband_raises(self):
         from uacpy.core.results import ReflectionCoefficient
         rc = ReflectionCoefficient(
-            angles=np.linspace(0, 90, 5),
+            angles_deg=np.linspace(0, 90, 5),
             magnitude=np.linspace(0, 1, 5),
             phase=np.zeros(5),
             model='Test', frequencies=100.0,
@@ -123,7 +123,7 @@ class TestReflectionCoefficientChainAccessors:
     def test_at_angle_selects_one_angle(self):
         rc = self._broadband_rc()
         by_angle = rc.at(angle=45.0)
-        assert by_angle.angles.shape == (1,)
+        assert by_angle.angles_deg.shape == (1,)
 
     def test_at_unknown_axis_raises(self):
         # Generic Field.at-style form rejects axes it doesn't have.
@@ -139,7 +139,7 @@ class TestReflectionCoefficientChainAccessors:
     def test_isel_positional_angle(self):
         rc = self._broadband_rc()
         s = rc.isel(angle=2)
-        assert s.angles.shape == (1,) and s.angles[0] == rc.angles[2]
+        assert s.angles_deg.shape == (1,) and s.angles_deg[0] == rc.angles_deg[2]
         assert s.magnitude.shape == (1, 3)
 
     def test_isel_oob_raises_indexerror(self):
@@ -149,7 +149,7 @@ class TestReflectionCoefficientChainAccessors:
     def test_eval_interpolates_off_grid_angle(self):
         rc = self._broadband_rc()              # 1° grid → 30.5° is off-grid
         s = rc.eval(angle=30.5)
-        assert s.angles[0] == pytest.approx(30.5)
+        assert s.angles_deg[0] == pytest.approx(30.5)
         expect = 0.5 * (np.cos(np.deg2rad(30)) ** 2
                         + np.cos(np.deg2rad(31)) ** 2)   # linear of cos^2
         assert s.magnitude[0, 0] == pytest.approx(expect, abs=1e-6)
@@ -173,7 +173,7 @@ class TestReflectionCoefficientExtrapolationIsAnnounced:
     def _rc():
         th = np.arange(10.0, 41.0, 5.0)
         return ReflectionCoefficient(
-            angles=th, magnitude=np.linspace(0.9, 0.3, th.size),
+            angles_deg=th, magnitude=np.linspace(0.9, 0.3, th.size),
             phase=np.zeros(th.size), model='Test', frequencies=100.0)
 
     @pytest.mark.parametrize('angle', [5.0, 80.0])
@@ -211,7 +211,7 @@ class TestReflectionEvalInterpolatesPhaseAsAtDoesAndSaysSo:
 
     @staticmethod
     def _rc(phi):
-        return ReflectionCoefficient(angles=np.array([10.0, 20.0, 30.0]),
+        return ReflectionCoefficient(angles_deg=np.array([10.0, 20.0, 30.0]),
                                      magnitude=np.array([0.9, 0.8, 0.7]),
                                      phase=np.asarray(phi, dtype=float))
 
@@ -269,7 +269,7 @@ class TestReflectionCoefficientCarriesTheTravellingWavePhaseSign:
     def _rc(**kwargs):
         from uacpy.core.results import ReflectionCoefficient
         theta = np.array([10.0, 20.0, 30.0])
-        return ReflectionCoefficient(angles=theta, magnitude=np.full(3, 0.5),
+        return ReflectionCoefficient(angles_deg=theta, magnitude=np.full(3, 0.5),
                                      phase=np.zeros(3), model='Test', **kwargs)
 
     def test_default_stamp_is_travelling_wave(self):
@@ -291,7 +291,7 @@ class TestAReflectionTableHasItsComplexAndLossViews:
     @staticmethod
     def _table(R):
         from uacpy.core.results import ReflectionCoefficient
-        return ReflectionCoefficient(angles=[10.0, 45.0, 80.0], magnitude=R,
+        return ReflectionCoefficient(angles_deg=[10.0, 45.0, 80.0], magnitude=R,
                                      phase=[0.3, -0.2, 0.0], frequencies=[100.0])
 
     def test_the_complex_view_carries_magnitude_and_phase(self):
@@ -312,16 +312,16 @@ class TestAReflectionCoefficientIsAMagnitudeAndAPhase:
 
     def test_a_complex_r_is_refused_with_the_constructor_to_use(self):
         with pytest.raises(ConfigurationError, match='from_complex'):
-            ReflectionCoefficient(angles=[10.0, 20.0],
+            ReflectionCoefficient(angles_deg=[10.0, 20.0],
                                   magnitude=[0.9 * np.exp(0.3j), 0.8 * np.exp(0.5j)],
                                   phase=[0.0, 0.0])
 
     def test_a_negative_magnitude_and_a_nan_angle_are_refused(self):
         with pytest.raises(ConfigurationError, match='negative'):
-            ReflectionCoefficient(angles=[10.0, 20.0], magnitude=[-0.5, 0.5],
+            ReflectionCoefficient(angles_deg=[10.0, 20.0], magnitude=[-0.5, 0.5],
                                   phase=[0.0, 0.0])
         with pytest.raises(ConfigurationError, match='non-finite angle'):
-            ReflectionCoefficient(angles=[10.0, np.nan], magnitude=[0.5, 0.5],
+            ReflectionCoefficient(angles_deg=[10.0, np.nan], magnitude=[0.5, 0.5],
                                   phase=[0.0, 0.0])
 
     def test_from_complex_keeps_the_magnitude_and_unwraps_the_phase(self):
@@ -342,7 +342,73 @@ class TestAReflectionCoefficientIsAMagnitudeAndAPhase:
         np.testing.assert_allclose(table.phase, phase, rtol=1e-15)
 
     def test_isel_takes_an_integer_position(self):
-        table = ReflectionCoefficient(angles=[10.0, 20.0], magnitude=[0.9, 0.8],
+        table = ReflectionCoefficient(angles_deg=[10.0, 20.0], magnitude=[0.9, 0.8],
                                       phase=[0.3, 0.5])
         with pytest.raises(ConfigurationError, match='not an integer index'):
             table.isel(angle=1.5)
+
+
+class TestNarrowbandTablesStackIntoOneBroadbandTable:
+    """``ReflectionCoefficient.stack`` builds ``R(θ, f)`` from one table per
+    frequency, the columns in frequency order."""
+
+    @staticmethod
+    def _table(f, scale, **kw):
+        return ReflectionCoefficient(angles_deg=[10.0, 20.0, 30.0],
+                                     magnitude=scale * np.array([1.0, 0.8, 0.5]),
+                                     phase=[0.1, 0.2, 0.3], frequencies=f, **kw)
+
+    def test_the_columns_are_the_tables_in_frequency_order(self):
+        stacked = ReflectionCoefficient.stack(
+            [self._table(200.0, 0.9), self._table(100.0, 1.0)])
+        assert stacked.is_broadband
+        np.testing.assert_array_equal(stacked.frequencies, [100.0, 200.0])
+        np.testing.assert_allclose(stacked.magnitude[:, 0], [1.0, 0.8, 0.5])
+        np.testing.assert_allclose(stacked.magnitude[:, 1],
+                                   0.9 * np.array([1.0, 0.8, 0.5]))
+        np.testing.assert_allclose(stacked.at(frequency=200.0).magnitude,
+                                   0.9 * np.array([1.0, 0.8, 0.5]))
+
+    def test_tables_that_are_not_one_axis_are_refused(self):
+        other = ReflectionCoefficient(angles_deg=[10.0, 20.0, 31.0],
+                                      magnitude=[1.0, 0.8, 0.5],
+                                      phase=[0.1, 0.2, 0.3], frequencies=50.0)
+        with pytest.raises(ConfigurationError, match='other grazing angles'):
+            ReflectionCoefficient.stack([self._table(100.0, 1.0), other])
+        with pytest.raises(ConfigurationError, match='share a frequency'):
+            ReflectionCoefficient.stack([self._table(100.0, 1.0),
+                                         self._table(100.0, 0.5)])
+        with pytest.raises(ConfigurationError, match='two or more'):
+            ReflectionCoefficient.stack([self._table(100.0, 1.0)])
+        with pytest.raises(ConfigurationError, match="'transmission' table"):
+            ReflectionCoefficient.stack(
+                [self._table(100.0, 1.0),
+                 self._table(200.0, 1.0, reflection_type='transmission')])
+
+    def test_a_shared_critical_angle_is_kept(self):
+        kept = ReflectionCoefficient.stack(
+            [self._table(100.0, 1.0, critical_angle_deg=24.6),
+             self._table(200.0, 1.0, critical_angle_deg=24.6)])
+        assert kept.critical_angle_deg == 24.6
+        mixed = ReflectionCoefficient.stack(
+            [self._table(100.0, 1.0, critical_angle_deg=24.6),
+             self._table(200.0, 1.0)])
+        assert mixed.critical_angle_deg is None
+
+
+def test_tables_on_their_own_grids_stack_onto_one_given_axis():
+    """BOUNCE tabulates each frequency on a grid of its own; ``angles=``
+    reads every table there by linear interpolation of magnitude and phase,
+    and refuses an angle a table does not reach."""
+    a = ReflectionCoefficient(angles_deg=[0.0, 45.0, 90.0],
+                              magnitude=[1.0, 0.6, 0.2],
+                              phase=[0.0, 1.0, 2.0], frequencies=100.0)
+    b = ReflectionCoefficient(angles_deg=[0.0, 30.0, 60.0, 90.0],
+                              magnitude=[1.0, 0.9, 0.8, 0.7],
+                              phase=[0.0, 0.3, 0.6, 0.9], frequencies=200.0)
+    stacked = ReflectionCoefficient.stack([a, b], angles_deg=[0.0, 15.0, 90.0])
+    np.testing.assert_allclose(stacked.magnitude[:, 0], [1.0, 0.8667, 0.2],
+                               atol=1e-4)
+    np.testing.assert_allclose(stacked.phase[:, 1], [0.0, 0.15, 0.9])
+    with pytest.raises(ConfigurationError, match='beyond table 0'):
+        ReflectionCoefficient.stack([a, b], angles_deg=[0.0, 95.0])

@@ -69,9 +69,11 @@ def absorption_thorp(frequency: _ArrayLike,
     values, use Francois-Garrison instead (JKPS cites an overall accuracy of
     5 % for it; AT provides it as ``CASE ( 'F' )`` in the same routine).
 
-    **Frequency band.** The 3.3e-3 dB/km constant term is not an absorption
-    mechanism — JKPS attributes that regime to leakage out of the deep sound
-    channel — so below ~50 Hz this and Francois-Garrison diverge hard (at 10 Hz
+    **Frequency band.** The 3.3e-3 dB/km constant term is the one JKPS does
+    not give an absorption mechanism: region I "is still not completely
+    understood but it is conjectured that it is related to … leakage out of
+    the deep sound channel" (JKPS §1.5.2) — so below ~50 Hz this and
+    Francois-Garrison diverge hard (at 10 Hz
     3.3e-3 dB/km against FG's 1.2e-5 at 4 °C, 35 ppt, pH 8.0, 3000 m, and
     only FG is modelling absorption).
     ``docs/guide/environment.md §6 "Two things the curve does not tell you"``
@@ -269,9 +271,7 @@ def absorption_francois_garrison(
     # f^2. Francois & Garrison fit A3 piecewise about 20 degC. P3's
     # 3.83e-5 is the coefficient AttenMod.f90:161 evaluates; Medwin & Clay
     # eq. (3.4.33) print 3.83e-3, a misprint: with it P3, and the
-    # pure-water absorption, turn negative below 261 m. F&G Part I
-    # (JASA 72, 896), which states the coefficient, is not in the
-    # reference corpus.
+    # pure-water absorption, turn negative below 261 m.
     P3 = 1.0 - 3.83e-5 * z + 4.9e-10 * z * z
     A3_cold = 4.937e-4 - 2.59e-5 * T + 9.11e-7 * T * T - 1.5e-8 * T * T * T
     A3_warm = 3.964e-4 - 1.146e-5 * T + 1.45e-7 * T * T - 6.5e-10 * T * T * T
@@ -285,13 +285,13 @@ def absorption_francois_garrison(
     return a
 
 
-def absorption_biological(frequency: _ArrayLike, f0_hz: float, Q: float,
+def absorption_biological(frequency: _ArrayLike, f0: float, Q: float,
                          a0: float) -> np.ndarray:
     """One biological (fish swim-bladder) resonance layer's attenuation, dB/km.
 
     ``a = a0 / ((1 - f0**2/f**2)**2 + 1/Q**2)``, the form
     ``misc/AttenMod.f90`` evaluates inside a ``'B'`` layer (a formula the
-    Acoustics-Toolbox manual attributes to Orest Diachok): ``f0_hz`` is the
+    Acoustics-Toolbox manual attributes to Orest Diachok): ``f0`` is the
     resonance frequency, ``Q`` its quality factor, and ``a0`` the amplitude in
     dB/km, scaled by ``Q**2`` at resonance. :class:`~uacpy.core.absorption.Biological`
     sums it over the layers a depth falls in.
@@ -300,7 +300,7 @@ def absorption_biological(frequency: _ArrayLike, f0_hz: float, Q: float,
     ----------
     frequency : float or array
         Frequency in Hz.
-    f0_hz, Q, a0 : float
+    f0, Q, a0 : float
         The layer's resonance frequency (Hz), quality factor and amplitude
         (dB/km).
 
@@ -314,7 +314,7 @@ def absorption_biological(frequency: _ArrayLike, f0_hz: float, Q: float,
     # exact limit; numpy's divide-by-zero RuntimeWarning on the way is not a
     # uacpy warning, so it is silenced and the limit returned.
     with np.errstate(divide='ignore'):
-        return a0 / ((1.0 - f0_hz ** 2 / f ** 2) ** 2 + 1.0 / Q ** 2)
+        return a0 / ((1.0 - f0 ** 2 / f ** 2) ** 2 + 1.0 / Q ** 2)
 
 
 # The units of :func:`convert_attenuation_units` whose definition carries a
@@ -431,9 +431,9 @@ def convert_attenuation_units(
                         "carry no frequency.")
     # The same three units carry a sound speed, and it divides on every one of
     # them, so it needs the same guard as the frequency. Unguarded,
-    # ``sound_speed=0`` returned 0.0 dB/wavelength from a real dB/km loss — a
-    # lossless medium — and a negative speed returned a negative, i.e.
-    # amplifying, attenuation, both silently.
+    # ``sound_speed=0`` would give 0.0 dB/wavelength from a real dB/km loss —
+    # a lossless medium — and a negative speed a negative, i.e. amplifying,
+    # attenuation, both silently.
     if needs_frequency and not np.all(np.isfinite(sound_speed)
                                       & (sound_speed > 0.0)):
         raise ConfigurationError(

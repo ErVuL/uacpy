@@ -23,7 +23,7 @@ from uacpy.core.exceptions import (
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 from uacpy.core._validate import (
-    DENSITY_UNITS_SUSPECT_G_CM3, require_attenuation_in_range,
+    DENSITY_UNITS_SUSPECT_G_CM3, warn_attenuation_past_at_ceiling,
     require_positive, require_non_negative, require_finite,
     require_real_scalar, warn_attenuation_beyond_seabeds,
     warn_speed_typed_in_km_per_s,
@@ -201,7 +201,7 @@ def _check_geoacoustic_plausibility(owner: str, density: float,
     frame between here and the caller is an ordinary package frame that
     :data:`USER_FRAME_SKIP` steps over, from a direct ``SedimentLayer(…)``, from
     ``layer.density = …`` and from the in-package factories
-    (``Bottom.range_dependent``, the CRUST1 and GRAW readers,
+    (``Bottom.from_halfspaces``, the CRUST1 and GRAW readers,
     ``SeabedColumn.collapse_layers``) alike."""
     if density > DENSITY_UNITS_SUSPECT_G_CM3:
         raise ConfigurationError(
@@ -222,6 +222,13 @@ def _check_geoacoustic_plausibility(owner: str, density: float,
 #: The columns of a seabed or surface table: what each row states.
 _PROPERTY_COLUMNS = ('sound_speed', 'density', 'attenuation', 'shear_speed',
                      'shear_attenuation', 'roughness')
+
+#: The unit of each acoustic column, and of the depth columns a layered
+#: table adds, for ``to_dataframe``'s ``attrs['units']``.
+_PROPERTY_UNITS = {'sound_speed': 'm/s', 'density': 'g/cm³',
+                   'attenuation': 'dB/λ', 'shear_speed': 'm/s',
+                   'shear_attenuation': 'dB/λ', 'roughness': 'm',
+                   'top': 'm', 'bottom': 'm', 'range': 'm'}
 
 
 def _property_row(node) -> dict:
@@ -273,7 +280,9 @@ class SedimentLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     density : float
         Density (g/cm³).
     attenuation : float
-        Compressional attenuation (dB/wavelength). Default 0.5.
+        Compressional attenuation (dB/wavelength). Default 0.5, uacpy
+        guidance with no published source, the value of the default
+        half-space.
     shear_speed : float
         Shear wave speed (m/s). Default 0.0 (fluid layer).
     shear_attenuation : float
@@ -325,9 +334,9 @@ class SedimentLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         for attr in ('attenuation', 'shear_speed', 'shear_attenuation',
                      'roughness'):
             require_non_negative(getattr(self, attr), f"SedimentLayer {attr}")
-        require_attenuation_in_range(
+        warn_attenuation_past_at_ceiling(
             self.attenuation, "SedimentLayer attenuation")
-        require_attenuation_in_range(
+        warn_attenuation_past_at_ceiling(
             self.shear_attenuation, "SedimentLayer shear_attenuation")
         warn_attenuation_beyond_seabeds(
             self.attenuation, "SedimentLayer attenuation")
@@ -451,11 +460,11 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     Notes
     -----
     On a half-space, a density above 20 g/cm³ (a kg/m³ value typed into a
-    g/cm³ field) and a shear speed above the compressional speed each raise
-    a ``ValidityWarning`` at construction and on assignment; both are accepted,
-    since neither breaks a deck. An assignment rebuilds the boundary through
-    the constructor, so it is refused wherever the constructor refuses the
-    same value.
+    g/cm³ field) is refused; a shear speed above the compressional speed
+    raises a ``ValidityWarning`` and is accepted. Both checks run at
+    construction and on assignment: an assignment rebuilds the boundary
+    through the constructor, so it is refused wherever the constructor
+    refuses the same value.
 
     Examples
     --------
@@ -523,7 +532,11 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     # BoundaryProperties(sound_speed=1600) means a 1600 m/s half-space even
     # though 1600 is also the resolved default — value-vs-default comparison
     # cannot tell the two apart. After ``__post_init__`` every attribute
-    # carries a concrete float.
+    # carries a concrete float. The values are uacpy guidance, a generic
+    # fluid half-space matching no preset: no cited source gives this
+    # triple (Etter, *Underwater Acoustic Modeling and Simulation*
+    # §5.3.3.1, Jensen's 1984 upslope wedge, uses 1600 m/s and 1.5 g/cm³
+    # with 0.2 dB/λ).
     _ACOUSTIC_DEFAULTS = {
         'density': 1.5,
         'sound_speed': 1600.0,
@@ -595,9 +608,9 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         for name in ('sound_speed', 'attenuation', 'shear_speed',
                      'shear_attenuation', 'roughness'):
             require_non_negative(getattr(self, name), f"BoundaryProperties {name}")
-        require_attenuation_in_range(
+        warn_attenuation_past_at_ceiling(
             self.attenuation, "BoundaryProperties attenuation")
-        require_attenuation_in_range(
+        warn_attenuation_past_at_ceiling(
             self.shear_attenuation, "BoundaryProperties shear_attenuation")
         warn_attenuation_beyond_seabeds(
             self.attenuation, "BoundaryProperties attenuation")
@@ -740,11 +753,11 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             package's one water, the nominal 1500 m/s and 1.027 g/cm³).
         """
         from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_ENVIRONMENT,
-                                         canonical_grain_size_selection,
+                                         _canonical_grain_size_selection,
                                          grain_size_to_geoacoustics)
         if hamilton_fit is None:
             hamilton_fit = DEFAULT_GRAIN_SIZE_ENVIRONMENT
-        model, hamilton_fit = canonical_grain_size_selection(
+        model, hamilton_fit = _canonical_grain_size_selection(
             model, hamilton_fit, who='BoundaryProperties.from_grain_size')
         g = grain_size_to_geoacoustics(
             grain_size_phi, model=model, hamilton_fit=hamilton_fit,
@@ -770,9 +783,10 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
         The boundary is **fluid by default** (shear dropped) so it works
         with every model. Pass ``elastic=True`` to keep the preset's shear
-        speed / attenuation — needed only for the elastic-capable solvers
-        (OASES, Scooter, Kraken). ``shear_*`` in ``**overrides`` wins
-        regardless.
+        speed / attenuation — read only by the solvers that model a shear
+        wave in the seabed (OASES, Scooter, Kraken's ``krakenc``, Bounce,
+        Bellhop through Bounce, RAM's ``rams``; the environment guide's
+        "What ``shear_speed`` changes" table). ``shear_*`` in ``**overrides`` wins regardless.
 
         Parameters
         ----------

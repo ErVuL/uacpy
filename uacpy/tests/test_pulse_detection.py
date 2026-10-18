@@ -105,12 +105,12 @@ class TestAmbiguity:
 
     def test_zero_doppler_slice_is_autocorrelation(self):
         s = _chirp().astype(complex)
-        lags, dop, A = ambiguity_function(s, FS, doppler_hz=[0.0])
+        lags, dop, A = ambiguity_function(s, FS, doppler_shifts=[0.0])
         auto = np.abs(matched_filter(s, s))
         assert np.allclose(A[0], auto, atol=1e-9)
 
     def test_default_doppler_span_is_plus_minus_fs_over_20(self):
-        """Leaving ``doppler_hz`` unset evaluates ``n_doppler`` (default 101)
+        """Leaving ``doppler_shifts`` unset evaluates ``n_doppler`` (default 101)
         evenly spaced points across exactly ``+/- sample_rate/20``, zero
         included."""
         s = np.exp(2j * np.pi * 1000.0 * np.arange(64) / FS)
@@ -135,7 +135,7 @@ class TestAmbiguity:
         _, s = lfm_chirp(300.0, 300.0 + B, T, sample_rate=fs)
         z = analytic_signal(s)
         doppler = np.linspace(-200.0, 200.0, 41)
-        lags, dop, A = ambiguity_function(z, fs, doppler_hz=doppler)
+        lags, dop, A = ambiguity_function(z, fs, doppler_shifts=doppler)
         ridge = lags[np.argmax(A, axis=1)]
         slope, intercept = np.polyfit(dop, ridge, 1)
         assert slope == pytest.approx(-T / B, rel=0.02)

@@ -17,7 +17,7 @@ the UACPY propagation model architecture.
 Usage
 -----
 ```python
-from uacpy.models import OAST, OASN, OASR, OASP, OASS, OASSP
+from uacpy.models import OAST, OASN, OASR, OASP, OASS, OASSP, RunMode
 
 # Transmission loss using OAST
 oast = OAST()

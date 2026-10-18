@@ -37,7 +37,7 @@ from uacpy.acoustic_signal.spectral import (
 )
 import warnings
 
-from uacpy.acoustic_signal.bands import decidecade_band_levels
+from uacpy.acoustic_signal.bands import band_levels
 from uacpy.acoustic_signal.timefreq import spectrogram
 from uacpy.core.acoustics import power_to_dB
 from uacpy.core.exceptions import ConfigurationError
@@ -45,7 +45,7 @@ from uacpy.core.exceptions import ConfigurationError
 #: The scalars every sample-rate / dimension guard must refuse.
 BAD_SCALARS = [0.0, -100.0, np.nan, np.inf]
 from uacpy.visualization.plots.signal import (
-    plot_psd, plot_ppsd, plot_sel)
+    plot_band_levels, plot_psd, plot_ppsd)
 from uacpy.tests.conftest import recorded_warnings
 
 
@@ -73,6 +73,43 @@ def test_psd_matches_welch():
     fig, ax = plot_psd(f, p, label="x")
     assert ax.lines
     plt.close(fig)
+
+
+class TestWelchSegmentOnAShortRecord:
+    """Unset, ``nperseg`` is 8192 samples or the whole record when that is
+    shorter — the segment scipy would clamp it to, without scipy's
+    UserWarning reaching the caller; a given ``nperseg`` is used as given and
+    refused when longer than the record."""
+
+    FS = 1000.0
+
+    @staticmethod
+    def _record(n=1000):
+        return np.random.default_rng(1).standard_normal(n)
+
+    def test_the_default_takes_the_whole_short_record_without_a_warning(self):
+        import inspect
+        assert inspect.signature(welch).parameters['nperseg'].default is None
+        x = self._record()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            est = welch(x, self.FS)
+        f0, p0 = _scipy_welch(x, self.FS, window='hann', nperseg=1000,
+                              noverlap=500)
+        np.testing.assert_allclose(est.frequencies, f0)
+        np.testing.assert_allclose(est.power, p0, rtol=1e-12)
+
+    def test_a_given_segment_up_to_the_record_is_used_as_given(self):
+        x = self._record()
+        est = welch(x, self.FS, nperseg=1000)
+        assert est.frequencies.size == 501
+        assert welch(x, self.FS, nperseg=200).frequencies.size == 101
+
+    def test_a_given_segment_longer_than_the_record_is_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match=r"welch: nperseg=1001 is longer than the "
+                                 r"record \(1000 samples\)"):
+            welch(self._record(), self.FS, nperseg=1001)
 
 
 def test_psd_scaling_density_is_invariant_spectrum_is_not():
@@ -122,7 +159,7 @@ def test_psd_hann_spectrum_to_density_ratio_is_1p5_bins():
     fs, nper = 8000.0, 256
     x = np.random.default_rng(3).standard_normal(4 * nper)
     # Both windows named: the ratio IS the window's bandwidth, and the two
-    # scalings no longer default to the same window (a spectrum defaults to
+    # scalings default to different windows (a spectrum defaults to
     # flattop, whose 3.77-bin bandwidth would be the answer instead).
     f, pd_ = welch(x, fs, nperseg=nper, window="hann",
                                )
@@ -171,9 +208,9 @@ def test_sel_parseval():
     t = np.arange(int(T * fs)) / fs
     x = 2.5 * np.sin(2 * np.pi * 1000.0 * t)
     est = _band_exposure(x, fs)
-    s, bands = est.power, est.bands
+    s = est.power
     assert abs(np.sum(s) / (np.sum(x ** 2) / fs) - 1.0) < 0.01
-    fig, ax = plot_sel(s, bands, duration=T)
+    fig, ax = plot_band_levels(est, duration=T)
     assert ax.patches
     plt.close(fig)
 
@@ -358,12 +395,12 @@ class TestEveryLadderComesFromOneBuilder:
             caught.value)
 
     @pytest.mark.parametrize('nperseg, refused', [(None, False), (2048, False),
-                                                  ('default', True),
+                                                  ('default', False),
                                                   (1024, True)])
     def test_an_array_window_is_the_segment(self, nperseg, refused):
-        """An array window sets the segment length; a different nperseg
-        (welch's default 8192 included) is refused naming welch and the
-        length to pass, not scipy's raw ValueError."""
+        """An array window sets the segment length: unset (welch's default
+        None) it takes the window's, and a different nperseg is refused
+        naming welch and the length to pass, not scipy's raw ValueError."""
         from uacpy.acoustic_signal import welch
         x = np.random.default_rng(0).standard_normal(20000)
         kw = {} if nperseg == 'default' else {'nperseg': nperseg}
@@ -375,15 +412,6 @@ class TestEveryLadderComesFromOneBuilder:
             assert 'Pass nperseg=2048' in str(e.value)
         else:
             assert call().power.shape == (1025,)
-
-    def test_band_levels_on_the_decidecade_ladder_are_decidecade_band_levels(
-            self):
-        from uacpy.acoustic_signal import band_levels, decidecade_band_levels
-        f = np.linspace(0.0, 4000.0, 4097)
-        psd = np.random.default_rng(7).exponential(1e-10, f.size)
-        for got, want in zip(band_levels(psd, f),
-                             decidecade_band_levels(psd, frequencies=f)):
-            np.testing.assert_array_equal(got, want)
 
     @pytest.mark.parametrize('band_type, ladder', [
         ('decidecade', 'decidecade_bands'), ('octave', 'octave_bands')])
@@ -423,7 +451,7 @@ class TestEveryLadderComesFromOneBuilder:
             assert (twin.band_type, twin.ref) == ('octave', 1.0)
             np.testing.assert_array_equal(twin.upper, upper)
         assert result.units == {'centers': 'Hz', 'levels': 'dB re 1 Pa²'}
-        assert sig.decidecade_band_levels(np.full(f.size, 1e-10),
+        assert sig.band_levels(np.full(f.size, 1e-10),
                                           frequencies=f).units['levels'] == 'dB re 1 µPa²'
 
     @pytest.mark.parametrize('ref', [1e-6, 1.0])
@@ -454,7 +482,7 @@ class TestEveryLadderComesFromOneBuilder:
         fig, ax = plot_band_levels(result)
         try:
             assert ('µPa' in ax.get_ylabel()) == (ref == 1e-6)
-            assert ax.get_xlabel().startswith('Octave')
+            assert 'octave bands' in ax.get_xlabel()
             np.testing.assert_array_equal(
                 [p.get_height() for p in ax.patches], result.levels)
         finally:
@@ -565,8 +593,9 @@ class TestPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
 
 def test_ppsd_columns_are_densities_with_empty_bins_at_zero():
     """Each frequency column integrates to 1 over the level axis with a plain
-    sum: a level never observed is a density of 0 (it was NaN, 95 % of a
-    white-noise histogram, and pdf.sum() was NaN). The plotter blanks it."""
+    sum: a level never observed is a density of 0, not NaN (95 % of a
+    white-noise histogram, which would make pdf.sum() NaN). The plotter
+    blanks it."""
     fs = 8000.0
     rng = np.random.default_rng(1)
     r = probabilistic_welch(rng.standard_normal(int(30 * fs)) * 1e-3, fs, segment_duration=1.0,
@@ -584,11 +613,11 @@ def test_ppsd_columns_are_densities_with_empty_bins_at_zero():
 class TestSELBandGridIsAnchoredAt1kHz:
     """IEC 61260-1 anchors both band systems at 1 kHz — Pierce: "1, 10, 100,
     1000, 10,000 Hz … are also standard 1/3-octave-band f_o's". Snapping the
-    ladder to the caller's ``freq_min`` instead made the grid move with the
-    request: ``freq_min=8.9125`` and ``freq_min=10.0`` produced disjoint, interleaved
-    centres, and the nearest centre to 1 kHz was 1024 Hz (+2.4 %) or 912.3 Hz
-    (-8.8 %) depending on it. ``decidecade_bands`` in the same package already
-    anchors correctly; the band estimator was the outlier."""
+    ladder to the caller's ``freq_min`` instead makes the grid move with the
+    request: ``freq_min=8.9125`` and ``freq_min=10.0`` give disjoint, interleaved
+    centres, and the nearest centre to 1 kHz is 1024 Hz (+2.4 %) or 912.3 Hz
+    (-8.8 %) depending on it. The band estimator anchors as
+    ``decidecade_bands`` does."""
 
     FS = 48000
 
@@ -601,15 +630,16 @@ class TestSELBandGridIsAnchoredAt1kHz:
         assert np.isclose(self._centres(band_type=band_type), 1000.0).any()
 
     def test_octave_ladder_is_not_powers_of_two(self):
-        # 1024 Hz was reported where a soundscape table expects 1000.
+        # A powers-of-two ladder reports 1024 Hz where a soundscape table
+        # expects 1000.
         oc = self._centres(band_type='octave')
         assert not np.isclose(oc, 1024.0).any()
 
     @pytest.mark.parametrize('freq_min', [10.0, 12.0, 20.0, 25.0])
     def test_grids_nest_instead_of_interleaving(self, freq_min):
         # The discriminating property: changing freq_min may drop bands off the
-        # bottom but must never shift the ladder. Before the fix these sets
-        # were disjoint from the default one.
+        # bottom but must never shift the ladder. A ladder snapped to
+        # freq_min makes these sets disjoint from the default one.
         base = self._centres()
         got = self._centres(freq_min=freq_min)
         assert np.isclose(got[:, None], base[None, :], rtol=1e-9).any(axis=1).all()
@@ -809,9 +839,9 @@ def test_ppsd_integration_time_refuses_records_of_different_lengths(
 
 
 def test_ppsd_segment_shorter_than_one_sample_is_diagnosed_as_such():
-    """A ``segment_duration`` under one sample used to surface as an
-    ``segment_overlap_percent`` error, because the zero-length chunk made the step
-    non-positive before anything checked the chunk itself."""
+    """A ``segment_duration`` under one sample is refused by name, not as
+    the ``segment_overlap_percent`` error the zero-length chunk's
+    non-positive step would raise."""
     from uacpy.core.exceptions import ConfigurationError
     x = np.random.default_rng(0).standard_normal(4000)
     with pytest.raises(ConfigurationError, match="segment_duration"):
@@ -887,7 +917,7 @@ class TestDecidecadeGuards:
         p, f = self._flat()
         with pytest.raises(ConfigurationError,
                            match="ref must be > 0 Pa and finite"):
-            decidecade_band_levels(p, frequencies=f, ref=bad)
+            band_levels(p, frequencies=f, ref=bad)
 
     def test_negative_psd_raises_typed(self):
         # A negative-power band failed the `power > 0` publication test and
@@ -895,11 +925,11 @@ class TestDecidecadeGuards:
         p, f = self._flat()
         p[10] = -1.0
         with pytest.raises(ConfigurationError, match="negative"):
-            decidecade_band_levels(p, frequencies=f)
+            band_levels(p, frequencies=f)
 
     def test_flat_psd_gives_finite_levels_inside_support(self):
         p, f = self._flat()
-        _, levels = decidecade_band_levels(p, frequencies=f)
+        _, levels = band_levels(p, frequencies=f)
         assert np.isfinite(levels).any()
 
 
@@ -997,13 +1027,13 @@ class TestDecidecadeSinglePositiveFrequencyGrid:
     def test_error_names_the_callers_grid(self):
         with pytest.raises(ConfigurationError,
                            match='spans no decidecade band') as exc:
-            decidecade_band_levels(np.ones(2), frequencies=np.fft.rfftfreq(2))
+            band_levels(np.ones(2), frequencies=np.fft.rfftfreq(2))
         assert 'freq_min' not in str(exc.value)
 
     def test_two_positive_frequencies_pass_the_guard(self):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
-            centers, levels = decidecade_band_levels(
+            centers, levels = band_levels(
                 np.ones(3), frequencies=np.fft.rfftfreq(4, d=1e-3))
         assert centers.size > 0
 
@@ -1071,7 +1101,7 @@ def test_each_function_carries_the_window_its_statistic_measures_best():
 
 
 def test_an_exposure_takes_none_of_the_knobs_that_would_break_it():
-    """The guard that used to police these is now the signature itself: a
+    """The signature itself is the guard: a
     band's value is the sum of the bins inside it, which is the band's energy
     only when every bin is counted once and whole, so there is no window, no
     overlap, no detrending and no averaging to set."""
@@ -1274,7 +1304,7 @@ class TestEveryEstimatorAnswersAndSaysWhatItReturned:
     def test_a_bin_estimate_cannot_be_drawn_as_bars(self):
         est = welch(self._signal(), self.FS, scaling='spectrum', nperseg=512)
         with pytest.raises(ConfigurationError, match='no band_type'):
-            plot_sel(est)
+            plot_band_levels(est)
 
     def test_an_unknown_ladder_names_the_ones_that_exist(self):
         with pytest.raises(ConfigurationError, match='unknown band_type'):
@@ -1637,9 +1667,9 @@ class TestAnEnergyIsNotAScalingOfABinEstimator:
         assert "'density'" in message and "'spectrum'" in message
 
     def test_the_remediation_does_not_advertise_the_third_value(self):
-        """A caller who mistypes a scaling used to be told to use
-        ``'exposure'`` — the one value that silently returned a wrong
-        number."""
+        """A caller who mistypes a scaling is not told to use
+        ``'exposure'`` — the one value that would return a wrong
+        number silently."""
         with pytest.raises(ConfigurationError,
                            match="unknown scaling 'rms'") as excinfo:
             welch(self._record(), self.FS, scaling='rms')
@@ -1799,7 +1829,7 @@ class TestSpectralResultsKeepWhatTheyMean:
         from uacpy.acoustic_signal import spectrogram
         x = np.random.default_rng(2).standard_normal(8192)
         res = spectrogram(x, 1000.0, nperseg=256, scaling='spectrum')
-        assert res.scaling == 'spectrum' and res.mode == 'psd'
+        assert res.scaling == 'spectrum'
         assert res._replace(power=res.power).scaling == 'spectrum'
         fig, ax = res.plot()
         try:
@@ -1808,13 +1838,41 @@ class TestSpectralResultsKeepWhatTheyMean:
         finally:
             plt.close(fig)
 
-    def test_a_phase_panel_is_not_drawn_as_a_level(self):
+    def test_the_spectrogram_takes_no_mode(self):
+        """The panel is a power; the complex transform is stft's."""
         from uacpy.acoustic_signal import spectrogram
-        from uacpy.core.exceptions import ConfigurationError
-        x = np.random.default_rng(2).standard_normal(8192)
-        res = spectrogram(x, 1000.0, nperseg=256, mode='angle')
-        with pytest.raises(ConfigurationError, match="phase"):
-            res.plot()
+        x = np.random.default_rng(2).standard_normal(2048)
+        with pytest.raises(TypeError, match="mode"):
+            spectrogram(x, 1000.0, nperseg=256, mode='complex')
+
+    @pytest.mark.parametrize('kwargs, match', [
+        (dict(scaling='bogus'), r"^spectrogram: unknown scaling 'bogus'"),
+        (dict(scaling='exposure'), r"^spectrogram: unknown scaling"),
+        (dict(nperseg=None), r"^spectrogram: nperseg must be an integer"),
+        (dict(nperseg=100.5), r"^spectrogram: nperseg must be an integer"),
+        (dict(nperseg=256.0), r"^spectrogram: nperseg must be an integer"),
+        (dict(nperseg=True), r"^spectrogram: nperseg must be an integer"),
+        (dict(nperseg=0), r"^spectrogram: nperseg must be an integer"),
+    ])
+    def test_spectrogram_refuses_what_scipy_would_reject_untyped(
+            self, kwargs, match):
+        """scipy answered these with a bare ValueError ('window must be
+        1-D', 'Unknown scaling', 'Nx=256.0 is not a positive integer') or a
+        TypeError from int(None); the estimator's siblings refuse with a
+        ConfigurationError."""
+        from uacpy.acoustic_signal import spectrogram
+        x = np.random.default_rng(2).standard_normal(2048)
+        with pytest.raises(ConfigurationError, match=match):
+            spectrogram(x, 1000.0, **{'nperseg': 256, **kwargs})
+
+    @pytest.mark.parametrize('kwargs', [
+        dict(window='boxcar'), dict(window=('kaiser', 8.0)),
+        dict(nperseg=np.int64(256)), dict(scaling='spectrum')])
+    def test_spectrogram_takes_every_documented_spelling(self, kwargs):
+        from uacpy.acoustic_signal import spectrogram
+        x = np.random.default_rng(2).standard_normal(2048)
+        res = spectrogram(x, 1000.0, **{'nperseg': 256, **kwargs})
+        assert res.power.shape[0] == 129
 
 
 class TestTheLevelOfAnEstimate:
@@ -2077,20 +2135,6 @@ class TestLevelHistogramIsTheArrayForm:
             with pytest.raises(ConfigurationError,
                                match='level_percentiles: q must be'):
                 level_percentiles(levels, q)
-
-
-def test_decidecade_band_levels_takes_frequencies_as_band_levels_does():
-    """``band_levels``, ``integrate_psd`` and ``band_level`` take the
-    frequencies second, positionally; ``decidecade_band_levels`` refused it
-    (keyword-only), so a call copied from its sibling raised TypeError."""
-    from uacpy.acoustic_signal import band_levels, decidecade_band_levels
-    f = np.linspace(1.0, 5000.0, 4000)
-    psd = np.full(f.size, 1e-6)
-    by_position = decidecade_band_levels(psd, f)
-    by_name = decidecade_band_levels(psd, frequencies=f)
-    sibling = band_levels(psd, f)
-    np.testing.assert_array_equal(by_position.levels, by_name.levels)
-    np.testing.assert_array_equal(by_position.levels, sibling.levels)
 
 
 class TestWelchReadsALongRecordInBatches:

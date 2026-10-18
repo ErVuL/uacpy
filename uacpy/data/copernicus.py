@@ -56,9 +56,10 @@ from uacpy.core.geo import (
     Coordinate, as_coordinate, normalize_lon, geodesic_waypoints,
 )
 from uacpy.data._geo import (
-    checked_n_points, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
-    capped_n_points, checked_max_distance, checked_offset, cell_half_diagonal_km,
-    checked_max_days, cut_at_first_invalid, value_at_depth,
+    checked_n_points, auto_budget, checked_max_points,
+    checked_explicit_n_points, checked_max_distance, checked_offset,
+    cell_half_diagonal_km, checked_max_days, cut_at_first_invalid,
+    nearest_indices, run_representative_indices, value_at_depth,
 )
 from uacpy.core.geo import parse_date
 from uacpy.core.acoustics.seawater import (
@@ -68,7 +69,7 @@ from uacpy.core.acoustics.seawater import (
 )
 from uacpy.data.sound_speed import (
     TSProfile,
-    assemble_range_dependent,
+    _assemble_range_dependent,
     extend_column_to_seafloor,
 )
 from uacpy.data.sources import SOURCES, DataProvenance
@@ -112,17 +113,11 @@ BGC_PRODUCTS = (
 )
 BGC_PH_VAR = 'ph'                    # sea-water pH (total scale)
 # Max days the nearest available time step may sit from the requested date
-# before it counts as out-of-coverage and raises (shared tolerance contract
-# with the other dated SSP sources — cf. argo.DEFAULT_MAX_DAYS=15). Looser than
-# Argo's by design: this is daily-mean *model* output (smooth, persistent — and
-# in-coverage the nearest step is sub-day, so this is really a coverage-edge
-# guard), whereas an Argo profile is one real in-situ snapshot that the ocean
-# decorrelates from within a couple of weeks. The default tracks how slowly the
-# field varies: climatology (month) > model (31 d) > in-situ obs (15 d).
+# before it counts as out-of-coverage and raises (the tolerance the other dated
+# SSP sources share — cf. argo.DEFAULT_MAX_DAYS=15). Inside a product's
+# coverage the nearest step is within one time step of the date, so this
+# guards the coverage edge. uacpy guidance (policy), not a physical bound.
 DEFAULT_MAX_DAYS = 31
-#: Columns an ``n_points='auto'`` operational transect samples: the grid has
-#: no cheap cell identity to probe, so 'auto' is a fixed count.
-AUTO_TRANSECT_COLUMNS = 6
 
 
 def _last_time(ds) -> Optional[np.datetime64]:
@@ -208,6 +203,8 @@ def _open_physics(marine, when: Optional[str], dataset_id: Optional[str], *,
     return (t_ds if s_ds is t_ds else _TwoDatasetColumn(t_ds, s_ds)), product
 
 
+@one_provenance_notice(subject="the profile's data",
+                       record='uacpy.data.citations(ssp)')
 def fetch_ssp_operational(
     point: Coordinate,
     *,
@@ -267,7 +264,7 @@ def fetch_ssp_operational(
     )
     # Mackenzie is stated in depth and reads the model depths directly.
     c = np.asarray(sound_speed_at_depth(t_insitu, sal, depths, formula=formula,
-                                        latitude_deg=lat), dtype=float)
+                                        latitude=lat), dtype=float)
     log_message(
         'copernicus', f"operational SSP at {lat:.3f}, {lon:.3f} ({date}): "
         f"{depths.size} levels, c=[{c.min():.1f}, {c.max():.1f}] m/s",
@@ -296,7 +293,7 @@ def fetch_ssp_transect_operational(
     *,
     date: Union[str, _dt.date],
     n_points: Union[int, str] = 'auto',
-    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    max_points: Optional[int] = None,
     formula: str = DEFAULT_SOUND_SPEED_FORMULA,
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: Optional[str] = None,
@@ -317,11 +314,14 @@ def fetch_ssp_transect_operational(
     :class:`~uacpy.core.environment.SoundSpeedProfile`. See
     :func:`fetch_ssp_operational` for parameters/exceptions.
 
-    ``n_points`` and ``max_points`` take the same values as
-    :func:`uacpy.data.fetch_ssp_transect`'s. The Copernicus grid exposes no
-    cheap cell identity to probe, so ``'auto'`` samples
-    :data:`AUTO_TRANSECT_COLUMNS` columns (capped at ``max_points``); an
-    explicit count above ``max_points`` is capped with a ``FallbackWarning``.
+    ``n_points`` and ``max_points`` take the same values, and ``'auto'``
+    follows the same rule, as :func:`uacpy.data.fetch_ssp_transect`'s:
+    ``max_points`` waypoints are probed, consecutive waypoints falling in one
+    model grid cell (the node a column read selects, on the dataset's own
+    latitude/longitude axes) collapse, and one column is read per cell
+    crossed. Each column is one remote T/S read, so a long transect on the
+    1/12° grid makes many reads; an integer ``n_points`` reads exactly that
+    many evenly spaced columns.
 
     Parameters
     ----------
@@ -330,10 +330,12 @@ def fetch_ssp_transect_operational(
     date : str or datetime.date
         Calendar date; the nearest available time step is used.
     n_points : int or 'auto', optional
-        Columns, or ``'auto'`` for :data:`AUTO_TRANSECT_COLUMNS`. Default
-        ``'auto'``.
+        Columns, used as given, or ``'auto'`` for one per model grid cell
+        crossed. Default ``'auto'``.
     max_points : int, optional
-        Cap on the columns. Default 1000.
+        The waypoints ``'auto'`` probes; ``None`` (default) is 1000 (uacpy
+        guidance). An explicit ``n_points`` above an explicit
+        ``max_points`` is refused.
     formula : {'teos10', 'unesco', 'delgrosso', 'mackenzie'}, optional
         Sound-speed equation. Default ``'teos10'``.
     max_days : int, optional
@@ -358,16 +360,20 @@ def fetch_ssp_transect_operational(
                                     'fetch_ssp_transect_operational')
     n_points = checked_n_points(n_points, 'fetch_ssp_transect_operational',
                                 allow_auto=True)
-    n_points = (min(AUTO_TRANSECT_COLUMNS, max_points) if n_points == 'auto'
-                else capped_n_points(n_points, max_points,
-                                     'fetch_ssp_transect_operational'))
+    if n_points != 'auto':
+        n_points = checked_explicit_n_points(
+            n_points, max_points, 'fetch_ssp_transect_operational')
     when = parse_date(date).isoformat()
     marine = _import_copernicusmarine()
     ds, product = _open_physics(
         marine, when, dataset_id,
         remediation="Run `copernicusmarine login` and check the dataset_id.")
 
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
+    if n_points == 'auto':
+        lats, lons, ranges = _grid_cell_waypoints(
+            ds, start, end, auto_budget(max_points))
+    else:
+        lats, lons, ranges = geodesic_waypoints(start, end, n_points)
     limit = checked_max_distance(max_distance_km, 'fetch_ssp_transect_operational')
     columns = []
     for la, lo in zip(lats, lons):
@@ -382,7 +388,7 @@ def fetch_ssp_transect_operational(
         t_insitu = insitu_from_potential(salinity=sal, theta=temp,
                                          pressure_dbar=pressure)
         c = np.asarray(sound_speed_at_depth(t_insitu, sal, depths,
-                                            formula=formula, latitude_deg=la),
+                                            formula=formula, latitude=la),
                        dtype=float)
         prov = DataProvenance(source=SOURCES['copernicus'],
                               data_date=actual['date'],
@@ -397,19 +403,22 @@ def fetch_ssp_transect_operational(
             formula=formula))
 
     log_message(
-        'copernicus', f"operational range-dependent SSP: {n_points} columns "
-        f"over {ranges_m[-1] / 1000:.1f} km", verbose=verbose,
+        'copernicus', f"operational range-dependent SSP: {len(columns)} "
+        f"columns ({n_points}) over {ranges[-1] / 1000:.1f} km",
+        verbose=verbose,
     )
     if seafloor is not None:
         # Same per-column extension as fetch_ssp_transect: never flat-hold a
         # shallower column inside its used water column.
         columns = [
             extend_column_to_seafloor(col, seafloor, r, latitude=la)
-            for col, r, la in zip(columns, ranges_m, lats)
+            for col, r, la in zip(columns, ranges, lats)
         ]
-    return assemble_range_dependent(columns, ranges_m)
+    return _assemble_range_dependent(columns, ranges)
 
 
+@one_provenance_notice(subject="the profile's data",
+                       record="the result's .provenance")
 def fetch_ts_profile_operational(
     point: Coordinate,
     *,
@@ -612,6 +621,35 @@ def _check_snapped_point(ds, lat: float, lon: float,
     return tuple(spacings) if all(spacings) else None
 
 
+def _grid_cell_waypoints(ds, start, end, budget: int):
+    """``(lats, lons, ranges)`` of an ``n_points='auto'`` transect: one
+    waypoint per model grid cell crossed.
+
+    ``budget`` waypoints are probed along the great circle; each takes the
+    cell of the latitude and longitude nodes nearest it (the node a column
+    read selects), and each run of consecutive waypoints in one cell keeps
+    one representative, endpoints anchored
+    (:func:`~uacpy.data._geo.run_representative_indices`) — the rule
+    :func:`uacpy.data.ssp_transect_sampling` applies to the WOA23 grid, read here
+    from the dataset's own axes.
+    """
+    try:
+        lat_axis = np.asarray(ds['latitude'].values, dtype=float).reshape(-1)
+        lon_axis = np.asarray(ds['longitude'].values, dtype=float).reshape(-1)
+    except (KeyError, AttributeError, TypeError) as exc:
+        raise DataFetchError(
+            "fetch_ssp_transect_operational: the dataset exposes no 1-D "
+            "latitude/longitude axes, so n_points='auto' has no grid cell to "
+            "sample by.",
+            remediation="Pass an integer n_points.") from exc
+    lats, lons, ranges = geodesic_waypoints(start, end, budget)
+    rows = nearest_indices(lat_axis, lats)
+    cols = nearest_indices(lon_axis, [normalize_lon(lo) for lo in lons])
+    idx = np.asarray(run_representative_indices(
+        list(zip(rows.tolist(), cols.tolist()))), dtype=int)
+    return lats[idx], lons[idx], ranges[idx]
+
+
 def _offset_checked(prov, spacing, *, who, max_distance_km):
     """``prov`` through the offset rule: a warning once the snapped node
     stands outside the cell holding the requested point (``spacing`` is that
@@ -669,6 +707,8 @@ def _extract_ts(
     return depth, t, s, actual
 
 
+@one_provenance_notice(subject="the sea state's data",
+                       record="the result's .provenance")
 def fetch_waves_operational(
     point: Coordinate,
     *,
@@ -740,6 +780,9 @@ def fetch_waves_operational(
                                              'fetch_waves_operational')))
 
 
+@one_provenance_notice(
+    subject='the pH data',
+    record='env.extra_data_sources of fetch_environment(with_absorption=True)')
 def fetch_ph_operational(
     point: Coordinate,
     *,

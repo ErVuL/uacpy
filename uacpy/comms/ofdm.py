@@ -299,7 +299,17 @@ def ofdm_symbol(subcarrier_values, n_subcarriers, cp_len):
     """
     nsc = _require_subcarrier_count(n_subcarriers, "ofdm_symbol")
     cp = _require_cp_len(cp_len, nsc, "ofdm_symbol")
-    t = np.fft.ifft(subcarrier_values) * np.sqrt(nsc)
+    values = np.asarray(subcarrier_values)
+    # The IFFT runs at the input's own length: any other length than nsc
+    # gives a block of that length with a prefix sliced from the wrong place
+    # (none at all for a shorter one).
+    if values.shape != (nsc,):
+        raise ConfigurationError(
+            f"ofdm_symbol: subcarrier_values must hold the n_subcarriers = "
+            f"{nsc} values of one block; got shape {values.shape}. "
+            f"ofdm_modulate zero-pads any number of symbols to whole "
+            f"blocks.")
+    t = np.fft.ifft(values) * np.sqrt(nsc)
     return np.concatenate([t[nsc - cp:], t])
 
 
@@ -348,12 +358,35 @@ def schmidl_cox_preamble(n_subcarriers, cp_len, *, rng=None):
     return ofdm_symbol(freq, nsc, cp_len)
 
 
-#: Fraction of the peak sliding-window energy R(d) below which the
-#: Schmidl-Cox timing metric is not evaluated (set to 0): a normalised ratio
-#: over a near-silent window takes arbitrary values that would dwarf the
-#: preamble plateau. Relative to the record's own peak, so the metric does
-#: not depend on the units the record is held in.
-_SC_ENERGY_GATE = 0.25
+#: Fraction of the first half-window's energy that the second half's energy
+#: R(d) must reach for the Schmidl-Cox timing metric to be evaluated (else
+#: 0). By the Cauchy-Schwarz inequality ``|P(d)|² <= E1(d)·R(d)``, with
+#: ``E1(d)`` the energy of the first half, so ``M(d) <= E1(d)/R(d)``: the
+#: ratio can exceed its plateau value of 1 only where the second half is the
+#: quieter one — the trailing edge of a loud stretch into a quiet one, where
+#: it grows with the stretch's SNR and would outscore the preamble. The gate
+#: compares the two halves of the window itself, so a window's metric depends
+#: on no sample outside it (a burst elsewhere in the capture cannot hide the
+#: frame) nor on the record's units. uacpy guidance: Schmidl & Cox (1997)
+#: eq. (8) has no gate.
+_SC_HALF_ENERGY_RATIO = 0.25
+
+
+def _window_sums(x, L, n):
+    """``x[d:d + L].sum()`` for ``d = 0 .. n - 1`` (``x`` holds at least
+    ``n + L - 1`` samples).
+
+    From prefix sums restarted every ``L`` samples, so a window's rounding
+    error is set by the ``2L`` samples around it rather than by every sample
+    before it in the record, and a window of exact zeros sums to exactly 0."""
+    n_blocks = (n - 1) // L + 2
+    padded = np.zeros(n_blocks * L, dtype=x.dtype)
+    m = min(x.size, padded.size)
+    padded[:m] = x[:m]
+    prefix = np.zeros((n_blocks, L + 1), dtype=x.dtype)
+    np.cumsum(padded.reshape(n_blocks, L), axis=1, out=prefix[:, 1:])
+    block, j = np.divmod(np.arange(n), L)
+    return (prefix[block, L] - prefix[block, j]) + prefix[block + 1, j]
 
 
 def _schmidl_cox_terms(r, nsc):
@@ -365,26 +398,22 @@ def _schmidl_cox_terms(r, nsc):
         return np.zeros(0), np.zeros(0, dtype=complex)
     # Schmidl & Cox 1997 eqs. (5) and (7): P(d) = sum conj(r[d+m]) r[d+m+L]
     # and R(d) = sum |r[d+m+L]|^2 — both length-L sliding sums, O(n) here via
-    # cumulative sums rather than the paper's iterative form (6).
-    a = np.conj(r[:-L]) * r[L:]
-    ca = np.concatenate(([0.0 + 0.0j], np.cumsum(a)))
-    p = ca[L:L + n] - ca[:n]
-    energy = np.abs(r[L:]) ** 2
-    ce = np.concatenate(([0.0], np.cumsum(energy)))
-    rr = ce[L:L + n] - ce[:n]
+    # block prefix sums (_window_sums) rather than the paper's iterative form
+    # (6). ``first`` is the energy of the first half, r[d : d+L].
+    energy = np.abs(r) ** 2
+    p = _window_sums(np.conj(r[:-L]) * r[L:], L, n)
+    first = _window_sums(energy, L, n)
+    rr = _window_sums(energy[L:], L, n)
     metric = np.zeros(n)
-    rr_max = float(rr.max())
-    if rr_max <= 0.0:
-        return metric, p
-    # The energy gate runs first and the division is done only where it passes,
-    # so the metric needs no epsilon. An absolute one is wrong here anyway:
+    # The gate runs first and the division is done only where it passes, so
+    # the metric needs no epsilon. An absolute one is wrong here anyway:
     # rr**2 scales as amplitude**4, so `rr**2 + 1e-12` made M(d) a function of
     # the units the caller held the record in — a noise-free frame synced in
     # µPa and returned (None, 0.0) in Pa, below ~5e-4 amplitude. The same
     # reasoning is written out at `acoustic_signal.frf._etfe_divide`.
-    loud = rr >= _SC_ENERGY_GATE * rr_max
+    balanced = (rr > 0.0) & (rr >= _SC_HALF_ENERGY_RATIO * first)
     # Timing metric M(d) = |P(d)|^2 / R(d)^2, eq. (8).
-    metric[loud] = np.abs(p[loud]) ** 2 / rr[loud] ** 2
+    metric[balanced] = np.abs(p[balanced]) ** 2 / rr[balanced] ** 2
     return metric, p
 
 
@@ -396,10 +425,16 @@ def schmidl_cox_metric(received, n_subcarriers):
     identical halves give ``M = 1``, and the preamble shows as a plateau as
     long as its cyclic prefix. Entry ``d`` scores the window starting at
     sample ``d``, for ``d = 0 .. len(received) - n_subcarriers - 1`` (empty when the
-    record is shorter than one symbol). Windows whose energy ``R(d)`` is below
-    a quarter of the record's peak ``R`` read 0: the ratio there is not
-    meaningful, and the gate is relative, so the metric is the same whatever
-    units the record is in. This is the curve :func:`schmidl_cox_sync`
+    record is shorter than one symbol). A window reads 0 where its second
+    half carries no energy (``R(d) = 0``, the ratio is undefined) or less
+    than a quarter of its first half's: since ``M(d)`` is at most the ratio
+    of the first half's energy to ``R(d)``, those windows — the trailing edge
+    of a loud stretch into a quiet one — could otherwise outscore the
+    preamble (uacpy guidance; the paper has no gate). The gate compares the
+    two halves of each window, so the metric depends on no sample outside the
+    window, whatever else the capture holds, and not on the record's units.
+    A tone, or any content periodic in ``n_subcarriers/2`` samples, scores
+    near 1 like the preamble. This is the curve :func:`schmidl_cox_sync`
     searches.
 
     Parameters
@@ -431,9 +466,11 @@ def _schmidl_cox_backoff(n_subcarriers):
 def schmidl_cox_sync(received, n_subcarriers, threshold=0.5):
     """Locate the Schmidl & Cox preamble and estimate the fractional CFO.
 
-    Returns ``(start, cfo)`` — ``start`` is the index of the preamble's cyclic
-    prefix; ``cfo`` the normalized carrier frequency offset (cycles/sample) from
-    the half-symbol phase. ``start`` is ``None`` when the peak of the timing
+    Returns ``(start, cfo)`` — ``start`` is the index where the preamble's
+    cyclic prefix begins, less a margin of ``ceil((1 - sqrt(0.9))·n/2)``
+    samples (about ``n_subcarriers/40``, 7 at 256) that the search leaves
+    on purpose (see the comment in the code); ``cfo`` the normalized carrier
+    frequency offset (cycles/sample) from the half-symbol phase. ``start`` is ``None`` when the peak of the timing
     metric (:func:`schmidl_cox_metric`) is below ``threshold``. The metric
     depends only on the two identical ``n_subcarriers/2`` halves, so the
     cyclic-prefix length plays no part in the search.
@@ -444,7 +481,7 @@ def schmidl_cox_sync(received, n_subcarriers, threshold=0.5):
     loses frames below a few dB; measured over 20 frames at 256
     subcarriers it found 0/20 at 0 dB, 11/20 at 2 dB and 20/20 at 4 dB. Lower
     it to sync a coded link that decodes below that, keeping it above the
-    peak a noise-only record of the same length reaches: 0.07 at most over
+    peak a noise-only record of the same length reaches: 0.093 at most over
     20 white-noise records of 3000 samples at 256 subcarriers (measured).
 
     Parameters

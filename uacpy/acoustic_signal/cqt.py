@@ -29,6 +29,7 @@ from uacpy.acoustic_signal.spectral import (
     ProbabilisticSpectralEstimate, _BIN_SCALINGS, _split_records,
     _warn_levels_outside_window, level_histogram,
 )
+from uacpy.acoustic_signal.windows import _IMAGE_BIAS_WARN_DB
 
 
 class CQTResult(PlottedResult,
@@ -146,14 +147,14 @@ def _cq_kernels(frequencies, Q, sample_rate, window):
     return kernels
 
 
-# A bin whose one-sided band power is inflated by more than this much warns.
-# The bias is 10*log10(1 + ratio**2) and rises smoothly with f_k/fs: measured
-# on a Hann window at B=24 it is under 0.005 dB for every f_k/fs <= 0.4865,
-# first crosses 0.01 dB at f_k/fs ~ 0.4875, and reaches 3.01 dB at f_k = fs/2.
-# 3.01 dB is the phase average, not a bound: at exactly fs/2 the image lands on
-# DC and the reading follows the tone's own phase as 10*log10(4 cos**2 phi),
-# so a cosine reads +6.02 dB and a sine is identically zero on the grid.
-_CQ_IMAGE_BIAS_WARN_DB = 0.01
+# A bin whose one-sided band power is inflated by more than
+# _IMAGE_BIAS_WARN_DB warns. The bias is 10*log10(1 + ratio**2) and rises
+# smoothly with f_k/fs: measured on a Hann window at B=24 it is under 0.005 dB
+# for every f_k/fs <= 0.4865, first crosses 0.01 dB at f_k/fs ~ 0.4875, and
+# reaches 3.01 dB at f_k = fs/2. 3.01 dB is the phase average, not a bound: at
+# exactly fs/2 the image lands on DC and the reading follows the tone's own
+# phase as 10*log10(4 cos**2 phi), so a cosine reads +6.02 dB and a sine is
+# identically zero on the grid.
 
 
 def _cq_image_ratio(frequencies, sample_rate, kernels):
@@ -365,27 +366,28 @@ def _cq_setup(data, sample_rate, freq_min, freq_max, bins_per_octave, window, wh
                             "the bin has no signal to analyse")
     freqs = _cq_frequencies(freq_min, freq_max, bins_per_octave, who=who)
     Q = _cq_quality(bins_per_octave)
-    kernels = _cq_kernels(freqs, Q, fs, window)
+    # None is the constant-Q estimators' documented default kernel taper.
+    kernels = _cq_kernels(freqs, Q, fs, "hann" if window is None else window)
     n_lowest = kernels[0][0]
     if n_lowest > x.size:
         fate = ("dropped from the average" if drops_short_bins else
                 "evaluated on a zero-padded window and read low there")
         # Every public constant-Q estimator funnels through this setup helper,
         # so the frame the user wrote is two deep here, not one: a
-        # hand-counted ``stacklevel=2`` named this module's own call line for
+        # hand-counted ``stacklevel=2`` names this module's own call line for
         # all four of them (measured). ``skip_file_prefixes`` walks out to the
-        # first frame outside the package instead, which is the caller's own
-        # line whichever estimator they chose.
+        # first frame outside the package, which is the caller's own line
+        # whichever estimator they chose.
         warnings.warn(
             f"{who}: lowest bin needs {n_lowest} samples (Q·fs/freq_min) but the "
             f"signal has {x.size}; low-frequency bins never fit a full window "
             f"and are {fate}. Raise freq_min or lengthen the signal.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
     bias_dB = 10.0 * np.log10(1.0 + _cq_image_ratio(freqs, fs, kernels) ** 2)
-    hot = np.flatnonzero(bias_dB > _CQ_IMAGE_BIAS_WARN_DB)
+    hot = np.flatnonzero(bias_dB > _IMAGE_BIAS_WARN_DB)
     if not fmax_given and hot.size and hot[0] > 0:
         # Unset, the range ends at the last bin below the first one whose
-        # image leaks more than _CQ_IMAGE_BIAS_WARN_DB, so the default call
+        # image leaks more than _IMAGE_BIAS_WARN_DB, so the default call
         # reads tone levels it can stand behind and has nothing to warn
         # about. A caller who asks for more names freq_max, and is warned.
         keep = int(hot[0])
@@ -436,11 +438,12 @@ def constant_q_transform(data, sample_rate, *, freq_min=20.0, freq_max=None,
         Sample rate (Hz).
     freq_min, freq_max : float, optional
         First and last bin centre (Hz); ``None`` for ``freq_max`` stops below
-        the near-Nyquist bins (see above). Default ``freq_min`` 20 Hz.
+        the near-Nyquist bins (see above). Default ``freq_min`` 20 Hz
+        (uacpy guidance, as on :func:`constant_q`).
     bins_per_octave : int, optional
-        Bins per octave, which fixes Q. Default 24.
+        Bins per octave, which fixes Q. Default 24 (uacpy guidance).
     window : str, optional
-        Kernel taper. Default ``'hann'``.
+        Kernel taper. Default ``'hann'``, which ``None`` also selects.
     """
     x, fs, freqs, kernels = _cq_setup(
         data, sample_rate, freq_min, freq_max, bins_per_octave, window,
@@ -478,13 +481,14 @@ def constant_q_spectrogram(data, sample_rate, *, freq_min=20.0, freq_max=None,
         Sample rate (Hz).
     freq_min, freq_max : float, optional
         First and last bin centre (Hz); ``None`` for ``freq_max`` stops below
-        the near-Nyquist bins (see above). Default ``freq_min`` 20 Hz.
+        the near-Nyquist bins (see above). Default ``freq_min`` 20 Hz
+        (uacpy guidance, as on :func:`constant_q`).
     bins_per_octave : int, optional
-        Bins per octave, which fixes Q. Default 24.
+        Bins per octave, which fixes Q. Default 24 (uacpy guidance).
     hop : int, optional
         Cell width in samples; ``None`` is an eighth of the longest kernel.
     window : str, optional
-        Kernel taper. Default ``'hann'``.
+        Kernel taper. Default ``'hann'``, which ``None`` also selects.
     scaling : {'density', 'spectrum'}, optional
         PSD per Hz or band power. Default ``'density'``.
     """

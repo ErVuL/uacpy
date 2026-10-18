@@ -132,8 +132,14 @@ from uacpy import sonar
 `0.0` so that "not supplied" stays distinguishable from a legitimate per-angle
 `DI` array that happens to contain a zero. `array_gain_dB` **replaces** it — passing
 both raises `ConfigurationError`, because they are two parametrisations of the
-same term. `AG = DI` only for isotropic noise; anisotropic noise or signal
-coherence loss across the array makes `AG < DI`.
+same term. `AG = DI` for isotropic noise and a plane-wave signal (Ainslie,
+*Principles of Sonar Performance Modelling*, §6.1.3.2.1); otherwise they
+differ: signal or noise coherence can lower the array gain, and directional
+noise away from the steered beam can raise it (Butler & Sherman,
+*Transducers and Arrays for Underwater Sound*, §8.4.1: "the array gain can be
+reduced from 10 log N by noise coherence, and … when the noise is
+directional, the array gain can be increased above 10 log N for certain
+signal reception directions").
 
 `active_signal_excess` with neither `noise_level_dB` nor `reverberation_level_dB`
 raises: a signal excess against no background is not a number.
@@ -176,8 +182,7 @@ evaluate the sonar equation at every `(depth, range)` sample of it:
 | `passive_signal_excess_field(tl_field, *, source_level_dB=None, noise_level_dB, detection_threshold_dB, directivity_index_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
 | `active_signal_excess_field(tl_field, *, source_level_dB=None, target_strength_dB, detection_threshold_dB, noise_level_dB=None, reverberation_level_dB=None, directivity_index_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
 | `transition_probability_field(se_field, *, sigma_dB)` | an `SE` `Field` | `P_D` `Field` |
-| `detection_ranges_by_depth(se_field, *, crossing='outermost')` | an `SE` `Field` | `(depths, ranges)` |
-| `detection_range_from_field(se_field, *, crossing='outermost')` | a 1-D `SE` `Field` over range, e.g. `se.at(depth=z)` | detection range (m) |
+| `detection_ranges_field(se_field, *, crossing='outermost')` | an `SE` `Field` with a range axis: a cut `se.at(depth=z)` or the `(depth, range)` map | detection range (m): a float for a cut, one per depth (on `se.coords['depth']`) for a map |
 
 The two map functions build a `SonarBudget` from their keywords and evaluate
 it (`budget.signal_excess_field(tl_field)` is the same map).
@@ -185,11 +190,11 @@ it (`budget.signal_excess_field(tl_field)` is the same map).
 `Source(source_level_dB=...)` on the run) and is refused when the field has
 none; the map's `source_level_dB` is the level the budget used, and the
 `P_D` map inherits it.
-`transition_probability_field` and `detection_ranges_by_depth` are the Field
+`transition_probability_field` and `detection_ranges_field` are the Field
 forms of two array functions: `transition_probability(signal_excess_dB, *,
-sigma_dB)` and `detection_ranges(ranges_m, *, signal_excess_dB, axis=-1,
-crossing='outermost')`, which applies `detection_range` along one axis of any
-signal-excess array.
+sigma_dB)` and `detection_ranges(ranges, *, signal_excess_dB, axis=-1,
+crossing='outermost')`, the detection range of every signal-excess curve along
+one axis of any array (a float for one curve).
 
 ### `array_gain_dB` may be a grid
 
@@ -223,8 +228,10 @@ scalar. `example_42` measures
 both on one channel: 11.9 dB assumed against 8.7 dB realised on the target's
 own row (9.0 dB over the whole water column). The assumed gain puts the
 detection range at 60 m at 4.0 km against 2.5 km realised, so 38 % of the
-predicted range is range the realised gain does not reach, and it calls twice
-the area detectable (22 % against 11 %).
+predicted range is range the realised gain does not reach, and it calls 2.5
+times the area detectable (20 % of the water from 0.6 km out, against 8 %).
+With a grid, the `SE = 0` boundary is no longer one TL contour, so
+`example_42` contours the signal excess itself.
 
 The shortfall is a property of the *replica*, not of the channel. A
 conventional beamformer is the matched filter for a plane wave, which is the
@@ -242,19 +249,19 @@ import numpy as np
 import uacpy
 from uacpy import sonar
 from uacpy.models import Bellhop, Kraken, RunMode
-from uacpy.plot import (
-    plot_detection_probability, plot_roc, plot_signal_excess)
+from uacpy.plot import plot_detection_probability, plot_signal_excess
 
 from figure_scripts._common import deep_water, shallow_water
 
+env, source, receiver = deep_water()     # 5000 m Munk channel, source at 1000 m, 50 Hz
+
 DT_PASSIVE = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=50.0, integration_time_s=10.0)     # −7.55 dB
+    0.5, 1e-4, bandwidth=50.0, integration_time=10.0)     # −7.55 dB
 
 PASSIVE_DEEP = dict(source_level_dB=125.0, noise_level_dB=65.0,
                     directivity_index_dB=15.0,
                     detection_threshold_dB=DT_PASSIVE)
 
-env, source, receiver = deep_water()
 tl = Bellhop(beam_type='G', n_beams=0, backend='fortran').run(
     env, source, receiver, run_mode=RunMode.INCOHERENT_TL)
 se = sonar.passive_signal_excess_field(tl, **PASSIVE_DEEP)
@@ -313,14 +320,14 @@ PASSIVE_SHELF = dict(source_level_dB=110.0, noise_level_dB=75.0,
                      directivity_index_dB=15.0,
                      detection_threshold_dB=DT_PASSIVE)
 
-env, source, receiver = shallow_water()
+env, source, receiver = shallow_water()  # 100 m over sand, source at 25 m, 200 Hz
 tl = Kraken().run(env, source, receiver, run_mode=RunMode.INCOHERENT_TL)
 se = sonar.passive_signal_excess_field(tl, **PASSIVE_SHELF)
 
 fom = sonar.figure_of_merit(**PASSIVE_SHELF)              # 57.55 dB
 cut = se.at(depth=60.0)
-r_det = sonar.detection_range_from_field(cut)                      # 3013.3 m
-depths, ranges = sonar.detection_ranges_by_depth(se)
+r_det = sonar.detection_ranges_field(cut)                          # 3013.3 m
+ranges = sonar.detection_ranges_field(se)          # one per se.coords['depth']
 ```
 
 ![Figure of merit and detection range](figures/sonar_detection_range.png)
@@ -340,8 +347,8 @@ own call — one number, comparable across sonars, that you can cross with any
 model's TL.
 
 **Right:** the same crossing repeated at every receiver depth.
-`detection_ranges_by_depth` applies `detection_range` to each depth row of the
-2-D field. The profile is not flat and not monotonic:
+`detection_ranges_field` on the 2-D field finds the crossing of each depth row.
+The profile is not flat and not monotonic:
 
 | Receiver depth | Detection range |
 |---|--:|
@@ -357,12 +364,20 @@ near 74 m. A 9× swing in detection range across the water column, from one
 environment and one budget: that is the argument for computing a field instead
 of quoting a radius.
 
-`detection_range` reports the outermost crossing by default; in deep water,
+`detection_ranges` reports the outermost crossing by default; in deep water,
 where a convergence zone gives + / − / + along range, `crossing='first'` gives
-the range of first loss of detection instead, and `detection_annuli(ranges_m,
-signal_excess_dB)` lists every `(start_m, end_m)` interval where SE ≥ 0.
+the range of first loss of detection instead, and `detection_annuli(ranges,
+signal_excess_dB=se)` lists every `(start, end)` interval (m) where SE ≥ 0.
+Both take `ranges` strictly increasing and refuse any other order.
 
-`detection_range` returns `np.nan` when `SE` is negative everywhere, and
+The outermost crossing is a tail statistic: one fringe of `SE ≥ 0` past the
+main boundary sets it. `example_44` runs one detection chain on a Kraken and a
+Bellhop field of the same section: the two `P_D` maps differ by 0.05 on
+average over the water, while their median detection ranges across depth are
+2.3 km and 3.7 km. Compare two predictions by their maps or detectable areas,
+and quote a detection range beside the map it came from.
+
+`detection_ranges` returns `np.nan` when `SE` is negative everywhere, and
 `np.inf` whenever the outermost crossing lies **beyond the grid** — that is,
 whenever `SE ≥ 0` at the last sampled range with data. `np.isfinite` on the
 result therefore answers "did the grid contain the crossing?", and a finite
@@ -386,17 +401,16 @@ convergence-zone lobes: a grid out to 60 km ends at `+0.8 dB` and returns
 crossing at `99167.8 m`. Widen `receiver.ranges` until the answer is finite.
 
 "The last range with data" is what the function tests, not `ranges[-1]`:
-`detection_range` masks the no-data cells (`NaN`, the package's no-data
+`detection_ranges` masks the no-data cells (`NaN`, the package's no-data
 convention — a cell the engine never evaluated or a solver wrote no number for,
 [results](results.md#9-gotchas)) before it looks at the far edge, so a far-edge
 recovery on a 20 km grid with three trailing no-data cells returns `inf`, and
 the warning quotes `17000 m` as the outermost range the model filled.
 
-`detection_ranges_by_depth` applies the same rule row by row, so each depth's
-entry is `inf` exactly when that row's crossing lies beyond its own last filled
-cell. The warnings quote each row's own edge, and under Python's default filter
-two rows sharing an edge are deduplicated to one warning: count `inf` rows, not
-warnings, unless you have set `simplefilter('always')`.
+On a map the same rule runs row by row, so each depth's entry is `inf` exactly
+when that row's crossing lies beyond its own last filled cell. One warning per
+call names how many rows have such an in-grid shadow and quotes the first one's
+edge: count `inf` rows, not warnings.
 
 It also **interpolates** linearly between the two samples that straddle the
 crossing: `3013.3 m` sits between grid points at 3012.0 and 3031.9 m, on a
@@ -444,6 +458,16 @@ the geometric centre plus `10·log10(900)`. `decidecade_levels(freq_min, freq_ma
 gives the same integral per decidecade band, and both take `component=` for one
 source of the five.
 
+**A band budget wants a band TL too.** Once `SL` and `NL` are band levels, the
+propagation term of the passive equation with incoherent broadband processing
+is the broadband propagation loss, the propagation factor averaged over the
+sonar band (Ainslie, *Principles of Sonar Performance Modelling*, §11.3.3,
+Eq. 11.46), not the single-frequency TL at the band centre. A
+`RunMode.BROADBAND` run over the band, reduced by
+`field.broadband_loss(source_spectrum=…)`, is that quantity, and the `*_field`
+budgets take it as their TL ([results](results.md); the method's reasoning is
+in [broadband products](../theory/broadband_products.md)).
+
 ---
 
 ## 4. From signal excess to probability of detection
@@ -475,7 +499,7 @@ P_D = Φ(SE / sigma_dB)
 ```
 
 ```python
-env, se = _passive_deep()      # the §2 run, factored into a helper
+# env and se: the deep-water signal-excess field of §2
 for sigma in (5.6, 9.0):
     pd = sonar.transition_probability_field(se, sigma_dB=sigma)
     plot_detection_probability(pd, env=env,
@@ -531,9 +555,9 @@ that turns that promise into decibels.
 | `deflection_coefficient(pd, pf)` | `d' = Φ⁻¹(P_D) − Φ⁻¹(P_F)` — separation in noise σ |
 | `detection_index(pd, pf)` | `d = (d')²` — Urick's detection index; the square of the deflection, so not an input to `probability_of_detection` (pass `np.sqrt(d)`) |
 | `probability_of_detection(deflection, pf)` | `P_D = Q(Q⁻¹(P_F) − d')`, the inverse of `deflection_coefficient`; `pf` may be an array |
-| `roc_curve(deflection, n_points=200)` | `(P_F, P_D)` arrays, `P_F` log-spaced over `[1e-6, ~1]` |
+| `roc_curve(deflection, n_points=200)` | a `RocCurve` `(pfa, pd)` (it unpacks as two arrays), `P_F` log-spaced over `[1e-6, ~1]`; `.plot()` draws it |
 | `albersheim_snr(pd, pf, n_pulses=1)` | required per-sample SNR (dB), envelope detector |
-| `detection_threshold_energy(pd, pf, bandwidth_hz, integration_time_s, *, exact=True)` | `DT` (dB), energy detector: the exact Gamma-statistic threshold; `exact=False` gives Abraham's large-`M` form `5·log10(d/(w·t))`, optimistic at small `w·t` and warned outside 1 dB |
+| `detection_threshold_energy(pd, pf, bandwidth, integration_time, *, exact=True)` | `DT` (dB), energy detector: the exact Gamma-statistic threshold; `exact=False` gives Abraham's large-`M` form `5·log10(d/(w·t))`, optimistic at small `w·t` and warned outside 1 dB |
 | `per_look_false_alarm(pf_scan, n_looks)` | per-look `P_F` holding a scan at `pf_scan` |
 | `scan_false_alarm(pf_look, n_looks)` | rate a max-over-looks detector achieves |
 
@@ -548,7 +572,7 @@ look first:
 n_looks = span_in_sin_theta / (wavelength / aperture)      # resolution cells
 dt = sonar.detection_threshold_energy(
     pd=0.5, pf=sonar.per_look_false_alarm(1e-4, n_looks),
-    bandwidth_hz=10.0, integration_time_s=10.0)
+    bandwidth=10.0, integration_time=10.0)
 ```
 
 `n_looks` counts **independent** looks. One beam is `λ/L` wide in `sin θ`, so
@@ -558,7 +582,10 @@ independent beams, worth +0.79 dB of `DT`. Shaded beams overlap and are
 correlated, so the orthogonal-beam count is the conservative choice.
 
 ```python
-plot_roc([1.0, 2.0, 3.0, 4.0, 5.0], title='ROC — Gaussian detector')
+ax = None
+for deflection in [1.0, 2.0, 3.0, 4.0, 5.0]:
+    fig, ax = sonar.roc_curve(deflection).plot(
+        ax=ax, title='ROC — Gaussian detector')
 
 pd_axis = np.linspace(0.1, 0.99, 200)
 d = [sonar.detection_index(p, 1e-4) for p in pd_axis]
@@ -566,8 +593,8 @@ d = [sonar.detection_index(p, 1e-4) for p in pd_axis]
 wt = np.logspace(0.0, 5.0, 200)
 d = sonar.detection_index(0.5, 1e-4)
 dt_large_m = 5.0 * np.log10(d / wt)                          # eq. (2.77)
-dt_exact = [sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=m,
-                                             integration_time_s=1.0, exact=True)
+dt_exact = [sonar.detection_threshold_energy(0.5, 1e-4, bandwidth=m,
+                                             integration_time=1.0, exact=True)
             for m in wt]
 ```
 
@@ -577,8 +604,10 @@ dt_exact = [sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=m,
 `d = (d')²`. Read it at the dashed line, `P_F = 10⁻⁴`: a detector with `d' = 4`
 reaches `P_D ≈ 0.61` there, and you need `d' = 5` to reach `P_D ≈ 0.9`. Buying a
 decade of false-alarm rate costs real deflection, which is what makes `P_F` an
-engineering decision rather than a preference. `plot_roc` takes a scalar or a
-sequence of deflections, or pre-computed `pfa`/`pd` arrays.
+engineering decision rather than a preference. `sonar.roc_curve(d)` returns the
+curve as a `RocCurve` (`pfa, pd = curve` unpacks it); its `.plot()` — or
+`plot_roc(curve)`, which also takes two `pfa`/`pd` arrays — draws it, and
+`ax=` overlays the next one.
 
 **Middle — the price of a requirement.** `10·log10 d` against required `P_D`, for
 three false-alarm rates. This is the detector's side of the contract: at
@@ -605,9 +634,9 @@ This is where the page's `DT` values come from:
 
 ```python
 DT_PASSIVE = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=50.0, integration_time_s=10.0)     # −7.55 dB
+    0.5, 1e-4, bandwidth=50.0, integration_time=10.0)     # −7.55 dB
 DT_ACTIVE  = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=100.0, integration_time_s=0.5)     # −2.05 dB
+    0.5, 1e-4, bandwidth=100.0, integration_time=0.5)     # −2.05 dB
 ```
 
 Both aim at the same `(0.5, 10⁻⁴)` operating point. The passive sonar's
@@ -651,13 +680,15 @@ linear or square-law **envelope** detector after non-coherent integration of
 Abraham §2.3.5.2 covers, appropriate when conditions do not change much from
 ping to ping. A fluctuating target needs more SNR than this returns.
 
-It is a closed-form fit to Robertson's curves. The usual quoted accuracy is
-~0.2 dB over `0.1 ≤ P_D ≤ 0.9` and `10⁻⁷ ≤ P_F ≤ 10⁻³`; Abraham §2.3.5.2, after
-Tufts & Cann (1983), gives it as holding at least over `0.3 ≤ P_D ≤ 0.95`,
-`10⁻⁸ ≤ P_F ≤ 10⁻⁴` and **`n_pulses ≤ 16`**. Past 16 pulses it still runs and
-is still usable, just less accurate — worst near `P_D` = 0 or 1 — and nothing
-in `albersheim_snr` warns you. It is the right call for a pulsed active system
-where the energy-detector model does not fit.
+It is a closed-form fit to Robertson's curves, and two accuracy envelopes are
+published for it. Abraham §2.3.5.2, after Tufts & Cann (1983), gives 0.2 dB
+"for at least" `0.3 ≤ P_D ≤ 0.95`, `10⁻⁸ ≤ P_F ≤ 10⁻⁴` and `1 ≤ n_pulses ≤ 16`;
+Richards (2014) gives ~0.2 dB over
+`0.1 ≤ P_D ≤ 0.9`, `10⁻⁷ ≤ P_F ≤ 10⁻³` and `1 ≤ n_pulses ≤ 8096`.
+`albersheim_snr` warns (`ValidityWarning`) outside Richards' box and runs
+silently inside it — so past 16 pulses, where Abraham's statement stops, it
+does not warn. It is the right call for a pulsed active system where the
+energy-detector model does not fit.
 
 ---
 
@@ -668,11 +699,11 @@ put on it comes back, in dB re 1 m².
 
 | Call | Formula | Aspect | Regime |
 |---|---|---|---|
-| `ts_sphere(radius_m, *, frequency=None, sound_speed=1500.0)` | `10·log10(a²/4)` | flat | `ka > 10` |
-| `ts_convex(radius1_m, radius2_m, *, frequency=None, sound_speed=1500.0)` | `10·log10(a₁a₂/4)` | one aspect | `ka > 10` on the smaller radius |
-| `ts_ellipsoid(a_m, b_m, c_m, *, frequency=None, sound_speed=1500.0)` | `20·log10(bc/2a)` | viewed along `a` | `ka > 10` on `min(b²/a, c²/a)` — **not on any semi-axis** |
-| `ts_cylinder(radius_m, length_m, *, frequency, angle_deg=0.0, sound_speed=1500.0)` | `10·log10[(aL²/2λ)·sinc²β·cos²θ]` | **from broadside** | `ka > 1` |
-| `ts_plate(width_m, height_m, *, frequency, angle_deg=0.0, sound_speed=1500.0)` | `10·log10[(wh/λ)²·sinc²β·cos²θ]` | **from normal incidence** | `k·min(w,h) > 2π`, i.e. both dimensions at least a wavelength |
+| `ts_sphere(radius, *, frequency=None, sound_speed=1500.0)` | `10·log10(a²/4)` | flat | `ka > 10` |
+| `ts_convex(radius1, radius2, *, frequency=None, sound_speed=1500.0)` | `10·log10(a₁a₂/4)` | one aspect | `ka > 10` on the smaller radius |
+| `ts_ellipsoid(a, b, c, *, frequency=None, sound_speed=1500.0)` | `20·log10(bc/2a)` | viewed along `a` | `ka > 10` on `min(b²/a, c²/a)` — **not on any semi-axis** |
+| `ts_cylinder(radius, length, *, frequency, angle_deg=0.0, sound_speed=1500.0)` | `10·log10[(aL²/2λ)·sinc²β·cos²θ]` | **from broadside** | `ka > 1` |
+| `ts_plate(width, height, *, frequency, angle_deg=0.0, sound_speed=1500.0)` | `10·log10[(wh/λ)²·sinc²β·cos²θ]` | **from normal incidence** | `k·min(w,h) > 2π`, i.e. both dimensions at least a wavelength |
 
 The split runs down the middle of that table. The first three are
 **frequency-flat**: a rigid convex body in the geometric regime returns the same
@@ -765,7 +796,7 @@ volume:    RL(r) = SL − 2·TL(r) + S_v + 10·log10(Ψ · r²  · cτ/2)
 two-way solid-angle beamwidth (sr). A boundary cell is an annular patch that
 grows as `r`; a volume cell is a shell segment that grows as `r²`.
 
-`ranges_m` is the **slant** range from the sonar to the cell, and with it the
+`ranges` is the **slant** range from the sonar to the cell, and with it the
 boundary cell is exact at any grazing angle: the annulus is `cτ/(2·cos θ_g)`
 wide down-range, but its arc is `Φ·r·cos θ_g`, and the two cosines cancel to
 `Φ·r·cτ/2`. A **horizontal** range `x` in its place under-states the cell by
@@ -776,9 +807,9 @@ page do.
 
 | Call | |
 |---|---|
-| `boundary_reverberation(ranges_m, source_level_dB, scattering_strength_dB, *, pulse_length_s, horizontal_beamwidth_rad, sound_speed=1500.0, tl_dB=None)` | surface or bottom |
-| `volume_reverberation(ranges_m, source_level_dB, scattering_strength_dB, *, pulse_length_s, solid_angle_beamwidth_sr, sound_speed=1500.0, tl_dB=None)` | scattering layers |
-| `total_reverberation(*levels_dB)` | incoherent (power) sum |
+| `boundary_reverberation(ranges, source_level_dB, scattering_strength_dB, *, pulse_length, horizontal_beamwidth, sound_speed=1500.0, tl_dB=None)` | surface or bottom |
+| `volume_reverberation(ranges, source_level_dB, scattering_strength_dB, *, pulse_length, solid_angle_beamwidth, sound_speed=1500.0, tl_dB=None)` | scattering layers |
+| `uacpy.acoustics.sum_levels_dB(*levels_dB)` | the components' incoherent (power) sum |
 
 `tl_dB=None` falls back to spherical spreading, `20·log10(r)`. Pass an array or
 a callable to use a **modelled** TL instead — the same move as §2, and §8 does
@@ -790,7 +821,7 @@ exactly that.
 |---|---|
 | `lambert_bottom(grazing_deg, mu_dB=-27.0)` | `S_b = µ_dB + 20·log10(sin θ)`, the **monostatic** case of `S_b = 10·log10(µ sin θ_i sin θ_s)`; Mackenzie's −27 dB; holds below ~45° grazing |
 | `chapman_harris_surface(*, frequency, grazing_deg, wind_speed_kn)` | wind-driven sea surface; fitted by Chapman & Harris over 0.4–6.4 kHz, validated by Chapman & Scott over 0.1–6.4 kHz for θ < 80°, though the underlying data are all below 40° grazing |
-| `column_scattering_strength(sv_dB, thickness_m)` | `S_v + 10·log10(h)` — a scattering layer as an equivalent area strength |
+| `column_scattering_strength(sv_dB, thickness)` | `S_v + 10·log10(h)` — a scattering layer as an equivalent area strength |
 | `apl_uw_bottom_backscatter(grazing_deg, frequency, params, *, water_sound_speed=1500.0)` | APL-UW TR 9407 seabed model, 10–100 kHz: interface roughness (Kirchhoff, composite, large) plus sediment volume scattering from the six `BottomParameters` |
 | `apl_uw_bottom_loss(grazing_deg, params)` | TR 9407 forward reflection loss, a lossy Rayleigh coefficient; no frequency dependence |
 | `apl_uw_surface_backscatter(*, frequency, grazing_deg, wind_speed_kn)` | TR 9407 sea-surface model, 10–100 kHz: bubble layer + Bragg ripples + specular facets, with bubble-layer extinction; wind in **knots** (converted to the report's m/s), warns above the 17 m/s (33 kn) of the strongest wind the report compared with data |
@@ -812,21 +843,67 @@ grazing = np.rad2deg(np.arctan2(50.0, ranges))
 
 bottom = sonar.boundary_reverberation(
     slant, 210.0, sonar.lambert_bottom(grazing),
-    pulse_length_s=0.02, horizontal_beamwidth_rad=0.15, sound_speed=1500.0)
+    pulse_length=0.02, horizontal_beamwidth=0.15, sound_speed=1500.0)
 surface = sonar.boundary_reverberation(
     slant, 210.0,
     sonar.chapman_harris_surface(frequency=5000.0, grazing_deg=grazing,
                                  wind_speed_kn=25.0),
-    pulse_length_s=0.02, horizontal_beamwidth_rad=0.15, sound_speed=1500.0)
+    pulse_length=0.02, horizontal_beamwidth=0.15, sound_speed=1500.0)
 volume = sonar.volume_reverberation(
     slant, 210.0, -70.0,
-    pulse_length_s=0.02, solid_angle_beamwidth_sr=0.01, sound_speed=1500.0)
+    pulse_length=0.02, solid_angle_beamwidth=0.01, sound_speed=1500.0)
 
-total = sonar.total_reverberation(bottom, surface, volume)
+total = uacpy.acoustics.sum_levels_dB(bottom, surface, volume)
 background = sonar.noise_background(55.0, 20.0)          # 35.0 dB
 ```
 
 ![Reverberation decay after a ping](figures/sonar_reverberation.png)
+
+A 20 ms ping at 5 kHz, plotted against two-way travel time with slant range
+on the top axis. The two boundary terms dominate at the start — 135 dB surface
+and 128 dB bottom 50 m out (71 m slant), against 95 dB of volume — but they decay **at three
+different rates**, and the rates are not empirical. They fall straight out of
+the cell geometry:
+
+| Component | at 1 km | at 8 km | decay | why |
+|---|--:|--:|--:|---|
+| surface — Chapman–Harris, 25 kn | 81.7 dB | 40.6 dB | −45.5 dB/decade | −30 geometry, −15.5 from `S_s(θ)` |
+| bottom — Lambert, µ = −27 dB | 70.5 dB | 25.3 dB | −50.0 dB/decade | −30 geometry, −20 from `20·log10(sin θ)` |
+| volume — `S_v` = −70 dB re 1/m | 71.8 dB | 53.7 dB | −20.0 dB/decade | −40 spreading, +20 from the `r²` cell |
+
+With spherical spreading, `−2·TL` contributes `−40 dB/decade`. The volume cell
+gives `+20` back, leaving `−20`. A boundary cell gives only `+10`, leaving
+`−30`, and then the grazing angle falls as `1/r` and drags the scattering
+strength down with it — steeply for Lambert, more gently for Chapman–Harris.
+
+**Every rate in that table is conditioned on spherical spreading and on a
+single grazing angle**, which is what `tl_dB=None` and the direct-path angle
+give you: the cell form assumes that the waves incident on the boundary arrive
+at a single angle (Abraham, *Underwater Acoustic Signal Processing*, §3.5.3,
+Eq. 3.237). A waveguide changes them: in a shallow-water mode-stripping region
+where `TL = 15·log₁₀ r`, boundary reverberation decays at 20 dB/decade rather
+than 30 (§3.5.3, with `S_b` held constant). And Zhou and Harrison show that
+under Lambert's rule the echo and the reverberation both decay at `30·log₁₀ r`
+at ranges large compared with the water depth, so the signal-to-reverberation
+ratio **stops changing with range altogether** (Abraham §3.5.4). Passing
+`tl_dB=` a modelled TL, as [§8](#8-the-active-budget-end-to-end) does, replaces
+the spreading but not the angle: `S_b` is read at the one angle you pass.
+On §8's 100 m guide the direct-path Lambert term falls 20 dB/decade while the
+modelled TL at the seabed stays within 3 dB of the TL to the target, so
+`EL − RL` climbs from 13.1 dB at 3 km to 29.1 dB at 30 km — 16 dB/decade where
+Zhou and Harrison find none. Past a few water depths, read the single-angle
+curve as outside its assumption; [OASS](../models/oases.md#2-the-six-sub-models)
+models reverberation in the waveguide itself (example 39).
+
+So the ordering **inverts with range**. Volume overtakes bottom at 906 m and
+surface at 2.46 km, and by 8 km the grey total is within 0.22 dB of the volume
+term alone: the two boundary components have stopped mattering. Bottom
+reverberation crosses below the `NL − DI` line at 5.13 km (6.84 s) — past that
+it is quieter than the ambient noise and there is no point modelling it.
+
+The practical reading: **boundary reverberation is a near-field problem, volume
+reverberation is a far-field one.** Which one you must fight depends on how far
+out your target is.
 
 ### The high-frequency boundary models
 
@@ -857,7 +934,9 @@ The seabed model takes the six inputs of the handbook's Table 1 as a
 volume parameter σ₂, and the relief spectrum's exponent γ and strength w₂.
 `from_sediment('medium sand')` reads them off Table 2, `from_grain_size(1.5)`
 evaluates the handbook's grain-size relations (the two agree to the table's
-printed digits), and `from_geoacoustics(...)` takes measured cp, ρ and
+printed digits; Table 2 itself is `sonar.APL_UW_SEDIMENTS`, a ready
+`BottomParameters` for rock and cobble and the grain size `Mz` for every other
+row), and `from_geoacoustics(...)` takes measured cp, ρ and
 attenuation and infers the grain size from the sound-speed ratio for the two
 the geoacoustics cannot give. A seabed you already hold goes in directly:
 `from_environment(env)` reads `env.bottom` (at `range=`, nearest column, top
@@ -884,9 +963,19 @@ gravel at −22 dB, medium sand at −28 dB and silty clay at −32 dB, where
 Lambert's one curve says −36 dB for all of them; and medium sand rises from
 −31 dB at 10 kHz to −24 dB at 100 kHz. The implementation reproduces the
 handbook's Table 3 to 0.6 dB worst case over twelve columns and fifteen
-angles, once a documented constant is applied to the Kirchhoff level (the
-module explains it); the handbook's own uncertainty is about 3 dB for
-characterised sand and silt and 10 dB for rock and gravel.
+angles (0.35 dB on sand and silt) at the handbook's own 1528 m/s water
+(`sonar.TABLE_WATER_SOUND_SPEED`, pass it as `water_sound_speed=`). Near
+vertical it evaluates the Kirchhoff integral itself (Jackson, Winebrenner &
+Ishimaru 1986), which the handbook says "must be integrated numerically or
+otherwise approximated" (TR 9407 p. IV-27) and approximates by its Eq. 37: at
+the `γ = 3.25` of every table row the integral sits 3.6 dB above Eq. 37 at
+vertical, the level Table 3 prints, and at a measured `spectral_exponent` it
+follows the integral (Eq. 37 is exact only at `γ = 3`).
+The handbook's own uncertainty is about 3 dB for characterised sand and silt
+and 10 dB for rock and gravel. `apl_uw_bottom_loss` is the package's fluid
+reflection loss in the handbook's ratios: the same number as
+`uacpy.acoustics.reflection_coeff` with sound speed ν·c_w, density ρ·ρ_w and
+attenuation 40π·log₁₀(e)·δ dB/λ.
 
 The surface model's inputs are wind speed in knots and frequency (the
 handbook's fits are in m/s and take it converted). Bubble scattering dominates
@@ -906,42 +995,14 @@ soft bottoms the backscatter is set mostly by σ₂, which is an empirical fit
 that varies an order of magnitude between sites of the same name — the
 handbook's advice is to fit it to any backscatter data you have.
 
-A 20 ms ping at 5 kHz, plotted against two-way travel time with slant range
-on the top axis. The two boundary terms dominate at the start — 135 dB surface
-and 128 dB bottom 50 m out (71 m slant), against 95 dB of volume — but they decay **at three
-different rates**, and the rates are not empirical. They fall straight out of
-the cell geometry:
-
-| Component | at 1 km | at 8 km | decay | why |
-|---|--:|--:|--:|---|
-| surface — Chapman–Harris, 25 kn | 81.7 dB | 40.6 dB | −45.5 dB/decade | −30 geometry, −15.5 from `S_s(θ)` |
-| bottom — Lambert, µ = −27 dB | 70.5 dB | 25.3 dB | −50.0 dB/decade | −30 geometry, −20 from `20·log10(sin θ)` |
-| volume — `S_v` = −70 dB re 1/m | 71.8 dB | 53.7 dB | −20.0 dB/decade | −40 spreading, +20 from the `r²` cell |
-
-With spherical spreading, `−2·TL` contributes `−40 dB/decade`. The volume cell
-gives `+20` back, leaving `−20`. A boundary cell gives only `+10`, leaving
-`−30`, and then the grazing angle falls as `1/r` and drags the scattering
-strength down with it — steeply for Lambert, more gently for Chapman–Harris.
-
-**Every rate in that table is conditioned on spherical spreading**, which is
-what `tl_dB=None` gives you. A waveguide changes them: in a shallow-water
-mode-stripping region where `TL = 15·log₁₀ r`, boundary reverberation decays at
-20 dB/decade rather than 30. Worse for planning, Zhou and Harrison show that
-under Lambert's rule the echo and the reverberation both settle to `30·log₁₀ r`
-at ranges large compared with the water depth, so the signal-to-reverberation
-ratio **stops improving with range altogether**. Pass `tl_dB=` a modelled TL, as
-[§8](#8-the-active-budget-end-to-end) does, and the rate comes out right without
-your having to know which regime you are in.
-
-So the ordering **inverts with range**. Volume overtakes bottom at 906 m and
-surface at 2.46 km, and by 8 km the grey total is within 0.22 dB of the volume
-term alone: the two boundary components have stopped mattering. Bottom
-reverberation crosses below the `NL − DI` line at 5.13 km (6.84 s) — past that
-it is quieter than the ambient noise and there is no point modelling it.
-
-The practical reading: **boundary reverberation is a near-field problem, volume
-reverberation is a far-field one.** Which one you must fight depends on how far
-out your target is.
+**Is the boundary rough at this frequency?** Three small functions answer it
+before any scattering run: `sonar.rayleigh_parameter(frequency, rms_roughness,
+grazing_deg)` is the RMS phase deviation `P = 2kσ sin θ` (JKPS §1.7, their Γ),
+smooth for `P ≪ 1`; `sonar.coherent_reflection_factor(...)` is the
+`exp(−P²/2)` the coherent reflection is multiplied by (JKPS Eq. 1.79), a
+small-roughness result; and `sonar.perturbative_grazing_limit(frequency,
+rms_roughness)` is the steepest grazing angle where `P = 1`, the part of a
+full-field run's angle spectrum a small-roughness model (OASS, OASSP) covers.
 
 ---
 
@@ -952,9 +1013,9 @@ from §6, a reverberation curve from §7, and a `DT` from §5.
 
 ```python
 DT_ACTIVE = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=100.0, integration_time_s=0.5)      # −2.05 dB
+    0.5, 1e-4, bandwidth=100.0, integration_time=0.5)      # −2.05 dB
 ACTIVE_SL, ACTIVE_NL, DIRECTIVITY = 170.0, 60.0, 15.0
-PULSE_S, BEAMWIDTH_RAD, SONAR_HEIGHT = 0.5, 0.3, 75.0
+PULSE_LENGTH, BEAMWIDTH, SONAR_HEIGHT = 0.5, 0.3, 75.0
 
 env, source, _ = shallow_water()
 receiver = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 60),
@@ -971,7 +1032,7 @@ nl_di = sonar.noise_background(ACTIVE_NL, DIRECTIVITY)          # 45.0 dB
 grazing = np.rad2deg(np.arctan2(SONAR_HEIGHT, ranges))
 rl = sonar.boundary_reverberation(
     np.hypot(ranges, SONAR_HEIGHT), ACTIVE_SL, sonar.lambert_bottom(grazing),
-    pulse_length_s=PULSE_S, horizontal_beamwidth_rad=BEAMWIDTH_RAD,
+    pulse_length=PULSE_LENGTH, horizontal_beamwidth=BEAMWIDTH,
     tl_dB=tl_bottom)
 
 se_noise = sonar.active_signal_excess(
@@ -1014,6 +1075,14 @@ range to a peak of 14.5 dB at 3.5 km before rejoining the noise-limited curve.
 Both curves reach `SE = 0` at **the same 13.8 km**, to within 10 m (13.840 km
 without reverberation, 13.831 km with it).
 
+The rise is the single-angle cell form of [§7](#7-reverberation) at work:
+`S_b` is read at the direct-path grazing angle, which keeps falling with range.
+Past a few water depths (100 m here) a waveguide's signal-to-reverberation
+ratio stops changing with range (Zhou and Harrison, in Abraham §3.5.4), so the
+reverberation figures of this section beyond the first kilometres carry that
+approximation; [OASS](../models/oases.md#2-the-six-sub-models) (example 39)
+models the reverberation of the waveguide itself.
+
 That is the whole lesson of reverberation-limited operation, and it survives
 inspection of the equations:
 
@@ -1022,20 +1091,26 @@ SE_reverb-limited = (SL − 2·TL + TS) − (SL − 2·TL_b + S_b + 10·log10(ce
 ```
 
 **`SL` cancels exactly.** Inside the shaded zone, turning the projector up raises
-the echo and the reverberation by identical amounts, and buys precisely nothing.
+the echo and the reverberation by identical amounts, and buys precisely nothing
+(Abraham §8.7.2.1, confirming the sonar-equation analysis of §2.3.3).
 The knobs that do work there are the ones that shrink the scattering cell — a
 narrower beam, and above all more **bandwidth** — or a receiver that resolves the
 target's Doppler away from the reverberation. Bandwidth is the first lever:
 pulse duration by itself does nothing, and for a CW pulse the only way to buy
 bandwidth is to shorten it, `W = 1/T_p`, which is why the advice is usually
 phrased as "shorten the pulse". An FM sweep breaks that link and gives separate
-control of the two, which is the reason FM waveforms exist. Outside the zone the
-sonar is noise-limited, `SL` works normally again, and that is where the
-detection range is actually set.
+control of the two: an LFM pulse's reverberation support is set by its
+bandwidth, about `1/W`, not by its duration, while its Doppler shift stays
+small against `W` (Abraham §8.7.2.2, Fig. 8.31). Outside the zone the sonar is
+noise-limited, `SL` works normally again, and that is where the detection range
+is actually set.
 
 The field-grid counterpart of the same call is `active_signal_excess_field`,
 which takes the whole TL `Field` and accepts `reverberation_level_dB` as either a
-scalar or a 1-D per-range array matching the field's `'range'` axis.
+scalar or a 1-D per-range array matching the field's `'range'` axis. A per-range
+`RL` is applied to every depth row: each cell compares the echo of a target at
+that depth with the reverberation the sonar receives at that range, so the
+`RL` curve's own structure shows as vertical bands across the map.
 
 ---
 
@@ -1056,7 +1131,7 @@ surface** is the localisation estimate.
 | `synthesize_replica(modes, *, source_depth, ranges, array_depths)` | one replica, `(N, R)` |
 | `replica_bank(modes, *, array_depths, candidate_depths, candidate_ranges)` | a one-frequency `Replicas` from Kraken modes: `candidates={'depth', 'range'}`, `replicas` `(1, n_z, n_r, N)` |
 | `replica_bank_from_field(field, *, array_depths=None)` | a one-frequency `Replicas` from any coherent `Field` |
-| `csdm(snapshots)` | `(N, N)` from `(N, L)` complex snapshots |
+| `csdm(snapshots, *, diagonal_loading=0.0)` | `(N, N)` from `(N, L)` complex snapshots, `K = (1/L) Σ d dᴴ` (JKPS §10.3.2.1), plus `diagonal_loading · tr(K)/N` on the diagonal when set |
 | `bartlett(covariance, replicas)` | `P_B = eᴴKe / (eᴴe · tr K)` (`K` = `covariance`), in `[0, 1]`, as an ambiguity `Field` on the candidates: `kind='ambiguity'` in dB re its peak, `.max()` the estimate, its coordinates in `.pinned` (and its repr), `.reference` the peak `P_B` itself |
 | `mvdr(covariance, replicas, *, diagonal_loading=1e-2)` | `P_MV = 1 / (eᴴK⁻¹e)`, max scaled to 1, as the same kind of Field |
 
@@ -1069,7 +1144,7 @@ divides out.
 The two processors are `uacpy.acoustic_signal.bartlett` /
 `mvdr` over the replicas' rows, with `normalize='trace'` / `'max'`: call those
 for the linear surface as an array, and
-`uacpy.core.results.ambiguity_field(surface, candidates, *, reference_unit)` to
+`uacpy.sonar.ambiguity_field(surface, candidates, *, reference_unit)` to
 turn one into the same Field. The Field keeps the peak power it is relative
 to as `reference` (in `reference_unit`), so
 `field.reference * 10**(field.data / 10)` is the linear surface again.
@@ -1082,7 +1157,21 @@ TRUE_DEPTH, TRUE_RANGE = 62.0, 3200.0
 CAND_DEPTHS = np.linspace(5.0, 95.0, 181)
 CAND_RANGES = np.linspace(500.0, 5000.0, 226)
 
-env, source, _ = shallow_water()
+env, source, _ = shallow_water()      # §3's channel, where the data come from
+
+
+def simulated_csdm(modes, snr_dB=10.0, n_snapshots=50, seed=0):
+    # The source at the true position, random phase per snapshot, noise
+    e = sonar.synthesize_replica(modes, source_depth=TRUE_DEPTH,
+                                 ranges=TRUE_RANGE, array_depths=ARRAY_DEPTHS)
+    rng = np.random.default_rng(seed)
+    phases = np.exp(1j * rng.uniform(0.0, 2.0 * np.pi, n_snapshots))
+    n_power = np.mean(np.abs(e) ** 2) / 10.0 ** (snr_dB / 10.0)
+    noise = np.sqrt(n_power / 2.0) * (
+        rng.standard_normal((ARRAY_DEPTHS.size, n_snapshots))
+        + 1j * rng.standard_normal((ARRAY_DEPTHS.size, n_snapshots)))
+    return sonar.csdm(e[:, None] * phases + noise)
+
 modes = Kraken().compute_modes(env, source)                  # 14 modes
 bank = sonar.replica_bank(modes, array_depths=ARRAY_DEPTHS,
                           candidate_depths=CAND_DEPTHS,
@@ -1098,8 +1187,8 @@ true_env = uacpy.Environment(
                                     sound_speed=1650.0, density=1.8,
                                     attenuation=0.6),
 )
-k_matched = _csdm(modes)
-k_mismatched = _csdm(Kraken().compute_modes(true_env, source))
+k_matched = simulated_csdm(modes)
+k_mismatched = simulated_csdm(Kraken().compute_modes(true_env, source))
 
 sonar.bartlett(k_matched, bank)
 sonar.mvdr(k_matched, bank, diagonal_loading=1e-3)
@@ -1107,8 +1196,8 @@ sonar.bartlett(k_mismatched, bank)
 sonar.mvdr(k_mismatched, bank, diagonal_loading=1e-3)
 ```
 
-`_csdm` is the figure module's data simulator, and it is a handful of lines of
-`uacpy.sonar` plus numpy: `synthesize_replica` at the true position, 50
+`simulated_csdm` is the data simulator the figure script uses, a handful of
+lines of `uacpy.sonar` plus numpy: `synthesize_replica` at the true position, 50
 snapshots given random phase, complex Gaussian noise added at 10 dB SNR, and
 `csdm()` over the result. It takes a `Modes` set, so passing a *perturbed*
 environment's modes is how the mismatch below is staged — the data come from one
@@ -1246,7 +1335,7 @@ that inversion. `se.sonar_budget` carries the term-by-term budget
 `transition_probability_field` likewise returns
 `kind='probability_of_detection'`, `unit='1'` — dimensionless, not dB.
 
-**`detection_range` returns `inf` and `nan`, not exceptions.** `np.inf`
+**`detection_ranges` returns `inf` and `nan`, not exceptions.** `np.inf`
 whenever `SE ≥ 0` at the last sampled range *with data* — the outermost
 crossing lies beyond the grid, and any finite number there would be the grid's
 own edge, moving with `receiver.ranges` — and `np.nan` when `SE` is negative
@@ -1256,14 +1345,31 @@ inside the grid before recovering at the far edge, the `inf` comes with a
 test, not `ranges[-1]`: no-data cells are masked first, so a far-edge recovery
 on a 20 km grid with three trailing no-data cells returns `inf`, and the
 warning quotes `17000 m` as the outermost range the model filled. [§3](#3-figure-of-merit-and-detection-range) measures one such case
-at 60 km where the answer is 99 km, and covers `detection_ranges_by_depth`,
+at 60 km where the answer is 99 km, and covers a `(depth, range)` map,
 where each depth row masks its own no-data cells.
 
-**`detection_range` takes the *outermost* crossing.** That is deliberate: a
+**`detection_ranges` takes the *outermost* crossing.** That is deliberate: a
 convergence zone giving `+, −, +` is genuinely detectable at the far lobe, and
 reporting the first crossing would hide it. The consequence is that a **coherent**
 TL cut, which crosses the FOM line at every interference null, will report a
 range far beyond the last reliable one. Budgets want `INCOHERENT_TL`.
+
+**An incoherent ray field has crossings of its own.** Bellhop's default hat
+beams keep a caustic's ray-theoretic singularity
+([Bellhop §1](../models/bellhop.md)); it is Gaussian beam tracing that removes
+"the caustic spike which occurred with standard ray tracing" (Jensen et al.,
+*Computational Ocean Acoustics*, §3.5.2). On a 100 m sandy shelf at 1 kHz,
+source 7 m, receiver 90 m and a 74.2 dB FOM, a default `Bellhop()`
+`INCOHERENT_TL` budget crosses the FOM line in seven annuli, the outer ones
+0.1 km wide or less, and reports **35.0 km**; Kraken's incoherent TL gives
+**15.4 km** in one annulus. Beyond 5 km Bellhop's TL sits +0.3 dB from
+Kraken's on median (1.1 dB median |ΔTL|), but the 35.0 km crossing sits on a
+spike 11.2 dB below Kraken's TL. Before quoting
+the outermost range of a ray model, look at
+`detection_annuli(ranges, signal_excess_dB=se)` (or `crossing='first'`), or
+take the budget's TL from a mode or wavenumber model or band-averaged
+(`broadband_loss`). `beam_type='B'` is not the cure: it reports 21.8 km
+there, and its `πλ` floor biases a shallow duct (Bellhop §1).
 
 **And `compute_field` is the coherent one.** `Model.compute_field(...)` — and the
 default `Model.run(...)` — is `RunMode.COHERENT_TL`, so the warning above lands
@@ -1310,7 +1416,7 @@ edges keep reflecting where these go to `−inf`.
 **Raising `SL` does nothing when reverberation-limited.** It cancels out of the
 signal excess exactly. Buy bandwidth or narrow the beam instead — and note that
 the waveform reaches `boundary_reverberation` and `volume_reverberation` only as
-`pulse_length_s`, with no bandwidth parameter, so they describe a CW ping; an FM
+`pulse_length`, with no bandwidth parameter, so they describe a CW ping; an FM
 sweep's separation of bandwidth from duration is not represented.
 
 **uacpy's MFP is single-frequency.** Slice a broadband field with
@@ -1320,8 +1426,10 @@ not implemented here.
 
 **MVDR's `diagonal_loading` is a robustness knob, not a tuning nuisance.** Small values
 give sharp Capon peaks and collapse under mismatch; larger values approach
-Bartlett. The default is `1e-2`; this page's figures use `1e-3` to make the
-mismatch behaviour visible.
+Bartlett. The default is `1e-2` (uacpy guidance: Stergiopoulos §4.2.3 says only to "add some
+small quantity to the diagonal", and JKPS §10.3.4.1 sets the loading from an allowed white-noise-gain
+drop, "3-dB down … trial and error"), the same for `Covariance.mvdr`; this page's figures use `1e-3`
+to make the mismatch behaviour visible.
 
 ---
 
@@ -1333,7 +1441,9 @@ mismatch behaviour visible.
   Ch. 12 for detection and the `P_D` transition curve (Fig. 12.10).
 - Abraham, D. A., *Underwater Acoustic Signal Processing*, Springer — §2.3.5 for
   the `DT` vs `DT_Hz` distinction, §3.4 for the geometric target-strength forms
-  and their `ka` bounds, §9.2 for the incoherent energy detector.
+  and their `ka` bounds, §3.5.3-§3.5.4 for the single-angle boundary
+  reverberation form (Eq. 3.237) and the signal-to-reverberation ratio in a
+  waveguide (after Zhou and Harrison), §9.2 for the incoherent energy detector.
 - Etter, P. C., *Underwater Acoustic Modeling and Simulation* — Table 11.1 for
   the sonar-parameter grouping, Ch. 9 and §10.3 for scattering and
   reverberation, §11.5.7.1 for matched-field processing.
@@ -1358,8 +1468,9 @@ mismatch behaviour visible.
 - Albersheim, W. J., "A closed-form approximation to Robertson's detection
   characteristics", *Proc. IEEE* 69(7), 839, 1981; Tufts, D. W. & Cann, A. J.,
   "On Albersheim's detection equation", *IEEE Trans. AES* 19(4), 643–646, 1983 —
-  the accuracy bounds; see also Richards, M. A., *Fundamentals of Radar Signal
-  Processing*.
+  the accuracy bounds as Abraham §2.3.5.2 quotes them; Richards, M. A.,
+  "Alternative Forms of Albersheim's Equation" (2014), the form and envelope
+  `albersheim_snr` implements.
 - Baggeroer, A. B., Kuperman, W. A. & Mikhalevsky, P. N., "An overview of
   matched field methods in ocean acoustics", *IEEE J. Ocean. Eng.* 18(4), 1993.
 - Jensen, Kuperman, Porter & Schmidt, *Computational Ocean Acoustics*, 2nd ed.,

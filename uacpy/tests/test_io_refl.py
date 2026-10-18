@@ -65,7 +65,7 @@ class TestSourceBeamPatternRoundTrip:
         path = tmp_path / 'beam.sbp'
         write_source_beam_pattern(path, angles, levels)
         back = read_source_beam_pattern(path)
-        assert np.allclose(back.angles, angles)
+        assert np.allclose(back.angles_deg, angles)
         assert np.allclose(back.levels_dB, levels)
 
     def test_the_table_record_exports_its_levels_on_the_angle_axis(
@@ -82,9 +82,9 @@ class TestSourceBeamPatternRoundTrip:
         table = read_source_beam_pattern(path)
         assert isinstance(table, BeamPatternTable)
         assert np.array_equal(table.values(), [-6.0, 0.0, -6.0])
-        assert not table.angles.flags.writeable
+        assert not table.angles_deg.flags.writeable
         back = BeamPatternTable.from_dict(table.to_dict())
-        assert np.array_equal(back.angles, table.angles)
+        assert np.array_equal(back.angles_deg, table.angles_deg)
         pytest.importorskip('xarray')
         ds = table.to_xarray()
         assert ds['levels_dB'].dims == ('angle',)
@@ -235,18 +235,85 @@ class TestReflectionTablesAreNeverEditedInPlace:
             self, tmp_path, step):
         assert self._stage_two_row_table(tmp_path, step) == []
 
-    def test_a_copied_table_is_normalised(self, tmp_path):
-        """The copy is what earns the right to rewrite."""
+    def test_a_copied_table_is_staged_as_given(self, tmp_path):
+        """The Fortran binaries read a repeated angle without a test
+        (misc/RefCoef.f90:45-55), so the copy is the user's table, silently
+        identical."""
+        from uacpy.io.refl_io import stage_reflection_file
+        src = tmp_path / 'user.brc'
+        src.write_text(self.TABLE)
+        with recorded_warnings() as caught:
+            dest = stage_reflection_file(src, tmp_path / 'deck.env',
+                                         boundary='bottom')
+        assert dest != src
+        assert dest.read_text() == src.read_text()
+        assert [str(w.message) for w in caught] == []
+
+    def test_a_binary_that_refuses_repeats_gets_them_dropped_and_said(
+            self, tmp_path):
+        """bellhopcuda / bellhopcxx refuse a repeated angle
+        (src/module/reflcoef.hpp:135-141): the copy keeps the first row of
+        each repeat, every value as written, and one IOWarning names the
+        rows dropped; the user's file is unchanged."""
+        import uacpy
         from uacpy.io.refl_io import (
             stage_reflection_file, read_reflection_coefficient)
         src = tmp_path / 'user.brc'
         src.write_text(self.TABLE)
         before = hashlib.sha256(src.read_bytes()).hexdigest()
-        dest = stage_reflection_file(src, tmp_path / 'deck.env',
-                                     boundary='bottom')
-        assert dest != src
+        with recorded_warnings() as caught:
+            dest = stage_reflection_file(src, tmp_path / 'deck.env',
+                                         boundary='bottom',
+                                         drop_repeated_angles=True)
+        said = [w for w in caught if issubclass(w.category, uacpy.IOWarning)]
+        assert len(said) == 1 and '1 row(s)' in str(said[0].message)
+        assert 'at 20 deg' in str(said[0].message)
         assert hashlib.sha256(src.read_bytes()).hexdigest() == before
-        assert len(read_reflection_coefficient(dest).angles) == 3
+        table = read_reflection_coefficient(dest)
+        assert table.angles_deg.tolist() == [10.0, 20.0, 30.0]
+        assert table.magnitude.tolist() == [0.50, 0.55, 0.60]
+        np.testing.assert_allclose(np.degrees(table.phase),
+                                   [-175.0, -170.0, -160.0])
+
+    def test_a_copied_wrapped_phase_is_unwrapped_and_keeps_every_row(
+            self, tmp_path):
+        """The unwrap changes no coefficient (whole turns) and gives every
+        binary the column misc/RefCoef.f90:119 assumes; the rows stay."""
+        from uacpy.io.refl_io import (
+            stage_reflection_file, read_reflection_coefficient)
+        src = tmp_path / 'user.brc'
+        src.write_text("3\n 10.0 0.5 0.0\n 10.0 0.5 0.0\n 20.0 0.6 315.6\n")
+        with recorded_warnings() as caught:
+            dest = stage_reflection_file(src, tmp_path / 'deck.env',
+                                         boundary='bottom')
+        assert [str(w.message) for w in caught] == []
+        table = read_reflection_coefficient(dest)
+        assert table.angles_deg.tolist() == [10.0, 10.0, 20.0]
+        np.testing.assert_allclose(np.degrees(table.phase),
+                                   [0.0, 0.0, -44.4], atol=1e-6)
+
+    @pytest.mark.parametrize('backend, n_rows', [(None, 4), ('fortran', 4),
+                                                 ('cxx', 3), ('cuda', 3)])
+    def test_the_bellhop_writer_stages_for_its_backend(self, tmp_path,
+                                                       backend, n_rows):
+        import uacpy
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        from uacpy.io.refl_io import read_reflection_coefficient
+        src = tmp_path / 'user.brc'
+        src.write_text(self.TABLE)
+        env = uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(acoustic_type='file',
+                                            reflection_file=str(src)))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            write_bellhop_env_file(
+                tmp_path / 'deck.env', env,
+                uacpy.Source(depths=25.0, frequencies=100.0),
+                uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+                backend=backend)
+        staged = read_reflection_coefficient(tmp_path / 'deck.brc')
+        assert staged.angles_deg.size == n_rows
 
 
 class TestReflectionTableAngleOrderIsChecked:
@@ -285,7 +352,7 @@ class TestReflectionTableAngleOrderIsChecked:
         p = tmp_path / 'evan.brc'
         p.write_text("3\n 0.0 1.0 180.0\n 0.0 1.0 180.0\n 10.0 0.9 170.0\n")
         dedupe_reflection_file(p)
-        assert read_reflection_coefficient(p).angles.tolist() == [0.0, 10.0]
+        assert read_reflection_coefficient(p).angles_deg.tolist() == [0.0, 10.0]
 
 
 class TestATruncatedReflectionTableIsNeverNormalisedIntoAValidOne:
@@ -377,7 +444,7 @@ class TestSourceBeamPatternNeedsTwoRows:
         write_source_beam_pattern(p, np.array([-10.0, 10.0]),
                                   np.array([-3.0, -6.0]))
         back = read_source_beam_pattern(p)
-        assert np.allclose(back.angles, [-10.0, 10.0])
+        assert np.allclose(back.angles_deg, [-10.0, 10.0])
         assert np.allclose(back.levels_dB, [-3.0, -6.0])
 
     def test_a_repeated_angle_raises_configurationerror(self, tmp_path):
@@ -443,7 +510,7 @@ class TestSourceBeamPatternRequiresOneLevelPerAngle:
         write_source_beam_pattern(out, np.array([-90.0, 0.0, 90.0]),
                                   np.array([0.0, -3.0, 0.0]))
         back = read_source_beam_pattern(out)
-        assert back.angles.shape == back.levels_dB.shape == (3,)
+        assert back.angles_deg.shape == back.levels_dB.shape == (3,)
         assert np.allclose(back.levels_dB, [0.0, -3.0, 0.0])
 
     def test_a_column_shaped_pattern_raises_configurationerror(self, tmp_path):
@@ -473,14 +540,14 @@ class TestTheReaderReturnsTheReflectionResult:
         from uacpy import ReflectionCoefficient
         from uacpy.io.refl_io import (read_reflection_coefficient,
                                       write_reflection_coefficient)
-        table = ReflectionCoefficient(angles=[0.0, 30.0, 60.0, 90.0],
+        table = ReflectionCoefficient(angles_deg=[0.0, 30.0, 60.0, 90.0],
                                       magnitude=[1.0, 0.8, 0.5, 0.25],
                                       phase=[3.0, 2.0, 1.0, 0.5])
         path = tmp_path / 'rt.brc'
-        write_reflection_coefficient(path, table.angles, table.coefficient)
+        write_reflection_coefficient(path, table.angles_deg, table.coefficient)
         back = read_reflection_coefficient(path)
         assert type(back) is ReflectionCoefficient
-        assert np.array_equal(back.angles, table.angles)
+        assert np.array_equal(back.angles_deg, table.angles_deg)
         np.testing.assert_allclose(back.magnitude, table.magnitude, atol=1e-6)
         np.testing.assert_allclose(back.phase, table.phase, atol=1e-7)
         assert back.phase_reference == table.phase_reference
@@ -506,3 +573,18 @@ class TestTheReaderReturnsTheReflectionResult:
         p = tmp_path / 'zero.brc'
         p.write_text("2\n0.0 0.0 0.0\n10.0 0.9 170.0\n")
         assert read_reflection_coefficient(p).magnitude.tolist() == [0.0, 0.9]
+
+
+def test_an_irc_field_whose_exponent_drops_its_letter_is_scaled(tmp_path):
+    """A G15.7 field whose exponent needs three digits is written without
+    the E (``0.4000000-100``); the .irc rescaling reads it as Fortran does
+    instead of failing on float()."""
+    from uacpy.io.refl_io import _scale_irc_impedance
+    row = ('  0.1000000    ' '   2.000000    ' ' -0.3000000    '
+           '   1.500000    ' '  0.4000000-100' '    3')
+    path = tmp_path / 't.irc'
+    path.write_text("'BOUNCE- t'  100.0\n 1\n" + row + '\n')
+    _scale_irc_impedance(path, 2.0)
+    out = path.read_text().splitlines()[2]
+    assert float(out[60:75]) == pytest.approx(0.8e-100, rel=1e-6)
+    assert out[75:] == '    3'

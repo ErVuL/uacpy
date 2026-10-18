@@ -37,7 +37,7 @@ class TestRamsurfReaderDepthAxis:
         from uacpy.io.ramsurf_reader import read_tl_grid
         p = tmp_path / "tl.grid"
         self._write_grid(p, lz=5, n_records=3)
-        depths = read_tl_grid(p, dr=10.0, ndr=1, dz=2.0, ndz=1,
+        depths = read_tl_grid(p, dr=10.0, range_decimation=1, dz=2.0, depth_decimation=1,
                               depth_index_offset=0).depths
         # ramsurf: i = k*ndz, depth = (i-1)*dz -> first sample at z=0.
         assert depths[0] == 0.0
@@ -47,7 +47,7 @@ class TestRamsurfReaderDepthAxis:
         from uacpy.io.ramsurf_reader import read_tl_grid
         p = tmp_path / "tl.grid"
         self._write_grid(p, lz=5, n_records=3)
-        depths = read_tl_grid(p, dr=10.0, ndr=1, dz=2.0, ndz=1,
+        depths = read_tl_grid(p, dr=10.0, range_decimation=1, dz=2.0, depth_decimation=1,
                               depth_index_offset=1).depths
         # rams: i = 1 + k*ndz, depth = (i-1)*dz -> first sample at z=dz.
         assert depths[0] == 2.0
@@ -58,7 +58,7 @@ class TestRamsurfReaderDepthAxis:
         from uacpy.io.ramsurf_reader import read_tl_grid
         self._write_grid(tmp_path / 'd.grid', lz=5, n_records=3)
         self._write_grid(tmp_path / 's.grid', lz=5, n_records=3, dtype='<f4')
-        kw = dict(dr=10.0, ndr=1, dz=2.0, ndz=1)
+        kw = dict(dr=10.0, range_decimation=1, dz=2.0, depth_decimation=1)
         tl_d = read_tl_grid(tmp_path / 'd.grid', **kw).data
         tl_s = read_tl_grid(tmp_path / 's.grid', **kw).data
         assert tl_s.dtype == np.float64
@@ -70,7 +70,7 @@ class TestRamsurfReaderDepthAxis:
         self._write_grid(p, lz=5, n_records=3)
         p.write_bytes(p.read_bytes()[:-10])
         with pytest.warns(UserWarning, match='2 range step'):
-            grid = read_tl_grid(p, dr=10.0, ndr=1, dz=2.0, ndz=1)
+            grid = read_tl_grid(p, dr=10.0, range_decimation=1, dz=2.0, depth_decimation=1)
         assert grid.data.shape == (5, 2) and grid.ranges.size == 2
 
     def test_each_reader_names_the_quantity_it_returns(self, tmp_path):
@@ -81,7 +81,7 @@ class TestRamsurfReaderDepthAxis:
         self._write_grid(tmp_path / 'tl.grid', lz=5, n_records=3)
         self._write_grid(tmp_path / 'pcomplex.bin', lz=5, n_records=3,
                          dtype='<c16')
-        kw = dict(dr=10.0, ndr=1, dz=2.0, ndz=1)
+        kw = dict(dr=10.0, range_decimation=1, dz=2.0, depth_decimation=1)
         tl = read_tl_grid(tmp_path / 'tl.grid', **kw)
         env = read_pcomplex_grid(tmp_path / 'pcomplex.bin', **kw)
         assert (tl.quantity, tl.unit) == ('transmission_loss', 'dB')
@@ -105,7 +105,7 @@ class TestRamsurfReaderDepthAxis:
         self._write_grid(p, lz=5, n_records=3)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            read_tl_grid(p, dr=10.0, ndr=1, dz=2.0, ndz=1)
+            read_tl_grid(p, dr=10.0, range_decimation=1, dz=2.0, depth_decimation=1)
 
 
 class TestRamWritersCheckShapeBeforeWriting:
@@ -134,15 +134,32 @@ class TestRamWritersCheckShapeBeforeWriting:
         write_water_attenuation_file(out, [0.0, 50.0], [100.0], [1.0, 2.0])
         assert out.read_text().splitlines()[3].split() == ['50', '2']
 
+    def test_the_messages_name_the_parameters_the_writers_take(
+            self, tmp_path):
+        """A refusal names a keyword the caller can pass: ``ranges``,
+        ``depths``, ``sound_speed`` — not ``ranges_m`` / ``depths_m`` /
+        ``speeds``, which raise TypeError."""
+        from uacpy.io.mpirams_writer import write_mpirams_bathymetry, write_mpirams_ssp
+        with pytest.raises(ConfigurationError,
+                           match=r'write_mpirams_ssp: ranges is required') as e:
+            write_mpirams_ssp(tmp_path / 's.ssp', np.array([0.0, 100.0]),
+                              np.full((2, 2), 1500.0))
+        assert 'ranges_m' not in str(e.value)
+        with pytest.raises(ConfigurationError, match=r'ranges \(2\) and '
+                                                     r'depths') as e:
+            write_mpirams_bathymetry(tmp_path / 'b.bth', np.array([0.0, 1000.0]),
+                                     np.array([100.0, 110.0, 120.0]))
+        assert 'depths_m' not in str(e.value)
+
     @pytest.mark.parametrize('speeds', [np.full((2, 2), 1500.0),
                                         np.full((4, 2), 1500.0),
                                         np.full(2, 1500.0)])
     def test_speeds_without_one_row_per_depth_are_refused(
             self, tmp_path, speeds):
-        from uacpy.io.mpirams_writer import write_ssp_file
+        from uacpy.io.mpirams_writer import write_mpirams_ssp
         out = tmp_path / 's.ssp'
         with pytest.raises(ConfigurationError, match='one row per depth|'
                                                      'n_depths'):
-            write_ssp_file(out, np.array([0.0, 50.0, 100.0]), speeds,
-                           ranges=np.array([0.0, 1000.0]))
+            write_mpirams_ssp(out, np.array([0.0, 50.0, 100.0]), speeds,
+                              ranges=np.array([0.0, 1000.0]))
         assert not out.exists()

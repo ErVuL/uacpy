@@ -22,19 +22,19 @@ __all__ = [
 ]
 
 
-def steering_vectors(positions_m, angles_deg, frequency: float,
+def steering_vectors(positions, angles_deg, frequency: float,
                      sound_speed: float = DEFAULT_SOUND_SPEED):
     """Unit plane-wave steering vectors for a line array.
 
     ``e_n(theta) = exp(-j*k*z_n*sin(theta)) / sqrt(N)`` with
     ``k = 2*pi*f/sound_speed``,
     ``theta`` measured from broadside and positive downward (the declination
-    sign of ``Bellhop/bellhop.f90:453``). ``positions_m`` are element
+    sign of ``Bellhop/bellhop.f90:453``). ``positions`` are element
     coordinates along the array axis (m).
 
     The ``-j`` is the conjugate of Acoustics-Toolbox ``planewave_rep.m:32``
     because every consumer here applies the vector in Hermitian form —
-    ``e**H p`` for :func:`beamform`, ``e**H R e`` for the spectra — whereas
+    ``e**H p`` for ``beamform_field``, ``e**H R e`` for the spectra — whereas
     ``Matlab/beamform.m:20`` applies its ``+j`` vector as ``e p``. Under AT's
     ``exp(+i*omega*t)`` convention (``KrakenField/EvaluateMod.f90:42``) an
     arrival at declination ``+theta`` carries depth phase
@@ -43,7 +43,7 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
 
     Parameters
     ----------
-    positions_m : array_like
+    positions : array_like
         Element coordinates along the array axis (m).
     angles_deg : array_like
         Angles from broadside (deg), positive downward.
@@ -58,14 +58,14 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
     ndarray
         Shape ``(n_angles, n_elements)``, unit-norm per row.
     """
-    z = np.atleast_1d(np.asarray(positions_m, dtype=float))
+    z = np.atleast_1d(np.asarray(positions, dtype=float))
     if z.ndim != 1:
         # np.outer flattens, so an (N, 2) coordinate array would come back as
         # a unit-norm (n_angles, 2N) manifold — the right shape for a 2N-element
-        # array that does not exist. sample_covariance checks ndim for the same
-        # reason.
+        # array that does not exist. The snapshot covariance checks ndim for
+        # the same reason.
         raise ConfigurationError(
-            f"steering_vectors: positions_m must be 1-D element coordinates "
+            f"steering_vectors: positions must be 1-D element coordinates "
             f"along the array axis (m); got shape {z.shape}. For a planar or "
             f"volumetric array, project the coordinates onto the array axis.")
     angles = np.atleast_1d(np.asarray(angles_deg, dtype=float))
@@ -83,7 +83,7 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
     return e / np.sqrt(z.size)
 
 
-def array_factor(positions_m, weights, angles_deg, frequency: float,
+def array_factor(positions, weights, angles_deg, frequency: float,
                  sound_speed: float = DEFAULT_SOUND_SPEED) -> np.ndarray:
     """Complex free-field array factor of a line of point sources.
 
@@ -100,7 +100,7 @@ def array_factor(positions_m, weights, angles_deg, frequency: float,
 
     Parameters
     ----------
-    positions_m : array_like
+    positions : array_like
         Element positions along the array axis (m), 1-D.
     weights : array_like
         Complex element weights, one per position.
@@ -116,7 +116,7 @@ def array_factor(positions_m, weights, angles_deg, frequency: float,
     ndarray
         Complex ``AF(θ)``, one entry per angle.
     """
-    positions = np.atleast_1d(np.asarray(positions_m, dtype=float))
+    positions = np.atleast_1d(np.asarray(positions, dtype=float))
     offsets = positions - positions.mean()
     replicas = steering_vectors(offsets, angles_deg, frequency, sound_speed)
     return np.sqrt(offsets.size) * np.conj(replicas) @ np.asarray(weights)

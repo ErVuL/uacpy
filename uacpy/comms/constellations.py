@@ -100,12 +100,16 @@ def _require_binary_bits(who: str, bits):
             f"uacpy.comms.bytes_to_bits(text.encode()) or "
             f"[int(ch) for ch in bit_string].")
     try:
-        b = np.asarray(bits, dtype=int).ravel()
+        raw = np.asarray(bits)
+        b = raw.astype(int).ravel()
     except (TypeError, ValueError) as exc:
         raise ConfigurationError(
             f"{who}: bits must be a sequence of 0/1 integers "
             f"({exc}).") from exc
-    bad = b[(b != 0) & (b != 1)]
+    # A float such as 0.5 casts to 0, so a fractional value is checked
+    # before the cast; 0.0 and 1.0 are bits.
+    values = raw.ravel() if raw.dtype.kind in "fc" else b
+    bad = values[(values != 0) & (values != 1)]
     if bad.size:
         raise ConfigurationError(
             f"{who}: bits must be 0/1, got value(s) "
@@ -135,8 +139,62 @@ def _labels_to_bits(labels, bits_per_symbol):
     return ((labels[:, None] >> np.arange(bps - 1, -1, -1)) & 1).ravel()
 
 
+def psk_qam_modulate(bits, scheme):
+    """Map a 1-D 0/1 bit array to the Gray-coded ``scheme`` symbols
+    (zero-padded to a whole symbol).
+
+    Parameters
+    ----------
+    bits : array_like of int
+        Information bits, 0/1.
+    scheme : str
+        A scheme of :data:`SCHEMES` (see :func:`constellation`).
+    """
+    table = constellation(scheme)
+    return _modulate(bits, table, "psk_qam_modulate")
+
+
+def psk_qam_demodulate(symbols, scheme):
+    """Hard minimum-distance decision against the Gray-coded ``scheme``
+    constellation: complex symbols -> 1-D bit array.
+
+    Slicing is against the constellation at its native unit average
+    energy: an amplitude-scaled QAM input decodes to the wrong rings
+    silently, so the caller must restore scale first — the package's
+    equalizer and OFDM chains already do; constant-modulus PSK is
+    unaffected by a common gain.
+
+    The nearest-point search is :func:`uacpy.comms.slicer`'s, which works in
+    blocks so its memory is bounded whatever the record length.
+
+    Parameters
+    ----------
+    symbols : array_like of complex
+        Received symbols.
+    scheme : str
+        A scheme of :data:`SCHEMES` (see :func:`constellation`).
+    """
+    return _demodulate(symbols, constellation(scheme))
+
+
+def _modulate(bits, table, who):
+    """:func:`psk_qam_modulate` on the constellation ``table``; refusals
+    name ``who``."""
+    b = _require_binary_bits(who, bits)
+    return table[_bits_to_labels(b, int(np.log2(table.size)))]
+
+
+def _demodulate(symbols, table):
+    """:func:`psk_qam_demodulate` on the constellation ``table``."""
+    s = np.asarray(symbols, dtype=complex).ravel()
+    return _labels_to_bits(_nearest_labels(s, table),
+                           int(np.log2(table.size)))
+
+
 class Modulator(SettingsRepr):
-    """Bit<->symbol mapper for a Gray-coded constellation.
+    """Bit<->symbol mapper for a Gray-coded constellation, the
+    configure-once form of :func:`psk_qam_modulate` /
+    :func:`psk_qam_demodulate`.
 
     Parameters
     ----------
@@ -151,25 +209,12 @@ class Modulator(SettingsRepr):
         self.bits_per_symbol = int(np.log2(self.order))
 
     def modulate(self, bits):
-        """Map a 1-D 0/1 bit array to complex symbols (zero-padded to a whole symbol)."""
-        b = _require_binary_bits("Modulator.modulate", bits)
-        return self.constellation[_bits_to_labels(b, self.bits_per_symbol)]
+        """:func:`psk_qam_modulate` of ``bits`` on this scheme."""
+        return _modulate(bits, self.constellation, "Modulator.modulate")
 
     def demodulate(self, symbols):
-        """Hard minimum-distance decision: complex symbols -> 1-D bit array.
-
-        Slicing is against the constellation at its native unit average
-        energy: an amplitude-scaled QAM input decodes to the wrong rings
-        silently, so the caller must restore scale first — the package's
-        equalizer and OFDM chains already do; constant-modulus PSK is
-        unaffected by a common gain.
-
-        The nearest-point search is :func:`uacpy.comms.slicer`'s, which
-        works in blocks so its memory is bounded whatever the record length.
-        """
-        s = np.asarray(symbols, dtype=complex).ravel()
-        labels = _nearest_labels(s, self.constellation)
-        return _labels_to_bits(labels, self.bits_per_symbol)
+        """:func:`psk_qam_demodulate` of ``symbols`` on this scheme."""
+        return _demodulate(symbols, self.constellation)
 
 
 def _require_power_of_two_m(who: str, order):
@@ -231,21 +276,21 @@ def dpsk_demodulate(symbols, order: int = 2):
     return _labels_to_bits(label, int(np.log2(order)))
 
 
-def _whole_samples_per_symbol(who, duration_s, sample_rate) -> int:
-    """``round(duration_s * sample_rate)``, the samples one FSK symbol
+def _whole_samples_per_symbol(who, duration, sample_rate) -> int:
+    """``round(duration * sample_rate)``, the samples one FSK symbol
     spans, refused when it rounds to zero."""
-    n = int(round(duration_s * float(sample_rate)))
+    n = int(round(duration * float(sample_rate)))
     if n < 1:
         raise ConfigurationError(
-            f"{who}: symbol_duration_s ({duration_s:g} s) x sample_rate "
+            f"{who}: symbol_duration ({duration:g} s) x sample_rate "
             f"({float(sample_rate):g} Hz) is "
-            f"{duration_s * float(sample_rate):g} samples per symbol, which "
-            f"rounds to zero samples; require symbol_duration_s >= "
+            f"{duration * float(sample_rate):g} samples per symbol, which "
+            f"rounds to zero samples; require symbol_duration >= "
             f"0.5/sample_rate.")
     return n
 
 
-def fsk_modulate(bits, frequencies, symbol_duration_s: float, sample_rate: float):
+def fsk_modulate(bits, frequencies, symbol_duration: float, sample_rate: float):
     """Binary/M-FSK waveform: each symbol is a tone from ``frequencies``.
 
     ``len(frequencies)`` must be a power of two (M-ary). Returns the real passband
@@ -257,7 +302,7 @@ def fsk_modulate(bits, frequencies, symbol_duration_s: float, sample_rate: float
         Information bits, 0/1.
     frequencies : array_like
         The M tone frequencies (Hz), M a power of two, below Nyquist.
-    symbol_duration_s : float
+    symbol_duration : float
         Symbol duration (s).
     sample_rate : float
         Sample rate (Hz).
@@ -268,7 +313,7 @@ def fsk_modulate(bits, frequencies, symbol_duration_s: float, sample_rate: float
     require_below_nyquist(f, sample_rate, "fsk_modulate", "tone(s)",
                           "the sampled tones alias")
     dur = require_positive_finite_scalar(
-        symbol_duration_s, "fsk_modulate", "symbol_duration_s", " s")
+        symbol_duration, "fsk_modulate", "symbol_duration", " s")
     bps = int(np.log2(M))
     b = _require_binary_bits("fsk_modulate", bits)
     sym = _bits_to_labels(b, bps)
@@ -285,35 +330,35 @@ def fsk_modulate(bits, frequencies, symbol_duration_s: float, sample_rate: float
 _FSK_ORTHOGONALITY_TOL = 1e-6
 
 
-def _warn_unless_orthogonal_tones(f, duration_s):
+def _warn_unless_orthogonal_tones(f, duration):
     """Warn when two tones are not a whole number of cycles apart over one
     symbol: their correlators then leak into each other and the
     non-coherent detector falls short of ``ber_theory('bfsk')``."""
     cycles = np.abs(f[:, None] - f[None, :])[np.triu_indices(f.size, 1)] \
-        * duration_s
+        * duration
     off = np.abs(cycles - np.round(cycles))
     bad = (off > _FSK_ORTHOGONALITY_TOL) | (np.round(cycles) < 1)
     if np.any(bad):
         worst = float(cycles[bad][0])
         warnings.warn(
             f"fsk_demodulate: tones {worst:g} cycles apart over one symbol "
-            f"({duration_s:g} s as sampled); the correlators are orthogonal "
+            f"({duration:g} s as sampled); the correlators are orthogonal "
             f"only for a whole, non-zero number of cycles, i.e. a spacing "
-            f"that is a multiple of 1/symbol_duration_s. Detection runs, but "
+            f"that is a multiple of 1/symbol_duration. Detection runs, but "
             f"each tone leaks into the others and the error rate exceeds the "
             f"orthogonal-FSK curve.",
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
-def fsk_demodulate(signal, frequencies, symbol_duration_s: float, sample_rate: float):
+def fsk_demodulate(signal, frequencies, symbol_duration: float, sample_rate: float):
     """Non-coherent M-FSK detection (per-symbol max tone energy) -> bit array.
 
     A trailing partial symbol (fewer than one symbol period of samples) is
     dropped, so a signal shorter than one symbol demodulates to an empty
     bit array.
 
-    The tones must be spaced by a multiple of ``1/symbol_duration_s`` (whole
-    cycles over the symbol as sampled, ``round(symbol_duration_s *
+    The tones must be spaced by a multiple of ``1/symbol_duration`` (whole
+    cycles over the symbol as sampled, ``round(symbol_duration *
     sample_rate)`` samples) for the correlators to be orthogonal, which is
     what :func:`~uacpy.comms.ber_theory` ``'bfsk'`` assumes; any other
     spacing warns.
@@ -324,7 +369,7 @@ def fsk_demodulate(signal, frequencies, symbol_duration_s: float, sample_rate: f
         The real received waveform, starting on a symbol boundary.
     frequencies : array_like
         The tone frequencies :func:`fsk_modulate` used (Hz).
-    symbol_duration_s : float
+    symbol_duration : float
         Symbol duration (s).
     sample_rate : float
         Sample rate (Hz).
@@ -343,7 +388,7 @@ def fsk_demodulate(signal, frequencies, symbol_duration_s: float, sample_rate: f
         "the correlation bank matches their aliased images rather than the "
         "tones themselves")
     dur = require_positive_finite_scalar(
-        symbol_duration_s, "fsk_demodulate", "symbol_duration_s", " s")
+        symbol_duration, "fsk_demodulate", "symbol_duration", " s")
     bps = int(np.log2(M))
     n = _whole_samples_per_symbol("fsk_demodulate", dur, sample_rate)
     _warn_unless_orthogonal_tones(f, n / float(sample_rate))

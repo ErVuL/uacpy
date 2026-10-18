@@ -4,7 +4,7 @@ deck."""
 
 from pathlib import Path
 from types import MappingProxyType
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Sequence, Union
 
 import numpy as np
 
@@ -19,14 +19,16 @@ from uacpy.core.source import VALID_SOURCE_TYPES
 from uacpy.models._spec import (
     _SINGLE_FREQUENCY_MODES, EngineTraits, ModelSpec,
 )
-from uacpy.core.run_settings import OutputSpec, RunMode
+from uacpy.core.run_settings import Notice, OutputSpec, RunMode
 from uacpy.core.results import PhaseReference, ReflectionCoefficient
 from uacpy.models._defaults import DEFAULT_C_MIN
 from uacpy.core.exceptions import (
     ConfigurationError,
+    FallbackWarning,
     ModelExecutionError,
     UnsupportedFeatureError,
 )
+from uacpy.models._knobs import whole_count
 from uacpy.io.refl_io import (
     read_reflection_coefficient, dedupe_reflection_file, _scale_irc_impedance,
 )
@@ -36,7 +38,7 @@ from uacpy.models.bounce._plan import (
     refuse_too_few_angles, refuse_unsized_table,
     reject_c_low_above_the_water, resolve_c_high, resolve_c_low,
     resolve_n_mesh,
-    resolve_rmax_m, tabulated_angle_count,
+    resolve_rmax, tabulated_angle_count,
 )
 from uacpy.models.bounce._settings import BounceSettings
 from uacpy.models._extract import attach_output_paths, result_kwargs
@@ -72,7 +74,7 @@ class Bounce(PropagationModel):
     -----
     Only emits ``RunMode.REFLECTION``. The result always carries the
     in-memory reflection coefficient as typed attributes
-    (``.angles``, ``.magnitude``, ``.phase``); the standalone Python user does not
+    (``.angles_deg``, ``.magnitude``, ``.phase``); the standalone Python user does not
     need the on-disk files.
 
     To **chain to another model** (Bellhop / Scooter / Kraken reading
@@ -104,7 +106,7 @@ class Bounce(PropagationModel):
 
     Defaults auto-derived at ``run()`` time:
 
-    - ``rmax_m=None`` → ``receiver.range_max`` (or 10 km if 0).
+    - ``rmax=None`` → ``receiver.range_max`` (or 10 km if 0).
     - ``c_low=None`` → ``min(DEFAULT_C_MIN, min(env.ssp))``, AT's
       ``bounce.htm`` rule "the lowest speed in the problem"; with
       ``c_high=None`` → ``DEFAULT_C_MAX_UNBOUNDED`` this tabulates the full
@@ -119,9 +121,9 @@ class Bounce(PropagationModel):
       'volume_attenuation')`` still answers ``False`` (see
       ``consumes_volume_absorption`` below).
 
-    With ``verbose='info'`` the resolved ``rmax_m`` is logged.
+    With ``verbose='info'`` the resolved ``rmax`` is logged.
     ``Bounce().run_settings(env, source, receiver).engine`` is the
-    :class:`BounceSettings` a run would use — ``c_low``, ``rmax_m`` and
+    :class:`BounceSettings` a run would use — ``c_low``, ``rmax`` and
     where each came from, the ``NkTab`` count, the mesh — without launching
     anything; every result carries its own as
     ``result.run_settings.engine``.
@@ -145,7 +147,8 @@ class Bounce(PropagationModel):
     ... )
     >>> env = Environment(name="test", bathymetry=100, bottom=bottom)
     >>> source = Source(depths=50, frequencies=50)
-    >>> receiver = Receiver(depths=np.array([50]))
+    >>> receiver = Receiver(depths=[50.0],
+    ...                     ranges=np.linspace(100.0, 5000.0, 50))
     >>>
     >>> # Pin work_dir so the .brc/.irc files persist for the consumer; a
     >>> # temporary directory keeps them out of the caller's own tree. The
@@ -154,7 +157,7 @@ class Bounce(PropagationModel):
     >>> import tempfile
     >>> from uacpy.models import Scooter
     >>> with tempfile.TemporaryDirectory() as d:
-    ...     bounce = Bounce(c_low=1400, rmax_m=10000, work_dir=d)
+    ...     bounce = Bounce(c_low=1400, rmax=10000, work_dir=d)
     ...     result = bounce.run(env, source, receiver)
     ...     # Output files can be used by different models:
     ...     # - .brc file → Bellhop, Scooter, Kraken (run as krakenc)
@@ -213,8 +216,8 @@ class Bounce(PropagationModel):
     })
 
     #: The settings' ``n_angles`` is the count the deck tabulates, which
-    #: follows from the recorded ``rmax_m``; as a knob it would re-derive
-    #: ``rmax_m`` instead (:meth:`from_run_settings`).
+    #: follows from the recorded ``rmax``; as a knob it would re-derive
+    #: ``rmax`` instead (:meth:`from_run_settings`).
     _UNPINNED_FIELDS = frozenset({'n_angles'})
     # The .brc table as ``misc/RefCoef.f90`` reads it back: |R| and a phase
     # in the travelling-wave convention every AT consumer applies.
@@ -229,8 +232,9 @@ class Bounce(PropagationModel):
         executable: Optional[Path] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
-        rmax_m: Optional[float] = None,
+        rmax: Optional[float] = None,
         n_angles: Optional[int] = None,
+        n_mesh: Optional[Union[int, Sequence[int]]] = None,
         interp_ssp: Optional[str] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
@@ -267,7 +271,7 @@ class Bounce(PropagationModel):
             silently returns ``R = 0, phi = 0`` above the last tabulated
             angle (``misc/RefCoef.f90:144-149``, both of whose warning WRITEs
             are commented out). Must be strictly greater than c_low.
-        rmax_m : float, optional
+        rmax : float, optional
             Maximum range (m) for angular sampling. ``None`` (default)
             auto-derives from ``receiver.range_max`` at ``run()`` time,
             falling back to 10000 m when no receiver range is available.
@@ -276,10 +280,24 @@ class Bounce(PropagationModel):
         n_angles : int, optional
             The number of angular samples (``NkTab`` in AT's bounce). If
             None (default), bounce computes NkTab internally from
-            ``rmax_m``. When provided, uacpy sets ``rmax_m`` such that
+            ``rmax``. When provided, uacpy sets ``rmax`` such that
             bounce's internal formula (``bounce.f90:49``) yields exactly
             ``n_angles`` samples, and refuses a count the deck's RMax cannot
             give, naming the one it gives. A whole number, at least 2.
+        n_mesh : int or sequence of int, optional
+            Finite-difference mesh points per sediment medium (``NPTS`` of
+            the deck's medium lines), written as given: one count for every
+            medium, or one per medium. ``0`` asks the reader for its
+            automatic 20 points per wavelength (``doc/bounce.htm``: "If you
+            set the number of finite-difference grid points (NPTS) to zero,
+            then BOUNCE automatically calculates a value to have 20 points
+            per wavelength"). ``None`` (default): 100 points per wavelength
+            of each medium's slowest wave, at least 100 per medium — the
+            manual's "perhaps 100 points/wavelength as a good balance between
+            run time and accuracy" (:func:`~uacpy.models.bounce._plan.resolve_n_mesh`).
+            Refused where the reader would stop ("Mesh is too coarse",
+            ``ReadEnvironmentMod.f90:110-112``); not used over a bare
+            half-space, which has no medium to mesh (a notice).
         interp_ssp : str, optional
             Sample-connection scheme written into ``TopOpt(1)``. A BOUNCE deck
             carries only the seabed stack — its media are 2-point linear slabs —
@@ -295,31 +313,16 @@ class Bounce(PropagationModel):
             For a knob no run could use: a value that is not a number, a
             non-positive speed or range, ``c_high <= c_low``, an
             ``n_angles`` that is not a whole number of at least 2, or
-            ``n_angles`` and ``rmax_m`` both pinned.
+            ``n_angles`` and ``rmax`` both pinned.
         """
         super().__init__(**_host_options(locals()))
-        # BOUNCE meshes only the seabed stack — write_bounce_input_file emits
-        # no water column and no .ssp — so the range-dependent 'quad' scheme
-        # has no file to read and ERROUTs at NMedia.
-        # UnsupportedFeatureError, the type every AT wrapper raises for
-        # 'quad' (oalib_writer.reject_unsupported_ssp_interp).
-        if interp_ssp is not None and str(interp_ssp).lower() in (
-                'q', 'quad', 'quadratic'):
-            raise UnsupportedFeatureError(
-                'Bounce',
-                "interp_ssp='quad' — BOUNCE reflection decks carry no water "
-                "column, so no .ssp file is written for the quad scheme to "
-                "read and the binary stops at NMedia",
-                alternatives=["'linear' (default)", "'n2linear'", "'pchip'",
-                              "'spline'"],
-                alternatives_label='SSP interpolations',
-            )
         self.interp_ssp = interp_ssp
 
         self.c_low = c_low
         self.c_high = c_high
-        self.rmax_m = rmax_m
+        self.rmax = rmax
         self.n_angles = n_angles
+        self.n_mesh = n_mesh
         self._check_knobs()
 
         # Run modes, capability flags and collapse defaults come from the
@@ -336,7 +339,7 @@ class Bounce(PropagationModel):
         ``ReadSzRz``. The plane-wave reflection coefficient is independent of
         source position, so the field models' depth and range-coverage checks
         would reject and warn about geometry that never reaches the binary.
-        ``receiver`` is read only to auto-derive ``rmax_m``.
+        ``receiver`` is read only to auto-derive ``rmax``.
         """
 
     def _multi_frequency_refusal(self, mode, source) -> Exception:
@@ -353,9 +356,33 @@ class Bounce(PropagationModel):
 
     def _check_knobs(self) -> None:
         """Refuse a knob no run could use
-        (:func:`~uacpy.models.bounce._plan.check_knobs`)."""
+        (:func:`~uacpy.models.bounce._plan.check_knobs`), and
+        ``interp_ssp='quad'``: BOUNCE meshes only the seabed stack —
+        write_bounce_input_file emits no water column and no .ssp — so the
+        range-dependent 'quad' scheme has no file to read and ERROUTs at
+        NMedia. UnsupportedFeatureError, the type every AT wrapper raises
+        for 'quad' (oalib_writer.reject_unsupported_ssp_interp). Run at
+        construction and again by every run (stage 2)."""
+        if self.interp_ssp is not None and str(self.interp_ssp).lower() in (
+                'q', 'quad', 'quadratic'):
+            raise UnsupportedFeatureError(
+                'Bounce',
+                "interp_ssp='quad' — BOUNCE reflection decks carry no water "
+                "column, so no .ssp file is written for the quad scheme to "
+                "read and the binary stops at NMedia",
+                alternatives=["'linear' (default)", "'n2linear'", "'pchip'",
+                              "'spline'"],
+                alternatives_label='SSP interpolations',
+            )
         check_knobs(c_low=self.c_low, c_high=self.c_high,
-                    rmax_m=self.rmax_m, n_angles=self.n_angles)
+                    rmax=self.rmax, n_angles=self.n_angles)
+        # The deck's NPTS is a point count per medium, 0 handing the mesh to
+        # the reader (doc/bounce.htm).
+        if isinstance(self.n_mesh, (list, tuple, np.ndarray)):
+            for count in self.n_mesh:
+                whole_count('Bounce: each n_mesh count', count, 0)
+        elif self.n_mesh is not None:
+            whole_count('Bounce: n_mesh', self.n_mesh, 0)
 
     def _validate_engine(self, env, source, receiver, run_mode, *,
                          request=None) -> None:
@@ -364,11 +391,11 @@ class Bounce(PropagationModel):
         refuses.
 
         - ``receiver=None`` with nothing else to size the table
-          (``rmax_m`` and ``n_angles`` both unset);
+          (``rmax`` and ``n_angles`` both unset);
         - a ``'precalc'`` (``.irc``) seabed, which the binary cannot re-read
           and rewrite in one launch.
         """
-        refuse_unsized_table(receiver, rmax_m=self.rmax_m,
+        refuse_unsized_table(receiver, rmax=self.rmax,
                              n_angles=self.n_angles)
         refuse_precalc_seabed(self.model_name, env)
 
@@ -389,11 +416,11 @@ class Bounce(PropagationModel):
         c_high, c_high_origin = resolve_c_high(self.c_high)
         check_phase_speed_window(c_low, c_high=c_high)
         frequency = float(np.atleast_1d(source.frequencies)[0])
-        rmax_m, rmax_origin = resolve_rmax_m(
+        rmax, rmax_origin = resolve_rmax(
             receiver, frequency, c_low, n_angles=self.n_angles,
-            rmax_m=self.rmax_m, c_high=c_high)
-        self._log(f"rmax_m = {rmax_m:.1f} m (from {rmax_origin})")
-        n_angles = tabulated_angle_count(rmax_m, frequency, c_low,
+            rmax=self.rmax, c_high=c_high)
+        self._log(f"rmax = {rmax:.1f} m (from {rmax_origin})")
+        n_angles = tabulated_angle_count(rmax, frequency, c_low,
                                          c_high=c_high)
         # NkTab is bounded below only. No upper cap: the binary holds four
         # NkTab-length tables (xTab/fTab/gTab/ITab, bounce.f90:52) — tens of
@@ -401,24 +428,33 @@ class Bounce(PropagationModel):
         # cube costs Scooter gigabytes (the sibling Scooter guards with
         # ``scooter._plan.reject_oversized_green_cube``) — and refuses a
         # failed allocation itself through its IAllocStat test.
-        refuse_too_few_angles(n_angles, frequency, c_low, rmax_m=rmax_m,
+        refuse_too_few_angles(n_angles, frequency, c_low, rmax=rmax,
                               rmax_origin=rmax_origin, c_high=c_high)
         self._log(f"NkTab = {n_angles} tabulated angles", level='debug')
         reject_c_low_above_the_water(env, c_low)
         seabed_type = env.bottom.halfspace_at(range=0.0).acoustic_type
-        n_mesh = resolve_n_mesh(env, frequency)
+        n_mesh = resolve_n_mesh(env, frequency, self.n_mesh)
         self._log(f"mesh points per medium = {n_mesh}", level='debug')
+        notices = []
+        if (self.n_mesh is not None and not n_mesh and 'n_mesh'
+                not in getattr(self, '_pinned_from_record', ())):
+            notices.append(Notice(
+                "n_mesh not used",
+                f"{self.model_name}: n_mesh={self.n_mesh!r} is not used: the "
+                f"seabed is a bare half-space, and BOUNCE meshes the sediment "
+                f"layers only.", FallbackWarning))
         return BounceSettings(
             c_low=c_low,
             c_low_origin=('Bounce(c_low=…)' if self.c_low is not None else
                           f"min({DEFAULT_C_MIN:g}, min(env.ssp))"),
             c_high=c_high,
             c_high_origin=c_high_origin,
-            rmax_m=rmax_m,
+            rmax=rmax,
             rmax_origin=rmax_origin,
             n_angles=n_angles,
             n_mesh=tuple(n_mesh),
             staged_table_suffix=_STAGED_TABLE_SUFFIX.get(seabed_type),
+            notices=tuple(notices),
         )
 
     def _write_input(self, inputs) -> Path:
@@ -427,7 +463,7 @@ class Bounce(PropagationModel):
         resolved settings.
 
         BOUNCE uses the KRAKEN ENV format plus ``cLow``/``cHigh`` and
-        ``RMax`` (in km, converted from ``rmax_m``). It does NOT call
+        ``RMax`` (in km, converted from ``rmax``). It does NOT call
         ``ReadSzRz``: its Fortran driver reads only TopOpt, SSP, BotOpt,
         cLow/cHigh, RMax, so the deck carries no source or receiver depth
         block and ``inputs.receiver`` is not read here.
@@ -441,7 +477,7 @@ class Bounce(PropagationModel):
             n_mesh=list(engine.n_mesh),
             c_low=engine.c_low,
             c_high=engine.c_high,
-            rmax_m=engine.rmax_m,
+            rmax=engine.rmax,
             verbose=self.verbose,
         )
         return deck
@@ -491,7 +527,7 @@ class Bounce(PropagationModel):
 
         self._log(f"Reading output: {brc_file}")
         table = read_reflection_coefficient(str(brc_file))
-        if table.angles.size == 0:
+        if table.angles_deg.size == 0:
             # The deck asked for n_angles rows and the binary wrote none:
             # that is an outcome of the run, not a bad configuration, so
             # it is a ModelExecutionError carrying the .prt tail the
@@ -503,7 +539,7 @@ class Bounce(PropagationModel):
                     f"Bounce produced an empty reflection-coefficient "
                     f"table — {brc_file.name} has no angle rows, although "
                     f"the deck asked for {engine.n_angles} (RMax = "
-                    f"{engine.rmax_m:g} m, from {engine.rmax_origin})."
+                    f"{engine.rmax:g} m, from {engine.rmax_origin})."
                 ),
             )
             attach_prt_tail(exc, work_dir, base_name)
@@ -522,7 +558,7 @@ class Bounce(PropagationModel):
         settings = inputs.settings
         engine = settings.engine
         table = ReflectionCoefficient(
-            angles=raw.angles,
+            angles_deg=raw.angles_deg,
             magnitude=raw.magnitude,
             phase=raw.phase,
             **result_kwargs(

@@ -120,7 +120,7 @@ def test_kraken_family_env_writes_top_bc_for_halfspace_surface(
     """All three Kraken-family writers must emit TopOpt='A' for an ice surface."""
     src, _ = src_rcv
     model_cls = getattr(uacpy.models, model_cls_name)
-    model = model_cls(verbose=False, rmax_m=1000.0)
+    model = model_cls(verbose=False, rmax=1000.0)
     out = tmp_path / f'{model_cls_name.lower()}_ice.env'
     rcv = uacpy.Receiver(depths=[50.0], ranges=[1000.0])
     launch = model.run_settings(_basic_env(_ice()), src,

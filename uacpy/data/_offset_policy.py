@@ -18,23 +18,25 @@ __all__ = ['ARGO_OFFSET_WARN_KM', 'SAMPLE_OFFSET_WARN_KM',
            'COPERNICUS_DAILY_OFFSET_WARN_DAYS', 'date_offset_breach',
            'checked_date_offset', 'is_monthly']
 
-#: Past this distance (km) a returned cast warns (the offset rule): uacpy's
-#: stated policy for "far" for a single in-situ profile, not a physical bound.
+#: Past this distance (km) a returned cast warns (the offset rule): uacpy
+#: guidance — the stated policy for "far" for a single in-situ profile, not a
+#: physical bound.
 ARGO_OFFSET_WARN_KM = 50.0
-#: Past this distance (km) a returned sample warns (the offset rule): uacpy's
-#: stated policy for "far" for a seabed sample, whose type varies on km
-#: scales, not a physical bound. ``max_distance_km`` refuses.
+#: Past this distance (km) a returned sample warns (the offset rule): uacpy
+#: guidance — the stated policy for "far" for a seabed sample, not a physical
+#: bound. ``max_distance_km`` refuses.
 SAMPLE_OFFSET_WARN_KM = 10.0
-#: Past this distance (km) a returned sample warns (the offset rule): uacpy's
-#: stated policy for "far" for a seabed sample, as for the grain-size DB.
+#: Past this distance (km) a returned sample warns (the offset rule): uacpy
+#: guidance, as for the grain-size DB.
 MARS_OFFSET_WARN_KM = 10.0
 
-#: Past this many days from the requested date an Argo cast warns: one cast
-#: is a single in-situ snapshot of a field that decorrelates within weeks.
+#: Past this many days from the requested date an Argo cast warns: uacpy
+#: guidance — the stated policy for "stale" for a single in-situ cast, not a
+#: physical bound. ``max_days`` refuses.
 ARGO_OFFSET_WARN_DAYS = 5
-#: Past this many days a Copernicus daily (or finer) field warns: a daily
-#: model mean is smooth, but a few days is already another synoptic state.
-#: A monthly field warns instead when it is another calendar month.
+#: Past this many days a Copernicus daily (or finer) field warns: uacpy
+#: guidance (policy), not a physical bound. A monthly field warns instead when
+#: it is another calendar month.
 COPERNICUS_DAILY_OFFSET_WARN_DAYS = 3
 
 #: The sources whose dated fields follow the Copernicus rule.

@@ -1,8 +1,8 @@
 """Tests for ``uacpy.acoustic_signal.beamforming`` on a synthetic line array.
 
-Steering vectors and the Bartlett / MVDR / MUSIC beamformers; ``beamform``
-and its shading; ``beamform_field`` over a whole field grid, narrowband and
-broadband, and the reception it synthesises; and the three scalars that
+Steering vectors and the Bartlett / MVDR / MUSIC beamformers;
+``beamform_field`` over a whole field grid, narrowband and broadband, its
+shading, its SNR and the reception it synthesises; and the three scalars that
 bound a scan — ``plane_wave_array_gain``, ``matched_replica_gain`` and
 ``independent_beams``.
 """
@@ -22,13 +22,13 @@ from uacpy.acoustic_signal import (
     bartlett,
     music_spectrum,
     mvdr,
-    sample_covariance,
     steering_vectors,
     shading_taper,
 )
+from uacpy.sonar import csdm
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.acoustic_signal.beamforming import (
-    _shaded_steering, beamform, beamform_field, independent_beams,
+    _shaded_steering, beamform_field, independent_beams,
     matched_replica_gain, plane_wave_array_gain,
 )
 
@@ -64,9 +64,9 @@ class TestSteering:
 
 
 class TestCovariance:
-    def test_sample_covariance_is_hermitian(self):
+    def test_the_covariance_is_hermitian(self):
         x = _snapshots(_array(), 10.0)
-        R = sample_covariance(x)
+        R = csdm(x)
         assert np.allclose(R, R.conj().T)
 
     def test_diagonal_loading_adds_trace_fraction(self):
@@ -75,42 +75,54 @@ class TestCovariance:
         # pure arithmetic on the same R, so 1e-12 absolute (well above the
         # ~1e-16 float noise of the addition) is the right scale.
         x = _snapshots(_array(), 10.0)
-        R = sample_covariance(x)
-        R_loaded = sample_covariance(x, diagonal_loading=0.1)
+        R = csdm(x)
+        R_loaded = csdm(x, diagonal_loading=0.1)
         n = R.shape[0]
         expected = R + 0.1 * (np.trace(R).real / n) * np.eye(n)
         np.testing.assert_allclose(R_loaded, expected, atol=1e-12)
 
     def test_requires_2d(self):
         with pytest.raises(ConfigurationError, match='snapshots must be 2-D'):
-            sample_covariance(np.zeros(8))
+            csdm(np.zeros(8))
 
 
 class TestBeamformers:
     # 241 nodes over 120 deg = 0.5 deg spacing, and the spectra are read with
     # a bare argmax, so the abs=1.0 below is a two-node allowance on the scan
     # grid — not a bearing-accuracy claim.
-    angles = np.linspace(-60, 60, 241)
+    angles_deg = np.linspace(-60, 60, 241)
 
     def test_bartlett_recovers_doa(self):
-        R = sample_covariance(_snapshots(_array(), 15.0))
-        p = bartlett(R, steering_vectors(_array(), self.angles, FREQ, C))
-        assert self.angles[np.argmax(p)] == pytest.approx(15.0, abs=1.0)
+        R = csdm(_snapshots(_array(), 15.0))
+        p = bartlett(R, steering_vectors(_array(), self.angles_deg, FREQ, C))
+        assert self.angles_deg[np.argmax(p)] == pytest.approx(15.0, abs=1.0)
 
     def test_mvdr_recovers_doa(self):
-        R = sample_covariance(_snapshots(_array(), -20.0))
-        p = mvdr(R, steering_vectors(_array(), self.angles, FREQ, C))
-        assert self.angles[np.argmax(p)] == pytest.approx(-20.0, abs=1.0)
+        R = csdm(_snapshots(_array(), -20.0))
+        p = mvdr(R, steering_vectors(_array(), self.angles_deg, FREQ, C))
+        assert self.angles_deg[np.argmax(p)] == pytest.approx(-20.0, abs=1.0)
+
+    def test_mvdr_defaults_to_the_one_package_mvdr_loading(self):
+        # sonar.mvdr and Covariance.mvdr default to the same constant, so the
+        # array function's default run is the 1e-2 run; on this full-rank
+        # covariance a 1e-6 loading gives a different spectrum.
+        from uacpy.core._beamforming import MVDR_DIAGONAL_LOADING
+        R = csdm(_snapshots(_array(), -20.0))
+        e = steering_vectors(_array(), self.angles_deg, FREQ, C)
+        assert MVDR_DIAGONAL_LOADING == 1e-2
+        np.testing.assert_array_equal(
+            mvdr(R, e), mvdr(R, e, diagonal_loading=MVDR_DIAGONAL_LOADING))
+        assert not np.allclose(mvdr(R, e), mvdr(R, e, diagonal_loading=1e-6))
 
     def test_music_recovers_doa(self):
-        R = sample_covariance(_snapshots(_array(), 5.0))
-        p = music_spectrum(R, steering_vectors(_array(), self.angles, FREQ, C), 1)
-        assert self.angles[np.argmax(p)] == pytest.approx(5.0, abs=1.0)
+        R = csdm(_snapshots(_array(), 5.0))
+        p = music_spectrum(R, steering_vectors(_array(), self.angles_deg, FREQ, C), 1)
+        assert self.angles_deg[np.argmax(p)] == pytest.approx(5.0, abs=1.0)
 
     def test_music_rejects_bad_source_count(self):
-        R = sample_covariance(_snapshots(_array(), 5.0))
+        R = csdm(_snapshots(_array(), 5.0))
         with pytest.raises(ConfigurationError, match='n_sources must be in'):
-            music_spectrum(R, steering_vectors(_array(), self.angles, FREQ, C), 16)
+            music_spectrum(R, steering_vectors(_array(), self.angles_deg, FREQ, C), 16)
 
 
 class TestTaper:
@@ -133,24 +145,24 @@ class TestTaper:
         assert np.linalg.norm(w) == pytest.approx(4.0)
 
     def test_boxcar_is_all_ones(self):
-        # The discriminating case: under unit-mean this was also all-ones, so
+        # The discriminating case: under unit-mean boxcar is all-ones too, so
         # it alone cannot tell the two normalisations apart — but under RMS it
         # must stay all-ones, which pins the scale rather than just the shape.
         assert np.allclose(shading_taper(16, "boxcar"), 1.0)
 
 
 @pytest.mark.parametrize("true_deg", [15.0, -30.0, 45.0])
-def test_beamform_resolves_true_angle_not_mirror(true_deg):
-    """beamform must resolve a source at +theta (not the mirror -theta) —
-    consistent with bartlett/mvdr/music (the steering vector is conjugated)."""
-    from uacpy.acoustic_signal import beamform, steering_vectors
+def test_beamform_field_resolves_true_angle_not_mirror(true_deg):
+    """beamform_field must resolve a source at +theta (not the mirror
+    -theta) — consistent with bartlett/mvdr/music (the steering vector is
+    conjugated)."""
+    from uacpy.acoustic_signal import beamform_field, steering_vectors
     c, f = 1500.0, 1500.0
     pos = np.arange(16) * (c / f / 2.0)
     ang = np.linspace(-60, 60, 241)
     a = steering_vectors(pos, [true_deg], f, c)[0]
-    snr, angles, _ = beamform(a[:, None], pos, ang, f, source_level_dB=0,
-                              noise_level_dB=0)
-    assert abs(angles[np.argmax(snr[:, 0])] - true_deg) < 1.0
+    snr = beamform_field(a[:, None], pos, ang, f).snr_dB(0.0, 0.0)
+    assert abs(ang[np.argmax(snr[:, 0])] - true_deg) < 1.0
 
 
 def test_mvdr_music_no_divide_warning_and_music_peaks_at_source():
@@ -249,7 +261,7 @@ class TestPowerlessCovariance:
     """``diagonal_loading`` is a *fraction of* ``trace(R)/N``, so it vanishes
     with the trace: it stabilises a rank-deficient covariance that still
     carries power but cannot rescue an all-zero one. That is ordinary data —
-    ``sample_covariance`` of a silent segment (dead element, digital silence)
+    the covariance of a silent segment (dead element, digital silence)
     returns exactly it. Without the guard MVDR's inverse is singular and
     MUSIC's noise subspace is arbitrary, so both must decline rather than
     return a finite *uniform* pseudospectrum that looks like an answer."""
@@ -261,11 +273,9 @@ class TestPowerlessCovariance:
                                 np.linspace(-90.0, 90.0, 37), 1000.0)
 
     def test_silence_gives_nan_and_warns_not_a_raw_linalg_error(self):
-        from uacpy.acoustic_signal.beamforming import (
-            sample_covariance, mvdr, music_spectrum,
-        )
+        from uacpy.acoustic_signal.beamforming import mvdr, music_spectrum
         E = self._rig()
-        R = sample_covariance(np.zeros((8, 200), dtype=complex))
+        R = csdm(np.zeros((8, 200), dtype=complex))
         for fn in (lambda: mvdr(R, E),
                    lambda: music_spectrum(R, E, 1)):
             with pytest.warns(UserWarning, match='no power'):
@@ -273,24 +283,20 @@ class TestPowerlessCovariance:
             assert np.all(np.isnan(out))
 
     def test_bartlett_reports_zero_power_which_is_the_true_answer(self):
-        from uacpy.acoustic_signal.beamforming import (
-            sample_covariance, bartlett,
-        )
-        R = sample_covariance(np.zeros((8, 200), dtype=complex))
+        from uacpy.acoustic_signal.beamforming import bartlett
+        R = csdm(np.zeros((8, 200), dtype=complex))
         assert np.all(bartlett(R, self._rig()) == 0.0)
 
     def test_a_powered_rank_deficient_covariance_resolves(self):
         """The case the loading exists for must keep working: fewer snapshots
         than elements, but non-zero trace."""
         from uacpy.core.acoustics.arrays import steering_vectors
-        from uacpy.acoustic_signal.beamforming import (
-            sample_covariance, mvdr,
-        )
+        from uacpy.acoustic_signal.beamforming import mvdr
         rng = np.random.default_rng(0)
         a = steering_vectors(np.arange(8) * 0.75, [15.0], 1000.0).T * np.sqrt(8)
         x = a @ (rng.normal(size=(1, 4)) + 1j * rng.normal(size=(1, 4)))
         angles = np.linspace(-90.0, 90.0, 721)
-        P = mvdr(sample_covariance(x),
+        P = mvdr(csdm(x),
                           steering_vectors(np.arange(8) * 0.75, angles, 1000.0))
         assert np.all(np.isfinite(P))
         assert angles[np.argmax(P)] == pytest.approx(15.0, abs=0.5)
@@ -310,7 +316,7 @@ def test_look_direction_agrees_with_an_independently_propagated_field():
     """
     from uacpy import (Environment, Source, Receiver, Bellhop,
                        SoundSpeedProfile, BoundaryProperties)
-    from uacpy.acoustic_signal import beamform
+    from uacpy.acoustic_signal import beamform_field
 
     c, freq, z_src, range_m = 1500.0, 200.0, 200.0, 10_000.0
     z_rcv = np.arange(1400.0, 1601.0, 3.0)
@@ -321,7 +327,7 @@ def test_look_direction_agrees_with_an_independently_propagated_field():
                                   sound_speed=1800.0, density=1.8,
                                   attenuation=0.5),
     )
-    field = Bellhop(beam_type='G', n_beams=4001, launch_angles=(6.0, 9.0)).compute_field(
+    field = Bellhop(beam_type='G', n_beams=4001, launch_angles_deg=(6.0, 9.0)).compute_field(
         env, Source(depths=z_src, frequencies=freq),
         Receiver(depths=z_rcv, ranges=[range_m]))
     p = np.asarray(field.data).ravel()
@@ -335,9 +341,9 @@ def test_look_direction_agrees_with_an_independently_propagated_field():
     assert expected_deg > 0.0                      # receivers below the source
 
     angles = np.arange(-20.0, 20.01, 0.05)
-    out = beamform(p, z_rcv, angles, freq, source_level_dB=0,
-                   noise_level_dB=0, sound_speed=c)
-    peak_deg = out.angles[np.argmax(out.snr)]
+    snr = beamform_field(p[:, None], z_rcv, angles, freq,
+                         sound_speed=c).snr_dB(0.0, 0.0)
+    peak_deg = angles[np.argmax(snr)]
     assert peak_deg == pytest.approx(expected_deg, abs=0.5)
 
 
@@ -352,7 +358,13 @@ def test_look_direction_agrees_with_an_independently_propagated_field():
 # sidelobe levels §4.10); Butler & Sherman *Transducers and Arrays* (§7.10
 # grating lobes, §8.16 isotropic spatial correlation).
 
-from uacpy.acoustic_signal import beamform as beamform_fn
+
+def _snr(pressure, positions, angles_deg, frequency, source_level_dB,
+         noise_level_dB, **options):
+    """The SNR (dB) of :func:`beamform_field` over ``pressure``."""
+    return beamform_field(pressure, positions, angles_deg, frequency,
+                          **options).snr_dB(source_level_dB, noise_level_dB)
+
 
 LAM = C / FREQ                     # 1.5 m at 1000 Hz in 1500 m/s water
 
@@ -604,43 +616,50 @@ class TestShadingTapers:
         assert dg == pytest.approx(loss_dB, abs=0.01)
 
 
-class TestBeamformOutputContract:
-    """beamform returns 20·log10|eᴴp| + source_level_dB − noise_level_dB on
-    the angles it is given; unit-norm steering folds the array gain in, so a
-    unit-element-amplitude plane wave peaks at 10·log10(N) + SL − NL
-    (arrays.md §3)."""
+class TestBeamformedFieldSNR:
+    """``BeamformedField.snr_dB`` is 20·log10|eᴴp| + source_level_dB −
+    noise_level_dB on the angles beamformed; unit-norm steering folds the
+    array gain in, so a unit-element-amplitude plane wave peaks at
+    10·log10(N) + SL − NL (arrays.md §3)."""
 
     def test_output_is_20log10_quadratic_form_plus_sl_minus_nl(self):
         pos = _array()
         rng = np.random.default_rng(2)
         p = rng.standard_normal(16) + 1j * rng.standard_normal(16)
         angles = np.linspace(-60.0, 60.0, 25)
-        res = beamform_fn(p[:, None], pos, angles, FREQ,
-                          source_level_dB=150.0, noise_level_dB=37.0)
+        snr = _snr(p[:, None], pos, angles, FREQ, 150.0, 37.0, sound_speed=C)
         e = steering_vectors(pos, angles, FREQ, C)
         expected = 20.0 * np.log10(np.abs(e.conj() @ p)) + 150.0 - 37.0
-        np.testing.assert_allclose(res.snr[:, 0], expected, atol=1e-12)
+        np.testing.assert_allclose(snr[:, 0], expected, atol=1e-12)
 
-    def test_the_angles_given_are_the_angles_returned(self):
-        p = np.ones(16, dtype=complex)
-        grid = np.arange(-90, 91, 1)
-        res = beamform_fn(p[:, None], _array(), grid, FREQ,
-                          source_level_dB=0.0, noise_level_dB=0.0)
-        np.testing.assert_array_equal(res.angles, grid)
+    def test_it_has_the_shape_of_the_response(self):
+        out = beamform_field(np.ones((16, 3, 2), dtype=complex), _array(),
+                             np.arange(-90, 91, 1), FREQ)
+        assert out.snr_dB(0.0, 0.0).shape == out.response.shape
+
+    @pytest.mark.parametrize('bad', [np.nan, np.inf, [1.0, 2.0]])
+    def test_a_level_that_is_not_a_finite_scalar_is_refused(self, bad):
+        out = beamform_field(np.ones((16, 1), dtype=complex), _array(),
+                             [0.0], FREQ)
+        with pytest.raises(ConfigurationError,
+                           match='snr_dB: source_level_dB must be a finite'):
+            out.snr_dB(bad, 0.0)
+        with pytest.raises(ConfigurationError,
+                           match='snr_dB: noise_level_dB must be a finite'):
+            out.snr_dB(0.0, bad)
 
     def test_unit_plane_wave_peaks_at_10log10_n_and_the_levels_add(self):
         pos = _array()
         k = 2.0 * np.pi * FREQ / C
         p = np.exp(-1j * k * pos * np.sin(np.deg2rad(20.0)))   # |p_n| = 1
         grid = np.arange(-90, 91, 1)
-        res = beamform_fn(p[:, None], pos, grid, FREQ, source_level_dB=0.0,
-                          noise_level_dB=0.0)
-        assert res.peak_snr == pytest.approx(10.0 * np.log10(16), abs=1e-9)
-        assert res.angles[np.argmax(res.snr[:, 0])] == 20
+        snr = _snr(p[:, None], pos, grid, FREQ, 0.0, 0.0, sound_speed=C)
+        assert snr.max() == pytest.approx(10.0 * np.log10(16), abs=1e-9)
+        assert grid[np.argmax(snr[:, 0])] == 20
         # The source level enters additively, the noise level subtractively.
-        res_levels = beamform_fn(p[:, None], pos, grid, FREQ,
-                                 source_level_dB=150.0, noise_level_dB=40.0)
-        assert res_levels.peak_snr - res.peak_snr == pytest.approx(110.0)
+        levelled = _snr(p[:, None], pos, grid, FREQ, 150.0, 40.0,
+                        sound_speed=C)
+        np.testing.assert_allclose(levelled - snr, 110.0, atol=1e-9)
 
 
 class TestBeamformFieldGoesBroadband:
@@ -729,7 +748,7 @@ class TestBeamformedFieldDrawsItsBeam:
         fig, ax = self._beams().plot()
         assert len(ax.get_lines()) == 1
         x, y = ax.get_lines()[0].get_data()
-        np.testing.assert_allclose(x, self._beams().angles)
+        np.testing.assert_allclose(x, self._beams().angles_deg)
         assert y.max() == pytest.approx(0.0)          # dB re max
         assert 'angle' in ax.get_xlabel().lower()
         assert 'launch' not in ax.get_xlabel().lower()
@@ -793,72 +812,64 @@ class TestBeamformedFieldSynthesisesAReception:
         return beamform_field(H, pos, np.array([-10.0, 0.0, 10.0]), freqs,
                               sound_speed=C, weights=shading_taper(16, 'hann'))
 
+    _FS = 1000.0       # Hz: the band reaches 250 Hz
+
     def test_it_returns_a_time_field(self):
-        tr = self._beam().to_time_trace(0.0, range=5000.0)
+        tr = self._beam().to_time_trace(0.0, range=5000.0,
+                                        sample_rate=self._FS)
         assert list(tr.coords) == ['time']
         assert np.asarray(tr.data).size > 1
 
-    def test_the_auto_window_is_hann_bare_and_none_is_rectangular(self):
-        """The beam's ``window='auto'`` decides as Field's does: ``'hann'``
-        on the bare impulse response; ``None`` stays rectangular."""
+    def test_the_default_window_is_none_and_a_hann_is_recorded(self):
+        """The beam's window is Field's: none by default, a Hann when
+        asked for (a display of h(t) without band-edge ringing)."""
         beams = self._beam()
-        assert beams.to_time_trace(0.0, range=5000.0).synthesis_window == 'hann'
-        assert beams.to_time_trace(0.0, range=5000.0,
-                                   window=None).synthesis_window is None
+        assert beams.to_time_trace(0.0, range=5000.0, sample_rate=self._FS
+                                   ).synthesis_window is None
+        assert beams.to_time_trace(0.0, range=5000.0, sample_rate=self._FS,
+                                   window='hann').synthesis_window == 'hann'
 
     def test_the_trace_pins_the_separation_and_no_depth(self):
         """A beam has no depth, so none is stamped; the separation that
         placed the record is the one pinned coordinate."""
-        tr = self._beam().to_time_trace(0.0, range=5000.0)
+        tr = self._beam().to_time_trace(0.0, range=5000.0,
+                                        sample_rate=self._FS)
         assert tr.pinned == {'range': 5000.0}
         assert 'depth' not in tr.coords
         assert tr.model == ''
 
-    def test_a_source_waveform_gives_the_same_trace_as_its_spectrum(self):
-        from uacpy.acoustic_signal import tone_burst, waveform_spectrum_at
-        beams = self._beam()
-        fs = 2000.0
-        _, wf = tone_burst(200.0, 8, sample_rate=fs)
-        by_waveform = beams.to_time_trace(0.0, range=5000.0,
-                                          source_waveform=wf, sample_rate=fs,
-                                          t_start=3.2)
-        by_spectrum = beams.to_time_trace(
-            0.0, range=5000.0, t_start=3.2, sample_rate=fs,
-            source_spectrum=waveform_spectrum_at(wf, fs, beams.frequencies))
-        np.testing.assert_array_equal(by_waveform.data, by_spectrum.data)
-
-    def test_it_matches_the_hand_built_field_route(self):
+    @pytest.mark.parametrize('received', [False, True])
+    def test_it_matches_the_hand_built_field_route(self, received):
+        from uacpy.acoustic_signal import tone_burst
         from uacpy.core.results import Field
         beams = self._beam()
-        i = int(np.argmin(np.abs(beams.angles - 10.0)))
-        mine = np.asarray(beams.to_time_trace(10.0, range=5000.0).data)
-        hand = Field(data=beams.response[i][None, None, :],
-                     coords={'depth': np.array([0.0]),
-                             'range': np.array([5000.0]),
-                             'frequency': beams.frequencies},
-                     model='x').to_time_trace(depth=0.0, range=5000.0)
-        np.testing.assert_allclose(mine, np.asarray(hand.data), atol=1e-18)
-
-    def test_a_source_spectrum_shapes_the_reception(self):
-        beams = self._beam()
-        plain = np.asarray(beams.to_time_trace(0.0, range=5000.0).data)
-        S = np.exp(-((beams.frequencies - 200.0) / 20.0) ** 2)
-        shaped = np.asarray(beams.to_time_trace(
-            0.0, range=5000.0, source_spectrum=S).data)
-        assert not np.allclose(plain, shaped)
+        i = int(np.argmin(np.abs(beams.angles_deg - 10.0)))
+        _, wf = tone_burst(200.0, 8, sample_rate=self._FS)
+        given = ({'source_waveform': wf} if received else {})
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            mine = np.asarray(beams.to_time_trace(
+                10.0, range=5000.0, sample_rate=self._FS, **given).data)
+            hand = Field(data=beams.response[i][None, None, :],
+                         coords={'depth': np.array([0.0]),
+                                 'range': np.array([5000.0]),
+                                 'frequency': beams.frequencies},
+                         model='x').to_time_trace(
+                depth=0.0, range=5000.0, sample_rate=self._FS, **given)
+        np.testing.assert_array_equal(mine, np.asarray(hand.data))
 
     def test_the_range_must_be_given(self):
         """There is no separation at which a default would be right."""
         beams = self._beam()
         with pytest.raises(TypeError, match="'range'"):
-            beams.to_time_trace(0.0)
+            beams.to_time_trace(0.0, sample_rate=self._FS)
 
     def test_a_narrowband_beam_cannot_make_a_trace(self):
         pos = _array()
         p = np.ones((16, 4), dtype=complex)
         narrow = beamform_field(p, pos, np.array([0.0]), FREQ, sound_speed=C)
         with pytest.raises(ConfigurationError, match='frequency'):
-            narrow.to_time_trace(0.0, range=5000.0)
+            narrow.to_time_trace(0.0, range=5000.0, sample_rate=self._FS)
 
     def test_extra_grid_axes_are_refused_with_advice(self):
         pos = _array()
@@ -866,7 +877,7 @@ class TestBeamformedFieldSynthesisesAReception:
         H = np.ones((16, 5, freqs.size), dtype=complex)    # 5 ranges
         beams = beamform_field(H, pos, np.array([0.0]), freqs, sound_speed=C)
         with pytest.raises(ConfigurationError, match='one point'):
-            beams.to_time_trace(0.0, range=5000.0)
+            beams.to_time_trace(0.0, range=5000.0, sample_rate=self._FS)
 
 
 class TestWeightsMayBeComplex:
@@ -929,7 +940,7 @@ class TestWeightsMayBeComplex:
         assert broadside < 1.0                    # the ramp nulls broadside
         assert scan.array_gain()[0] > 9.0         # the scan finds the lobe
         assert scan.array_gain()[0] - broadside > 9.0
-        assert abs(scan.best_angle[0]) > 5.0      # and it is not at 0 deg
+        assert abs(scan.best_angle_deg[0]) > 5.0      # and it is not at 0 deg
 
     def test_it_reproduces_butler_and_shermans_superdirective_pair(self):
         """B&S 8.4.1, five hydrophones, incoherent noise: +7 and -7 dB.
@@ -1006,24 +1017,21 @@ class TestShadedSteeringIsRenormalised:
         np.testing.assert_allclose(raw.array_gain(), tapered.array_gain(),
                                    atol=1e-9)
 
-    def test_beamform_peak_is_the_taper_gain_for_a_raw_taper(self):
+    def test_the_snr_peak_is_the_taper_gain_for_a_raw_taper(self):
         """Without the re-normalisation this peak is wrong by 10log10(N/||w||^2)."""
         pos = _array()
         k = 2.0 * np.pi * FREQ / C
         p = np.exp(-1j * k * pos * np.sin(np.deg2rad(0.0)))[:, None]
         w = self._raw_taper()
-        res = beamform_fn(p, pos, np.arange(-90, 91), FREQ,
-                          source_level_dB=0.0, noise_level_dB=0.0, weights=w)
-        assert res.peak_snr == pytest.approx(plane_wave_array_gain(w), abs=1e-9)
+        snr = _snr(p, pos, np.arange(-90, 91), FREQ, 0.0, 0.0, sound_speed=C,
+                   weights=w)
+        assert snr.max() == pytest.approx(plane_wave_array_gain(w), abs=1e-9)
 
 
 class TestBeamformFieldCoversAWholeGrid:
-    """A coverage map needs the beamformer run over every point of a field.
-
-    ``beamform`` takes one ``(n_phones, n_ranges)`` slice and returns SNR in
-    dB, so a depth-range plane, the beam power itself, and the look angle
-    that won had to be assembled by hand at every call site.
-    """
+    """A coverage map needs the beamformer run over every point of a field:
+    a depth-range plane, the beam power itself, and the look angle that
+    won, from one call."""
 
     @staticmethod
     def _plane(n_el=16, n_z=7, n_r=11, seed=3):
@@ -1056,7 +1064,7 @@ class TestBeamformFieldCoversAWholeGrid:
         for truth in (-20.0, 0.0, 12.5):
             p = np.exp(-1j * k * pos * np.sin(np.deg2rad(truth)))[:, None]
             out = beamform_field(p, pos, ang, FREQ, sound_speed=C)
-            assert out.best_angle[0] == pytest.approx(truth, abs=0.5)
+            assert out.best_angle_deg[0] == pytest.approx(truth, abs=0.5)
 
     def test_array_gain_of_a_matched_plane_wave_is_the_weight_vector_gain(self):
         pos = _array()
@@ -1225,7 +1233,7 @@ class TestIndependentBeamsCountsOrthogonalLooks:
         assert half == pytest.approx(wide * np.sin(np.deg2rad(30.0)), rel=1e-9)
 
 
-class TestBeamformTakesAShadingTaper:
+class TestBeamformFieldTakesAShadingTaper:
     """A shaded beamformer trades main-lobe width and gain for sidelobes.
 
     Without a ``weights`` argument the only way to shade is to rebuild the
@@ -1237,51 +1245,45 @@ class TestBeamformTakesAShadingTaper:
         pos = _array()
         rng = np.random.default_rng(5)
         p = (rng.standard_normal(16) + 1j * rng.standard_normal(16))[:, None]
-        levels = dict(source_level_dB=0.0, noise_level_dB=0.0)
         grid = np.arange(-90, 91)
-        plain = beamform_fn(p, pos, grid, FREQ, **levels)
-        boxcar = beamform_fn(p, pos, grid, FREQ, **levels,
-                             weights=np.ones(16))
-        np.testing.assert_allclose(boxcar.snr, plain.snr, atol=1e-12)
+        plain = _snr(p, pos, grid, FREQ, 0.0, 0.0)
+        boxcar = _snr(p, pos, grid, FREQ, 0.0, 0.0, weights=np.ones(16))
+        np.testing.assert_allclose(boxcar, plain, atol=1e-12)
 
     def test_a_hann_taper_lowers_the_peak_by_its_own_loss(self):
         pos = _array()
         k = 2.0 * np.pi * FREQ / C
         p = np.exp(-1j * k * pos * np.sin(np.deg2rad(0.0)))[:, None]
         w = shading_taper(16, 'hann')
-        shaded = beamform_fn(p, pos, np.arange(-90, 91), FREQ,
-                             source_level_dB=0.0, noise_level_dB=0.0,
-                             weights=w)
+        shaded = _snr(p, pos, np.arange(-90, 91), FREQ, 0.0, 0.0,
+                      sound_speed=C, weights=w)
         # A matched plane wave gives |sum w|^2 / ||w||^2 for unit-norm w,
         # which is the array gain the taper leaves.
         wn = w / np.linalg.norm(w)
         expected = 10.0 * np.log10(np.abs(np.sum(wn)) ** 2
                                    / np.sum(np.abs(wn) ** 2))
-        assert shaded.peak_snr == pytest.approx(expected, abs=1e-9)
+        assert shaded.max() == pytest.approx(expected, abs=1e-9)
 
     def test_the_taper_buys_lower_sidelobes(self):
         pos = _array()
         k = 2.0 * np.pi * FREQ / C
         p = np.exp(-1j * k * pos * np.sin(0.0))[:, None]
         ang = np.linspace(-90.0, 90.0, 721)
-        plain = beamform_fn(p, pos, ang, FREQ, source_level_dB=0.0,
-                            noise_level_dB=0.0)
-        shaded = beamform_fn(p, pos, ang, FREQ, source_level_dB=0.0,
-                             noise_level_dB=0.0,
-                             weights=shading_taper(16, 'hann'))
+        plain = _snr(p, pos, ang, FREQ, 0.0, 0.0, sound_speed=C)
+        shaded = _snr(p, pos, ang, FREQ, 0.0, 0.0, sound_speed=C,
+                      weights=shading_taper(16, 'hann'))
         far = np.abs(ang) > 30.0          # well outside either main lobe
-        assert shaded.snr[far, 0].max() < plain.snr[far, 0].max() - 5.0
+        assert shaded[far, 0].max() < plain[far, 0].max() - 5.0
 
     def test_a_taper_that_does_not_fit_the_array_is_refused(self):
         p = np.ones((16, 1), dtype=complex)
         with pytest.raises(ConfigurationError, match='weights'):
-            beamform_fn(p, _array(), np.arange(-90, 91), FREQ,
-                        source_level_dB=0.0, noise_level_dB=0.0,
-                        weights=np.ones(15))
+            beamform_field(p, _array(), np.arange(-90, 91), FREQ,
+                           weights=np.ones(15))
 
 
 class TestPowerAverageEqualsCovarianceBeamforming:
-    def test_snapshot_power_average_is_bartlett_of_sample_covariance(self):
+    def test_snapshot_power_average_is_bartlett_of_the_covariance(self):
         """Averaging beam power over snapshots and beamforming the sample
         covariance are the same arithmetic in a different order
         (arrays.md §9: identical to ~3e-13 dB):
@@ -1290,11 +1292,10 @@ class TestPowerAverageEqualsCovarianceBeamforming:
         rng = np.random.default_rng(1)
         X = rng.standard_normal((16, 64)) + 1j * rng.standard_normal((16, 64))
         ang = np.linspace(-90.0, 90.0, 181)
-        snr = beamform_fn(X, pos, ang, FREQ, source_level_dB=0.0,
-                          noise_level_dB=0.0).snr
+        snr = _snr(X, pos, ang, FREQ, 0.0, 0.0, sound_speed=C)
         power_avg = 10.0 * np.log10(np.mean(10.0 ** (snr / 10.0), axis=1))
         bart = 10.0 * np.log10(
-            bartlett(sample_covariance(X),
+            bartlett(csdm(X),
                               steering_vectors(pos, ang, FREQ, C)).real)
         np.testing.assert_allclose(power_avg, bart, atol=1e-10)
 
@@ -1315,14 +1316,14 @@ class TestMusicModelOrder:
 
     # The scan grid contains ±3.0 exactly, so the correct-order peaks land
     # on the true bearings to grid precision.
-    angles = np.linspace(-90.0, 90.0, 3601)
+    angles_deg = np.linspace(-90.0, 90.0, 3601)
 
     def _mainlobe_peaks(self, n_sources):
-        E = steering_vectors(_array(), self.angles, FREQ, C)
+        E = steering_vectors(_array(), self.angles_deg, FREQ, C)
         p = music_spectrum(self._theory_R(), E, n_sources)
         peaks = _local_maxima(p)
-        peaks = peaks[np.abs(self.angles[peaks]) < 7.2]   # Rayleigh region
-        return self.angles[peaks], p
+        peaks = peaks[np.abs(self.angles_deg[peaks]) < 7.2]   # Rayleigh region
+        return self.angles_deg[peaks], p
 
     def test_too_few_sources_merges_the_pair(self):
         found, p = self._mainlobe_peaks(1)
@@ -1360,46 +1361,48 @@ class TestArrayGuards:
                            match="frequency must be > 0 Hz and finite"):
             steering_vectors([0.0, 0.75], [0.0], bad)
 
-    def test_beamform_rejects_zero_sound_speed(self):
+    def test_beamform_field_rejects_zero_sound_speed(self):
         with pytest.raises(ConfigurationError,
                            match="sound_speed must be > 0 m/s"):
-            beamform(np.ones((2, 3)), np.array([0.0, 0.75]), [0.0], 100.0,
-                     source_level_dB=0, noise_level_dB=0, sound_speed=0.0)
+            beamform_field(np.ones((2, 3)), np.array([0.0, 0.75]), [0.0],
+                           100.0, sound_speed=0.0)
 
     @pytest.mark.parametrize("bad", [-0.1, np.nan])
-    def test_sample_covariance_negative_or_nan_loading_raises(self, bad):
-        # A negative loading was skipped by the `> 0` application branch, so
-        # the caller got an unregularised R that looked regularised.
+    def test_snapshots_covariance_negative_or_nan_loading_raises(self, bad):
+        # A negative loading would leave an unregularised R that looked
+        # regularised.
         x = np.ones((2, 4), dtype=complex)
         with pytest.raises(ConfigurationError,
-                           match="diagonal_loading must be >= 0"):
-            sample_covariance(x, diagonal_loading=bad)
+                           match="Snapshots.covariance: diagonal_loading must "
+                                 "be a finite number >= 0"):
+            N.Snapshots(100.0, x).covariance(diagonal_loading=bad)
 
     def test_positive_loading_scales_the_trace_by_one_plus_dl(self):
         x = (np.random.default_rng(7).standard_normal((3, 16))
              + 1j * np.random.default_rng(8).standard_normal((3, 16)))
-        t0 = np.trace(sample_covariance(x)).real
-        t1 = np.trace(sample_covariance(x, diagonal_loading=0.5)).real
+        snaps = N.Snapshots(100.0, x)
+        t0 = np.trace(snaps.covariance()).real
+        t1 = np.trace(snaps.covariance(diagonal_loading=0.5)).real
         assert t1 == pytest.approx(1.5 * t0)
 
 
-class TestBeamformValidatesOwnArguments:
-    LEVELS = dict(source_level_dB=0.0, noise_level_dB=0.0)
+class TestBeamformFieldValidatesOwnArguments:
 
     @pytest.mark.parametrize("bad_c", [0.0, np.inf])
-    def test_zero_or_infinite_sound_speed_error_names_beamform(self, bad_c):
+    def test_zero_or_infinite_sound_speed_error_names_beamform_field(
+            self, bad_c):
         with pytest.raises(ConfigurationError,
-                           match="beamform: sound_speed must be > 0 m/s and "
-                                 "finite"):
-            beamform(np.ones((4, 3), dtype=complex), np.arange(4.0),
-                     [0.0], 100.0, **self.LEVELS, sound_speed=bad_c)
+                           match="beamform_field: sound_speed must be > 0 "
+                                 "m/s and finite"):
+            beamform_field(np.ones((4, 3), dtype=complex), np.arange(4.0),
+                           [0.0], 100.0, sound_speed=bad_c)
 
-    def test_negative_frequency_error_names_beamform(self):
+    def test_negative_frequency_error_names_beamform_field(self):
         with pytest.raises(ConfigurationError,
-                           match="beamform: frequency must be > 0 Hz and "
-                                 "finite"):
-            beamform(np.ones((4, 3), dtype=complex), np.arange(4.0), [0.0],
-                     -5.0, **self.LEVELS)
+                           match="beamform_field: frequency must be > 0 Hz "
+                                 "and finite"):
+            beamform_field(np.ones((4, 3), dtype=complex), np.arange(4.0),
+                           [0.0], -5.0)
 
     def test_steering_vectors_keeps_its_own_sound_speed_guard(self):
         with pytest.raises(ConfigurationError,
@@ -1407,46 +1410,11 @@ class TestBeamformValidatesOwnArguments:
                                  "m/s and finite"):
             steering_vectors(np.arange(4.0), [0.0], 100.0, sound_speed=0.0)
 
-    def test_valid_arguments_beamform(self):
-        snr, angles, peak = beamform(np.ones((4, 3), dtype=complex),
-                                     np.arange(4.0), np.arange(-90, 91),
-                                     100.0, **self.LEVELS)
-        assert snr.shape == (angles.size, 3) and np.isfinite(peak)
-
-    def test_beamform_takes_its_siblings_order_and_no_default_levels(self):
-        """``(pressure, positions_m, angles_deg, frequency)`` as in
-        beamform_field, and the two levels keyword-only with no default: an
-        SNR is only as right as the source and noise levels behind it."""
-        import inspect
-        params = inspect.signature(beamform).parameters
-        assert list(params)[:4] == ['pressure', 'positions_m', 'angles_deg',
-                                    'frequency']
-        for name in ('source_level_dB', 'noise_level_dB'):
-            assert params[name].kind is inspect.Parameter.KEYWORD_ONLY
-            assert params[name].default is inspect.Parameter.empty
-        assert params['sound_speed'].kind is inspect.Parameter.KEYWORD_ONLY
-
-    def test_an_old_order_call_fails_loudly(self):
-        """The (pressure, coords, frequency, angles, SL, NL, c) order cannot
-        run silently: without the keyword-only levels it is a TypeError, and
-        with them the swapped frequency/angles are refused by name."""
-        p, z = np.ones((4, 3), dtype=complex), np.arange(4.0)
-        angles = np.arange(-90, 91)
-        with pytest.raises(
-                TypeError,
-                match="required keyword-only arguments: 'source_level_dB'"):
-            beamform(p, z, 100.0, angles)
-        with pytest.raises(TypeError,
-                           match='takes 4 positional arguments but'):
-            beamform(p, z, 100.0, angles, 150.0, 0.0)
-        with pytest.raises(ConfigurationError, match="beamform: frequency"):
-            beamform(p, z, 100.0, angles, **self.LEVELS)
-
 
 class TestSnapshotsBridgeARecordToTheCovarianceEstimators:
     """From what an array records to what the covariance estimators take.
 
-    ``sample_covariance`` averages over snapshots, but an array delivers a
+    ``uacpy.sonar.csdm`` averages over snapshots, but an array delivers a
     real time series per element. Closing that by hand means segmenting,
     windowing, transforming, reading one bin and transposing — five steps,
     and the last two are where it goes wrong silently: the record is
@@ -1476,6 +1444,27 @@ class TestSnapshotsBridgeARecordToTheCovarianceEstimators:
             n=cls.N_T, axis=0)
         rec = rec / np.sqrt(np.mean(rec ** 2)) * 3.0
         return pos, rec + noise * rng.standard_normal(rec.shape)
+
+    def test_an_element_first_record_takes_axis_1(self):
+        _pos, rec = self._record()
+        rows = N.snapshots(rec, self.FS, 200.0, nperseg=1024)
+        cols = N.snapshots(rec.T, self.FS, 200.0, nperseg=1024, axis=1)
+        assert cols.frequency == rows.frequency
+        np.testing.assert_array_equal(cols.data, rows.data)
+        with pytest.raises(ConfigurationError, match='axis=2 is not an axis'):
+            N.snapshots(rec, self.FS, 200.0, nperseg=1024, axis=2)
+
+    def test_the_window_default_is_boxcar_and_none_selects_it(self):
+        _pos, rec = self._record()
+        default = N.snapshots(rec, self.FS, 200.0, nperseg=1024).data
+        np.testing.assert_array_equal(
+            N.snapshots(rec, self.FS, 200.0, nperseg=1024, window=None).data,
+            default)
+        seg = rec[:1024]
+        bin_index = int(round(200.0 * 1024 / self.FS))
+        np.testing.assert_allclose(default[:, 0],
+                                   np.fft.fft(seg, axis=0)[bin_index],
+                                   rtol=1e-12, atol=1e-9)
 
     def test_it_transposes_the_record_into_snapshot_orientation(self):
         _pos, rec = self._record()
@@ -1511,19 +1500,18 @@ class TestSnapshotsBridgeARecordToTheCovarianceEstimators:
         f_bin, data = N.snapshots(rec, self.FS, 200.0, nperseg=1024)
         angles = np.linspace(-60.0, 60.0, 1201)
         surface = np.asarray(N.bartlett(
-            N.sample_covariance(data, diagonal_loading=1e-3),
+            csdm(data, diagonal_loading=1e-3),
             N.steering_vectors(pos, angles, f_bin, self.C)), float)
         peak = angles[int(np.argmax(surface))]
         assert abs(peak - self.TRUE_BEARING) < 0.5, peak
 
-    def test_covariance_is_the_same_as_calling_sample_covariance(self):
+    def test_covariance_is_the_same_as_calling_csdm(self):
         _pos, rec = self._record()
         result = N.snapshots(rec, self.FS, 200.0, nperseg=1024)
-        assert np.array_equal(result.covariance(),
-                              N.sample_covariance(result.data))
+        assert np.array_equal(result.covariance(), csdm(result.data))
         assert np.array_equal(
             result.covariance(diagonal_loading=0.05),
-            N.sample_covariance(result.data, diagonal_loading=0.05))
+            csdm(result.data, diagonal_loading=0.05))
 
     def test_the_result_unpacks_as_frequency_and_data(self):
         _pos, rec = self._record()
@@ -1554,9 +1542,9 @@ class TestSnapshotsBridgeARecordToTheCovarianceEstimators:
             N.snapshots(np.zeros(1024), self.FS, 200.0, nperseg=512)
 
 
-class TestBeamformResultsCarryTheirAxes:
-    """The range axis of ``beamform``'s SNR and the grid behind
-    ``beamform_field``'s response travel with the result when given."""
+class TestBeamformFieldCarriesItsGrid:
+    """The grid behind ``beamform_field``'s response travels with the result
+    when given."""
 
     POS = 0.75 * np.arange(8)
     ANG = np.linspace(-60.0, 60.0, 31)
@@ -1565,34 +1553,6 @@ class TestBeamformResultsCarryTheirAxes:
     def _p(*shape):
         rng = np.random.default_rng(7)
         return rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
-
-    def test_beamform_carries_the_ranges_it_was_given(self):
-        import pickle
-        ranges = np.linspace(500.0, 4500.0, 5)
-        res = N.beamform(self._p(8, 5), self.POS, self.ANG, 1000.0,
-                         source_level_dB=150.0, noise_level_dB=60.0,
-                         ranges=ranges)
-        snr, angles, peak = res
-        assert np.array_equal(res.ranges, ranges)
-        assert res.ranges is not ranges
-        assert np.array_equal(pickle.loads(pickle.dumps(res)).ranges, ranges)
-        assert N.beamform(self._p(8, 5), self.POS, self.ANG, 1000.0,
-                          source_level_dB=150.0,
-                          noise_level_dB=60.0).ranges is None
-
-    @pytest.mark.parametrize('n', [4, 6])
-    def test_beamform_refuses_ranges_of_another_length(self, n):
-        with pytest.raises(ConfigurationError,
-                           match=r'beamform: ranges .* 5 values'):
-            N.beamform(self._p(8, 5), self.POS, self.ANG, 1000.0,
-                       source_level_dB=150.0, noise_level_dB=60.0,
-                       ranges=np.arange(float(n)))
-
-    def test_beamform_refuses_ranges_for_a_single_column(self):
-        with pytest.raises(ConfigurationError, match='beamform: ranges'):
-            N.beamform(self._p(8), self.POS, self.ANG, 1000.0,
-                       source_level_dB=150.0, noise_level_dB=60.0,
-                       ranges=[1000.0])
 
     def test_beamform_field_carries_the_grid_it_was_given(self):
         import copy
@@ -1676,14 +1636,14 @@ class TestRealisedArrayGainIsTheArrayForm:
             N.realised_array_gain(np.zeros((0, 3), dtype=complex), np.ones(3))
 
 
-def test_an_all_zero_beamform_warns_through_the_warnings_machinery():
+def test_an_all_zero_beam_snr_warns_through_the_warnings_machinery():
     """A filterable ``ValidityWarning``, not a log line."""
-    from uacpy.acoustic_signal import beamform
     from uacpy.core.exceptions import ValidityWarning
-    with pytest.warns(ValidityWarning, match='all beam outputs are zero'):
-        beamform(np.zeros((8, 3), dtype=complex), np.arange(8) * 0.75,
-                 np.linspace(-60.0, 60.0, 7), 1000.0,
-                 source_level_dB=150.0, noise_level_dB=60.0)
+    out = beamform_field(np.zeros((8, 3), dtype=complex), np.arange(8) * 0.75,
+                         np.linspace(-60.0, 60.0, 7), 1000.0)
+    with pytest.warns(ValidityWarning, match='every beam output is zero'):
+        snr = out.snr_dB(150.0, 60.0)
+    assert np.all(np.isneginf(snr))
 
 
 def test_independent_beams_falls_back_with_a_fallback_warning(monkeypatch):
@@ -1706,11 +1666,11 @@ class TestBeamformFieldGuardsItsInputsAsBeamformDoes:
     def _call(**changes):
         from uacpy.acoustic_signal import beamform_field
         args = dict(pressure=np.ones((8, 3), dtype=complex),
-                    positions_m=np.arange(8) * 0.75,
+                    positions=np.arange(8) * 0.75,
                     angles_deg=np.linspace(-60.0, 60.0, 7), frequency=1000.0)
         args.update(changes)
         sound_speed = args.pop('sound_speed', 1500.0)
-        return beamform_field(args['pressure'], args['positions_m'],
+        return beamform_field(args['pressure'], args['positions'],
                               args['angles_deg'], args['frequency'],
                               sound_speed=sound_speed)
 
@@ -1727,11 +1687,11 @@ class TestBeamformFieldGuardsItsInputsAsBeamformDoes:
         assert len(hits) == 1
         assert np.all(np.isnan(beams.response[:, 1]))
         assert np.isnan(beams.element_power[1])
-        assert np.isnan(beams.best_angle[1])
+        assert np.isnan(beams.best_angle_deg[1])
         for j in (0, 2):
             np.testing.assert_array_equal(beams.response[:, j],
                                           clean.response[:, j])
-            assert beams.best_angle[j] == clean.best_angle[j]
+            assert beams.best_angle_deg[j] == clean.best_angle_deg[j]
 
     def test_a_field_with_no_finite_point_is_refused(self):
         p = np.full((8, 3), np.nan, dtype=complex)

@@ -37,21 +37,29 @@ def stability_terms(knobs) -> int:
             else int(knobs.n_stability))
 
 
-# The rotation angle a rams march takes when ``rams_rotation_angle`` is left ``None``
+#: rams0.5's rotation flag ``irot`` when ``rams_rotation`` is left ``None``:
+#: on, uacpy guidance — no source prefers the rotated coefficients
+#: (Milinazzo et al. 1997 take Collins' complex coefficients as their
+#: reference); the 45° tuning and the rams stability rule were measured
+#: with rotation on.
+DEFAULT_RAMS_ROTATION = True
+
+
+# The rotation angle a rams march takes when ``rams_rotation_angle_deg`` is left ``None``
 # and the stability rule does not ask for less (see ``resolve_rams_rotation_angle``).
 RAMS_DEFAULT_THETA_DEG = 45.0
 
 
 def theta_for_freq(freq: float, *, knobs) -> float:
-    """Resolve ``rams_rotation_angle`` for a single frequency.
+    """Resolve ``rams_rotation_angle_deg`` for a single frequency.
 
-    ``rams_rotation_angle`` may be:
+    ``rams_rotation_angle_deg`` may be:
       - a float: same theta for every frequency (default 45.0).
       - a callable taking a float frequency in Hz and returning a
         float theta in degrees. Use this when the elastic PE needs
         different stability angles across the band.
     """
-    t = knobs.rams_rotation_angle
+    t = knobs.rams_rotation_angle_deg
     if t is None:
         return float(RAMS_DEFAULT_THETA_DEG)
     if callable(t):
@@ -63,7 +71,7 @@ def resolve_rams_rotation_angle(env: Environment, freq: float, *,
                                 knobs) -> float:
     """The rotation angle a rams march at ``freq`` on ``env`` uses.
 
-    A pinned ``rams_rotation_angle`` (float or callable) is returned as is. Left
+    A pinned ``rams_rotation_angle_deg`` (float or callable) is returned as is. Left
     ``None``, the default 45° is kept unless the stability rule finds its
     own growth above the seabed's leak, in which case the widest stable
     angle on the ladder replaces it (Milinazzo, Zala & Brooke 1997: the
@@ -88,10 +96,10 @@ def rams_rotation_angle_lowering(env: Environment, freq: float, *, knobs):
     or ``None`` when the angle is pinned, the default holds, or no angle
     on the ladder does."""
     requested = theta_for_freq(freq, knobs=knobs)
-    if knobs.rams_rotation_angle is not None:
+    if knobs.rams_rotation_angle_deg is not None:
         return None
     stab = rams_stability(env, freq, theta=requested, knobs=knobs)
-    if stab is None or stab['margin']['floor_excess'] <= 0.0:
+    if stab is None or stab['margin'].floor_excess <= 0.0:
         return None
     if stab['theta'] is None:
         return None
@@ -149,7 +157,7 @@ def rams_stability_params(env: Environment, freq: float,
             seabed_speed=float(top.sound_speed),
             seabed_density=float(top.density if top.density is not None
                                  else 1.0),
-            seabed_attenuation_dB_lambda=float(
+            seabed_attenuation=float(
                 top.attenuation if top.attenuation is not None else 0.0),
             depth=depth, n_pade=int(knobs.n_pade),
             theta_deg=theta_deg,
@@ -171,7 +179,7 @@ def rams_stability(env: Environment, freq: float,
         return None
     margins = [rams_growth_margin(dr, **p) for p in params]
     key = 'excess' if dr is not None else 'floor_excess'
-    worst = max(margins, key=lambda m: m[key])
+    worst = max(margins, key=lambda m: getattr(m, key))
     drs = [rams_stable_dr(dr_max, **p) for p in params]
     dr_stable = None if any(d is None for d in drs) else min(drs)
     thetas = [rams_stable_theta(**p) for p in params]
@@ -184,16 +192,16 @@ def rams_stability(env: Environment, freq: float,
 def rams_rotation_remedy(stab: dict, *, knobs) -> str:
     """The sentence naming what fixes a rotation-limited rams march."""
     m = stab['margin']
-    head = (f"the rotated square root itself (rams_rotation_angle="
+    head = (f"the rotated square root itself (rams_rotation_angle_deg="
             f"{stab['theta_requested']:.0f}°, n_pade={int(knobs.n_pade)}) "
             f"amplifies the steepest propagating components at "
-            f"{m['floor']:.2e} Np/m, above the {m['floor_leak']:.2e} Np/m "
+            f"{m.floor:.2e} Np/m, above the {m.floor_leak:.2e} Np/m "
             f"this seabed leaks them at (over the "
             f"{RAMS_STABILITY_SAFETY:g}× safety margin), so no range step "
             f"can keep the march bounded.")
     if stab['theta'] is not None:
-        return (head + f" Pass rams_rotation_angle={stab['theta']:.0f} (the largest "
-                f"angle that is stable here), or leave rams_rotation_angle=None "
+        return (head + f" Pass rams_rotation_angle_deg={stab['theta']:.0f} (the largest "
+                f"angle that is stable here), or leave rams_rotation_angle_deg=None "
                 f"to have it chosen, or use a larger n_pade.")
     return (head + " No rotation angle down to 5° is stable here; use "
             "a larger n_pade, or OAST / Scooter for this seabed.")
@@ -201,19 +209,19 @@ def rams_rotation_remedy(stab: dict, *, knobs) -> str:
 
 def warn_rams_rotation_angle_lowered(lowered, n_frequencies: int, *,
                              notices=None) -> None:
-    """One warning naming every frequency whose default ``rams_rotation_angle``
+    """One warning naming every frequency whose default ``rams_rotation_angle_deg``
     the stability rule lowered (:func:`rams_rotation_angle_lowering`)."""
     f0, first = lowered[0]
     m = first['margin']
     if len(lowered) == 1:
         give_notice(notices,
-            f"RAM:rams: at f={f0:.1f} Hz the default rams_rotation_angle="
+            f"RAM:rams: at f={f0:.1f} Hz the default rams_rotation_angle_deg="
             f"{first['requested']:.0f}° would amplify the steepest "
-            f"propagating components at {m['floor']:.2e} Np/m against the "
-            f"{m['floor_leak']:.2e} Np/m this seabed leaks them at, "
-            f"whatever the range step; using rams_rotation_angle="
+            f"propagating components at {m.floor:.2e} Np/m against the "
+            f"{m.floor_leak:.2e} Np/m this seabed leaks them at, "
+            f"whatever the range step; using rams_rotation_angle_deg="
             f"{first['theta']:.0f}°, the widest stable angle. Pin "
-            f"rams_rotation_angle to choose yourself.",
+            f"rams_rotation_angle_deg to choose yourself.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         return
@@ -221,13 +229,13 @@ def warn_rams_rotation_angle_lowered(lowered, n_frequencies: int, *,
     angles = [low['theta'] for _, low in lowered]
     give_notice(notices,
         f"RAM:rams: at {len(lowered)} of {n_frequencies} frequencies "
-        f"({min(freqs):.1f}-{max(freqs):.1f} Hz) the default rams_rotation_angle="
+        f"({min(freqs):.1f}-{max(freqs):.1f} Hz) the default rams_rotation_angle_deg="
         f"{first['requested']:.0f}° would amplify the steepest "
         f"propagating components faster than this seabed leaks them "
-        f"(at {f0:.1f} Hz: {m['floor']:.2e} against "
-        f"{m['floor_leak']:.2e} Np/m), whatever the range step; those "
+        f"(at {f0:.1f} Hz: {m.floor:.2e} against "
+        f"{m.floor_leak:.2e} Np/m), whatever the range step; those "
         f"bins use the widest stable angle, "
-        f"{min(angles):.0f}-{max(angles):.0f}°. Pin rams_rotation_angle to choose "
+        f"{min(angles):.0f}-{max(angles):.0f}°. Pin rams_rotation_angle_deg to choose "
         f"yourself.",
         FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
     )
@@ -242,7 +250,7 @@ def warn_if_rams_step_unstable(env, fc, dr, *, notices=None, knobs):
                           theta=resolve_rams_rotation_angle(env, fc,
                                                             knobs=knobs),
                                                    knobs=knobs)
-    if stab is None or stab['margin']['excess'] <= 0.0:
+    if stab is None or stab['margin'].excess <= 0.0:
         return
     m = stab['margin']
     if stab['dr'] is None:
@@ -250,8 +258,8 @@ def warn_if_rams_step_unstable(env, fc, dr, *, notices=None, knobs):
     else:
         remedy = (f"Its rotated Crank-Nicolson step amplifies the "
                   f"steepest propagating components (grazing "
-                  f"{m['grazing_deg']:.0f}°) at "
-                  f"{m['growth']:.2e} Np/m against the {m['leak']:.2e} "
+                  f"{m.grazing_deg:.0f}°) at "
+                  f"{m.growth:.2e} Np/m against the {m.leak:.2e} "
                   f"Np/m this seabed leaks them at; the automatic grid "
                   f"would use dr <= {stab['dr']:.4g} m here.")
     give_notice(notices,
@@ -303,13 +311,13 @@ def collins_stability_range(kind: str, *, knobs) -> Optional[float]:
     rams0.5, whose row 5 carries the rotation instead."""
     if kind == 'rams':
         return None
-    return float(knobs.stability_range_m or 0.0)
+    return float(knobs.stability_range or 0.0)
 
 
 def warn_stability_range_inert_on_a_multi_range_grid(receiver, *,
                                                       notices=None,
                                                       knobs) -> None:
-    """Say so when a pinned ``stability_range_m`` will not act at the range it
+    """Say so when a pinned ``stability_range`` will not act at the range it
     names, because the output grid decides instead.
 
     ``mpiramS/src/ram.f90:68`` computes ``rsc = |rg(nr) - 0| - rs`` once,
@@ -326,26 +334,26 @@ def warn_stability_range_inert_on_a_multi_range_grid(receiver, *,
     the test reduces to ``rnow > rs``. With more than one, the firing step
     is set by the receiver range spacing and the value of ``rs`` stops
     mattering over most of its range. Measured on a 100 m guide at 100 Hz
-    with receivers at 40 ranges from 500 m to 20 km: ``stability_range_m``
+    with receivers at 40 ranges from 500 m to 20 km: ``stability_range``
     9 km apart (10 km and 19 km) gives bit-identical output, while on a
     single 20 km output range the same pair moves TL by 0.0012 dB.
 
     This is upstream mpiramS behaviour; the warning is uacpy declining to
     let a public parameter look like it did something.
     """
-    if knobs.stability_range_m is None:
+    if knobs.stability_range is None:
         return
     ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
     if ranges.size < 2:
         return
     give_notice(notices,
-        f"RAM:mpirams: stability_range_m={knobs.stability_range_m:g} m will "
+        f"RAM:mpirams: stability_range={knobs.stability_range:g} m will "
         f"not switch the stability terms off at that range. ram.f90:251 tests "
         f"the distance left to the *current* output range, not the absolute "
         f"range marched, so with {ranges.size} receiver ranges the switch-off "
         f"point is set by the range spacing and the value is largely inert "
         f"(two values 9 km apart measured bit-identical on a 40-range grid). "
-        f"Use a single receiver range if you need stability_range_m to act at "
+        f"Use a single receiver range if you need stability_range to act at "
         f"the range it names, or leave it unset to keep n_stability terms on "
         f"throughout.",
         FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,

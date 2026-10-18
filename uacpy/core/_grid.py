@@ -17,8 +17,8 @@ from uacpy.core._repr import axis, build, extent
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
 from uacpy.core._validate import (
-    real_scalar_or_none, require_non_negative, require_real_array,
-    require_strictly_increasing,
+    normalize_axis, real_scalar_or_none, require_non_negative,
+    require_real_array, require_strictly_increasing,
 )
 from uacpy.core._carrier import DeepCopyMixin, RevalidateOnAssignMixin
 from uacpy.core._export import CarrierExport
@@ -293,14 +293,14 @@ class _RangeProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         scalar range, array for an array of ranges; every range must be
         finite. See :meth:`eval` (interpolate) and :meth:`isel`
         (positional)."""
-        return self._query(range, 'nearest')
+        return self._query(range, 'nearest', f"{type(self).__name__}.at")
 
     def eval(self, *, range, method: str = 'linear'):
         """Interpolated value at ``range`` (m). ``method`` is ``'linear'``
         (default), ``'nearest'`` or ``'cubic'``; constant extrapolation past
         the ends, and every range must be finite. The interpolating
         counterpart of :meth:`at`."""
-        return self._query(range, method)
+        return self._query(range, method, f"{type(self).__name__}.eval")
 
     def isel(self, *, range):
         """Value at integer index ``range`` — the positional counterpart of
@@ -317,8 +317,9 @@ class _RangeProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         out = v[idx.astype(int)]
         return float(out) if idx.ndim == 0 else out
 
-    def _query(self, range, method):
-        return _query_profile(self.ranges, self._values, range, method)
+    def _query(self, range, method, who):
+        return _query_profile(self.ranges, self._values, range, method,
+                              who=who)
 
     #: The plotter :func:`uacpy.plot.plot_carrier` draws this profile with.
     _plotter = 'plot_range_profile'
@@ -334,8 +335,91 @@ class _RangeProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                                        figsize=figsize, **kwargs)
 
 
-def _query_profile(ranges, values, query, method='linear'):
-    """Sample a 1-D ``(range -> value)`` profile at ``query`` range(s).
+def resample_depth_range(values, depths, ranges, new_depths, new_ranges, *,
+                         method: str = 'linear', axis=(-2, -1)) -> np.ndarray:
+    """``values`` on a ``(depth, range)`` grid, resampled onto the grid
+    ``(new_depths, new_ranges)``.
+
+    Each new point is interpolated from the stored samples around it
+    (``scipy.interpolate.RegularGridInterpolator``); complex values are
+    interpolated as their real and imaginary parts. A new point outside
+    the stored grid is NaN, and so is one whose stencil touches a NaN
+    sample: a sample nothing computed is no data, not a value to average
+    against its neighbours. Every other axis of ``values`` is carried
+    through. :meth:`uacpy.Field.resample_to` is this on a Field.
+
+    Interpolating a coherent field is only faithful while its carrier is
+    resolved: samples under a quarter wavelength apart on both axes (the
+    check :meth:`uacpy.Field.resample_to` makes; this function, which may
+    be handed a field with its carrier taken out, makes none). Take the
+    level first if only the level is wanted.
+
+    Parameters
+    ----------
+    values : array_like
+        Real or complex samples; ``axis`` names their depth and range axes.
+    depths, ranges : array_like
+        The stored axes (m), strictly increasing.
+    new_depths, new_ranges : array_like
+        The axes (m) to resample onto.
+    method : {'linear', 'nearest', 'cubic'}, optional
+        Interpolation scheme. Default ``'linear'``.
+    axis : (int, int), optional
+        The depth and range axes of ``values``. Default ``(-2, -1)``.
+
+    Returns
+    -------
+    ndarray
+        ``values`` with those two axes replaced by ``len(new_depths)`` and
+        ``len(new_ranges)`` samples, in place.
+
+    Raises
+    ------
+    ConfigurationError
+        An unknown ``method``, two axes that are not two distinct axes of
+        ``values``, or stored axes that do not match ``values``.
+    """
+    from scipy.interpolate import RegularGridInterpolator
+    who = 'resample_depth_range'
+    if method not in INTERP_METHODS:
+        raise ConfigurationError(
+            f"{who}: method={method!r}; choose from {list(INTERP_METHODS)}.")
+    v = np.asarray(values)
+    if np.ndim(axis) != 1 or np.size(axis) != 2:
+        raise ConfigurationError(
+            f"{who}: axis={axis!r} must be the pair (depth axis, range "
+            f"axis).")
+    d_ax, r_ax = (normalize_axis(v, a, who) for a in axis)
+    if d_ax == r_ax:
+        raise ConfigurationError(
+            f"{who}: axis={axis!r} names one axis twice; the depth and range "
+            f"axes are two.")
+    grid = (np.asarray(depths, dtype=float), np.asarray(ranges, dtype=float))
+    v = np.moveaxis(v, (d_ax, r_ax), (0, 1))
+    if v.shape[:2] != (grid[0].size, grid[1].size):
+        raise ConfigurationError(
+            f"{who}: values hold {v.shape[0]} depth(s) by {v.shape[1]} "
+            f"range(s) on the axes {axis}, but depths has {grid[0].size} and "
+            f"ranges {grid[1].size}.")
+    new_d = np.atleast_1d(np.asarray(new_depths, dtype=float))
+    new_r = np.atleast_1d(np.asarray(new_ranges, dtype=float))
+    DD, RR = np.meshgrid(new_d, new_r, indexing='ij')
+    points = np.stack([DD.ravel(), RR.ravel()], axis=-1)
+
+    def resampled(part):
+        return RegularGridInterpolator(
+            grid, np.asarray(part, dtype=float), method=method,
+            bounds_error=False, fill_value=np.nan)(points)
+
+    out = (resampled(v.real) + 1j * resampled(v.imag)
+           if np.iscomplexobj(v) else resampled(v))
+    out = out.reshape((new_d.size, new_r.size) + v.shape[2:])
+    return np.moveaxis(out, (0, 1), (d_ax, r_ax))
+
+
+def _query_profile(ranges, values, query, method='linear', *, who):
+    """Sample a 1-D ``(range -> value)`` profile at ``query`` range(s);
+    ``who`` names the caller in a refusal.
 
     Shared by the :class:`Bathymetry` / :class:`Altimetry` carriers (seafloor
     depth and sea-surface height vs range). ``'nearest'`` / ``'linear'`` /
@@ -346,7 +430,8 @@ def _query_profile(ranges, values, query, method='linear'):
     """
     if method not in INTERP_METHODS:
         raise ConfigurationError(
-            f"method must be one of {INTERP_METHODS}; got {method!r}.")
+            f"{who}: method must be one of {INTERP_METHODS}; got "
+            f"{method!r}.")
     x = np.asarray(ranges, dtype=float)
     y = np.asarray(values, dtype=float)
     rq = np.asarray(query, dtype=float)
@@ -359,7 +444,7 @@ def _query_profile(ranges, values, query, method='linear'):
         count = ('' if rq.ndim == 0
                  else f" ({n_bad} of {rq.size} query ranges)")
         raise ConfigurationError(
-            f"range={query!r} is not a finite label{count}: NaN and inf "
+            f"{who}: range={query!r} is not a finite label{count}: NaN and inf "
             f"ranges have no nearest node. Every |range - query| is NaN, so "
             f"the nearest lookup ranks nothing and searchsorted lands on an "
             f"end node — a real sample, which is why it would read as a "
@@ -385,7 +470,8 @@ def _query_profile(ranges, values, query, method='linear'):
     else:  # cubic
         if x.size < 4:
             raise ConfigurationError(
-                f"method='cubic' needs >= 4 ranges; got {x.size}. Use 'linear'.")
+                f"{who}: method='cubic' needs >= 4 ranges; got {x.size}.",
+                remediation="Use method='linear'.")
         from scipy.interpolate import interp1d
         f = interp1d(x, y, kind='cubic', bounds_error=False,
                      fill_value=(float(y[0]), float(y[-1])))

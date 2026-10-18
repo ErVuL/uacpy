@@ -297,7 +297,7 @@ class TestFrancoisGarrisonRowEnvelope:
             warnings.simplefilter('ignore')
             fg = _fg(salinity=7.0)
         assert fg.salinity == 7.0
-        assert np.isfinite(fg.alpha_dB_per_m(1000.0, 0.0)).all()
+        assert np.isfinite(fg._alpha_dB_per_m_at_frequency(1000.0, 0.0)).all()
 
     def test_ph_is_compared_on_the_nbs_scale_and_the_message_says_so(self):
         """A total-scale 8.3 is about 8.43 on NBS — the scale the equation
@@ -324,14 +324,14 @@ class TestFrancoisGarrisonFrequencyEnvelope:
 
     def test_the_bounds_are_silent_and_just_past_them_warns(self):
         fg = _fg()
-        _silent(_recorded(lambda: fg.alpha_dB_per_m(200.0, 0.0)))
-        _silent(_recorded(lambda: fg.alpha_dB_per_m(1.0e6, 0.0)))
-        low = _only(_recorded(lambda: fg.alpha_dB_per_m(199.99, 0.0)))
+        _silent(_recorded(lambda: fg._alpha_dB_per_m_at_frequency(200.0, 0.0)))
+        _silent(_recorded(lambda: fg._alpha_dB_per_m_at_frequency(1.0e6, 0.0)))
+        low = _only(_recorded(lambda: fg._alpha_dB_per_m_at_frequency(199.99, 0.0)))
         assert '1 of 1 frequency (199.99 Hz) is below 200 Hz' in str(
             low.message)
         assert 'outside the 200 Hz..1e+06 Hz' in str(low.message)
         assert 'may not hold below 200 Hz' in str(low.message)
-        high = _only(_recorded(lambda: fg.alpha_dB_per_m(1.0e6 + 1.0, 0.0)))
+        high = _only(_recorded(lambda: fg._alpha_dB_per_m_at_frequency(1.0e6 + 1.0, 0.0)))
         assert '(1000001 Hz) is above 1e+06 Hz' in str(high.message)
 
     def test_a_frequency_vector_gets_one_notice_with_its_counts(self):
@@ -359,11 +359,11 @@ class TestFrancoisGarrisonFrequencyEnvelope:
         fg = _fg()
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            below = fg.alpha_dB_per_m(100.0, np.array([0.0, 500.0]))
+            below = fg._alpha_dB_per_m_at_frequency(100.0, np.array([0.0, 500.0]))
         assert np.all(np.isfinite(below)) and np.all(below > 0.0)
 
     def test_thorp_has_no_envelope_notice(self):
-        _silent(_recorded(lambda: Thorp().alpha_dB_per_m(50.0, 0.0)))
+        _silent(_recorded(lambda: Thorp()._alpha_dB_per_m_at_frequency(50.0, 0.0)))
 
 
 class TestFrancoisGarrisonWarningsNameTheCallersLine:
@@ -383,7 +383,7 @@ class TestFrancoisGarrisonWarningsNameTheCallersLine:
 
     def test_the_frequency_notice_through_the_public_accessor_lands_here(self):
         fg = _fg()
-        warning = _only(_recorded(lambda: fg.alpha_dB_per_m(100.0, 0.0)))
+        warning = _only(_recorded(lambda: fg._alpha_dB_per_m_at_frequency(100.0, 0.0)))
         assert Path(warning.filename).resolve() == _THIS_FILE
 
     def test_two_call_sites_each_warn_under_the_default_filter(self):

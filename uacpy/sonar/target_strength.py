@@ -99,7 +99,7 @@ def _warn_below_geometric(scale_m: float, frequency, sound_speed,
 
 
 def ts_sphere(
-    radius_m,
+    radius,
     *,
     frequency=None,
     sound_speed=DEFAULT_SOUND_SPEED,
@@ -113,22 +113,22 @@ def ts_sphere(
 
     Parameters
     ----------
-    radius_m : float
+    radius : float
         Sphere radius (m).
     frequency : float, optional
         Frequency (Hz), used only to warn when ``ka < 10``.
     sound_speed : float, optional
         Sound speed (m/s) for the validity check. Default 1500.
     """
-    a = _require_positive(radius_m, 'radius_m')
+    a = _require_positive(radius, 'radius')
     _warn_below_geometric(a, frequency, sound_speed, 'ts_sphere',
                           _KA_MIN_SPHERE)
     return float(10.0 * np.log10(a ** 2 / 4.0))
 
 
 def ts_convex(
-    radius1_m,
-    radius2_m,
+    radius1,
+    radius2,
     *,
     frequency=None,
     sound_speed=DEFAULT_SOUND_SPEED,
@@ -142,7 +142,7 @@ def ts_convex(
 
     Parameters
     ----------
-    radius1_m, radius2_m : float
+    radius1, radius2 : float
         Principal radii of curvature (m) at the point nearest the sonar.
     frequency : float, optional
         Frequency (Hz); given, the high-frequency (``ka > 10``) condition is
@@ -150,8 +150,8 @@ def ts_convex(
     sound_speed : float, optional
         Sound speed (m/s). Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
     """
-    a1 = _require_positive(radius1_m, 'radius1_m')
-    a2 = _require_positive(radius2_m, 'radius2_m')
+    a1 = _require_positive(radius1, 'radius1')
+    a2 = _require_positive(radius2, 'radius2')
     return _ts_convex(a1, a2, frequency, sound_speed, 'ts_convex')
 
 
@@ -164,9 +164,9 @@ def _ts_convex(a1, a2, frequency, sound_speed, who):
 
 
 def ts_ellipsoid(
-    a_m,
-    b_m,
-    c_m,
+    a,
+    b,
+    c,
     *,
     frequency=None,
     sound_speed=DEFAULT_SOUND_SPEED,
@@ -180,7 +180,7 @@ def ts_ellipsoid(
 
     Parameters
     ----------
-    a_m, b_m, c_m : float
+    a, b, c : float
         Semi-axes (m), ensonified along ``a``.
     frequency : float, optional
         Frequency (Hz); given, the high-frequency (``ka > 10``) condition is
@@ -188,9 +188,9 @@ def ts_ellipsoid(
     sound_speed : float, optional
         Sound speed (m/s). Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
     """
-    a = _require_positive(a_m, 'a_m')
-    b = _require_positive(b_m, 'b_m')
-    c = _require_positive(c_m, 'c_m')
+    a = _require_positive(a, 'a')
+    b = _require_positive(b, 'b')
+    c = _require_positive(c, 'c')
     return _ts_convex(b ** 2 / a, c ** 2 / a, frequency, sound_speed,
                       'ts_ellipsoid')
 
@@ -212,8 +212,8 @@ def _sinc2_ts(sigma_broadside, k_dim, angle_deg):
 
 
 def ts_cylinder(
-    radius_m,
-    length_m,
+    radius,
+    length,
     *,
     frequency,
     angle_deg=0.0,
@@ -230,7 +230,7 @@ def ts_cylinder(
 
     Parameters
     ----------
-    radius_m, length_m : float
+    radius, length : float
         Cylinder radius and length (m).
     frequency : float or array_like
         Frequency or frequencies (Hz); broadcasts against ``angle_deg``, so
@@ -246,8 +246,8 @@ def ts_cylinder(
     float or ndarray
         TS (dB re 1 m²); ``-inf`` at exact pattern nulls.
     """
-    a = _require_positive(radius_m, 'radius_m')
-    L = _require_positive(length_m, 'length_m')
+    a = _require_positive(radius, 'radius')
+    L = _require_positive(length, 'length')
     f = _require_positive_frequencies(frequency)
     c = _require_positive(sound_speed, 'sound_speed')
     _warn_below_geometric(a, float(f.min()), c, 'ts_cylinder',
@@ -258,8 +258,8 @@ def ts_cylinder(
 
 
 def ts_plate(
-    width_m,
-    height_m,
+    width,
+    height,
     *,
     frequency,
     angle_deg=0.0,
@@ -276,8 +276,8 @@ def ts_plate(
 
     Parameters
     ----------
-    width_m, height_m : float
-        Plate dimensions (m); ``width_m`` lies in the rotation plane.
+    width, height : float
+        Plate dimensions (m); ``width`` lies in the rotation plane.
     frequency : float or array_like
         Frequency or frequencies (Hz); broadcasts against ``angle_deg``.
         The dimension check reads the lowest.
@@ -291,8 +291,8 @@ def ts_plate(
     float or ndarray
         TS (dB re 1 m²); ``-inf`` at exact pattern nulls.
     """
-    w = _require_positive(width_m, 'width_m')
-    h = _require_positive(height_m, 'height_m')
+    w = _require_positive(width, 'width')
+    h = _require_positive(height, 'height')
     f = _require_positive_frequencies(frequency)
     c = _require_positive(sound_speed, 'sound_speed')
     _warn_below_geometric(min(w, h), float(f.min()), c, 'ts_plate',

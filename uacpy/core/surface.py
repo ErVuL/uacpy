@@ -10,8 +10,8 @@ Like `Bottom`, distinct boundary types cannot be blended, so a `Surface` has
 ``at`` / ``isel`` (select by range / index) but no ``eval`` — only the surface
 *shape* (:class:`uacpy.core.altimetry.Altimetry`) interpolates. Reads of
 :class:`BoundaryProperties` attributes (``acoustic_type``, ``sound_speed``, …)
-delegate to the r = 0 node, so a uniform `Surface` is a drop-in wherever a
-single `BoundaryProperties` was used.
+delegate to the r = 0 node, so a uniform `Surface` reads as a single
+`BoundaryProperties` does.
 """
 
 import copy as _copy
@@ -33,7 +33,8 @@ from uacpy.core._carrier import (
 )
 from uacpy.core._export import CarrierExport
 from uacpy.core.boundary import (
-    BoundaryProperties, _columns, _delegate_write, _property_row,
+    BoundaryProperties, _PROPERTY_UNITS, _columns, _delegate_write,
+    _property_row,
     _reduce_uniform_nodes,
     _HALFSPACE_DELEGATED,
 )
@@ -128,6 +129,9 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                           **_property_row(node)}
                          for r, node in zip(ranges, self.nodes)])
 
+    def _table_units(self):
+        return {**super()._table_units(), **_PROPERTY_UNITS}
+
     def __repr__(self) -> str:
         if not self.is_range_dependent:
             return build('Surface', self.nodes[0]._repr_bits())
@@ -139,7 +143,7 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     def data_sources(self) -> tuple:
         """Every node's provenance, exact repeats removed (harmonised with the
         leaf carriers and ``env.data_sources``). On a range-dependent surface
-        each record carries its node's range as ``range_m``."""
+        each record carries its node's range as ``range``."""
         return dedupe_provenance(
             self.nodes, ranges=self.ranges if len(self.nodes) > 1 else None)
 
@@ -174,7 +178,7 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             return cls(nodes=props, ranges=ranges)
         raise ConfigurationError(
             "Surface: expected None, a BoundaryProperties, a Surface, or a list "
-            "of (range_m, BoundaryProperties) nodes; got "
+            "of (range, BoundaryProperties) nodes; got "
             f"{type(value).__name__}.")
 
     # ── derived ─────────────────────────────────────────────────────────────
@@ -286,8 +290,8 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             self.nodes, method, 'Surface.collapse_range', 'nodes')])
 
     def __getattr__(self, name):
-        # Uniform-surface compatibility: forward BoundaryProperties reads to the
-        # r = 0 node so a Surface stands in for a single BoundaryProperties.
+        # Forward BoundaryProperties reads to the r = 0 node so a Surface
+        # stands in for a single BoundaryProperties.
         if name in _SURFACE_DELEGATED:
             return getattr(self.nodes[0], name)
         raise AttributeError(

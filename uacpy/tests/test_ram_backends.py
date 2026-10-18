@@ -7,6 +7,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+from types import SimpleNamespace
 import pytest
 from scipy.io import FortranFile
 
@@ -20,8 +21,8 @@ from uacpy.core.environment import (
 from uacpy import Field
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
-from uacpy.io.mpirams_writer import write_inpe
-from uacpy.io.ramsurf_writer import write_ramin
+from uacpy.io.mpirams_writer import write_mpirams_inpe
+from uacpy.io.ramsurf_writer import write_ram_in
 from uacpy.models import RAM, RunMode
 from uacpy.core.exceptions import (
     ConfigurationError,
@@ -185,15 +186,17 @@ class TestBackendScopedKnobWarnings:
     """
 
     @pytest.mark.parametrize('backend,kw,expect', [
-        ('rams', dict(n_stability=5, stability_range_m=1234.0),
-         'n_stability, stability_range_m'),
-        ('rams', dict(rams_rotation_angle=60.0), None),
-        ('ramgeo', dict(rams_rotation_angle=60.0, rams_rotation=False),
-         'rams_rotation_angle, rams_rotation'),
-        ('ramgeo', dict(n_stability=5, stability_range_m=1234.0), None),
-        ('mpirams', dict(rams_rotation_angle=60.0), 'rams_rotation_angle'),
+        ('rams', dict(n_stability=5, stability_range=1234.0),
+         'n_stability, stability_range'),
+        ('rams', dict(rams_rotation_angle_deg=60.0), None),
+        ('ramgeo', dict(rams_rotation_angle_deg=60.0, rams_rotation=False),
+         'rams_rotation_angle_deg, rams_rotation'),
+        ('ramgeo', dict(n_stability=5, stability_range=1234.0), None),
+        ('mpirams', dict(rams_rotation_angle_deg=60.0), 'rams_rotation_angle_deg'),
         ('ramsurf', dict(rams_rotation=False), 'rams_rotation'),
         # A pin equal to the derived value is still a pin the run discards.
+        ('ramgeo', dict(rams_rotation=True), 'rams_rotation'),
+        ('rams', dict(rams_rotation=True), None),
         ('rams', dict(n_stability=1), 'n_stability'),
         ('ramgeo', dict(rams_dr_factor=5.0), 'rams_dr_factor'),
         ('mpirams', dict(rams_dr_factor=2.0), 'rams_dr_factor'),
@@ -434,7 +437,7 @@ class TestDispatchedDeckIsWritable:
     def test_slower_than_water_rd_bottom_writes_a_legal_sed_file(
             self, tmp_path, monkeypatch):
         # The once-broken case: a range-dependent slower-than-water bottom
-        # goes through write_sediment_file (range_dependent_sediment=1), whose '-1 range'
+        # goes through write_mpirams_sediment (range_dependent_sediment=1), whose '-1 range'
         # header sentinel refuses any profile record leading with a
         # negative token — before the surface control point was clamped,
         # this raised ConfigurationError on the mpiramS path dispatch
@@ -591,10 +594,10 @@ class TestRamInWriter:
 
     def test_ramsurf_kind_includes_surface_block(self, tmp_path):
         out = tmp_path / 'ram.in'
-        write_ramin(
+        write_ram_in(
             str(out), kind='ramsurf',
             frequency=100.0, zs=50.0, zr_line=50.0,
-            rmax_march=5000.0, dr=10.0, ndr=2,
+            rmax_march=5000.0, dr=10.0, range_decimation=2,
             zmax=400.0, dz=1.0, depth_decimation=2, zmplt=200.0,
             c0=1500.0, n_pade=4,
             surface=[(0.0, 0.0), (5000.0, 0.0)],
@@ -613,12 +616,12 @@ class TestRamInWriter:
 
     def test_rams_kind_uses_irot_theta_and_six_profiles(self, tmp_path):
         out = tmp_path / 'rams.in'
-        write_ramin(
+        write_ram_in(
             str(out), kind='rams',
             frequency=100.0, zs=50.0, zr_line=50.0,
-            rmax_march=5000.0, dr=10.0, ndr=2,
+            rmax_march=5000.0, dr=10.0, range_decimation=2,
             zmax=400.0, dz=1.0, depth_decimation=2, zmplt=200.0,
-            c0=1500.0, n_pade=4, rams_rotation=1, rams_rotation_angle=45.0,
+            c0=1500.0, n_pade=4, rams_rotation=1, rams_rotation_angle_deg=45.0,
             bathymetry=[(0.0, 100.0), (5000.0, 100.0)],
             range_segments=[dict(
                 range=0.0,
@@ -640,12 +643,12 @@ class TestRamInWriter:
         """ramgeo = ramsurf format minus the surface block, no shear: row-5
         carries (ns, rs) and there are only 4 profile blocks per range."""
         out = tmp_path / 'ramgeo.in'
-        write_ramin(
+        write_ram_in(
             str(out), kind='ramgeo',
             frequency=100.0, zs=50.0, zr_line=50.0,
-            rmax_march=5000.0, dr=10.0, ndr=2,
+            rmax_march=5000.0, dr=10.0, range_decimation=2,
             zmax=400.0, dz=1.0, depth_decimation=2, zmplt=200.0,
-            c0=1500.0, n_pade=4, n_stability=1, stability_range_m=0.0,
+            c0=1500.0, n_pade=4, n_stability=1, stability_range=0.0,
             bathymetry=[(0.0, 100.0), (5000.0, 100.0)],
             range_segments=[dict(
                 range=0.0,
@@ -665,10 +668,10 @@ class TestRamInWriter:
     def test_rams_requires_shear_profiles(self, tmp_path):
         out = tmp_path / 'rams.in'
         with pytest.raises(ConfigurationError, match="bottom_cs and bottom_attns"):
-            write_ramin(
+            write_ram_in(
                 str(out), kind='rams',
                 frequency=100.0, zs=50.0, zr_line=50.0,
-                rmax_march=5000.0, dr=10.0, ndr=2,
+                rmax_march=5000.0, dr=10.0, range_decimation=2,
                 zmax=400.0, dz=1.0, depth_decimation=2, zmplt=200.0,
                 c0=1500.0, n_pade=4,
                 bathymetry=[(0.0, 100.0), (5000.0, 100.0)],
@@ -690,9 +693,9 @@ class TestMpiramsDeckUnits:
     binary."""
 
     def test_ssp_profile_headers_are_km_and_pairs_metres(self, tmp_path):
-        from uacpy.io.mpirams_writer import write_ssp_file
+        from uacpy.io.mpirams_writer import write_mpirams_ssp
         out = tmp_path / 'ssp.dat'
-        write_ssp_file(
+        write_mpirams_ssp(
             out,
             depths=np.array([0.0, 100.0]),
             sound_speed=np.array([[1500.0, 1520.0], [1490.0, 1480.0]]),
@@ -708,19 +711,19 @@ class TestMpiramsDeckUnits:
         assert float(pairs[1][1]) == 1490.0
 
     def test_bathymetry_file_is_metres_unscaled(self, tmp_path):
-        from uacpy.io.mpirams_writer import write_bth_file
+        from uacpy.io.mpirams_writer import write_mpirams_bathymetry
         out = tmp_path / 'bth.dat'
-        write_bth_file(out, ranges=np.array([0.0, 5000.0]),
-                       depths=np.array([100.0, 220.0]))
+        write_mpirams_bathymetry(out, ranges=np.array([0.0, 5000.0]),
+                                 depths=np.array([100.0, 220.0]))
         rows = [[float(v) for v in ln.split()]
                 for ln in out.read_text().splitlines()]
         assert rows == [[0.0, 100.0], [5000.0, 220.0]], (
             "bathymetry rows must be range(m) depth(m), no km conversion")
 
     def test_output_ranges_file_is_metres_unscaled(self, tmp_path):
-        from uacpy.io.mpirams_writer import write_ranges_file
+        from uacpy.io.mpirams_writer import write_mpirams_ranges
         out = tmp_path / 'ranges.dat'
-        write_ranges_file(out, ranges=np.array([500.0, 4500.0]))
+        write_mpirams_ranges(out, ranges=np.array([500.0, 4500.0]))
         values = [float(ln) for ln in out.read_text().split()]
         assert values == [500.0, 4500.0]
 
@@ -1107,7 +1110,7 @@ class TestCollinsArrayLimits:
         m = RAM(verbose=False, backend='ramgeo', zmax=zmax)
         monkeypatch.setattr(
             'uacpy.models.ram.grid.optimize_grid_relaxing',
-            lambda **kw: ({'dr': 10.0, 'dz': 0.05}, kw['eps0'], kw['theta0']))
+            lambda **kw: (SimpleNamespace(dr=10.0, dz=0.05), kw['eps0'], kw['theta0']))
         env = Environment(
             name='deep-domain', bathymetry=100.005, ssp=1500.0,
             bottom=BoundaryProperties(acoustic_type='half-space',
@@ -1336,14 +1339,14 @@ class TestRamsRotatedPadeScalar:
 
 @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
 def test_forcing_rams_on_a_fluid_bottom_is_rejected():
-    """rams0.5 is the elastic PE; on a fluid bottom it returns a null field —
-    TL saturated at the zero-field floor at every range, which looks like
-    an answer rather than a failure.
+    """rams0.5 is the elastic PE; on a fluid bottom every node has
+    ``mub = rhob·cs² = 0`` (``rams0.5.f:204``) and its fluid–solid
+    interface rows divide by it (``:593-600``).
 
     ``ram._dispatch.validate_forced_backend`` therefore rejects each Collins
     backend when its defining feature is absent: ramsurf without altimetry,
     rams without shear. Auto-dispatch never routes fluid to rams, so only
-    ``backend='rams'`` can reach the null field.
+    ``backend='rams'`` can reach it.
     """
     from uacpy.core.exceptions import ConfigurationError
     fluid = Environment(
@@ -1600,9 +1603,9 @@ class TestBackendIndependentResultShape:
         m = RAM(verbose=False)
         field = m.run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
         raw = _collins_launch_grid(m, env, src, rcv)
-        from uacpy.models.ram._interp import interp_to_receiver_grid
-        native = interp_to_receiver_grid(
-            raw['depths'], raw['ranges'], np.asarray(raw['tl'], float),
+        from uacpy.acoustics import resample_depth_range
+        native = resample_depth_range(
+            np.asarray(raw['tl'], float), raw['depths'], raw['ranges'],
             rcv.depths.astype(float), rcv.ranges.astype(float))
         got = np.asarray(field.dB)
         # Compare where the binary's own TL is unclamped; the near-source
@@ -1616,8 +1619,8 @@ class TestDivergedSamplesDoNotContaminateNeighbours:
     """A PE sample the march failed to solve is no data, and interpolating
     it as a zero is worse than dropping it: the zero is a real pressure,
     so every receiver cell whose stencil touches one comes back finite and
-    credible. ``interp_to_receiver_grid`` therefore lets NaN propagate,
-    the way the Collins path does."""
+    credible. ``resample_depth_range``, the regrid every RAM backend uses,
+    therefore lets NaN propagate."""
 
     @staticmethod
     def _grid_with_a_diverged_patch():
@@ -1628,20 +1631,18 @@ class TestDivergedSamplesDoNotContaminateNeighbours:
         return depths, ranges, field
 
     def test_a_diverged_sample_marks_its_neighbours_no_data(self):
-        from uacpy.models.ram._interp import interp_to_receiver_grid
+        from uacpy.acoustics import resample_depth_range
         depths, ranges, field = self._grid_with_a_diverged_patch()
-        out = interp_to_receiver_grid(
-            depths, ranges, field,
-            np.array([50.0]), np.array([300.0]))
+        out = resample_depth_range(
+            field, depths, ranges, np.array([50.0]), np.array([300.0]))
         assert np.isnan(out).all(), (
             "a receiver reading the failed sample came back finite")
 
     def test_cells_away_from_the_failure_keep_their_value(self):
-        from uacpy.models.ram._interp import interp_to_receiver_grid
+        from uacpy.acoustics import resample_depth_range
         depths, ranges, field = self._grid_with_a_diverged_patch()
-        out = interp_to_receiver_grid(
-            depths, ranges, field,
-            np.array([0.0]), np.array([100.0]))
+        out = resample_depth_range(
+            field, depths, ranges, np.array([0.0]), np.array([100.0]))
         assert np.isfinite(out).all()
         assert out.ravel()[0] == pytest.approx(1e-3)
 
@@ -1686,9 +1687,9 @@ class TestCollinsBroadbandLevel:
                                    frequency=250.0)
         assert raw['frequency'] == pytest.approx(250.0)
 
-        from uacpy.models.ram._interp import interp_to_receiver_grid
-        native = interp_to_receiver_grid(
-            raw['depths'], raw['ranges'], np.asarray(raw['tl'], float),
+        from uacpy.acoustics import resample_depth_range
+        native = resample_depth_range(
+            np.asarray(raw['tl'], float), raw['depths'], raw['ranges'],
             rcv.depths.astype(float), rcv.ranges.astype(float))
         ok = (np.isfinite(native) & np.isfinite(got)
               & (native > 0.0) & (native < _PROPAGATION_LOSS_CEILING_DB))
@@ -2424,7 +2425,8 @@ class TestTheAutomaticDomainHoldsTheSedimentStack:
                                              knobs=model._knob_record())
         attn = segs[0]['bottom_attn']
         assert attn[-1][0] == pytest.approx(zmax - env.depth)
-        assert attn[-1][1] == pytest.approx(model.absorber_attenuation)
+        assert attn[-1][1] == pytest.approx(
+            ram_domain.DEFAULT_ABSORBER_ATTENUATION)
         # The 60 m layer keeps its own attenuation all the way to its base.
         assert max(d for d, v in attn if v <= 0.05) >= 60.0
 
@@ -2658,7 +2660,8 @@ class TestMpiramsAbsorberIsAFloorOnTheHalfSpaceAttenuation:
             attenuation=attn_halfspace))
         model = RAM(verbose=False)
         attn = _bottom_props(model, env, tmp_path)[4]
-        return float(attn[-2]), float(attn[-1]), model.absorber_attenuation
+        return (float(attn[-2]), float(attn[-1]),
+                ram_domain.DEFAULT_ABSORBER_ATTENUATION)
 
     def test_a_seabed_above_the_absorber_value_keeps_its_own(self, tmp_path):
         below, last, floor = self._last_two(15.0, tmp_path)
@@ -2670,6 +2673,19 @@ class TestMpiramsAbsorberIsAFloorOnTheHalfSpaceAttenuation:
         below, last, floor = self._last_two(0.5, tmp_path)
         assert below == pytest.approx(0.5)
         assert last == pytest.approx(floor)
+
+    @pytest.mark.parametrize('pinned, seabed', [(2.0, 3.0), (15.0, 0.5)])
+    def test_a_pinned_value_is_written_as_given(self, pinned, seabed,
+                                                tmp_path):
+        """A set ``absorber_attenuation`` reaches the deck as given, below
+        the seabed's own (the ramp then decreases) as above it."""
+        env = _env(bottom=BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1600.0, density=1.5,
+            attenuation=seabed))
+        model = RAM(verbose=False, absorber_attenuation=pinned)
+        attn = _bottom_props(model, env, tmp_path)[4]
+        assert (float(attn[-2]), float(attn[-1])) == pytest.approx(
+            (seabed, pinned))
 
 
 class TestSedimentSpeedFollowsTheLocalSeafloor:
@@ -2890,12 +2906,12 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         c_min, c_max = ram_domain.water_speed_bounds(env)
         c0 = ram_domain.resolve_c0(env, knobs=model._knob_record())
         c_min, c_max = min(c_min, c0), max(c_max, c0)   # the scored band
-        # angle_max is whichever relaxation rung succeeded, so score the
+        # angle_max_deg is whichever relaxation rung succeeded, so score the
         # returned grid at each rung and require the warning to name one.
         candidates = [
             grid_error(dr=dr, dz=dz, frequency=self.FREQ, c_min=c_min,
                        c_max=c_max, x_max=self.RMAX, c0=c0,
-                       angle_max=theta, p=int(model.n_pade), alpha=0.0,
+                       angle_max_deg=theta, p=int(model.n_pade), alpha=0.0,
                        c_min_all=c_min_all, c_max_all=c_max_all)
             for theta in (30.0, 20.0, 15.0)
         ]
@@ -2930,18 +2946,18 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         c_min, c_max = min(c_min, c0), max(c_max, c0)   # the scored band
         res = optimize_grid(frequency=self.FREQ, c_min=c_min, c_max=c_max,
                             x_max=self.RMAX, c0=c0,
-                            angle_max=30.0, eps=eps_used, p=int(model.n_pade),
+                            angle_max_deg=30.0, eps=eps_used, p=int(model.n_pade),
                             alpha=0.0, c_min_all=c_min_all,
                             c_max_all=c_max_all)
-        assert res['dz'] < 1500.0 / (16.0 * self.FREQ), (
+        assert res.dz < 1500.0 / (16.0 * self.FREQ), (
             "the search ladder must run below the floor for this to bite")
-        assert res['dz'] >= dz_ladder_end(self.FREQ, c_min)
-        assert dr == pytest.approx(res['dr'], rel=1e-9)
+        assert res.dz >= dz_ladder_end(self.FREQ, c_min)
+        assert dr == pytest.approx(res.dr, rel=1e-9)
         floor = 1500.0 / (16.0 * self.FREQ)
-        assert res['dz'] <= dz < floor
+        assert res.dz <= dz < floor
         from uacpy.models.pe_grid import grid_error
         assert grid_error(dr=dr, dz=dz, frequency=self.FREQ, c_min=c_min,
-                          c_max=c_max, x_max=self.RMAX, c0=c0, angle_max=30.0,
+                          c_max=c_max, x_max=self.RMAX, c0=c0, angle_max_deg=30.0,
                           p=int(model.n_pade), alpha=0.0,
                           c_min_all=c_min_all, c_max_all=c_max_all) < 1.0
 
@@ -2987,7 +3003,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         model = RAM(backend='ramgeo', verbose=False)
         monkeypatch.setattr(
             'uacpy.models.ram.grid.optimize_grid_relaxing',
-            lambda **kw: ({'dr': 10.0, 'dz': 0.5}, eps_used, kw['theta0']))
+            lambda **kw: (SimpleNamespace(dr=10.0, dz=0.5), eps_used, kw['theta0']))
         with recorded_warnings() as caught:
             ram_grid.compute_grid_lytaev(self._env(), 100.0,
                                        max_range=self.RMAX, kind='ramgeo',
@@ -3008,7 +3024,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         model = RAM(backend='ramgeo', verbose=False)
         monkeypatch.setattr(
             'uacpy.models.ram.grid.optimize_grid_relaxing',
-            lambda **kw: ({'dr': 10.0, 'dz': 0.5}, kw['eps0'], 20.0))
+            lambda **kw: (SimpleNamespace(dr=10.0, dz=0.5), kw['eps0'], 20.0))
         with pytest.warns(UserWarning, match='Lytaev relaxed') as record:
             ram_grid.compute_grid_lytaev(self._env(), 100.0,
                                        max_range=self.RMAX, kind='ramgeo',
@@ -3138,13 +3154,13 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
             dr, _dz = ram_grid.compute_grid_lytaev(
                 env, 200.0, max_range=5000.0, kind='mpirams',
                 knobs=model._knob_record(), log=model._log)
-        kw = dict(frequency=200.0, x_max=5000.0, c0=c0, angle_max=30.0, eps=1e-3,
+        kw = dict(frequency=200.0, x_max=5000.0, c0=c0, angle_max_deg=30.0, eps=1e-3,
                   p=int(model.n_pade), alpha=0.0,
                   c_min_all=c_min_all, c_max_all=c_max_all)
         widened = optimize_grid(c_min=c_min, c_max=c0, **kw)
         water = optimize_grid(c_min=c_min, c_max=c_max, **kw)
-        assert dr == pytest.approx(float(widened['dr']), rel=1e-9)
-        assert dr < float(water['dr']), "the widening must buy a finer step"
+        assert dr == pytest.approx(float(widened.dr), rel=1e-9)
+        assert dr < float(water.dr), "the widening must buy a finer step"
 
     def test_a_hard_rock_seabed_gets_a_refined_grid_and_no_warning(self):
         """The one-hull chooser refused a 5500 m/s seabed at every rung; the
@@ -3770,14 +3786,14 @@ def test_mpirams_zmax_is_an_exact_multiple_of_deltaz(tmp_path, earth_curvature):
     assert zmax / (icount - 1) == pytest.approx(deltaz, rel=1e-12)
 
 
-# ─── Regression: angle_max carries the seabed-slope term ─────────────────
+# ─── Regression: angle_max_deg carries the seabed-slope term ─────────────────
 
 
 @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
 class TestThetaMaxIncludesTheBottomSlope:
     """Lytaev (2023) §5.1 estimates the spectrum bracket as
     ``θ_max = max(θ_max^src, θ_max^bottom)``, the second being the steepest
-    slope between bottom and water. ``angle_max`` on the constructor is the
+    slope between bottom and water. ``angle_max_deg`` on the constructor is the
     source term only; the seabed term comes from ``env.bathymetry``."""
 
     def _sloped(self, run_m, drop_m):
@@ -4079,10 +4095,10 @@ class TestDzSurvivesTheDeck:
     def test_write_ramin_keeps_twelve_significant_digits(self, tmp_path):
         out = tmp_path / 'ramgeo.in'
         dz = 100.0 / 266.0
-        write_ramin(
+        write_ram_in(
             str(out), kind='ramgeo',
             frequency=100.0, zs=50.0, zr_line=50.0,
-            rmax_march=5000.0, dr=10.0, ndr=2,
+            rmax_march=5000.0, dr=10.0, range_decimation=2,
             zmax=400.0, dz=dz, depth_decimation=1, zmplt=200.0,
             c0=1500.0, n_pade=4,
             bathymetry=[(0.0, 100.0), (5000.0, 100.0)],
@@ -4119,17 +4135,17 @@ class TestCollinsHankelPhase:
         k0 = 0.7
         point_source_phase = np.exp(-1j * np.pi / 4.0)
         rs = psi_to_travelling_wave(
-            psi, convention='ramsurf', ranges_m=ranges, range_axis=1,
+            psi, convention='ramsurf', ranges=ranges, range_axis=1,
             k0=k0, apply_radial=False)
         # Dividing the explicit carrier back out must leave exactly the
         # point source's far-field phase.
         assert np.allclose(rs * np.exp(1j * k0 * ranges), point_source_phase)
         rams = psi_to_travelling_wave(
-            psi, convention='rams', ranges_m=ranges, range_axis=1,
+            psi, convention='rams', ranges=ranges, range_axis=1,
             apply_radial=False)
         assert np.allclose(rams, point_source_phase)
         mp = psi_to_travelling_wave(
-            psi, convention='mpirams', ranges_m=ranges, range_axis=1,
+            psi, convention='mpirams', ranges=ranges, range_axis=1,
             apply_radial=False)
         assert np.allclose(mp, 4.0 * np.pi)
         # |TL| is untouched: the factor is unit-modulus.
@@ -4460,7 +4476,7 @@ class TestShortCollinsOutputIsAudible:
 
     ``_read_lz_records`` stops before a partial trailing record, so a short
     ``tl.grid`` decodes as a SHORTER RANGE AXIS, and
-    ``interp_to_receiver_grid`` NaN-fills what lies beyond it. Measured on a
+    ``resample_depth_range`` NaN-fills what lies beyond it. Measured on a
     5 km ramgeo run truncated to 30% of its bytes: 80% of the Field NaN, and
     ``np.nanmean(-TL)`` reading 52.68 dB against 58.18 dB true — a plausible
     number 5.5 dB out. A non-zero exit already raises before the read, so the
@@ -4541,10 +4557,10 @@ class TestWriteSspFileAcceptsListInput:
 
     def test_list_speeds_write_one_profile_of_depth_speed_pairs(
             self, tmp_path):
-        from uacpy.io.mpirams_writer import write_ssp_file
+        from uacpy.io.mpirams_writer import write_mpirams_ssp
         path = tmp_path / 'profile.ssp'
-        write_ssp_file(path, depths=[0.0, 50.0, 100.0],
-                       sound_speed=[1500.0, 1510.0, 1520.0])
+        write_mpirams_ssp(path, depths=[0.0, 50.0, 100.0],
+                          sound_speed=[1500.0, 1510.0, 1520.0])
         lines = path.read_text().splitlines()
         assert lines[0].split()[0] == '-1'
         pairs = [ln.split() for ln in lines[1:]]
@@ -4553,10 +4569,11 @@ class TestWriteSspFileAcceptsListInput:
 
     def test_nested_list_speeds_without_ranges_are_refused(self, tmp_path):
         from uacpy.core.exceptions import ConfigurationError
-        from uacpy.io.mpirams_writer import write_ssp_file
-        with pytest.raises(ConfigurationError, match='ranges_m'):
-            write_ssp_file(tmp_path / 'p.ssp', depths=[0.0, 100.0],
-                           sound_speed=[[1500.0, 1501.0], [1520.0, 1521.0]])
+        from uacpy.io.mpirams_writer import write_mpirams_ssp
+        with pytest.raises(ConfigurationError,
+                           match='ranges is required for a range-dependent'):
+            write_mpirams_ssp(tmp_path / 'p.ssp', depths=[0.0, 100.0],
+                              sound_speed=[[1500.0, 1501.0], [1520.0, 1521.0]])
 
 
 class TestRamsurfWritersUseLengthNotTruthiness:
@@ -4599,29 +4616,29 @@ class TestMpiramsSspRejectsDecksThePeramxCounterMisreads:
     longer, it drops the trailing profiles without a word."""
 
     def test_a_short_range_vector_raises_configurationerror(self, tmp_path):
-        from uacpy.io.mpirams_writer import write_ssp_file
+        from uacpy.io.mpirams_writer import write_mpirams_ssp
         with pytest.raises(ConfigurationError, match='2 range.*3 profile'):
-            write_ssp_file(tmp_path / 'a.ssp', np.array([0.0, 10.0]),
-                           np.full((2, 3), 1500.0), np.array([0.0, 100.0]))
+            write_mpirams_ssp(tmp_path / 'a.ssp', np.array([0.0, 10.0]),
+                              np.full((2, 3), 1500.0), np.array([0.0, 100.0]))
 
     def test_a_long_range_vector_raises_configurationerror(self, tmp_path):
-        from uacpy.io.mpirams_writer import write_ssp_file
+        from uacpy.io.mpirams_writer import write_mpirams_ssp
         with pytest.raises(ConfigurationError, match='3 range.*2 profile'):
-            write_ssp_file(tmp_path / 'b.ssp', np.array([0.0, 10.0]),
-                           np.full((2, 2), 1500.0),
-                           np.array([0.0, 100.0, 200.0]))
+            write_mpirams_ssp(tmp_path / 'b.ssp', np.array([0.0, 10.0]),
+                              np.full((2, 2), 1500.0),
+                              np.array([0.0, 100.0, 200.0]))
 
     def test_a_negative_depth_names_the_header_sentinel(self, tmp_path):
-        from uacpy.io.mpirams_writer import write_ssp_file
+        from uacpy.io.mpirams_writer import write_mpirams_ssp
         with pytest.raises(ConfigurationError, match='-1 range'):
-            write_ssp_file(tmp_path / 'c.ssp', np.array([-5.0, 10.0]),
-                           np.array([1500.0, 1520.0]))
+            write_mpirams_ssp(tmp_path / 'c.ssp', np.array([-5.0, 10.0]),
+                              np.array([1500.0, 1520.0]))
 
     def test_matched_ranges_write_one_header_per_profile(self, tmp_path):
-        from uacpy.io.mpirams_writer import write_ssp_file
+        from uacpy.io.mpirams_writer import write_mpirams_ssp
         out = tmp_path / 'd.ssp'
-        write_ssp_file(out, np.array([0.0, 10.0]), np.full((2, 2), 1500.0),
-                       np.array([0.0, 100.0]))
+        write_mpirams_ssp(out, np.array([0.0, 10.0]), np.full((2, 2), 1500.0),
+                          np.array([0.0, 100.0]))
         lines = out.read_text().splitlines()
         assert [ln for ln in lines if ln.startswith('-1')] == \
             ['-1 0.0', '-1 0.1']
@@ -4637,16 +4654,16 @@ class TestMpiramsSedimentRowsMustMatchNzsExactly:
 
     @staticmethod
     def _write_deck(tmp_path, **overrides):
-        from uacpy.io.mpirams_writer import write_inpe
+        from uacpy.io.mpirams_writer import write_mpirams_inpe
         kwargs = dict(
             fc=100.0, q_factor=1.0, record_duration=1.0, zsrc=10.0, dz=0.5, dr=10.0,
-            n_pade=6, n_stability=1, stability_range_m=0.0, depth_decimation=1, ssp_filename='S.ssp',
+            n_pade=6, n_stability=1, stability_range=0.0, depth_decimation=1, ssp_filename='S.ssp',
             earth_curvature=0, horizontal_interpolation=0, bathymetry_from_file=1, bth_filename='B.bth', n_sediment_points=4,
             cs=np.zeros(4), rho=np.full(4, 1.2), attn=np.full(4, 0.5),
             c0=1500.0,
         )
         kwargs.update(overrides)
-        write_inpe(tmp_path / 'in.pe', **kwargs)
+        write_mpirams_inpe(tmp_path / 'in.pe', **kwargs)
 
     def test_an_inpe_row_longer_than_nzs_raises_configurationerror(
             self, tmp_path):
@@ -4665,8 +4682,8 @@ class TestMpiramsSedimentRowsMustMatchNzsExactly:
 
     @staticmethod
     def _write_sed(tmp_path, n_depths):
-        from uacpy.io.mpirams_writer import write_sediment_file
-        write_sediment_file(
+        from uacpy.io.mpirams_writer import write_mpirams_sediment
+        write_mpirams_sediment(
             tmp_path / 'a.sed', np.array([0.0, 1000.0]),
             np.zeros((n_depths, 2)), np.full((n_depths, 2), 1.2),
             np.full((n_depths, 2), 0.5), n_sediment_points=3)
@@ -4933,7 +4950,7 @@ def _vendored_text(path: Path) -> str:
 def _write_inpe_kwargs(nzs: int) -> dict:
     return dict(
         fc=75.0, q_factor=75.0, record_duration=1.0, zsrc=500.0, dz=1.0, dr=100.0,
-        n_pade=4, n_stability=1, stability_range_m=1000.0, depth_decimation=10, ssp_filename='test.ssp',
+        n_pade=4, n_stability=1, stability_range=1000.0, depth_decimation=10, ssp_filename='test.ssp',
         earth_curvature=0, horizontal_interpolation=0, bathymetry_from_file=1, bth_filename='test.bth', sedlayer=300.0,
         n_sediment_points=nzs, cs=np.zeros(nzs), rho=np.full(nzs, 1.2),
         attn=np.full(nzs, 0.5), c0=1500.0,
@@ -5020,10 +5037,10 @@ class TestNzsFloor:
     def test_write_inpe_rejects_nzs_below_four(self, tmp_path, nzs):
         with pytest.raises(ConfigurationError,
                            match="n_sediment_points must be at least 4"):
-            write_inpe(tmp_path / 'in.pe', **_write_inpe_kwargs(nzs))
+            write_mpirams_inpe(tmp_path / 'in.pe', **_write_inpe_kwargs(nzs))
 
     def test_write_inpe_writes_a_deck_at_the_nzs_floor(self, tmp_path):
-        write_inpe(tmp_path / 'in.pe', **_write_inpe_kwargs(4))
+        write_mpirams_inpe(tmp_path / 'in.pe', **_write_inpe_kwargs(4))
         lines = (tmp_path / 'in.pe').read_text().splitlines()
         assert lines[17].split()[0] == '4'
         for row in lines[19:22]:
@@ -5242,3 +5259,80 @@ def test_rams_level_follows_the_fluid_codes_in_a_sound_speed_gradient():
         level[backend] = 10.0 * np.log10(np.nanmean(10.0 ** (-tl / 10.0),
                                                     axis=1))
     assert np.max(np.abs(level['rams'] - level['ramgeo'])) < 0.2
+
+
+class TestTheAbsorbingLayerTopFollowsEachDeck:
+    """Where RAM's absorbing layer starts, as each deck places it — the depth
+    below which a RAM field is NaN (``_domain.mask_absorbing_layer``): 100 m
+    of water deepening to 200 m at 10 km over a half-space, ``zmax`` 1000 m,
+    and over a 60 m layer for the sediment-base floor."""
+
+    FREQ = 100.0
+    ZMAX = 1000.0
+
+    @staticmethod
+    def _sloping(bottom=None):
+        return Environment(
+            name='slope', bathymetry=[(0.0, 100.0), (10000.0, 200.0)],
+            ssp=1500.0, bottom=bottom if bottom is not None else
+            BoundaryProperties(acoustic_type='half-space', sound_speed=1700.0,
+                               density=1.8, attenuation=0.5))
+
+    def _top(self, kind, env, ranges):
+        knobs = RAM(backend=kind, verbose=False)._knob_record()
+        base = ram_collins.collins_deck_base(env, kind, self.ZMAX,
+                                             knobs=knobs)
+        width = ram_domain.absorbing_layer_thickness(env, self.FREQ,
+                                                     knobs=knobs)
+        return width, ram_collins.collins_absorber_top(
+            env, base, ranges, self.FREQ, kind=kind, knobs=knobs)
+
+    def test_ramgeo_hangs_the_layer_from_the_local_seafloor(self):
+        """One section, cut on the 100 m seafloor at r = 0: the block starts
+        ``zmax − 100 − width`` under the seafloor, and ``matrc`` keeps that
+        depth under the local seafloor as it deepens."""
+        width, top = self._top('ramgeo', self._sloping(), [0.0, 5000.0])
+        np.testing.assert_allclose(
+            top, [100.0 + 900.0 - width, 150.0 + 900.0 - width], rtol=1e-12)
+
+    def test_rams_holds_the_layer_at_its_absolute_depth(self):
+        width, top = self._top('rams', self._sloping(), [0.0, 5000.0])
+        np.testing.assert_allclose(top, self.ZMAX - width, rtol=1e-12)
+
+    def test_the_layer_never_starts_inside_the_modelled_sediment(self):
+        """A layer as deep as the domain's floor minus a few metres puts the
+        ramp start at the sediment base, not ``zmax − width``."""
+        env = self._sloping(SeabedColumn(
+            layers=[SedimentLayer(thickness=880.0, sound_speed=1600.0,
+                                  density=1.6, attenuation=0.2)],
+            halfspace=BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=1800.0, density=2.0,
+                                         attenuation=0.5)))
+        _, top = self._top('ramgeo', env, [0.0])
+        np.testing.assert_allclose(top, [100.0 + 880.0], rtol=1e-12)
+
+    def test_mpirams_starts_the_layer_sedlayer_under_the_local_seafloor(self):
+        import types
+        env = self._sloping()
+        knobs = RAM(backend='mpirams', verbose=False)._knob_record()
+        engine = types.SimpleNamespace(zmax_frequency=self.FREQ)
+        grid = types.SimpleNamespace(zmax=self.ZMAX, dz=0.5)
+        span = ram_domain.absorber_span(env, self.FREQ, self.ZMAX,
+                                        knobs=knobs)
+        top = ram_mpirams.mpirams_absorber_top(env, engine, grid,
+                                               [0.0, 5000.0], knobs=knobs)
+        np.testing.assert_allclose(top, np.array([100.0, 150.0]) + span,
+                                   rtol=1e-12)
+
+    def test_the_mask_keeps_the_top_and_nans_below_it_per_bin(self):
+        data = np.ones((3, 2, 2), dtype=complex)
+        top = np.array([[150.0, 120.0], [150.0, 160.0]])     # (range, bin)
+        with pytest.warns(UserWarning, match=r'4 of 12 samples lie inside'):
+            out = ram_domain.mask_absorbing_layer(
+                'RAM:ramgeo', data, [100.0, 150.0, 155.0], top)
+        expected = np.ones((3, 2, 2), dtype=bool)
+        expected[2, 0, 0] = False      # 155 m under the 150 m top
+        expected[1:, 0, 1] = False     # 150 and 155 m under the 120 m top
+        expected[2, 1, 0] = False      # 155 m under the 150 m top
+        np.testing.assert_array_equal(np.isfinite(out), expected)
+        assert np.isfinite(data).all()

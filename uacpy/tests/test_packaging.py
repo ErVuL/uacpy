@@ -593,8 +593,7 @@ _OASES_CITED_FILES = frozenset({
     "unoasn22.f", "unoasp22.f", "unoasr21.f", "unoass21.f", "unoassp30.f",
     "unoast31.f",
     "oases.tex", "oases_gen.tex", "oases_graph.tex", "oases_install.tex",
-    "oasn.tex", "oasp.tex", "oasr.tex", "oass.tex", "oassp.tex", "oast.tex",
-    "rdoast.tex",
+    "oases_intro.tex", "oasn.tex", "oasp.tex", "oasr.tex", "oass.tex", "oassp.tex", "oast.tex",
 })
 
 
@@ -2471,9 +2470,9 @@ _CROSS_PACKAGE_PRIVATES = {
     # ``who``, and a method (or engine) that delegates passes its own name so
     # a refusal names the call the user made.
     ('core/results/field.py', 'uacpy.acoustic_signal.channel',
-     '_broadband_propagation_loss'),
+     '_broadband_loss'),
     ('core/results/field.py', 'uacpy.acoustic_signal.channel',
-     '_gate_transfer_function'),
+     '_truncate_response'),
     ('core/results/field.py', 'uacpy.acoustic_signal.channel',
      '_transfer_function_from_impulse_response'),
     ('core/results/field.py', 'uacpy.acoustic_signal.spectrum_at',
@@ -2488,6 +2487,11 @@ _CROSS_PACKAGE_PRIVATES = {
     # Arrivals.impulse_response and its output_duration= knob.
     ('core/results/rays.py', 'uacpy.acoustic_signal.channel',
      '_arrival_cells_impulse_response'),
+    # The silent twin of grain_size_to_geoacoustics: returns its substitution
+    # report instead of warning, so bottom_from_samples reports under its own
+    # name without a catch_warnings window.
+    ('data/sediment_db.py', 'uacpy.core.sediment',
+     '_grain_size_to_geoacoustics'),
     ('core/results/rays.py', 'uacpy.acoustic_signal.delay_profile',
      '_channel_regime'),
     ('core/results/rays.py', 'uacpy.acoustic_signal.delay_profile',
@@ -2549,6 +2553,61 @@ _CROSS_PACKAGE_PRIVATES = {
     ('models/oases/oass.py', 'uacpy.io.oases_writer',
      '_check_oass_range_count'),
     ('models/oases/oass.py', 'uacpy.io.oases_writer', '_OASS_REVERB_OPTIONS'),
+    # The law an environment's absorption is evaluated with: a measured
+    # table stays the user's AbsorptionCoefficient on env.absorption, and
+    # this one adapter makes it the tabulated law wherever a deck writer or
+    # an engine evaluates it, so the tabulated law has no public name.
+    ('io/oalib_writer.py', 'uacpy.core.absorption', '_absorption_law'),
+    ('io/bellhop_writer.py', 'uacpy.core.absorption', '_absorption_law'),
+    ('io/oases_writer.py', 'uacpy.core.absorption', '_absorption_law'),
+    ('models/ram/_domain.py', 'uacpy.core.absorption', '_absorption_law'),
+    ('models/ram/mpirams.py', 'uacpy.core.absorption', '_absorption_law'),
+    ('models/bellhop/_synthesis.py', 'uacpy.core.absorption',
+     '_absorption_law'),
+    # The one check every engine that freezes the water absorption law at
+    # one frequency over a band runs (Bellhop's single trace, OASES's one
+    # water AC per deck), with its warn threshold and the depths it samples.
+    ('io/oalib_writer.py', 'uacpy.core.absorption',
+     '_warn_if_band_absorption_frozen'),
+    ('io/oalib_writer.py', 'uacpy.core.absorption',
+     '_BAND_ABSORPTION_WARN_DB_PER_KM'),
+    ('io/oalib_writer.py', 'uacpy.core.absorption',
+     '_BAND_ABSORPTION_CHECK_DEPTHS'),
+    ('io/oases_writer.py', 'uacpy.core.absorption',
+     '_BAND_ABSORPTION_CHECK_DEPTHS'),
+    ('models/bellhop/_synthesis.py', 'uacpy.core.absorption',
+     '_warn_if_band_absorption_frozen'),
+    ('models/oases/_common.py', 'uacpy.core.absorption',
+     '_warn_if_band_absorption_frozen'),
+    # The notice that small-roughness perturbation theory is over-driven
+    # (its Rayleigh parameter), stated once beside the scattering laws and
+    # given by an OASES run with a rough interface.
+    ('models/oases/_common.py', 'uacpy.sonar.scattering',
+     '_non_perturbative_roughness_notice'),
+    # One check and one spelling of the grain-size model and Hamilton fit
+    # (``'Hamilton'`` -> ``'hamilton'``), applied by every seabed backend
+    # and the composite fetch.
+    ('data/diesing_local.py', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('data/emodnet_local.py', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('data/environment.py', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('data/graw_local.py', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('data/mars.py', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('data/pelagic.py', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('data/seabed.py', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    ('data/sediment_db.py', 'uacpy.core.sediment',
+     '_canonical_grain_size_selection'),
+    # The wording of a provenance record: a fetch's summary line in
+    # citations() and a point in words in an offset notice, written beside
+    # the record type they describe.
+    ('data/sources.py', 'uacpy.core.provenance', '_fetch_summary_line'),
+    ('data/_geo.py', 'uacpy.core.provenance', '_point_in_words'),
 }
 
 

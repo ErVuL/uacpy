@@ -17,7 +17,8 @@ figure code.
 
 ## 1. `uacpy.materials` — the seabed catalogue
 
-Nine class-typical seafloor materials, keyed by name. Three names are on the
+Nine class-typical seafloor materials, keyed by name. Its four names
+(`MATERIALS`, `list_materials`, `get_material`, `materials_table`) are on the
 package root; the module itself is `uacpy.materials`
 (`from uacpy.materials import get_material`).
 
@@ -85,11 +86,19 @@ The geoacoustic values are not decoration: they set how much energy the seabed
 returns at each grazing angle.
 
 ```python
-from uacpy.core import acoustics
+from uacpy import acoustics
 
+fig = ax = None
 for name in ['clay', 'silt', 'sand', 'gravel', 'limestone']:
-    angles, loss_dB = acoustics.bottom_loss_curve(name)
+    rc = acoustics.bottom_loss_curve(name)        # a ReflectionCoefficient
+    fig, ax = rc.plot(value='loss', ax=ax, label=name, mark_critical=True)
 ```
+
+`bottom_loss_curve` returns the seabed's reflection as a
+`ReflectionCoefficient`: `rc.angles_deg` (grazing), the complex
+`rc.coefficient`, the bottom loss `rc.dB` = `-20·log10|R|`, and
+`rc.critical_angle_deg`. Its `.plot(value='loss')` draws the loss, and
+`mark_critical=True` rules that angle in the line's colour.
 
 ![Bottom loss from the presets](figures/util_bottom_loss.png)
 
@@ -149,7 +158,9 @@ constructors overrides a preset field the same way. See
 
 ## 2. `uacpy.metrics` — comparing two models quantitatively
 
-Four functions, one job: put a number on how far apart two TL fields are.
+Five functions, one job: put a number on how far apart two TL fields are,
+or a map of where they differ. `field_statistics` runs them over several
+fields at once, and `same_grid` says which pairs they accept.
 
 ```python
 from uacpy.metrics import tl_rmse, tl_max_error, tl_bias
@@ -160,7 +171,10 @@ from uacpy.metrics import tl_rmse, tl_max_error, tl_bias
 | `tl_rmse(field, reference, range_window=None, depth_window=None)` | Root-mean-square TL difference, dB |
 | `tl_max_error(field, reference, …)` | Largest absolute TL difference, dB |
 | `tl_bias(field, reference, …)` | Mean **signed** difference `field - reference`; positive means `field` reports more loss |
-| `tl_rmse_on_shared_ranges(field, reference, *, depth=None)` | RMS dB difference at one depth over the ranges both reach, **resampling** onto the coarser axis; two Fields with `depth=`, or two `(ranges, tl_dB)` curves |
+| `tl_rmse_on_shared_ranges(field, reference, *, depth=None)` | RMS dB difference at one depth over the ranges both reach, **resampling** onto the coarser axis; two Fields with `depth=`, two range cuts (`field.at(depth=z)`), or two `(ranges, tl_dB)` curves |
+| `tl_difference(field, reference)` | The difference map `field - reference` in dB as a `Field` (`kind='difference'`); a no-energy cell of either is NaN; `.plot()` draws it on a diverging ±10 dB map |
+| `field_statistics(fields, labels=None, *, depth)` | A `FieldStatistics` record of several fields at one depth: `mean_dB`, `std_dB` per field and the pairwise `rms_dB` table (`tl_rmse_on_shared_ranges` per pair); `.plot()` draws the bars and the table |
+| `same_grid(field, reference)` | Whether two Fields are on one grid, by the rule every metric above applies |
 
 The first three take two [`Field`](results.md) instances on the same `depth`
 and/or `range` axes (a 2-D grid, or a 1-D cut such as `field.at(depth=50.0)`),
@@ -169,19 +183,22 @@ code; the windows need Fields). TL is pulled from `.dB`, so it does not matter
 whether a field stores complex pressure or real dB. Non-finite cells — Bellhop's shadow zones, an empty modal
 sum — are dropped rather than propagated.
 
-The windows take `(min_m, max_m)` inclusive and default to the whole grid. Use
+The windows take `(min, max)` in metres, inclusive, and default to the whole grid. Use
 them: the near field is where two models disagree for uninteresting reasons.
 
 ### Same grid, or nothing
 
-The metrics refuse fields on different grids. Depth and range axes must match
-to ~1 mm, which is loose enough for the sub-millimetre rounding two models pick
-up interpolating onto the same requested receiver grid, and tight enough that
-genuinely different grids raise:
+The metrics refuse fields on different grids (`same_grid` says which pairs
+they accept). Each depth and range coordinate must match to a thousandth of
+its axis' smallest cell (4 cm on a 40 m range grid; uacpy guidance), which is
+loose enough for the rounding two models pick up interpolating onto the same
+requested receiver grid, and tight enough that genuinely different grids raise:
 
 ```
 ConfigurationError: tl_rmse: range axes differ — sample-cells are not aligned.
-Resample one field onto the other's grid before comparing.
+
+How to fix:
+Resample one field onto the other's grid (Field.resample_to) before comparing, or use tl_rmse_on_shared_ranges to compare two models at one depth over the ranges both reach.
 ```
 
 That is deliberate. Silently interpolating one field onto the other would bury
@@ -190,13 +207,13 @@ the resampling error inside the number you are about to quote.
 **When resampling is the question, not a shortcut**, use
 `tl_rmse_on_shared_ranges(field, reference, depth=…)`. Comparing *models* means comparing
 runs on different range axes by nature, so the refusal above is the wrong
-answer there — it is the number the pairwise table of
-`uacpy.plot.plot_field_statistics` prints in every cell, and
-`tl_rmse_on_shared_ranges` is where it comes from. Two functions rather
+answer there — it is the number in every cell of the pairwise table
+`uacpy.metrics.field_statistics(fields, depth=…)` returns (and its `.plot()`
+prints), and `tl_rmse_on_shared_ranges` is where it comes from. Two functions rather
 than a flag on one: the refusal and the resampling answer different
 questions, and picking the wrong one should mean picking a name. A measured
 curve needs no Field: `tl_rmse_on_shared_ranges((r_meas, tl_meas), (r_model,
-tl_model))` takes two `(ranges_m, tl_dB)` pairs and runs the same computation.
+tl_model))` takes two `(ranges, tl_dB)` pairs and runs the same computation.
 
 `ConfigurationError` also fires when the window selects no finite cells at all
 — an empty comparison is a bug, not a zero.
@@ -267,12 +284,12 @@ the metrics above score an engine against the exact answer:
 | `lloyd_mirror(source, receiver, *, sound_speed=1500)` | pressure-release surface, no bottom (image solution) | JKPS Eq. 1.19 |
 | `ideal_waveguide(env, source, receiver)` | isovelocity water over a `'rigid'` or `'vacuum'` bottom, full modal sum | JKPS §2.4.4 |
 | `pekeris(env, source, receiver)` | isovelocity water over a lossless fluid half-space, trapped modes | JKPS §2.4.5 |
+| `pekeris_modes(env, frequency, *, depths=None)` | the same waveguide's trapped modes as a `Modes` (`k`, shapes normalised `∫ψ²/ρ dz = 1`, `media`), to check a mode solver's eigenvalues | JKPS §2.4.5, cutoffs Eq. 2.191 |
 
 ```python
 import numpy as np
 import uacpy
-from uacpy import analytic
-from uacpy.core.bottom import BoundaryProperties
+from uacpy import analytic, BoundaryProperties
 
 env = uacpy.Environment(bathymetry=100, ssp=1500, bottom=BoundaryProperties(
     acoustic_type='half-space', sound_speed=1800, density=2.0, attenuation=0.0))
@@ -288,6 +305,9 @@ The environment-taking forms refuse an environment they do not model — a
 refracting profile, range dependence, water absorption, a lossy or layered
 bottom — rather than return an answer to a different problem. `pekeris` omits
 the continuous spectrum, so compare beyond a few water depths from the source.
+`pekeris_modes(env, 50.0).k` beside `Kraken().compute_modes(env, src).k` checks
+the eigenvalues themselves; tabulate it with `depths=` where a modal sum will
+read the shapes.
 
 ---
 
@@ -314,9 +334,9 @@ name a sub-module.
 | Function | Implements | Inputs |
 |---|---|---|
 | `sound_speed_mackenzie(temperature, salinity, *, depth=)` | Mackenzie (1981), nine-term | °C, PSU, **metres** |
-| `sound_speed_unesco(temperature, salinity, *, depth= \| pressure_dbar=, latitude_deg=)` | UNESCO (1983) / Chen & Millero (1977) | °C (ITS-90), PSU (PSS-78), **decibars** |
-| `sound_speed_delgrosso(temperature, salinity, *, depth= \| pressure_dbar=, latitude_deg=)` | Del Grosso (1974), "NRL II" | °C (ITS-90), PSU, **decibars** |
-| `sound_speed_teos10(temperature, salinity, *, depth= \| pressure_dbar=, latitude_deg=)` | TEOS-10 (IOC/SCOR/IAPSO 2010), Eqn. (2.17.1) on the IAPWS-08/09 Gibbs function | °C (ITS-90), PSU (PSS-78), **decibars** |
+| `sound_speed_unesco(temperature, salinity, *, depth= \| pressure_dbar=, latitude=)` | UNESCO (1983) / Chen & Millero (1977) | °C (ITS-90), PSU (PSS-78), **decibars** |
+| `sound_speed_delgrosso(temperature, salinity, *, depth= \| pressure_dbar=, latitude=)` | Del Grosso (1974), "NRL II" | °C (ITS-90), PSU, **decibars** |
+| `sound_speed_teos10(temperature, salinity, *, depth= \| pressure_dbar=, latitude=)` | TEOS-10 (IOC/SCOR/IAPSO 2010), Eqn. (2.17.1) on the IAPWS-08/09 Gibbs function | °C (ITS-90), PSU (PSS-78), **decibars** |
 
 **Water properties, one rule everywhere.** Every water-property input —
 `temperature`, `salinity` and `pH` of these formulas, of
@@ -364,19 +384,19 @@ Every one is evaluated at `depth=` (metres), the one coordinate of every
 `sound_speed_*` and `absorption_*` formula. UNESCO, Del Grosso and TEOS-10
 are stated in **pressure**, so they convert the depth themselves with
 `depth_to_pressure_dbar` (Leroy & Parthiot's standard ocean) at
-`latitude_deg=` (default 45°), the conversion
+`latitude=` (default 45°), the conversion
 `SoundSpeedProfile.from_temperature_salinity` uses; pressure-native data (an
 Argo cast) passes `pressure_dbar=` instead, keyword only. Depth and pressure
 are numerically close (≈ 1 dbar per metre) but they are not the same
 quantity.
 
 A cast held in depth reaches any of the four through
-`sound_speed_at_depth(temperature, salinity, depth, formula=, latitude_deg=)`:
+`sound_speed_at_depth(temperature, salinity, depth, formula=, latitude=)`:
 it converts depth to pressure at the cast's latitude for the three
 pressure equations and evaluates Mackenzie on the depth directly. The
-conversion itself is public too — `depth_to_pressure_dbar(depth_m,
-latitude_deg)` and its inverse `pressure_dbar_to_depth(pressure_dbar,
-latitude_deg)` (Leroy & Parthiot 1998 standard ocean) — for Argo floats and
+conversion itself is public too — `depth_to_pressure_dbar(depth,
+latitude)` and its inverse `pressure_dbar_to_depth(pressure_dbar,
+latitude)` (Leroy & Parthiot 1998 standard ocean) — for Argo floats and
 CTDs that report pressure.
 
 An ocean model reports potential temperature (`thetao`), the temperature a
@@ -470,20 +490,21 @@ positioning, and for little else.
 
 | Function | Implements |
 |---|---|
-| `density(temperature, salinity)` | Fofonoff (1985), IES 80 — near-surface seawater density, **kg/m³**, temperature ITS-90 (converted to EOS-80's IPTS-68); `Environment(water_density=density(T, S) / 1000)` is how a measured value reaches the decks |
+| `density(temperature, salinity)` | Fofonoff (1985), IES 80 — near-surface seawater density in **g/cm³** (the equation's kg/m³ divided by 1000), temperature ITS-90 (converted to EOS-80's IPTS-68); `Environment(water_density=density(T, S))` is how a measured value reaches the decks |
 | `reflection_coeff(grazing_deg, *, sound_speed, density, attenuation=0, water_sound_speed=1500, water_density=1.027)` | Rayleigh plane-wave `R` of a fluid half-space (Brekhovskikh & Lysanov), complex, in the package's units: grazing **degrees**, g/cm³, dB/λ |
-| `bottom_loss_curve(material, …)` | Preset-aware wrapper: grazing angles in **degrees**, loss in dB |
+| `bottom_loss_curve(material, …)` | Preset-aware wrapper returning a `ReflectionCoefficient` (grazing angles in **degrees**, its `.dB` the loss in dB, its `critical_angle_deg`); `.plot(value='loss')` draws the loss |
 | `doppler(speed, frequency, sound_speed=None)` | Doppler-shifted frequency `f·(1 + v/c)` (not the shift), `speed ≪ sound_speed` |
-| `bubble_resonance(radius, depth=0.0, …, water_density_kg_m3=1027.0)` | Minnaert resonance (Medwin & Clay 1998); water density in **kg/m³** |
+| `bubble_resonance(radius, depth=0.0, …, water_density=1.027)` | Minnaert resonance (Medwin & Clay 1998); water density in **g/cm³** |
 | `bubble_surface_loss(wind_speed_kn, frequency, grazing_deg)` | APL-UW (1994) surface loss at a grazing angle in **degrees** — returns a **linear multiplier** in `(0, 1]` |
-| `bubble_sound_speed(void_fraction, …)` | Wood (1964) two-phase speed (Medwin & Clay Eq. 8.3.39; low-frequency limit) |
+| `bubble_sound_speed(void_fraction, sound_speed=None, gas_sound_speed=340, gas_density_ratio=1000)` | Wood's two-phase speed (Medwin & Clay Eq. 8.3.39; low-frequency limit); the gas defaults are uacpy guidance |
 | `pekeris_root(gamma2)` | The Pekeris branch of `sqrt`, enforcing decay in the half-space |
+| `resample_depth_range(values, depths, ranges, new_depths, new_ranges, *, method='linear', axis=(-2, -1))` | A `(depth, range)` grid of any array resampled onto another (linear, nearest or cubic; complex as real and imaginary parts; `NaN` outside the grid or where a `NaN` sample enters the stencil), every other axis carried — `Field.resample_to` on plain arrays, without its quarter-wavelength check |
 
-`density` returns **kg/m³**, while the seabed carriers use **g/cm³**. That is
-not an inconsistency to paper over: `density()` is the oceanographic equation
-of state and its literature unit is kg/m³, whereas the geoacoustic file formats
-every model writes are g/cm³ — and `reflection_coeff` and `bottom_loss_curve`
-take g/cm³ like the carriers (a density above 20 is refused as a kg/m³ number).
+Every density here is in **g/cm³**, the unit of the seabed carriers and of the
+geoacoustic file formats every model writes: `density()` returns the
+oceanographic equation of state's kg/m³ divided by 1000, and `bubble_resonance`,
+`reflection_coeff` and `bottom_loss_curve` take g/cm³ (a density above 20 is
+refused as a kg/m³ number).
 `bottom_loss_curve` is `reflection_coeff` swept over grazing angle for a preset
 name, a property dict or a seabed carrier, so the two give one curve.
 
@@ -495,19 +516,19 @@ number consistent with `bottom_loss_curve`, negate the log:
 
 | Function | For |
 |---|---|
-| `pressure_from_recording(x, sensitivity, gain, volt_params=None)` | Recorded volts (or ADC bits) → **pascals**, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
-| `spl(x, ref=REFERENCE_PRESSURE_WATER, *, axis=None, floor=PRESSURE_FLOOR, complex_record=None)` | A pressure time series in Pa → mean SPL in dB re `ref` (default 1 µPa, written in Pa as `1e-6`). `axis=-1` gives one level per record of a block |
+| `pressure_from_recording(x, sensitivity, gain, volt_params=None, x_scale='counts')` | Recorded volts (or ADC counts, or `read_wav`'s fractions with `x_scale='read_wav'`) → **pascals**, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
+| `spl(x, ref=REFERENCE_PRESSURE_WATER, *, axis=None, floor=PRESSURE_FLOOR**2, complex_record=None)` | A pressure time series in Pa → mean SPL in dB re `ref` (default 1 µPa, written in Pa as `1e-6`). `axis=-1` gives one level per record of a block |
 | `peak_level(x, ref=…, *, axis=None, floor=…, complex_record=None)` | The same record → **peak** SPL, `20·log10(max\|x\|/ref)` |
 | `sound_exposure_level(pressure, sample_rate, ref=…, *, axis=-1, floor=…, complex_record=None, weighting=None)` | A record → **SEL**, `10·log10(Σp²/fs/ref²)` in dB re 1 µPa²·s; the rate, as on `Field.sound_exposure_level` (a value below 1 Hz is refused as a sample interval). `weighting=` gives the frequency-weighted SEL — a hearing group, your own `W(f)` function or a `(f, W_dB)` table ([results §6b](results.md#6b-weighted-accumulated-and-moving-source-exposure)) |
-| `cumulative_sound_exposure_level(pressure, sample_rate, ref=…, *, step=1.0, reset=None, weighting=None, axis=-1, floor=…, complex_record=None)` | `(times, levels)`: the SEL accumulated at the end of every `step` seconds, restarting every `reset` seconds; its last value is `sound_exposure_level`'s. Reads a `np.memmap` one block at a time |
+| `cumulative_sound_exposure_level(pressure, sample_rate, ref=…, *, step=1.0, reset=None, weighting=None, axis=-1, floor=…, complex_record=None)` | a `CumulativeExposure` `(times, levels)` (it unpacks as the two arrays; `.plot(criterion_dB=…)` draws it): the SEL accumulated at the end of every `step` seconds, restarting every `reset` seconds; its last value is `sound_exposure_level`'s. Reads a `np.memmap` one block at a time |
 | `track_exposure(sel_dB, ranges, positions, *, closest_approach, along=None, axis=-1, event_duration=None)` | The cumulative SEL of events along a straight line: the energy sum of one event's SEL at each event's distance `√(d² + (x_i − a)²)`; `along=` gives the plan view. For a continuous source, `sel_dB` is a received level and `event_duration=` the seconds each event lasts (each event's SEL is that level plus `10·log10(event_duration / 1 s)`). `Field.track_exposure` wraps it |
 | `weighted_pressure(pressure, sample_rate, weighting, *, axis=-1, complex_record=None)` | The frequency-weighted pressure `p_w(t)`, time-aligned (a zero-phase spectral filter) |
 | `frequency_weighting(frequency, weighting)` | `W(f)` in dB of any accepted weighting on your grid; `-inf` where it carries no weight |
 | `auditory_weighting(frequency, group)` | The Southall et al. (2019) weighting of one hearing group, the curve a group name stands for; also exported by `uacpy.noise` with the [noise guide](noise.md)'s spectrum helpers |
-| `power_to_dB(power, ref=1e-6, *, floor=1e-30)` | A **squared** quantity (PSD, mean-square pressure, an f-k spectrum) → dB re `ref` |
+| `power_to_dB(power, ref=1e-6, *, floor=PRESSURE_FLOOR**2)` | A **squared** quantity (PSD, mean-square pressure, an f-k spectrum) → dB re `ref` |
 | `sum_levels_dB(*levels_dB, axis=None)` | The **incoherent** (power) sum of dB levels — the separate arguments, or one array's levels along `axis` (`sum_levels_dB([L1, L2, L3])` without `axis` is the three levels unchanged), `10·log10(Σ10^(L/10))`, through `logaddexp` so a very loud term cannot overflow and a `-inf` term adds nothing; two equal levels give +3.01 dB. The sum of no-energy markers stays the marker, and a NaN level sums to NaN |
-| `integrate_psd(psd, frequencies, freq_min=None, freq_max=None)` | The power a one-sided PSD carries in a band, `∫ psd df` (Pa²/Hz → Pa²), with the band edges spliced into the grid; a band reaching past the spectrum is refused |
-| `band_level(level_density_dB, frequencies, freq_min=None, freq_max=None)` | The band level of a level density, `10·log10 ∫ 10^(L/10) df`; an empty band is `-inf`. `WenzNoise.band_level`, `WenzNoise.decidecade_levels`, `weighted_level` and `decidecade_band_levels` all integrate through it |
+| `integrate_psd(psd, frequencies, freq_min=None, freq_max=None, *, axis=-1)` | The power a one-sided PSD carries in a band, `∫ psd df` (Pa²/Hz → Pa²), with the band edges spliced into the grid; a band reaching past the spectrum is refused. An N-D `psd` (a spectrogram, a PSD per depth) gives one power per spectrum along `axis` |
+| `band_level(level_density_dB, frequencies, freq_min=None, freq_max=None, *, axis=-1)` | The band level of a level density, `10·log10 ∫ 10^(L/10) df`, one per spectrum along `axis`; an empty band is `-inf`. `WenzNoise.band_level`, `WenzNoise.decidecade_levels`, `weighted_level` and `band_levels` all integrate through it |
 | `received_level_dB(source_level_dB, tl_dB)` | The sonar-equation propagation term `SL - TL` (dB re 1 µPa); a no-energy cell (`\|TL\| >= 600`) stays the marker, at -600, instead of becoming a finite `SL - 600`. `Field.at_source_level` is this on a field |
 | `no_energy_mask(levels_dB)` | `True` where a dB value is the **no-energy marker** (±600 dB, `NO_ENERGY_DB`: a cell a model reached with no energy), not a level — the one test every metric and plotter excludes such cells with. A genuine deep null is kept |
 
@@ -529,14 +550,17 @@ est.plot()                                           # dB re 1 µPa²/Hz
 ```
 
 Pass `volt_params=(bits, v_ref)` when `x` is raw ADC counts rather than volts;
-the conversion to volts then happens first. The µPa in the sensitivity unit and
+the conversion to volts then happens first. `read_wav`'s ±1 fractions go in
+directly with `x_scale='read_wav'` and `bits = uacpy.io.read_wav_info(path).bits`:
+they are multiplied back to counts before the conversion, so the pressure is
+exact. The µPa in the sensitivity unit and
 the Pa that comes back out are 120 dB apart, and `pressure_from_recording` carries that factor
 — a hand-rolled `10**(SH/20)` division leaves the level 120 dB high.
 
 `power_to_dB` is the conversion every spectral estimator in the package uses:
-`10·log10(power / ref²)`, with `power` floored before the log so a silent
-sample gives a finite, very negative level instead of `-inf` — which would
-otherwise poison a downstream `mean` or histogram. Use `spl` for a waveform,
+`10·log10(power / ref²)`, with `power / ref²` floored before the log so a
+silent sample gives −600 dB (the no-energy marker) instead of `-inf` — which
+would otherwise poison a downstream `mean` or histogram. Use `spl` for a waveform,
 `power_to_dB` for anything already squared. For standards-based band levels and
 weighting, see [noise](noise.md) and [signal processing](signal.md).
 
@@ -555,15 +579,16 @@ three; unnamed, it is refused, because the two readings give different levels.
 which is the pressure; `|x|²` would be twice it (+3.01 dB). `'baseband'` (the
 complex envelope, `p = Re{x·e^{iω_c t}}`) reads `|x|`: mean square
 `|x|²/2`, i.e. `10·log10(mean|x|²/2 / ref²)`, and peak `|x|`. Its real part
-depends on the carrier phase (116.99, 120.00 or −180 dB for one constant
+depends on the carrier phase (116.99, 120.00 or −600 dB for one constant
 envelope), which is why it is not used.
-Their `floor=` bounds the **squared** pressure, as on `power_to_dB`;
+Their `floor=` bounds the **squared** ratio `p²/ref²`, as on `power_to_dB`;
 `transmission_loss_dB(p, floor=)` is the exception and bounds `|p|` itself,
 which is why its no-energy cap is 600 dB.
 
-All three floor a silent record at the same constant (−180 dB re 1 µPa at the
-default reference) rather than returning `-inf`, so one quiet cell cannot
-poison a mean taken over a map of them.
+All three (and `power_to_dB`) floor a silent record at −600 dB whatever the
+reference, the level view of the 600 dB no-energy marker, rather than
+returning `-inf`: one quiet cell cannot poison a mean taken over a map of
+them, and `no_energy_mask` finds it.
 
 `Field.sound_exposure_level` and `Field.peak_sound_pressure_level` are these
 functions plus a synthesis and the band metadata — the levels themselves are
@@ -612,9 +637,13 @@ stack = uacpy.run_parallel(jobs, coordinate_name='dr').stack()
 ```
 
 `ParallelResult` holds `results` (aligned to the jobs, `None` where one
-raised), `errors` (`{job_index: exception}`), `labels` and `coordinate_name`.
+raised), `errors` (`{job_index: exception}`), `warnings`
+(`{job_index: [(category, message), …]}`, each also re-emitted in the calling
+process under the job's label), `labels` and `coordinate_name`.
 It iterates and indexes like a list, and `.stack()` bundles the successes
-along one new leading axis named by `coordinate_name` — at the job labels
+along one new axis named by `coordinate_name` — leading, except `frequency` /
+`time`, which go last as in every producer's layout (`.stack(coordinate_name=…)`
+names it differently for that call) — at the job labels
 when every one is a real number, else at the job index, with a warning:
 `Field` results into
 one `Field` (they must share a grid), other results into a
@@ -721,19 +750,25 @@ consistently formatted output from its writers and readers too.
 ### One format for warnings too
 
 `install_warning_formatter()` replaces `warnings.formatwarning` so that every
-`warnings.warn(...)` in the process renders in the same
-`[timestamp] [LEVEL] [source] message` shape as `log_message`:
+uacpy warning (a `uacpy.UACPYWarning`) renders in the same
+`[timestamp] [LEVEL] [source] message` shape as `log_message`, its class after
+the level, the name a filter takes. Every other warning — your own, numpy's,
+matplotlib's — is handed back to the formatter it replaced and prints as it
+does without uacpy:
 
 ```
-[2026/08/01 20:50:17 UTC] [WARN] [study:31] Scooter does not support
+[2026/08/01 20:50:17 UTC] [WARN FallbackWarning] [study:31] Scooter does not support
 range-dependent bathymetry; collapsed to 400.0 m (method='max', range
-100.0–400.0 m). Override via `collapse={'bathymetry': 'min'|…|'initial'}`.
+100.0–400.0 m). Override via `collapse={'bathymetry': 'min'|…|'rmax'}`.
 ```
 
 The `[source]` field is **your** calling frame, not the uacpy internal that
 raised it — the warnings carry `skip_file_prefixes`, so the line number points
 at the `run()` call you wrote. It is called once at `import uacpy` and is
-idempotent. Only the *rendering* is
+idempotent. Two escapes: `UACPY_NO_WARNING_FORMAT=1` in the environment keeps
+Python's own rendering, and a formatter your application installed before
+`import uacpy` is kept (only the standard library's is replaced). Only the
+*rendering* is
 replaced — Python's filtering, `pytest.warns`, `simplefilter('error')` and
 friends all keep working unchanged, so you can still turn a collapse warning
 into a hard failure in a test:

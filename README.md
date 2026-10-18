@@ -74,7 +74,7 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 
 **Toolkits** — first‑class modules, not just glue around the models:
 
-- **Real‑world environments** (`uacpy.data`) — build an `Environment` from GPS coordinates and a date, fetching bathymetry, sound‑speed, seafloor, sea‑ice and sea‑state data from public ocean databases (GEBCO, GMRT multibeam, EMODnet DTM, World Ocean Atlas, Copernicus, EMODnet, AusSeabed MARS, NCEI/GlobSed/CRUST1/Graw seabed, NSIDC sea ice, GLODAP + Copernicus‑BGC pH, NBS wind, WaveWatch III / WAVERYS waves).
+- **Real‑world environments** (`uacpy.data`) — build an `Environment` from GPS coordinates and a date, fetching bathymetry, sound‑speed, seafloor, sea‑ice and sea‑state data from public ocean databases (GEBCO, GMRT multibeam, EMODnet DTM, World Ocean Atlas, Argo floats, Copernicus, EMODnet, AusSeabed MARS, NCEI/GlobSed/CRUST1/Graw/Diesing seabed, NSIDC sea ice, GLODAP + Copernicus‑BGC pH, NBS wind, WaveWatch III / WAVERYS waves).
 - **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering, beamforming, time‑frequency transforms, channel simulation.
 - **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range, and matched-field source localization (KRAKEN replicas, Bartlett/MVDR).
 - **Communications** (`uacpy.comms`) — digital modems (PSK/QAM/OFDM…), equalization, FEC, and the **NATO JANUS** standard.
@@ -119,7 +119,8 @@ juggling. A sound-speed profile is a list of `(depth m, speed m/s)` pairs,
 `ssp=[(0.0, 1500.0), (100.0, 1490.0)]`; its gradient bends the rays into
 caustics, which Bellhop's default hat-shaped beams draw as thin bright streaks
 of too little loss ([Bellhop §1](./docs/models/bellhop.md#1-what-it-solves)
-says when `beam_type='B'` is the better choice), so this first map keeps the
+says when `beam_type='B'` is the better choice — and when its `πλ` floor
+biases a shallow duct), so this first map keeps the
 water isovelocity. The documentation's [Start here](./docs/README.md#start-here) runs the
 same program and links each carrier to its guide page, and
 [DOCUMENTATION §3](./DOCUMENTATION.md#3-quick-start) lists which call to use for
@@ -133,8 +134,10 @@ says so.
   <img src="./docs/readme_realworld.png" alt="Real-world environment fetched from GPS, modelled, and plotted" width="820">
 </div>
 
-**Real-world example — from GPS to a modelled field, the code that produces the
-figure above.** This one is a showcase rather than a starting point: the
+**Real-world example — from GPS to a modelled field: the core of
+[example 37](./uacpy/examples/example_37_realworld_environment.py), whose first
+composite is the figure above (`docs/figure_scripts/readme.py` regenerates it
+with the example's settings).** This one is a showcase rather than a starting point: the
 `data.fetch_*` calls reach out to public ocean databases, so it needs **network
 access**, or a local cache populated in advance with `./install.sh --data all`
 (the `--data` flag is in [Installation](#-installation)). It is also a 374 km
@@ -357,9 +360,6 @@ rm -rf data_cache  # Optional
 ./install.sh       # Optional
 ```
 
-The upgrade steps a version needs and every change that breaks a call are
-in [CHANGELOG.md](CHANGELOG.md).
-
 ### Uninstall
 
 ```bash
@@ -394,8 +394,8 @@ Inside `uacpy/examples/` you will find numbered example scripts
 field to communications modems, a standards-based noise-impact assessment, a
 GPS-to-modelled-field real-world pipeline, matched-field source
 localization, and end-to-end chains from a source array to a detection map.
-Run them **by script path** (the form
-`uacpy/examples/run_all_examples.py` and the test suite use):
+Run them **by script path**, with the environment you installed uacpy into
+active (the form `uacpy/examples/run_all_examples.py` and the test suite use):
 
 ```bash
 python uacpy/examples/example_01_basic_shallow_water.py
@@ -405,6 +405,26 @@ The module form, `python -m uacpy.examples.example_01_…`, works too (from a
 source checkout; the examples are not part of the wheel). See the
 [examples index](./DOCUMENTATION.md#17-examples-index) for a description
 of each one.
+
+## 📏 Validation at a glance
+
+The engines measured against closed forms and published benchmarks, every
+published case run on its reference's water (density 1.0 g/cm³), as the tests
+state them; [docs/models/validation.md](./docs/models/validation.md) gives the
+cases, bounds, null controls and known limits.
+
+| Benchmark (reference) | Metric | Measured |
+|---|---|---|
+| Pekeris waveguide, 50 Hz (KRAKEN manual eq. 2.19) | median \|ΔTL\| | Kraken 0.02 dB · Scooter 0.03 dB · OAST 0.02 dB (strong-field cells) · OASP 0.0068 dB · RAM 0.55 dB |
+| Ideal (pressure-release) waveguide | median \|ΔTL\| | Kraken 0.014 dB · RAM 0.012 dB |
+| Rigid-bottom waveguide | median \|ΔTL\| | SPARC 0.17 dB |
+| Ideal wedge, 25 Hz (ASA Problem I, Buckingham & Tolstoy) | median \|ΔTL\| at 30 m / 150 m | Bellhop (line source) 0.47 / 0.384 dB |
+| Rayleigh reflection, fluid half-space | largest \|R\| difference | Bounce 3.3e-16 · OASR about 1e-6 |
+| ASA upslope wedge, 25 Hz (COUPLE07) | RMS ΔTL at 30 m / 150 m | RAM 0.110 / 0.133 dB (pinned grid) · Bellhop 1.834 / 2.141 dB · Kraken adiabatic 2.221 / 2.502 dB · Kraken coupled 2.756 / 2.392 dB |
+| NORDA PE Workshop 3b, 250 Hz (COUPLE07) | median \|ΔTL\| | Kraken 0.067 dB · RAM 0.160 dB · Scooter 0.192 dB · Bellhop 4.41 dB (loses the near-bed field) |
+| Corrugated seafloor, 25 Hz (COUPLE07, two-way) | mean TL offset, 10–18.09 km | Kraken coupled +2.83 dB · RAM +4.70 dB (mpiramS) / +5.82 dB (ramgeo) — one-way engines |
+| Bucker waveguide, 100 Hz (Scooter, checked against OAST) | median \|ΔTL\|, 2–20 km | OAST 0.0145 dB · Kraken `leaky_modes=True` 0.0198 dB (defaults 0.1235 dB) · RAM `zmax=2000` 0.0776 dB (defaults 0.1188 dB) |
+| NORDA PE Workshop 4c, 25 Hz (COUPLE07) | median \|ΔTL\|, flat 5–150 km, at 150 m / 700 m | Kraken adiabatic 0.101 / 0.153 dB · RAM 0.279 / 0.413 dB · Kraken coupled fails on the shelf (mean −21.761 dB) |
 
 ## 🧪 Testing
 
@@ -485,28 +505,37 @@ lands.
 ## 🗺️ Roadmap
 
 Because the initial codebase was LLM‑bootstrapped, *auditing* comes before
-new features. Both lists are contributor checklists — open an issue or PR
-for anything you investigate. Full diffs of in‑tree native‑model changes
+new features. The first list is the priority; the second collects ideas — open an
+issue or PR for anything you investigate. Full diffs of in‑tree native‑model changes
 live in [MODIFICATIONS.md](./uacpy/third_party/MODIFICATIONS.md).
 
 ### 🛠️ Hardening & validation (priority)
 
-- **🧱 API audit** 
-- **🔬 Native model re‑validation** 
-- **🐍 Python‑side review** 
-- **📊 Visualization review** 
-- **🧪 Test suite audit** 
-- **📦 Build, install, packaging** 
-- **🔁 CI / CD** 
+- **🔎 Audit & human validation** — the code was LLM‑bootstrapped. It is audited line by
+  line and every engine is checked against closed forms and published benchmarks
+  ([validation page](./docs/models/validation.md)), but it still needs review and
+  validation by human experts, for the models and regimes they use. Issues and PRs welcome.
 
-> **If you are evaluating UACPY for a project: do not trust any specific
-> number it produces until the re‑validation items above have been
-> verified for the model and regime you care about.**
+> **If you are evaluating UACPY for a project: do not trust any specific number it
+> produces until it has been validated for the model and regime you care about.**
 
-### 🔮 Future scope
+### 💡 Ideas for the future
 
-- **Model features** — coverage of every native model option, GPU acceleration for more models, full 3‑D propagation.
-- **GUI** — scenario‑based simulations, interactive TL / mode / noise level / ...,  dashboards.
+Possible directions, not commitments: none of them is planned or scheduled. Discussion and
+contributions are welcome.
+
+- **🧊 Full 3‑D propagation** — Bellhop3D and 3‑D modes; most of the plumbing already
+  exists.
+- **🚤 Moving platforms** — per‑arrival Doppler for a moving source or receiver in the
+  received signal (as the Acoustics Toolbox's `delayandsum.m` does), then arrivals
+  recomputed along a track.
+- **🎯 Geoacoustic inversion & uncertainty** — fit seabed parameters to measured array
+  data with the matched‑field tools already in uacpy, and run ensembles over the
+  uncertainty of the environment to give TL and detection ranges with percentile bands.
+- **🛰️ Scenario "digital twin"** — from a ship track and a date: fetched environment →
+  propagation → detection, communication and noise‑exposure maps (most pieces exist).
+- **🖥️ GUI** — scenario‑based simulations, interactive TL / modes / noise level,
+  dashboards.
 
 
 ## 🙏 Acknowledgments
@@ -547,8 +576,8 @@ Vendored from the Quiet Oceans repackaging of David C. Calvo's NRL
 distribution --- https://github.com/quiet-oceans/ramsurf
 
 - Collins, *A split-step Padé solution for the parabolic equation method*, JASA, 1993
-- Collins, *Higher-order parabolic approximations for accurate and stable elastic parabolic equations with application to interface wave propagation*, JASA, 1991 (RAMS / elastic)
-- Collins, *Generalization of the split-step Padé solution* (variable surface / ramsurf), JASA 97, 2767–2770, 1995
+- Collins, *Higher-order Padé approximations for accurate and stable elastic parabolic equations with application to interface wave propagation*, JASA 89, 1050–1057, 1991 (RAMS / elastic)
+- Collins, Coury & Siegmann, *Beach acoustics* (variable surface / ramsurf), JASA 97, 2767–2770, 1995
 
 ### ramgeo --- Collins RAM family (RAMGEO 1.5g, range-dependent layered fluid PE)
 
@@ -611,8 +640,8 @@ redistributed by UACPY); all are permissive and GPL-3.0-compatible.
 | **netCDF4** | reading WOA23 / GEBCO / GlobSed grids | MIT |
 | **shapely** | EMODnet seabed-substrate polygon lookups | BSD-3-Clause |
 | **pyproj** | map projections (sea-ice / Diesing reprojection) | MIT |
-| **tifffile** | NSIDC sea-ice / lithology raster reads | BSD-3-Clause |
-| **pillow** | image encode/decode behind the map and animation writers | HPND (MIT-style) |
+| **tifffile** | NSIDC sea-ice raster reads | BSD-3-Clause |
+| **pillow** | image encode/decode behind the map and animation writers; Diesing lithology raster reads | HPND (MIT-style) |
 | **copernicusmarine** | Copernicus operational sound speed — the optional `[copernicus]` extra, not installed by default | EUPL-1.2 (lists GPL-3.0 as compatible) |
 | **xarray** | `Field.to_xarray` / `Field.from_xarray` (and NetCDF through them) — the optional `[xarray]` extra, not installed by default | Apache-2.0 |
 
@@ -627,7 +656,7 @@ Test/development tooling (`pytest`, `pytest-xdist`, `setuptools`, `xarray`
 The `uacpy.data` layer builds an `Environment` (and, for
 `uacpy.plot.plot_bathymetry_map`, a coastline map) from public databases.
 These datasets are **fetched on demand - not redistributed** with UACPY.
-Their licences (CC-BY, CC-BY-NC, public domain, …) impose: whoever fetches 
+Their licences (CC-BY, public domain, the Copernicus Marine licence, …) impose: whoever fetches 
 the data is its licensee and is responsible for honouring the licence and 
 citing the source. Heavy users can point at their own mirror through the
 `base_url=` of the bathymetry, WOA, Argo, EMODnet-substrate and MARS
@@ -698,4 +727,5 @@ etc.), the maintainer can be reached at:
 - https://github.com/marcuskd/pyram
 - https://github.com/org-arl/UnderwaterAcoustics.jl
 - https://github.com/SPECFEM
+- https://github.com/TengjiaoHE/Multimodal-PE
 

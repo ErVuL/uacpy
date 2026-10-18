@@ -25,11 +25,11 @@ class BounceSettings(EngineSettings):
     c_high_origin : str
         Where ``c_high`` came from: the constructor, or the unbounded
         default ``DEFAULT_C_MAX_UNBOUNDED``.
-    rmax_m : float
+    rmax : float
         The range (m) the table's angular sampling is sized for, written as
         the deck's ``RMax`` in km.
     rmax_origin : str
-        Where ``rmax_m`` came from: the constructor, ``n_angles``, the
+        Where ``rmax`` came from: the constructor, ``n_angles``, the
         receiver's farthest range, or the 10 km fallback.
     n_angles : int
         Angles the binary tabulates for this deck (``bounce.f90:45-49``).
@@ -45,7 +45,7 @@ class BounceSettings(EngineSettings):
     c_low_origin: str
     c_high: float
     c_high_origin: str
-    rmax_m: float
+    rmax: float
     rmax_origin: str
     n_angles: int
     n_mesh: Tuple[int, ...]

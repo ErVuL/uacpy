@@ -45,17 +45,20 @@ from uacpy.data.sources import SOURCES, DataProvenance
 
 from uacpy.data._offset_policy import ARGO_OFFSET_WARN_KM
 from uacpy.data._offset_policy import checked_date_offset
+from uacpy.data._provenance_notice import one_provenance_notice
 
 __all__ = ['ArgoProfile', 'fetch_argo_profile', 'fetch_ssp_argo']
 
 ARGO_ERDDAP_URL = 'https://erddap.ifremer.fr/erddap/tabledap/ArgoFloats.csv'
 #: How far (km) the Argo search reaches for a cast when the caller sets no
 #: ``max_distance_km``: the radius of the query and of the space-time ranking.
+#: uacpy guidance (a search budget), not a physical bound.
 ARGO_SEARCH_RADIUS_KM = 250.0
-# Tight by design: one Argo profile is a single real in-situ snapshot and the
-# ocean decorrelates from it within a couple of weeks, so we accept less
-# temporal slack here than for the smoother daily-mean Copernicus model
-# (DEFAULT_MAX_DAYS=31). The tolerance tracks how slowly the field varies.
+#: Farthest a cast may lie from the requested date (days) when the caller sets
+#: no ``max_days``: uacpy guidance (policy), not a physical bound. It is
+#: tighter than the Copernicus model's 31 days because one cast is a single
+#: in-situ snapshot, while a model's nearest step inside its coverage is within
+#: one time step of the date.
 DEFAULT_MAX_DAYS = 15
 _GOOD_QC = {'1', '2'}                       # good / probably-good Argo QC flags
 # ERDDAP returns columns in the order requested, and the rows below are unpacked
@@ -188,6 +191,8 @@ class ArgoProfile(ExportRecord):
     _TABLE_FIELDS = ('pressure_dbar', 'temperature', 'salinity')
 
 
+@one_provenance_notice(subject="the cast's data",
+                       record="the result's .provenance")
 def fetch_argo_profile(
     point: Coordinate, *, date,
     max_distance_km: Optional[float] = None,
@@ -323,6 +328,7 @@ def fetch_argo_profile(
     # combined space-time: each axis normalised by its own tolerance, so a
     # slightly farther but much fresher float can win over a marginally closer,
     # staler one (a profile at the edge of either tolerance costs the same).
+    # uacpy guidance: a ranking choice, not a published rule.
     scored = [(key, p, great_circle_km(lat, lon, p['lat'], p['lon']))
               for key, p in profiles.items()]
     within = [t for t in scored if t[2] <= max_distance_km]
@@ -347,7 +353,8 @@ def fetch_argo_profile(
     (plat, cyc, dirn), prof, dist = min(within, key=_spacetime_cost)
     lev = np.array(sorted(prof['lev']), dtype=float)        # sort by pressure
     # Real-time surface PRES may be slightly negative with QC 1 (Argo's
-    # global-range test admits -5 dbar): floor it at the surface so the depth
+    # global-range test admits -5 dbar; Argo Quality Control Manual for CTD
+    # and Trajectory Data): floor it at the surface so the depth
     # conversion cannot place a node above 0 m, then keep the first sample of
     # each exactly repeated level so the depths stay strictly increasing.
     lev[:, 0] = np.maximum(lev[:, 0], 0.0)
@@ -373,6 +380,8 @@ def fetch_argo_profile(
         provenance=checked_date_offset(prov, who='fetch_argo_profile'))
 
 
+@one_provenance_notice(subject="the profile's data",
+                       record='uacpy.data.citations(ssp)')
 def fetch_ssp_argo(
     point: Coordinate, *, date,
     formula: str = DEFAULT_SOUND_SPEED_FORMULA,

@@ -25,20 +25,20 @@ from uacpy.acoustic_signal._results import PlottedResult
 
 
 class AmbiguityResult(PlottedResult,
-                      namedtuple("AmbiguityResult", "delays_s doppler_hz amplitude")):
-    """Ambiguity surface ``|chi|`` over ``delays_s`` and ``doppler_hz``.
+                      namedtuple("AmbiguityResult", "delays doppler_shifts amplitude")):
+    """Ambiguity surface ``|chi|`` over ``delays`` and ``doppler_shifts``.
 
-    The tuple is the measurement, so ``delays_s, doppler_hz, amplitude = ...``
+    The tuple is the measurement, so ``delays, doppler_shifts, amplitude = ...``
     keeps working; :meth:`plot` is the one obvious way to draw it.
     """
 
     __slots__ = ()
 
     _plotter = "plot_ambiguity"
-    _plot_fields = ("delays_s", "doppler_hz", "amplitude")
+    _plot_fields = ("delays", "doppler_shifts", "amplitude")
 
     def _field_units(self):
-        return {"delays_s": "s", "doppler_hz": "Hz", "amplitude": ""}
+        return {"delays": "s", "doppler_shifts": "Hz", "amplitude": ""}
 
 
 def matched_filter(received, replica, *, mode: str = "full", normalize: bool = True):
@@ -93,8 +93,8 @@ def matched_filter(received, replica, *, mode: str = "full", normalize: bool = T
 def pulse_compression(received, replica, sample_rate: float, *, normalize: bool = True):
     """Matched filter returning a lag axis in seconds.
 
-    Returns ``(lags_s, compressed)`` where ``lags_s`` is the echo-delay axis
-    (lag 0 = replica aligned with the start of ``received``).
+    Returns ``(lags, compressed)`` where ``lags`` is the echo-delay axis in
+    seconds (lag 0 = replica aligned with the start of ``received``).
 
     Parameters
     ----------
@@ -117,7 +117,7 @@ def pulse_compression(received, replica, sample_rate: float, *, normalize: bool 
     return lags, comp
 
 
-def processing_gain_dB(bandwidth_hz: float, duration_s: float) -> float:
+def processing_gain_dB(bandwidth: float, duration: float) -> float:
     """Matched-filter processing gain (dB) = ``10*log10(B*T)``.
 
     For a spreading code the same gain is ``10*log10(N)`` with ``N`` the chip
@@ -126,19 +126,19 @@ def processing_gain_dB(bandwidth_hz: float, duration_s: float) -> float:
 
     Parameters
     ----------
-    bandwidth_hz : float
+    bandwidth : float
         Signal bandwidth (Hz).
-    duration_s : float
+    duration : float
         Signal duration (s).
     """
     # Each factor on its own: two negatives make a positive product, and a
     # NaN fails every comparison.
-    bandwidth, duration = float(bandwidth_hz), float(duration_s)
+    bandwidth, duration = float(bandwidth), float(duration)
     if not (np.isfinite(bandwidth) and bandwidth > 0.0
             and np.isfinite(duration) and duration > 0.0):
         raise ConfigurationError(
             f"processing_gain_dB: B and T must each be > 0 and finite; got "
-            f"bandwidth_hz={bandwidth_hz!r}, duration_s={duration_s!r}.")
+            f"bandwidth={bandwidth!r}, duration={duration!r}.")
     return float(10.0 * np.log10(bandwidth * duration))
 
 
@@ -152,7 +152,7 @@ def processing_gain_dB(bandwidth_hz: float, duration_s: float) -> float:
 _MAX_AMBIGUITY_CELLS = 1 << 27
 
 
-def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
+def ambiguity_function(waveform, sample_rate: float, *, doppler_shifts=None,
                        n_doppler: int = 101):
     """Narrowband range-Doppler ambiguity surface ``|chi(tau, nu)|``.
 
@@ -165,16 +165,16 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
         Complex (or real) baseband transmit waveform.
     sample_rate : float
         Sample rate (Hz).
-    doppler_hz : array, optional
+    doppler_shifts : array, optional
         Doppler shifts (Hz) to evaluate. Default: ``n_doppler`` points spanning
         ``+/- sample_rate/20``.
     n_doppler : int
-        Number of Doppler bins when ``doppler_hz`` is None.
+        Number of Doppler bins when ``doppler_shifts`` is None.
 
     Returns
     -------
     AmbiguityResult
-        Namedtuple ``(delays_s, doppler_hz, amplitude)``: the delay axis (s,
+        Namedtuple ``(delays, doppler_shifts, amplitude)``: the delay axis (s,
         length ``2*N-1``), the Doppler axis (Hz), and ``|chi|`` with shape
         ``(n_doppler, 2*N-1)``.
     """
@@ -187,20 +187,20 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
     fs = require_positive_finite_scalar(
         sample_rate, "ambiguity_function", "sample_rate", " Hz")
     t = np.arange(n) / fs
-    if doppler_hz is None:
+    if doppler_shifts is None:
         fmax = fs / 20.0
-        doppler_hz = np.linspace(-fmax, fmax, int(n_doppler))
-    doppler_hz = np.atleast_1d(np.asarray(doppler_hz, dtype=float))
-    cells = int(doppler_hz.size) * (2 * n - 1)
+        doppler_shifts = np.linspace(-fmax, fmax, int(n_doppler))
+    doppler_shifts = np.atleast_1d(np.asarray(doppler_shifts, dtype=float))
+    cells = int(doppler_shifts.size) * (2 * n - 1)
     if cells > _MAX_AMBIGUITY_CELLS:
         raise ConfigurationError(
             f"ambiguity_function: the surface would be "
-            f"{doppler_hz.size} x {2 * n - 1} = {cells} float64 cells "
+            f"{doppler_shifts.size} x {2 * n - 1} = {cells} float64 cells "
             f"({cells * 8 / 2 ** 30:.2f} GiB), past the "
             f"{_MAX_AMBIGUITY_CELLS} cell cap "
             f"({_MAX_AMBIGUITY_CELLS * 8 / 2 ** 30:.2f} GiB). It also runs "
             f"one full-length FFT convolution per Doppler row. Shorten the "
-            f"waveform, decimate it, or pass fewer n_doppler / doppler_hz "
+            f"waveform, decimate it, or pass fewer n_doppler / doppler_shifts "
             f"candidates.")
     energy = float(np.sum(np.abs(s) ** 2))
     if energy == 0.0:
@@ -209,10 +209,10 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
             "the (0, 0) peak to 1 divides by zero and the whole surface is "
             "nan. Pass the transmit waveform.")
     rev = np.conj(s[::-1])
-    amp = np.empty((doppler_hz.size, 2 * n - 1))
-    for i, nu in enumerate(doppler_hz):
+    amp = np.empty((doppler_shifts.size, 2 * n - 1))
+    for i, nu in enumerate(doppler_shifts):
         sd = s * np.exp(2j * np.pi * nu * t)
         amp[i] = np.abs(fftconvolve(sd, rev, mode="full"))
     amp /= energy
     lags = (np.arange(2 * n - 1) - (n - 1)) / fs
-    return AmbiguityResult(lags, doppler_hz, amp)
+    return AmbiguityResult(lags, doppler_shifts, amp)

@@ -71,11 +71,12 @@ def test_stdin_keeps_its_pseudo_filename():
 
 def test_formatter_renders_the_log_message_shape():
     out = _uacpy_format_warning(
-        'grid too coarse', UserWarning,
+        'grid too coarse', uacpy.ValidityWarning,
         str(_PKG_ROOT / 'models' / 'ram.py'), 42)
     assert re.fullmatch(
-        r"\[\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} UTC\] \[WARN\] "
-        r"\[uacpy\.models\.ram:42\] grid too coarse\n",
+        r"\[\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} UTC\] "
+        r"\[WARN ValidityWarning\] \[uacpy\.models\.ram:42\] "
+        r"grid too coarse\n",
         out,
     ), out
 
@@ -85,17 +86,21 @@ def test_formatter_labels_by_category():
         out = _uacpy_format_warning('m', category, '/x/script.py', 1)
         return re.match(r"\[[^]]+\] \[([^]]+)\]", out).group(1)
 
-    # UserWarning matches log_message's WARN; other categories keep their
-    # name minus the 'Warning' suffix; the bare Warning base class (empty
-    # after the strip) falls back to WARN.
-    assert label(UserWarning) == 'WARN'
-    # a uacpy warning keeps the level label; its class names the cause
+    # a uacpy warning prints the level, then the class that names its cause
+    # (the name a warnings filter takes)
     for name in ('UACPYWarning', 'NumericsWarning', 'ValidityWarning',
                  'FallbackWarning', 'ProvenanceWarning', 'IOWarning'):
-        assert label(getattr(uacpy, name)) == 'WARN', name
-    assert label(DeprecationWarning) == 'DEPRECATION'
-    assert label(RuntimeWarning) == 'RUNTIME'
-    assert label(Warning) == 'WARN'
+        assert label(getattr(uacpy, name)) == f'WARN {name}', name
+
+
+@pytest.mark.parametrize('category', [UserWarning, DeprecationWarning,
+                                      RuntimeWarning, Warning])
+def test_a_warning_that_is_not_uacpys_prints_as_python_prints_it(category):
+    """The user's own warnings and other libraries' keep Python's rendering:
+    ``warnings.formatwarning`` is process-global, and only uacpy's own
+    warnings take the log shape."""
+    out = _uacpy_format_warning('m', category, '/x/script.py', 1)
+    assert out == f'/x/script.py:1: {category.__name__}: m\n'
 
 
 # ─── interpreter-shutdown fallback ─────────────────────────────────────────
@@ -106,16 +111,18 @@ def test_torn_down_datetime_falls_back_to_the_plain_shape(monkeypatch):
     # sys.modules teardown has nulled this module's globals; the formatter
     # must still return a line rather than raise and lose the warning.
     monkeypatch.setattr(_log, 'datetime', None)
-    out = _uacpy_format_warning('late warning', UserWarning, 'user_script.py', 7)
-    assert out == 'user_script.py:7: UserWarning: late warning\n'
+    out = _uacpy_format_warning('late warning', uacpy.ValidityWarning,
+                                'user_script.py', 7)
+    assert out == 'user_script.py:7: ValidityWarning: late warning\n'
 
 
 def test_torn_down_path_falls_back_too(monkeypatch):
     # Same guard, torn one level deeper: _source_from_filename itself
     # raising (Path nulled) is caught by the formatter's fallback.
     monkeypatch.setattr(_log, 'Path', None)
-    out = _uacpy_format_warning('late warning', UserWarning, 'user_script.py', 7)
-    assert out == 'user_script.py:7: UserWarning: late warning\n'
+    out = _uacpy_format_warning('late warning', uacpy.ValidityWarning,
+                                'user_script.py', 7)
+    assert out == 'user_script.py:7: ValidityWarning: late warning\n'
 
 
 # ─── install_warning_formatter policy ──────────────────────────────────────
@@ -274,7 +281,8 @@ def test_importing_uacpy_installs_the_warning_formatter():
 def test_the_warning_formatter_can_be_declined():
     """``warnings.formatwarning`` is process-global — installing it reformats
     every other library's warnings too — so a host gets the same opt-out
-    spelling :mod:`uacpy._stack` gives its RLIMIT change."""
+    spelling the child stack limit's RLIMIT change has
+    (``UACPY_NO_STACK_RAISE``)."""
     assert _formatter_module('1') == 'warnings'
 
 

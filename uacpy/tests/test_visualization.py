@@ -44,14 +44,15 @@ from uacpy.visualization.plots.maps import (_lon_label_value,
                                             _unwrap_lon_axis,
                                             plot_overview)
 from uacpy.visualization.plots.noise import plot_source_level, plot_wenz
-from uacpy.visualization.plots.rays_modes import _plot_rays, plot_modes_heatmap
+from uacpy.visualization.plots.rays_modes import plot_rays, plot_modes_heatmap
 from uacpy.visualization.plots.signal import (_clamped_freq_limits,
                                               _log_freq_xlim, _ref_label,
                                               plot_constant_q_ppsd,
                                               plot_constant_q_psd,
                                               plot_constant_q_spectrogram,
+                                              plot_band_levels,
                                               plot_frf, plot_ppsd, plot_psd,
-                                              plot_sel, plot_spectrogram)
+                                              plot_spectrogram)
 from uacpy.visualization.plots.fields import compare_models
 from uacpy.tests.conftest import recorded_warnings
 
@@ -195,9 +196,9 @@ class TestEnvironmentPlotCanMoveTheSource:
     def test_the_source_defaults_to_the_origin(self):
         assert self._source_x() == pytest.approx([0.0])
 
-    def test_source_marker_range_m_moves_the_star(self):
+    def test_source_marker_range_moves_the_star(self):
         assert self._source_x(
-            source_marker_range_m=5000.0) == pytest.approx([5.0])
+            source_marker_range=5000.0) == pytest.approx([5.0])
 
 
 class TestPlotField:
@@ -402,13 +403,53 @@ class TestStackedTraces:
         plt.close(fig)
 
     def test_per_trace_vertical_offsets(self, time_field):
-        fig, ax = plots.plot_field(time_field, stacked=True, stack_offset=1.5)
+        fig, ax = plots.plot_field(time_field, stacked=True, stack_offset=1.5,
+                                   normalize='global')
         # One Line2D per range row, each lifted by i · stack_offset.
         assert len(ax.lines) == time_field.coords['range'].size
         for i, line in enumerate(ax.lines):
             np.testing.assert_allclose(
                 line.get_ydata() - time_field.data[i], i * 1.5)
         plt.close(fig)
+
+    @staticmethod
+    def _spreading():
+        """Three ranges, the same pulse at 1/r amplitude: the far trace is
+        a fifth of the near one."""
+        t = np.linspace(0.0, 0.1, 200)
+        r = np.array([100.0, 250.0, 500.0])
+        pulse = np.exp(-((t - 0.05) / 0.005) ** 2)
+        return Field(data=pulse[None, :] / r[:, None],
+                     coords={'range': r, 'time': t}, model='Synth')
+
+    def test_each_trace_is_scaled_to_its_own_peak_by_default(self):
+        """The record-section reading: every trace peaks at 1 above its
+        baseline (offset 2), so the far traces of a spreading field show
+        their arrivals; one colour draws them all."""
+        f = self._spreading()
+        fig, ax = plots.plot_field(f, stacked=True)
+        for i, line in enumerate(ax.lines):
+            np.testing.assert_allclose(np.max(line.get_ydata()) - 2.0 * i,
+                                       1.0)
+        assert {line.get_color() for line in ax.lines} == {'k'}
+        assert 'each trace to its peak' in ax.get_ylabel()
+        plt.close(fig)
+
+    def test_global_keeps_the_true_amplitudes(self):
+        f = self._spreading()
+        fig, ax = plots.plot_field(f, stacked=True, normalize='global')
+        heights = [np.max(line.get_ydata()) - i * 2.0 * f.data.max()
+                   for i, line in enumerate(ax.lines)]
+        np.testing.assert_allclose(heights, f.data.max(axis=1))
+        plt.close(fig)
+
+    def test_normalize_belongs_to_the_stacked_view(self, time_field, tl_field):
+        with pytest.raises(ConfigurationError, match='normalize= has no '
+                                                     'effect'):
+            plots.plot_field(tl_field, normalize='trace')
+        with pytest.raises(ConfigurationError, match="'peak' is not one of"):
+            plots.plot_field(time_field, stacked=True, normalize='peak')
+        assert not plt.get_fignums()
 
 
 class TestKwargOwnershipRejections:
@@ -478,7 +519,7 @@ class TestCompareModels:
             model='B', frequencies=100.0,
         )
         with pytest.warns(UserWarning,
-                          match=r"'B' range axis differs from 'A'"):
+                          match=r"'B' is not on 'A''s grid"):
             fig, _ = plots.compare_models([tl_field, shifted],
                                           labels=['A', 'B'])
         plt.close(fig)
@@ -516,6 +557,34 @@ class TestAFieldOverSourceDepthsPlotsOnePanelPerDepth:
             'Source depth = 10 m', 'Source depth = 20 m',
             'Source depth = 30 m']
         plt.close(fig)
+
+    def test_panels_on_one_fixed_scale_share_one_bar(self):
+        """Three panels on the fixed 20-120 dB TL window drew three
+        identical bars, each narrowing its own panel; they share one bar
+        beside the grid, inside the canvas. Panels whose scales differ
+        (``value='level'`` autoscales each) keep a bar each."""
+        field = self._field()
+        fig, axes = field.plot()
+        try:
+            bars = _colorbars(fig)
+            assert len(bars) == 1 and bars[0].ax.get_ylabel() == 'TL (dB)'
+            widths = {round(ax.get_position().width, 6)
+                      for ax in np.ravel(axes)}
+            assert len(widths) == 1
+            fig.canvas.draw()
+            box = bars[0].ax.get_tightbbox(fig.canvas.get_renderer())
+            assert box.x1 <= fig.bbox.width + 0.5
+        finally:
+            plt.close(fig)
+        complex_field = Field(
+            data=np.ones((3, 5, 8), dtype=complex) / np.arange(1, 4)[:, None, None],
+            coords=field.coords, model='Synth', frequencies=100.0,
+            source_depths=[10.0, 20.0, 30.0])
+        fig, axes = complex_field.plot(value='level')
+        try:
+            assert len(_colorbars(fig)) == 3
+        finally:
+            plt.close(fig)
 
     def test_a_weighted_field_says_its_panels_carry_no_weights(self):
         field = self._field()
@@ -879,6 +948,26 @@ class TestPlotCovariance:
         assert ax.get_title() == 'Covariance at 200.0 Hz'
         plt.close(fig)
 
+    def test_the_covariance_and_replica_maps_take_a_colormap(self):
+        """Every other heatmap view takes ``cmap=``; these two had their
+        map hard-coded. ``None`` keeps the colours named in style.py."""
+        from uacpy.visualization.style import (MAGNITUDE_COLORMAP,
+                                               REPLICA_COLORMAP)
+        cov = Covariance(covariance=np.eye(3)[None].astype(complex),
+                         frequencies=200.0)
+        rep = Replicas(replicas=np.ones((1, 3, 4, 2), dtype=complex),
+                       candidates={'depth': np.linspace(10.0, 50.0, 3),
+                                   'range': np.linspace(1e3, 4e3, 4)},
+                       frequencies=200.0)
+        for result, default in ((cov, MAGNITUDE_COLORMAP),
+                                (rep, REPLICA_COLORMAP)):
+            fig, ax = result.plot()
+            assert (ax.images + ax.collections)[0].get_cmap().name == default
+            plt.close(fig)
+            fig, ax = result.plot(cmap='cividis')
+            assert (ax.images + ax.collections)[0].get_cmap().name == 'cividis'
+            plt.close(fig)
+
 
 class TestPlotReplicas:
     def test_dispatch_draws_replica_field(self):
@@ -1214,7 +1303,7 @@ class TestPlotModes:
 class TestPlotReflectionCoefficient:
     def test_narrowband(self):
         rc = ReflectionCoefficient(
-            angles=np.linspace(0, 90, 91),
+            angles_deg=np.linspace(0, 90, 91),
             magnitude=np.linspace(1.0, 0.0, 91),
             phase=np.zeros(91),
             model='Bounce',
@@ -1227,7 +1316,7 @@ class TestPlotReflectionCoefficient:
         freqs = np.linspace(50, 500, 10)
         R = np.tile(np.linspace(1.0, 0.0, 31)[:, None], (1, 10))
         rc = ReflectionCoefficient(
-            angles=theta, magnitude=R, phase=np.zeros_like(R),
+            angles_deg=theta, magnitude=R, phase=np.zeros_like(R),
             frequencies=freqs, model='Bounce',
         )
         fig, _ = rc.plot()
@@ -1243,7 +1332,7 @@ class TestReflectionPanelDrawsDecibelLoss:
     def _narrowband(reflection_type=None):
         # |R| = 1 at grazing, 0.1 at normal: 0 dB of loss rising to 20 dB
         return ReflectionCoefficient(
-            angles=np.linspace(0, 90, 91),
+            angles_deg=np.linspace(0, 90, 91),
             magnitude=np.linspace(1.0, 0.1, 91),
             phase=np.zeros(91), model='Bounce',
             reflection_type=reflection_type,
@@ -1251,7 +1340,7 @@ class TestReflectionPanelDrawsDecibelLoss:
 
     def test_the_curve_is_the_decibel_loss_of_the_magnitude(self):
         rc = self._narrowband()
-        fig, ax = rc.plot(quantity='loss')
+        fig, ax = rc.plot(value='loss')
         try:
             y = ax.lines[0].get_ydata()
             assert y[0] == pytest.approx(0.0, abs=1e-9)
@@ -1278,10 +1367,10 @@ class TestReflectionPanelDrawsDecibelLoss:
         at the 600 dB no-energy marker and |R| = 1e-7 at 140 dB. The view
         stops at 120 dB so the real losses keep the axis."""
         rc = ReflectionCoefficient(
-            angles=np.linspace(0, 90, 3), magnitude=np.array([1.0, null, 1.0]),
+            angles_deg=np.linspace(0, 90, 3), magnitude=np.array([1.0, null, 1.0]),
             phase=np.zeros(3), model='Bounce',
         )
-        fig, ax = rc.plot(quantity='loss')
+        fig, ax = rc.plot(value='loss')
         try:
             y = ax.lines[0].get_ydata()
             assert np.all(np.isfinite(y))
@@ -1295,10 +1384,10 @@ class TestReflectionPanelDrawsDecibelLoss:
         """|R| = 1e-5 is 100 dB, under the 120 dB cut: the axis is
         matplotlib's own autoscale over the data, 0 to 100 dB plus 5 %."""
         rc = ReflectionCoefficient(
-            angles=np.linspace(0, 90, 3), magnitude=np.array([1.0, 1e-5, 1.0]),
+            angles_deg=np.linspace(0, 90, 3), magnitude=np.array([1.0, 1e-5, 1.0]),
             phase=np.zeros(3), model='Bounce',
         )
-        fig, ax = rc.plot(quantity='loss')
+        fig, ax = rc.plot(value='loss')
         try:
             np.testing.assert_array_equal(ax.lines[0].get_ydata(), rc.dB)
             assert ax.get_ylim() == pytest.approx((-5.0, 105.0))
@@ -1312,10 +1401,10 @@ class TestReflectionPanelDrawsDecibelLoss:
         R = np.ones((3, 2))
         R[1, 0] = null
         rc = ReflectionCoefficient(
-            angles=np.linspace(0, 90, 3), magnitude=R, phase=np.zeros_like(R),
+            angles_deg=np.linspace(0, 90, 3), magnitude=R, phase=np.zeros_like(R),
             frequencies=np.array([100.0, 200.0]), model='Bounce',
         )
-        fig, ax = rc.plot(quantity='loss')
+        fig, ax = rc.plot(value='loss')
         try:
             mesh = ax.collections[0]
             np.testing.assert_array_equal(
@@ -1325,9 +1414,69 @@ class TestReflectionPanelDrawsDecibelLoss:
         finally:
             plt.close(fig)
 
+    def test_labelled_lines_overlay_on_a_neutral_axis(self):
+        """``label=`` names a line and adds a legend; with labels the y axis
+        keeps the default colour (one line's colour would claim the axis),
+        while an unlabelled line colours it, ``color=`` included."""
+        rc = self._narrowband()
+        fig, ax = rc.plot(color='C2')
+        try:
+            assert ax.yaxis.label.get_color() == ax.lines[0].get_color()
+        finally:
+            plt.close(fig)
+        fig, ax = rc.plot(label='a', color='C2', linestyle='--')
+        rc.plot(label='b', ax=ax)
+        try:
+            assert [l.get_label() for l in ax.lines] == ['a', 'b']
+            assert ax.lines[0].get_linestyle() == '--'
+            assert [t.get_text() for t in ax.get_legend().get_texts()] == [
+                'a', 'b']
+            assert ax.yaxis.label.get_color() == plt.rcParams[
+                'axes.labelcolor']
+        finally:
+            plt.close(fig)
+
+    def test_the_phase_is_drawn_in_radians(self):
+        rc = ReflectionCoefficient(angles_deg=np.linspace(0, 90, 10),
+                                   magnitude=np.ones(10),
+                                   phase=np.linspace(0.0, 3.0, 10))
+        fig, ax = rc.plot(show_phase=True)
+        try:
+            twin = [a for a in fig.axes if a is not ax][0]
+            np.testing.assert_allclose(twin.lines[0].get_ydata(), rc.phase)
+            assert twin.get_ylabel() == 'Phase (rad)'
+        finally:
+            plt.close(fig)
+
+    def test_a_line_knob_on_the_broadband_map_is_refused(self):
+        rc = ReflectionCoefficient(angles_deg=[10.0, 20.0],
+                                   magnitude=np.ones((2, 3)),
+                                   phase=np.zeros((2, 3)),
+                                   frequencies=[1.0, 2.0, 3.0])
+        for kw in ({'label': 'a'}, {'color': 'k'}, {'mark_critical': True},
+                   {'linestyle': '--'}):
+            with pytest.raises(ConfigurationError, match='no effect on a '
+                                                         'broadband result'):
+                rc.plot(**kw)
+        assert not plt.get_fignums()
+
+    def test_a_keyword_the_view_does_not_take_names_the_users_call(self):
+        """The line view forwards its other keywords to matplotlib's line,
+        so ``rc.plot(colour='k')`` — a keyword neither takes — is refused
+        naming ``ReflectionCoefficient.plot``, the call the user wrote, and
+        matplotlib's reason, with no figure left open."""
+        rc = self._narrowband()
+        with pytest.raises(ConfigurationError,
+                           match=r"^ReflectionCoefficient\.plot: a keyword "
+                                 r"was passed(?s:.*)'colour'") as info:
+            rc.plot(colour='k')
+        assert '_plot_' not in str(info.value)
+        assert 'who=' not in str(info.value)
+        assert not plt.get_fignums()
+
     def test_a_transmission_run_is_named_transmission_loss(self):
         rc = self._narrowband('transmission')
-        fig, ax = rc.plot(quantity='loss')
+        fig, ax = rc.plot(value='loss')
         try:
             assert 'Transmission loss' in ax.get_title()
             assert 'Reflection' not in ax.get_title()
@@ -1338,10 +1487,10 @@ class TestReflectionPanelDrawsDecibelLoss:
         theta = np.linspace(0, 90, 31)
         R = np.tile(np.linspace(1.0, 0.1, 31)[:, None], (1, 10))
         rc = ReflectionCoefficient(
-            angles=theta, magnitude=R, phase=np.zeros_like(R),
+            angles_deg=theta, magnitude=R, phase=np.zeros_like(R),
             frequencies=np.linspace(50, 500, 10), model='Bounce',
         )
-        fig, ax = rc.plot(quantity='loss')
+        fig, ax = rc.plot(value='loss')
         try:
             assert 'Reflection loss' in ax.get_title()
             bars = ''.join(cb.ax.get_ylabel() for cb in _colorbars(fig))
@@ -1349,10 +1498,10 @@ class TestReflectionPanelDrawsDecibelLoss:
         finally:
             plt.close(fig)
 
-    def test_an_unknown_quantity_is_refused(self):
+    def test_an_unknown_value_is_refused(self):
         rc = self._narrowband()
-        with pytest.raises(ConfigurationError, match='quantity'):
-            rc.plot(quantity='decibels')
+        with pytest.raises(ConfigurationError, match='value'):
+            rc.plot(value='decibels')
 
 
 class TestReflectionCoefficientPanelNamesItsQuantity:
@@ -1365,7 +1514,7 @@ class TestReflectionCoefficientPanelNamesItsQuantity:
     @staticmethod
     def _narrowband(reflection_type=None):
         return ReflectionCoefficient(
-            angles=np.linspace(0, 90, 91),
+            angles_deg=np.linspace(0, 90, 91),
             magnitude=np.linspace(1.0, 0.0, 91),
             phase=np.zeros(91),
             model='OASR', reflection_type=reflection_type,
@@ -1376,7 +1525,7 @@ class TestReflectionCoefficientPanelNamesItsQuantity:
         theta = np.linspace(0, 90, 31)
         R = np.tile(np.linspace(1.0, 0.0, 31)[:, None], (1, 10))
         return ReflectionCoefficient(
-            angles=theta, magnitude=R, phase=np.zeros_like(R),
+            angles_deg=theta, magnitude=R, phase=np.zeros_like(R),
             frequencies=np.linspace(50, 500, 10),
             model='OASR', reflection_type=reflection_type,
         )
@@ -1428,13 +1577,14 @@ class TestNoiseSonarPlotterSignatures:
     minimal-call smoke."""
 
     @pytest.mark.parametrize('name, params, args, kwargs', [
-        ('plot_roc', ('deflection', 'ax', 'pfa', 'pd'),
-         (), {'deflection': 2.0, 'n_points': 16}),
+        ('plot_roc', ('pfa', 'pd', 'ax', 'label'),
+         (uacpy.sonar.roc_curve(2.0, n_points=16),), {}),
         ('plot_source_level', ('frequency', 'level_dB', 'ax', 'label'),
          (np.array([63.0, 125.0, 250.0]),
           np.array([150.0, 148.0, 145.0])), {}),
-        ('plot_weighting', ('group', 'ax', 'frequency'),
-         ('LF',), {}),
+        ('plot_weighting', ('frequency', 'weighting_dB', 'ax', 'label'),
+         (np.logspace(1, 5, 50),
+          uacpy.noise.auditory_weighting(np.logspace(1, 5, 50), 'LF')), {}),
     ])
     def test_signature_and_smoke(self, name, params, args, kwargs):
         fn = getattr(plots, name)
@@ -1443,6 +1593,52 @@ class TestNoiseSonarPlotterSignatures:
         fig, ax = fn(*args, **kwargs)
         assert ax.has_data()
         plt.close(fig)
+
+
+def test_the_weighting_plotter_draws_the_curve_it_is_handed():
+    """``plot_weighting`` computes nothing: it draws the arrays
+    ``auditory_weighting`` returns, and a group name is refused, naming
+    that function."""
+    f = np.logspace(1, 5, 50)
+    w = uacpy.noise.auditory_weighting(f, 'HF')
+    fig, ax = uacpy.plot.plot_weighting(f, w, label='HF')
+    (line,) = ax.lines
+    np.testing.assert_array_equal(line.get_ydata(), w)
+    assert line.get_label() == 'HF'
+    plt.close(fig)
+    for group in ('HF', ['LF', 'HF']):
+        with pytest.raises(ConfigurationError, match='auditory_weighting'):
+            uacpy.plot.plot_weighting(group)
+    assert not plt.get_fignums()
+
+
+class TestTheRocPlotterDrawsACurveItIsHanded:
+    """``plot_roc`` computes nothing: it draws the ``RocCurve``
+    ``uacpy.sonar.roc_curve`` returns, or two arrays."""
+
+    def test_the_method_and_the_plotter_are_one_picture(self):
+        curve = uacpy.sonar.roc_curve(2.0, n_points=16)
+        drawn = []
+        for fig, ax in (curve.plot(), plots.plot_roc(curve)):
+            (line,) = ax.lines
+            drawn.append((line.get_xdata().tolist(), line.get_ydata().tolist(),
+                          line.get_label()))
+            plt.close(fig)
+        assert drawn[0] == drawn[1]
+        assert list(drawn[0][:2]) == [curve.pfa.tolist(), curve.pd.tolist()]
+        assert drawn[0][2] == "d'=2 (d=4.0)"
+
+    def test_curves_overlay_through_ax(self):
+        fig, ax = uacpy.sonar.roc_curve(1.0).plot()
+        uacpy.sonar.roc_curve(3.0).plot(ax=ax)
+        assert [line.get_label() for line in ax.lines] == [
+            "d'=1 (d=1.0)", "d'=3 (d=9.0)"]
+        plt.close(fig)
+
+    def test_a_deflection_is_refused_naming_roc_curve(self):
+        with pytest.raises(ConfigurationError, match=r'roc_curve\(d\)'):
+            plots.plot_roc(2.0)
+        assert not plt.get_fignums()
 
 
 class TestBathymetryMap:
@@ -1479,6 +1675,35 @@ class TestBathymetryMap:
                                             aspect=1)
         assert ax.get_aspect() == pytest.approx(1.0)
         plt.close(fig)
+
+    def test_named_isobaths_follow_the_map_rule(self):
+        """Depths the caller names are drawn by the rule of every map
+        plotter: one outside the map's 500-3000 m range is reported, not
+        dropped in silence; the default set (True) draws with no report, and
+        a number is one isobath, as on every map."""
+        lats, lons, depth = self._grid()
+        with pytest.warns(uacpy.NumericsWarning, match=r'contours=\[5000.0\]'):
+            fig, ax = plots.plot_bathymetry_map(
+                lats, lons, depth, basemap=False, contours=[1000.0, 5000.0])
+        try:
+            (contour,) = [c for c in ax.collections
+                          if isinstance(c, mcontour.ContourSet)]
+            assert list(contour.levels) == [1000.0]
+        finally:
+            plt.close(fig)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            fig, ax = plots.plot_bathymetry_map(
+                lats, lons, depth, basemap=False, contours=True)
+            assert any(isinstance(c, mcontour.ContourSet)
+                       for c in ax.collections)
+            plt.close(fig)
+            fig, ax = plots.plot_bathymetry_map(
+                lats, lons, depth, basemap=False, contours=2000)
+            (contour,) = [c for c in ax.collections
+                          if isinstance(c, mcontour.ContourSet)]
+            assert list(contour.levels) == [2000.0]
+            plt.close(fig)
 
     def test_relief_orientation_invariant_to_lat_order(self):
         # The shaded-relief path uses imshow(origin='lower'), which assumes
@@ -1626,6 +1851,30 @@ class TestBathymetryMap:
         west = relief_rgba(lons_east[::-1], depth_east[:, ::-1])
         assert np.array_equal(east, west, equal_nan=True)
         assert east[0, -1, 3] == 0.0                     # the land cell, transparent
+
+    @pytest.mark.parametrize('relief', [True, False])
+    def test_land_is_tan_on_the_plain_map_with_or_without_relief(self, relief):
+        """Without a coastline, land (NaN) is painted tan whichever way the
+        depth is drawn: the relief image leaves land transparent, and the
+        axes face under it was white — land read as blank paper."""
+        from matplotlib.colors import to_rgb
+        from uacpy.visualization.plots.maps import _PLAIN_MAP_LAND_COLOR
+        lats = np.linspace(42.0, 44.0, 20)
+        lons = np.linspace(5.0, 7.0, 20)
+        depth = np.random.default_rng(1).uniform(500.0, 2500.0, (20, 20))
+        depth[14:, :] = np.nan                           # land in the north
+        fig, ax = plots.plot_bathymetry_map(lats, lons, depth, basemap=False,
+                                            relief=relief, graticule=None,
+                                            show_colorbar=False)
+        try:
+            fig.canvas.draw()
+            pixels = np.asarray(fig.canvas.buffer_rgba())[..., :3] / 255.0
+            x, y = ax.transData.transform((6.0, 43.7))   # inside the land band
+            colour = pixels[int(round(fig.bbox.height - y)), int(round(x))]
+            np.testing.assert_allclose(colour, to_rgb(_PLAIN_MAP_LAND_COLOR),
+                                       atol=2 / 255)
+        finally:
+            plt.close(fig)
 
 
 @pytest.mark.parametrize("step, wraps", [
@@ -1997,6 +2246,29 @@ class TestSeaIce:
         assert uacpy.plot.plot_sea_ice_map is plots.plot_sea_ice_map
         plt.close(fig)
 
+    def test_the_sea_ice_map_takes_contours_by_the_map_rule(self):
+        """``contours=`` on every map plotter (ruling 6): concentration levels
+        on the image's own pixel grid, one outside the grid's range reported
+        and the others drawn."""
+        rows, cols = np.mgrid[0:20, 0:30]
+        grid = np.clip(cols / 29.0, 0.0, 0.95)          # 0 at left, 0.95 right
+        grid[0, 0] = np.nan                             # land cell
+        fig, ax = plots.plot_sea_ice_map(grid, contours=[0.5], zoom=False,
+                                         graticule=0)
+        try:
+            (contour,) = [c for c in ax.collections
+                          if isinstance(c, mcontour.ContourSet)]
+            assert list(contour.levels) == [0.5]
+            x = np.concatenate([p.vertices[:, 0]
+                                for p in contour.get_paths() if len(p)])
+            np.testing.assert_allclose(x, 14.5, atol=1e-6)   # 0.5 at column 14.5
+        finally:
+            plt.close(fig)
+        with pytest.warns(uacpy.NumericsWarning, match=r'contours=\[1.0\]'):
+            fig, ax = plots.plot_sea_ice_map(grid, contours=[0.5, 1.0],
+                                             zoom=False, graticule=0)
+        plt.close(fig)
+
     def test_environment_shows_ice(self, env):
         fig0, ax0 = env.plot()            # no ice
         n0 = len(ax0.collections)
@@ -2279,7 +2551,7 @@ class TestImshowPanelsAreEdgeAligned:
         ks = np.linspace(-1.2, 1.2, 25)              # non-square
         power = np.zeros((freqs.size, ks.size))
         power[3, 2] = 1.0
-        fig, ax = plot_fk(freqs, ks, power, scaling='power', sound_speed=1500.0)
+        fig, ax = plot_fk(freqs, ks, power, scaling='raw', sound_speed=1500.0)
         px, py = self._centres(ax, ks.size, freqs.size)
         assert px[2] == pytest.approx(ks[2], abs=1e-9)
         assert py[3] == pytest.approx(freqs[3], abs=1e-9)
@@ -2299,15 +2571,16 @@ class TestImshowPanelsAreEdgeAligned:
 
     def test_radon_and_taup_panels_are_edge_aligned(self):
         """Both draw ``origin='upper'`` with intercept time increasing downward
-        and an abscissa rescaled to s/km, so both conversions must survive."""
+        and an abscissa rescaled to kilometres (s/km², s/km), so both
+        conversions must survive."""
         from uacpy.visualization.plots.signal import plot_radon, plot_taup
         taus = np.linspace(0.0, 0.6, 21)
-        moveout = np.linspace(-0.002, 0.002, 15)
+        moveout = np.linspace(-2e-6, 2e-6, 15)
         R = np.zeros((moveout.size, taus.size))
         R[2, 3] = 1.0
-        fig, ax = plot_radon(moveout, taus, R)
+        fig, ax = plot_radon(moveout, taus, R, kind='parabolic')
         px, py = self._centres(ax, moveout.size, taus.size, y_down=True)
-        assert px[2] == pytest.approx(moveout[2] * 1e3, abs=1e-9)
+        assert px[2] == pytest.approx(moveout[2] * 1e6, abs=1e-9)
         assert py[3] == pytest.approx(taus[3], abs=1e-9)
         plt.close(fig)
 
@@ -2403,14 +2676,17 @@ class TestAnExampleTitleQuotesTheDeckThatRan:
         return re.findall(r"RunType: '(.{7})'", src)
 
     @staticmethod
-    def _written_run_type(**kwargs):
-        """The RunType line the deck writer actually emits for ``kwargs``."""
+    def _written_run_type(source_type='point', **kwargs):
+        """The RunType line the deck writer actually emits for ``kwargs``
+        and a Source of ``source_type``, which sets RunType(4:4) as the
+        example's line-source run does."""
         import re
         import tempfile
         from pathlib import Path
         from uacpy.io.bellhop_writer import write_bellhop_env_file
         env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom=1650.0)
-        src = uacpy.Source(depths=[25.0], frequencies=200.0)
+        src = uacpy.Source(depths=[25.0], frequencies=200.0,
+                           source_type=source_type)
         rcv = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 20),
                              ranges=np.linspace(100.0, 5000.0, 50))
         with tempfile.TemporaryDirectory() as d:
@@ -2427,12 +2703,11 @@ class TestAnExampleTitleQuotesTheDeckThatRan:
         assert len(titles) == 3, titles
         written = [
             self._written_run_type(run_type='C', beam_type='B',
-                                   source_type='R', grid_type='R'),
-            self._written_run_type(run_type='C', beam_type='B',
-                                   source_type='X', grid_type='R'),
+                                   grid_type='R'),
+            self._written_run_type('line', run_type='C', beam_type='B',
+                                   grid_type='R'),
             self._written_run_type(run_type='R', beam_type='g',
-                                   source_type='R', grid_type='R',
-                                   beam_shift=True),
+                                   grid_type='R', beam_shift=True),
         ]
         assert titles == written, (titles, written)
 
@@ -2443,79 +2718,91 @@ class TestAnExampleTitleQuotesTheDeckThatRan:
             assert title[5] == ' ', (title, title[5])
 
 
-class TestATLDifferenceIsNotLabelledAsALevel:
-    """``plot_field_difference`` builds its residual as a bare ``Field``, which
-    inherits ``kind='pressure'``, so the colourbar came back reading 'TL (dB)'
-    over a signed difference — and the loss predicate reads the same tag, which
-    would run a 1-D cut's value axis downward. Neither is true of a residual."""
+class TestTheDifferenceMapIsDrawnAsAResidual:
+    """``plot_field_difference`` draws the ``kind='difference'`` Field
+    ``uacpy.metrics.tl_difference`` returns: a signed residual on a diverging
+    map, captioned with the way its sign runs, never as a level."""
 
     @staticmethod
-    def _pair():
+    def _difference():
         d = np.linspace(5.0, 95.0, 6)
         r = np.linspace(100.0, 3000.0, 9)
         mk = lambda amp: Field(data=np.full((6, 9), amp, dtype=complex),
                                coords={'depth': d, 'range': r},
                                model='Synth', frequencies=100.0)
-        return mk(1e-3), mk(2e-3)
+        return uacpy.metrics.tl_difference(mk(1e-3), mk(2e-3))
 
     def test_the_colourbar_names_the_residual_and_its_sign(self):
-        a, b = self._pair()
-        fig, ax = uacpy.plot.plot_field_difference(a, b)
-        label = fig.axes[-1].get_ylabel()
-        assert label.startswith('ΔTL (dB)'), label
-        assert 'quieter' in label, label
+        fig, ax = uacpy.plot.plot_field_difference(self._difference())
+        assert fig.axes[-1].get_ylabel() == ('Difference (dB), field − '
+                                             'reference')
         plt.close(fig)
 
-    def test_the_sign_reads_the_view_rather_than_assuming_a_loss(self):
-        """More of a LOSS is quieter; more of a LEVEL is louder. The helper
-        this was promoted from said 'quieter' for both."""
-        a, b = (f.to_dB().replace(kind='signal_excess')
-                for f in self._pair())
-        fig, ax = uacpy.plot.plot_field_difference(a, b)
-        label = fig.axes[-1].get_ylabel()
-        assert 'louder' in label, label
-        plt.close(fig)
+    def test_the_method_and_the_plotter_are_one_picture(self):
+        """``d.plot()`` routes a difference Field to this plotter, as a
+        signal-excess field goes to plot_signal_excess."""
+        d = self._difference()
+        drawn = []
+        for fig, ax in (d.plot(), uacpy.plot.plot_field_difference(d)):
+            mesh = ax.collections[0]
+            drawn.append((mesh.get_clim(), mesh.get_cmap().name,
+                          fig.axes[-1].get_ylabel()))
+            plt.close(fig)
+        assert drawn[0] == drawn[1]
+        assert drawn[0][:2] == ((-10.0, 10.0), 'RdBu_r')
 
     def test_the_colormap_is_the_callers_to_choose(self):
         """The default is the residual's diverging map; ``cmap=`` replaces it
         rather than colliding with a hard-coded one."""
-        a, b = self._pair()
-        fig, ax = uacpy.plot.plot_field_difference(a, b)
+        d = self._difference()
+        fig, ax = uacpy.plot.plot_field_difference(d)
         assert ax.collections[0].get_cmap().name == 'RdBu_r'
         plt.close(fig)
-        fig, ax = uacpy.plot.plot_field_difference(a, b, cmap='viridis')
+        fig, ax = uacpy.plot.plot_field_difference(d, cmap='viridis')
         assert ax.collections[0].get_cmap().name == 'viridis'
         plt.close(fig)
 
     def test_one_window_form_at_a_time(self):
         """``diff_vmax`` and ``vmin``/``vmax`` both set the window; each works
         alone, the default is ±10 dB, and the two together are refused."""
-        a, b = self._pair()
+        d = self._difference()
         for kw, clim in (({}, (-10.0, 10.0)), ({'diff_vmax': 20.0}, (-20.0, 20.0)),
                          ({'vmin': -3.0, 'vmax': 5.0}, (-3.0, 5.0))):
-            fig, ax = uacpy.plot.plot_field_difference(a, b, **kw)
+            fig, ax = uacpy.plot.plot_field_difference(d, **kw)
             assert ax.collections[0].get_clim() == clim
             plt.close(fig)
         with pytest.raises(ConfigurationError, match='give one form'):
-            uacpy.plot.plot_field_difference(a, b, vmin=-3.0, diff_vmax=20.0)
+            uacpy.plot.plot_field_difference(d, vmin=-3.0, diff_vmax=20.0)
 
-    def test_two_fields_on_different_grids_are_refused(self):
-        """Differencing cell by cell publishes a number for positions that
-        never met — equal lengths are not equal axes."""
-        a, _ = self._pair()
-        shifted = Field(data=np.full((6, 9), 1e-3, dtype=complex),
-                        coords={'depth': np.linspace(5.0, 95.0, 6),
-                                'range': np.linspace(5100.0, 8000.0, 9)},
-                        model='Synth', frequencies=100.0)
-        with pytest.raises(ConfigurationError, match='not its values'):
-            uacpy.plot.plot_field_difference(a, shifted)
+    def test_a_cell_with_no_difference_is_grey_not_agreement(self):
+        """A no-energy cell has no difference (NaN); blank, it would show
+        the diverging map's near-white neutral, the colour of 0 dB."""
+        from matplotlib.colors import to_rgba
+        from uacpy.visualization.style import NO_ENERGY_COLOR
+        d = np.linspace(5.0, 95.0, 6)
+        r = np.linspace(100.0, 3000.0, 9)
+        a = Field(data=np.full((6, 9), 1e-3, dtype=complex),
+                  coords={'depth': d, 'range': r})
+        silent = a.data.copy()
+        silent[2, 3] = 0.0
+        b = Field(data=silent, coords={'depth': d, 'range': r})
+        fig, ax = uacpy.metrics.tl_difference(a, b).plot()
+        mesh = ax.collections[0]
+        assert np.isnan(np.asarray(mesh.get_array(), dtype=float)[2, 3])
+        assert mesh.get_cmap().get_bad() == pytest.approx(
+            to_rgba(NO_ENERGY_COLOR))
+        plt.close(fig)
 
-        shorter = Field(data=np.full((6, 5), 1e-3, dtype=complex),
-                        coords={'depth': np.linspace(5.0, 95.0, 6),
-                                'range': np.linspace(100.0, 3000.0, 5)},
-                        model='Synth', frequencies=100.0)
-        with pytest.raises(ConfigurationError, match='different grids'):
-            uacpy.plot.plot_field_difference(a, shorter)
+    def test_a_field_that_is_not_a_difference_is_refused(self):
+        """The plotter computes no difference: a TL field handed to it is
+        refused, naming the function that computes one."""
+        level = Field(data=np.full((2, 3), 1e-3, dtype=complex),
+                      coords={'depth': np.array([5.0, 15.0]),
+                              'range': np.array([100.0, 200.0, 300.0])})
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)'pressure' Field.*tl_difference"):
+            uacpy.plot.plot_field_difference(level)
+        assert not plt.get_fignums()
 
 
 class TestFieldStatisticsPanels:
@@ -2538,7 +2825,8 @@ class TestFieldStatisticsPanels:
     @classmethod
     def _rms_tiles(cls, fields):
         """The numbers the RMS panel prints, keyed by ``(row, column)``."""
-        fig, axes = uacpy.plot.plot_field_statistics(fields, depth=100.0)
+        fig, axes = uacpy.metrics.field_statistics(fields,
+                                                   depth=100.0).plot()
         tiles = {(round(t.get_position()[1]), round(t.get_position()[0])):
                  t.get_text() for t in axes[1].texts}
         plt.close(fig)
@@ -2576,7 +2864,8 @@ class TestFieldStatisticsPanels:
                   'H': self._tl_field(np.linspace(5000.0, 8000.0, 30), 60.0)}
         assert self._rms_tiles(fields) == {(0, 1): 'n/a', (1, 0): 'n/a'}
 
-        fig, axes = uacpy.plot.plot_field_statistics(fields, depth=100.0)
+        fig, axes = uacpy.metrics.field_statistics(fields,
+                                                   depth=100.0).plot()
         im = axes[1].get_images()[0]
         rgba = im.cmap(im.norm(np.ma.filled(im.get_array(), np.nan)))
         plt.close(fig)
@@ -2598,9 +2887,9 @@ class TestFieldStatisticsPanels:
         """The diagonal is a true zero and must stay visually distinct from a
         not-comparable tile."""
         span = np.linspace(50.0, 3000.0, 200)
-        fig, axes = uacpy.plot.plot_field_statistics(
+        fig, axes = uacpy.metrics.field_statistics(
             {'C': self._tl_field(span, 60.0), 'D': self._tl_field(span, 70.5)},
-            depth=100.0)
+            depth=100.0).plot()
         im = axes[1].get_images()[0]
         diagonal = im.cmap(im.norm(np.ma.filled(im.get_array(), np.nan)))[0, 0]
         plt.close(fig)
@@ -2609,14 +2898,22 @@ class TestFieldStatisticsPanels:
     def test_a_field_that_did_not_run_is_dropped_not_plotted(self):
         """``None`` is how a comparison records a model that did not run."""
         span = np.linspace(50.0, 3000.0, 40)
-        fig, axes = uacpy.plot.plot_field_statistics(
-            {'ran': self._tl_field(span, 60.0), 'skipped': None}, depth=100.0)
+        fig, axes = uacpy.metrics.field_statistics(
+            {'ran': self._tl_field(span, 60.0), 'skipped': None},
+            depth=100.0).plot()
         assert [t.get_text() for t in axes[0].get_xticklabels()] == ['ran']
         plt.close(fig)
 
     def test_all_fields_missing_raises(self):
-        with pytest.raises(ConfigurationError, match='no fields to plot'):
-            uacpy.plot.plot_field_statistics({'a': None}, depth=100.0)
+        with pytest.raises(ConfigurationError, match='no fields to compare'):
+            uacpy.metrics.field_statistics({'a': None}, depth=100.0)
+
+    def test_the_plotter_draws_a_statistics_record_only(self):
+        """A list of fields is a computation's input, not something drawn:
+        it is refused, naming the function that computes the record."""
+        span = np.linspace(50.0, 3000.0, 40)
+        with pytest.raises(ConfigurationError, match='field_statistics'):
+            uacpy.plot.plot_field_statistics([self._tl_field(span, 60.0)])
 
 
 class TestOnlySomeViewsCarryAFixedColourWindow:
@@ -2664,7 +2961,7 @@ class TestTheSourceMarkerClearsTheAxisEdge:
     out-of-view receivers), so half the star was cut away."""
 
     @staticmethod
-    def _panel(fig_width, source_marker_range_m):
+    def _panel(fig_width, source_marker_range):
         import uacpy
         d = np.linspace(1.0, 60.0, 40)
         r = np.linspace(50.0, 5000.0, 120)
@@ -2678,7 +2975,7 @@ class TestTheSourceMarkerClearsTheAxisEdge:
         tl.plot(env=env, receiver=rcv, ax=ax, show_colorbar=False)
         from uacpy.visualization.plots._common import _draw_geometry
         _draw_geometry(ax, uacpy.Source(depths=[30.0], frequencies=200.0),
-                       source_range_m=source_marker_range_m)
+                       source_range=source_marker_range)
         return fig, ax
 
     @staticmethod
@@ -3207,7 +3504,7 @@ class TestStackedTracesLabelRangeInKm:
                   coords={'range': r, 'time': t},
                   model='Synth', frequencies=100.0)
         fig, ax = plots.plot_field(f, stacked=True)
-        assert ax.get_ylabel() == 'Range (km) (stacked)'
+        assert ax.get_ylabel().startswith('Range (km) (stacked')
         labels = [tl.get_text() for tl in ax.get_yticklabels()]
         assert labels[0] == '0.1' and labels[-1] == '1'
         # Significant digits, not one decimal: 0.325 km and 0.55 km must not
@@ -3543,7 +3840,7 @@ class TestTimeSnapshotsValidateCoords:
         )
         with pytest.raises(ConfigurationError,
                            match=r"missing coord axes.*time"):
-            plots.plot_time_snapshots({'M': f}, times_s=[0.01])
+            plots.plot_time_snapshots({'M': f}, times=[0.01])
         assert not plt.get_fignums()
 
 
@@ -3703,6 +4000,134 @@ def test_a_genuine_deep_null_keeps_its_colour():
     plt.close(fig)
 
 
+class TestTheNoEnergyCellIsDrawnApart:
+    """A no-energy cell is not a loss past the window: on a dB heatmap it is
+    painted ``style.NO_ENERGY_COLOR``, while a real loss past the window
+    takes the end colour and the colorbar an arrow — the two used to share
+    the window's top colour, with nothing on the figure to tell them apart."""
+
+    @staticmethod
+    def _tl_field():
+        depths = np.linspace(0.0, 100.0, 21)
+        ranges = np.linspace(100.0, 5000.0, 50)
+        R, _ = np.meshgrid(ranges, depths)
+        p = (1.0 / R).astype(complex)
+        p[3:8, 10:15] = 0.0             # no energy
+        p[3:6, 30:35] = 1e-8            # a real 160 dB loss
+        return Field(data=p, coords={'depth': depths, 'range': ranges},
+                     model='Synthetic', source_depths=np.array([50.0]),
+                     frequencies=100.0)
+
+    @staticmethod
+    def _meshes(ax):
+        values = [c for c in ax.collections
+                  if isinstance(c, mcoll.QuadMesh)
+                  and c.get_gid() != _fields._NO_ENERGY_GID]
+        no_energy = [c for c in ax.collections
+                     if c.get_gid() == _fields._NO_ENERGY_GID]
+        return values, no_energy
+
+    def test_the_marker_leaves_the_scale_and_is_painted_grey(self):
+        from matplotlib.colors import to_rgba
+        from uacpy.visualization.style import NO_ENERGY_COLOR
+        field = self._tl_field()
+        fig, ax = plot_field(field)
+        try:
+            (value,), (grey,) = self._meshes(ax)
+            drawn = np.ma.filled(np.ma.asarray(value.get_array()), np.nan)
+            drawn = drawn.reshape(21, 50)
+            assert np.isnan(drawn[5, 12])               # off the value scale
+            assert drawn[4, 32] == pytest.approx(160.0)  # a real level stays
+            paint = grey.to_rgba(np.ma.asarray(grey.get_array()))
+            paint = np.asarray(paint).reshape(21, 50, 4)
+            np.testing.assert_allclose(paint[5, 12], to_rgba(NO_ENERGY_COLOR))
+            assert paint[4, 32][3] == 0.0               # the 160 dB is not grey
+            assert _colorbars(fig)[0].extend == 'max'
+        finally:
+            plt.close(fig)
+
+    def test_a_field_inside_the_window_draws_no_arrow_and_no_grey(self):
+        field = self._tl_field()
+        clean = Field(data=np.where(np.abs(field.data) < 1e-7, 1e-3,
+                                    field.data),
+                      coords=field.coords, model='Synthetic',
+                      source_depths=np.array([50.0]), frequencies=100.0)
+        fig, ax = plot_field(clean)
+        try:
+            values, no_energy = self._meshes(ax)
+            assert len(values) == 1 and not no_energy
+            assert _colorbars(fig)[0].extend == 'neither'
+        finally:
+            plt.close(fig)
+
+    def test_the_signal_excess_map_paints_the_marker_grey(self):
+        from uacpy.core.constants import NO_ENERGY_DB
+        depths = np.linspace(0.0, 100.0, 21)
+        ranges = np.linspace(100.0, 5000.0, 50)
+        se = np.linspace(-30.0, 30.0, 21 * 50).reshape(21, 50)
+        se[3:8, 10:15] = -NO_ENERGY_DB
+        field = Field(data=se, coords={'depth': depths, 'range': ranges},
+                      model='Synthetic', source_depths=np.array([50.0]),
+                      frequencies=100.0, kind='signal_excess', unit='dB')
+        fig, ax = plot_signal_excess(field)
+        try:
+            (value,), (grey,) = self._meshes(ax)
+            assert value.get_clim() == pytest.approx((-30.0, 30.0))
+            drawn = np.ma.filled(np.ma.asarray(value.get_array()), np.nan)
+            assert np.isnan(drawn.reshape(21, 50)[5, 12])
+        finally:
+            plt.close(fig)
+
+    def test_compare_models_marks_the_shared_bar_and_shares_it(self):
+        field = self._tl_field()
+        fig, axes = compare_models([field, field], labels=['a', 'b'])
+        try:
+            assert _colorbars(fig)[0].extend == 'max'
+            for ax in np.ravel(axes):
+                values, no_energy = self._meshes(ax)
+                assert len(values) == 1 and len(no_energy) == 1
+        finally:
+            plt.close(fig)
+        # The grey mesh describes no value, so one bar over the panels still
+        # finds one colour scale.
+        fig, axes = plt.subplots(1, 2)
+        try:
+            for ax in axes:
+                plot_field(field, ax=ax, show_colorbar=False)
+            plots.shared_colorbar(fig, axes, label='TL (dB)')
+        finally:
+            plt.close(fig)
+
+    def test_the_strip_down_to_the_seabed_takes_the_cell_colour(self):
+        """The strip that carries a column's deepest water cell down to the
+        seabed line is grey under a no-energy cell, and on the value scale
+        under a level."""
+        from matplotlib.colors import to_rgba
+        from uacpy.visualization.style import NO_ENERGY_COLOR
+        depths = np.linspace(0.0, 100.0, 11)
+        ranges = np.linspace(100.0, 1000.0, 10)
+        p = np.full((11, 10), 1e-3, dtype=complex)
+        p[10, :] = np.nan              # below the 98 m seabed
+        p[9, :5] = 0.0                 # deepest water cells: no energy
+        field = Field(data=p, coords={'depth': depths, 'range': ranges},
+                      model='Synthetic', source_depths=np.array([50.0]),
+                      frequencies=100.0)
+        env = uacpy.Environment(name='e', bathymetry=98.0, ssp=1500.0)
+        fig, ax = plot_field(field, env=env)
+        try:
+            strips = [c for c in ax.collections
+                      if type(c) is mcoll.PolyCollection]
+            greys = [s for s in strips if s.get_array() is None]
+            values = [s for s in strips if s.get_array() is not None]
+            assert len(greys) == 1 and len(greys[0].get_paths()) == 5
+            np.testing.assert_allclose(greys[0].get_facecolor()[0],
+                                       to_rgba(NO_ENERGY_COLOR))
+            assert len(values) == 1 and len(values[0].get_paths()) == 5
+            np.testing.assert_allclose(values[0].get_array(), 60.0)
+        finally:
+            plt.close(fig)
+
+
 def _absorbing_arrivals():
     """A 40 kHz link whose second cluster is heavily absorbed.
 
@@ -3720,7 +4145,7 @@ def _absorbing_arrivals():
         "phases": np.zeros(3),
         "n_top_bounces": np.array([0, 1, 9]),
         "n_bot_bounces": np.array([0, 1, 9]),
-        "source_angles": np.zeros(3), "receiver_angles": np.zeros(3),
+        "source_angles_deg": np.zeros(3), "receiver_angles_deg": np.zeros(3),
         "delays_imag": np.array([dimag(1.0), dimag(2.24), dimag(12.0)]),
     }
     return Arrivals(by_receiver=[[[cell]]],
@@ -3784,7 +4209,7 @@ def _arrivals_at_levels(amplitudes, delays=None):
         "phases": np.zeros(n),
         "n_top_bounces": np.zeros(n, int),
         "n_bot_bounces": np.zeros(n, int),
-        "source_angles": np.zeros(n), "receiver_angles": np.zeros(n),
+        "source_angles_deg": np.zeros(n), "receiver_angles_deg": np.zeros(n),
         "delays_imag": np.zeros(n),
     }
     return Arrivals(by_receiver=[[[cell]]],
@@ -3944,12 +4369,12 @@ _UNDECORATED_ENTRY_POINTS = {
 # Private renderers reached through ``result.plot()`` rather than
 # ``plots.__all__``.
 _PRIVATE_RENDERERS = (
-    ("rays_modes", "_plot_rays"),
-    ("rays_modes", "_plot_arrivals"),
-    ("rays_modes", "_plot_mode_functions"),
-    ("rays_modes", "_plot_reflection_coefficient"),
-    ("rays_modes", "_plot_covariance"),
-    ("rays_modes", "_plot_replicas"),
+    ("rays_modes", "plot_rays"),
+    ("rays_modes", "plot_arrivals"),
+    ("rays_modes", "plot_mode_shapes"),
+    ("rays_modes", "plot_reflection_coefficient"),
+    ("rays_modes", "plot_covariance"),
+    ("rays_modes", "plot_replicas"),
     ("fields", "_plot_source_depth_panels"),
     ("fields", "_plot_field_as"),
 )
@@ -4200,7 +4625,7 @@ class TestALevelAxisNamesTheReferenceItWasComputedAgainst:
         from uacpy.visualization.plots.signal import plot_fk
         f = np.linspace(0.0, 500.0, 8)
         k = np.linspace(-1.0, 1.0, 9)
-        fig, ax = plot_fk(f, k, np.ones((8, 9)), ref=ref, scaling='power')
+        fig, ax = plot_fk(f, k, np.ones((8, 9)), ref=ref, scaling='raw')
         assert fig.axes[-1].get_ylabel() == \
             f"|FK|² (dB re {shown}², unnormalised)"
         plt.close(fig)
@@ -4221,7 +4646,7 @@ class TestFKPanelUnits:
         from uacpy.acoustic_signal.gathers import fk_transform
         d = _fk_gather()
         return (d, fk_transform(d, self.FS, self.DX, scaling='density'),
-                fk_transform(d, self.FS, self.DX))
+                fk_transform(d, self.FS, self.DX, scaling='raw'))
 
     @pytest.mark.parametrize('normalize, unit, cbar, xlabel', [
         (True, 'rad/m', "PSD (dB re 1 µPa²·m/(Hz·rad))",
@@ -4320,7 +4745,7 @@ class TestFKPanelUnits:
         c = 1500.0
         for unit, x_end in (('rad/m', 2 * np.pi * 30.0 / c),
                             ('cycles/m', 30.0 / c)):
-            fig, ax = plot_fk(f, k, np.ones((16, 21)), scaling='power',
+            fig, ax = plot_fk(f, k, np.ones((16, 21)), scaling='raw',
                               sound_speed=c, wavenumber_unit=unit)
             xs = sorted(line.get_xydata()[-1][0] for line in ax.lines)
             assert xs == pytest.approx([-x_end, x_end], rel=1e-9)
@@ -4332,7 +4757,7 @@ class TestFKPanelUnits:
         from uacpy.visualization.plots.signal import plot_fk
         _, density, _ = self._results()
         with pytest.raises(ConfigurationError,
-                           match=r"scaling='density'.*scaling='power'"):
+                           match=r"scaling='density'.*scaling='raw'"):
             plot_fk(density.frequencies, density.wavenumbers, density.power)
         assert not plt.get_fignums()
 
@@ -4340,10 +4765,10 @@ class TestFKPanelUnits:
         from uacpy.visualization.plots.signal import plot_fk
         _, density, raw = self._results()
         with pytest.raises(ConfigurationError,
-                           match=r"scaling='power' contradicts.*'density'"):
-            plot_fk(density, scaling='power')
+                           match=r"scaling='raw' contradicts.*'density'"):
+            plot_fk(density, scaling='raw')
         with pytest.raises(ConfigurationError,
-                           match=r"scaling='density' contradicts.*'power'"):
+                           match=r"scaling='density' contradicts.*'raw'"):
             plot_fk(raw, scaling='density')
         assert not plt.get_fignums()
 
@@ -4369,6 +4794,21 @@ class TestFKPanelUnits:
 def _bands():
     """``sel``-shaped ``(low, centre, high)`` band triples."""
     return [(88.0, 100.0, 112.0), (112.0, 125.0, 141.0)]
+
+
+def _banded(power, bands, band_type='decidecade', scaling='exposure'):
+    """A banded SpectralEstimate (what ``sound_exposure`` returns) holding
+    ``power`` (Pa²·s) on ``bands``."""
+    from uacpy.acoustic_signal import SpectralEstimate
+    return SpectralEstimate(np.array([b[1] for b in bands]),
+                            np.asarray(power, dtype=float), scaling=scaling,
+                            method='welch', bands=bands, band_type=band_type)
+
+
+def _decidecade_edges(centres):
+    """The base-10 decidecade edges of ``centres`` (IEC 61260-1)."""
+    centres = np.asarray(centres, dtype=float)
+    return dict(lower=centres * 10.0 ** -0.05, upper=centres * 10.0 ** 0.05)
 
 
 def _modes(n=10):
@@ -4559,8 +4999,8 @@ def _plot_offscreen_ppsd():
 
 
 def _plot_offscreen_sel():
-    return plot_sel(np.array([1e-30, 1e-30]), _bands(), duration=1.0,
-                    ymin=0.0, ymax=200.0)
+    return plot_band_levels(_banded([1e-30, 1e-30], _bands()), duration=1.0,
+                            ymin=0.0, ymax=200.0)
 
 
 def _plot_offscreen_constant_q_psd():
@@ -4576,12 +5016,13 @@ def _plot_offscreen_constant_q_ppsd():
 
 def _plot_offscreen_frf():
     return plot_frf(np.array([10.0, 100.0, 1000.0]),
-                    np.array([1e-9 + 0j, 1e-9 + 0j, 1e-9 + 0j]))
+                    np.array([1e-9 + 0j, 1e-9 + 0j, 1e-9 + 0j]),
+                    ymin=-60.0, ymax=60.0)
 
 
 @pytest.mark.parametrize("call, caller", [
     (_plot_offscreen_ppsd, "plot_ppsd"),
-    (_plot_offscreen_sel, "plot_sel"),
+    (_plot_offscreen_sel, "plot_band_levels"),
     (_plot_offscreen_constant_q_psd, "plot_constant_q_psd"),
     (_plot_offscreen_constant_q_ppsd, "plot_constant_q_ppsd"),
     (_plot_offscreen_frf, "plot_frf"),
@@ -4620,7 +5061,7 @@ def _fitted_ppsd(occupied_rows_dB, mean_dB, std_dB, method='welch'):
 
 class TestALevelPlotterFitsItsWindowToTheLevelsItDraws:
     """``plot_psd``, ``plot_constant_q_psd``, ``plot_ppsd``,
-    ``plot_constant_q_ppsd`` and ``plot_sel`` share one default level
+    ``plot_constant_q_ppsd`` and ``plot_band_levels`` share one default level
     window: the finite levels drawn, less / plus 5 dB, rounded outward to a
     multiple of 10 dB. ``ymin`` / ``ymax`` each override their own edge."""
 
@@ -4632,10 +5073,11 @@ class TestALevelPlotterFitsItsWindowToTheLevelsItDraws:
             return plot_psd(self.F, _levels_to_power(levels), **kw)
         if name == 'plot_constant_q_psd':
             return plot_constant_q_psd(self.F, _levels_to_power(levels), **kw)
-        if name == 'plot_sel':
-            return plot_sel(_levels_to_power(levels),
-                            [(88.0, 100.0, 112.0), (112.0, 125.0, 141.0),
-                             (141.0, 160.0, 178.0)], **kw)
+        if name == 'plot_band_levels':
+            return plot_band_levels(_banded(
+                _levels_to_power(levels),
+                [(88.0, 100.0, 112.0), (112.0, 125.0, 141.0),
+                 (141.0, 160.0, 178.0)]), **kw)
         rows = [lo_dB, hi_dB]
         mean = 0.5 * (lo_dB + hi_dB)
         if name == 'plot_ppsd':
@@ -4643,7 +5085,7 @@ class TestALevelPlotterFitsItsWindowToTheLevelsItDraws:
         return plot_constant_q_ppsd(
             _fitted_ppsd(rows, [mean] * 3, 1.0, method='constant_q'), **kw)
 
-    NAMES = ['plot_psd', 'plot_constant_q_psd', 'plot_sel', 'plot_ppsd',
+    NAMES = ['plot_psd', 'plot_constant_q_psd', 'plot_band_levels', 'plot_ppsd',
              'plot_constant_q_ppsd']
 
     @pytest.mark.parametrize('name', NAMES)
@@ -4753,6 +5195,31 @@ def test_plot_wenz_total_line_keeps_its_own_style_by_default():
     plt.close(fig)
 
 
+def test_plot_wenz_lists_only_the_curves_it_draws_and_spells_its_unit():
+    """With ``rain_rate='no'`` the rain curve is all NaN and draws nothing,
+    yet the legend listed 'Rain noise (no rain)'. The level axis reads
+    'dB re 1 µPa²/Hz' as every other level axis, and Wenz is a name."""
+    wenz = WenzNoise(np.logspace(1, 5, 40), wind_speed_kn=10.0)
+    assert not np.any(np.isfinite(wenz.rain))
+    fig, ax = plot_wenz(wenz)
+    try:
+        labels = [t.get_text() for t in ax.get_legend().get_texts()]
+        assert not any(label.startswith('Rain') for label in labels), labels
+        assert len(labels) == len(ax.lines) == 5
+        assert ax.get_ylabel() == 'Noise level (dB re 1 µPa²/Hz)'
+        assert ax.get_title() == 'Wenz noise level estimate'
+    finally:
+        plt.close(fig)
+    rainy = WenzNoise(np.logspace(1, 5, 40), wind_speed_kn=10.0,
+                      rain_rate='heavy')
+    fig, ax = plot_wenz(rainy)
+    try:
+        assert any(t.get_text().startswith('Rain noise (heavy')
+                   for t in ax.get_legend().get_texts())
+    finally:
+        plt.close(fig)
+
+
 def test_plot_source_level_takes_a_caller_supplied_marker():
     """``marker`` collided; ``label`` is a named parameter and never did."""
     fig, ax = plot_source_level(np.array([100.0, 200.0]),
@@ -4772,50 +5239,57 @@ def test_ray_plot_rejects_an_unknown_colour_mode():
     the per-class legend, so the fan came back looking like a deliberate
     ``color_by=None`` call."""
     with pytest.raises(ConfigurationError, match="not a colouring mode"):
-        _plot_rays(_rays(), color_by='bounce')
+        plot_rays(_rays(), color_by='bounce')
     assert not plt.get_fignums()
 
 
 @pytest.mark.parametrize("color_by", ['bounces', None])
 def test_ray_plot_accepts_its_two_colour_modes(color_by):
-    fig, ax = _plot_rays(_rays(), color_by=color_by)
+    fig, ax = plot_rays(_rays(), color_by=color_by)
     assert ax.lines
     plt.close(fig)
 
 
-@pytest.mark.parametrize("mode_range", [(-3, 4), (-3, 8), (5, 2), (4, 4)])
-def test_mode_heatmap_rejects_a_range_that_selects_nothing(mode_range):
-    """A negative start wraps under numpy slicing and ``start >= stop`` selects
-    no column; ``(-3, 8)`` with ``normalize=False`` reached ``pcolormesh`` as a
-    raw ``TypeError`` naming neither knob."""
-    for normalize in (True, False):
-        with pytest.raises(ConfigurationError, match="0 <= start < stop"):
-            plot_modes_heatmap(_modes(), mode_range=mode_range,
-                               normalize=normalize)
+@pytest.mark.parametrize('plotter', ['plot_modes_heatmap',
+                                     'plot_mode_shapes'])
+@pytest.mark.parametrize('numbers, fragment', [
+    ([0, 1], 'from 1 to 10'), ([3, 11], 'from 1 to 10'),
+    ([2, 2], 'distinct'), ([], 'sequence of mode numbers'),
+    ([1.5], 'sequence of mode numbers')])
+def test_a_mode_selection_names_modes_the_result_carries(plotter, numbers,
+                                                         fragment):
+    """Mode numbers are 1-based, distinct and within the result; a 0, a
+    mode past the last, a repeat or a non-integer is refused by both mode
+    plotters before anything is drawn."""
+    with pytest.raises(ConfigurationError, match=fragment):
+        getattr(plots, plotter)(_modes(10), mode_numbers=numbers)
     assert not plt.get_fignums()
 
 
-def test_mode_heatmap_rejects_a_range_starting_past_the_last_mode():
-    with pytest.raises(ConfigurationError, match="starts past"):
-        plot_modes_heatmap(_modes(10), mode_range=(12, 20))
-    assert not plt.get_fignums()
-
-
-def test_mode_heatmap_clamps_a_range_reaching_past_the_last_mode():
-    """The open end is a slice bound, not a claim about how many modes exist."""
-    fig, ax = plot_modes_heatmap(_modes(10), mode_range=(2, 999))
-    assert '8 modes' in ax.get_title()
+def test_chosen_modes_draw_exactly_those_modes():
+    """``mode_numbers`` picks modes by number on both plotters: the shapes
+    draw those columns, the heatmap labels non-consecutive columns with
+    their numbers rather than widening one across the modes left out."""
+    m = _modes(10)
+    fig, ax = plots.plot_mode_shapes(m, mode_numbers=[2, 5, 9])
+    assert [line.get_label() for line in ax.lines] == ['m=2', 'm=5', 'm=9']
+    np.testing.assert_array_equal(ax.lines[1].get_xdata(),
+                                  np.asarray(m.phi[:, 4]).real)
+    plt.close(fig)
+    fig, ax = plot_modes_heatmap(m, mode_numbers=[2, 5, 9])
+    assert [t.get_text() for t in ax.get_xticklabels()] == ['2', '5', '9']
+    assert '3 modes' in ax.get_title()
     plt.close(fig)
 
 
 @pytest.mark.parametrize('kwargs', [
-    {'mode_range': (3, 7)}, {'n_modes': 4}, {'n_modes': 2}, {},
+    {'mode_numbers': range(4, 8)}, {'n_modes': 4}, {'n_modes': 2}, {},
 ])
 def test_the_mode_axis_is_ticked_on_whole_modes_only(kwargs):
     """A mode index is an integer; mode 4.5 does not exist. Over a short span
-    the default locator subdivides, and ``mode_range=(3, 7)`` came back with
-    3.5, 4.5, 5.5, 6.5 and 7.5 — five of nine ticks naming modes the field
-    does not contain."""
+    the default locator subdivides, and modes 4 to 7 came back with 3.5,
+    4.5, 5.5, 6.5 and 7.5 — five of nine ticks naming modes the field does
+    not contain."""
     fig, ax = plot_modes_heatmap(_modes(10), **kwargs)
     lo, hi = ax.get_xlim()
     on_axis = [t for t in ax.get_xticks() if lo <= t <= hi]
@@ -4825,7 +5299,7 @@ def test_the_mode_axis_is_ticked_on_whole_modes_only(kwargs):
 
 
 @pytest.mark.parametrize('plotter', ['plot_modes_heatmap',
-                                     '_plot_mode_functions'])
+                                     'plot_mode_shapes'])
 def test_a_mode_plotter_takes_the_axes_as_its_second_positional(plotter):
     """``ax`` follows the data, as on every single-panel plotter;
     ``n_modes`` is keyword-only."""
@@ -4837,12 +5311,42 @@ def test_a_mode_plotter_takes_the_axes_as_its_second_positional(plotter):
     plt.close(fig)
 
 
-def test_mode_heatmap_rejects_n_modes_together_with_mode_range():
-    """``mode_range`` took the slice wholesale, so ``n_modes`` was dropped
-    without a word."""
+def _dispersion(n=10):
+    """The :class:`ModeDispersion` of ``n`` modes at 100 and 150 Hz."""
+    depths = np.linspace(0.0, 100.0, 21)
+    phi = np.sin(np.outer(depths, np.arange(1, n + 1)) * np.pi / 100.0)
+    return Modes.dispersion([
+        Modes(k=np.linspace(0.42, 0.30, n) * f / 100.0 + 0j, phi=phi,
+              depths=depths, model='Test', frequencies=f)
+        for f in (100.0, 150.0)])
+
+
+@pytest.mark.parametrize('plotter', ['plot_modes_heatmap',
+                                     'plot_mode_shapes', 'plot_dispersion'])
+def test_a_mode_plotter_rejects_n_modes_together_with_mode_numbers(plotter):
+    """``mode_numbers`` takes the selection wholesale, so ``n_modes`` would
+    be dropped without a word."""
+    record = _dispersion(10) if plotter == 'plot_dispersion' else _modes(10)
     with pytest.raises(ConfigurationError, match="pass one"):
-        plot_modes_heatmap(_modes(10), n_modes=3, mode_range=(0, 8))
+        getattr(plots, plotter)(record, n_modes=3,
+                                mode_numbers=range(1, 9))
     assert not plt.get_fignums()
+
+
+@pytest.mark.parametrize('kw, drawn', [({}, ['mode 1', 'mode 2', 'mode 3']),
+                                       ({'n_modes': 2}, ['mode 1', 'mode 2']),
+                                       ({'mode_numbers': [2, 5]},
+                                        ['mode 2', 'mode 5'])])
+def test_the_dispersion_diagram_draws_the_first_three_modes_unless_told(
+        kw, drawn):
+    assert inspect.signature(plots.plot_dispersion).parameters[
+        'n_modes'].default is None
+    fig, ax = plots.plot_dispersion(_dispersion(10), **kw)
+    try:
+        assert [line.get_label() for line in ax.lines
+                if not line.get_label().startswith('_')] == drawn
+    finally:
+        plt.close(fig)
 
 
 def _cut(kind):
@@ -5074,6 +5578,20 @@ def test_the_overview_colorbar_follows_tl_kwargs(tl_kwargs, expected):
     assert [c.get_ylabel() for c in ax_tl.child_axes] == [expected]
 
 
+def test_the_overview_tl_bar_follows_show_colorbar():
+    """``tl_kwargs={'show_colorbar': False}`` was popped and the inset bar
+    drawn anyway; it now drops that bar, and True keeps it."""
+    fig, (_ax_map, ax_tl, _ax_env) = _overview(
+        tl_kwargs={'show_colorbar': False})
+    assert ax_tl.child_axes == []
+    assert any(isinstance(c, mcoll.QuadMesh) for c in ax_tl.collections)
+    plt.close(fig)
+    fig, (_ax_map, ax_tl, _ax_env) = _overview(
+        tl_kwargs={'show_colorbar': True})
+    assert [c.get_ylabel() for c in ax_tl.child_axes] == ['TL (dB)']
+    plt.close(fig)
+
+
 def test_the_overview_environment_panel_paints_the_water_over_the_tl_range():
     """A range-independent environment carries no range vector of its own, so
     without a ``receiver=`` the environment panel takes its span from the TL
@@ -5166,6 +5684,80 @@ def test_each_overview_sound_speed_label_stays_beside_its_own_bar():
     plt.close(fig)
 
 
+def _snapshot_field():
+    """A (depth, range, time) pulse spreading as 1/r, 100 m × 3 km."""
+    depths = np.linspace(0.0, 100.0, 21)
+    ranges = np.linspace(100.0, 3000.0, 30)
+    times = np.linspace(0.0, 2.5, 120)
+    D, R, T = np.meshgrid(depths, ranges, times, indexing='ij')
+    data = np.exp(-((T - R / 1500.0) / 0.02) ** 2) / R
+    return Field(data=data, coords={'depth': depths, 'range': ranges,
+                                    'time': times},
+                 model='Synth', source_depths=np.array([50.0]), unit='Pa')
+
+
+@pytest.mark.parametrize('name', ['plot_band_levels', 'plot_sync_metric',
+                                  'plot_weighting', 'plot_source_level',
+                                  'plot_coherence', 'plot_time_snapshots'])
+def test_a_plotter_keeps_its_labels_on_its_own_canvas(name):
+    """On its default figsize, a plotter that owns its figure lays it out:
+    measured before the layout pass, ``plot_band_levels`` dropped its whole x
+    label 27 px below the canvas, ``plot_sync_metric`` 5 px, three others
+    2 px, and the snapshot montage's colorbar label ran 5 px past the right
+    edge."""
+    rng = np.random.default_rng(0)
+    centres = 10.0 ** (np.arange(10, 44) / 10.0)
+    f = np.logspace(1, 4, 200)
+    calls = {
+        'plot_band_levels': lambda: uacpy.plot.plot_band_levels(
+            centres, 60.0 + rng.uniform(0, 30, centres.size),
+            **_decidecade_edges(centres)),
+        'plot_sync_metric': lambda: uacpy.plot.plot_sync_metric(
+            rng.uniform(0, 1, 4000), threshold=0.5),
+        'plot_weighting': lambda: uacpy.plot.plot_weighting(
+            f, uacpy.noise.auditory_weighting(f, 'HF'), label='HF'),
+        'plot_source_level': lambda: uacpy.plot.plot_source_level(
+            centres, 150.0 + rng.uniform(0, 20, centres.size)),
+        'plot_coherence': lambda: uacpy.plot.plot_coherence(
+            f, 0.9 + 0.1 * rng.uniform(0, 1, f.size)),
+        'plot_time_snapshots': lambda: uacpy.plot.plot_time_snapshots(
+            _snapshot_field(), [0.5, 1.0, 1.5]),
+    }
+    fig, _ = calls[name]()
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        for ax in fig.axes:
+            box = ax.get_tightbbox(renderer)
+            assert box.x0 >= -0.5 and box.y0 >= -0.5, (name, box)
+            assert box.x1 <= fig.bbox.width + 0.5, (name, box)
+            assert box.y1 <= fig.bbox.height + 0.5, (name, box)
+    finally:
+        plt.close(fig)
+
+
+def test_the_overview_sound_speed_ticks_read_at_their_labels_size():
+    """The stacked cp bars printed their ticks at 'xx-small' (about 5.8 pt
+    at a 10 pt base), smaller than their own labels and hard to read at
+    screen resolution; they print at the labels' 'x-small'."""
+    from uacpy.visualization.plots.environment import (
+        BOTTOM_CP_LABEL, WATER_C_LABEL)
+    env = uacpy.Environment(bathymetry=[(0, 100), (5000, 150)], ssp=1500.0,
+                            bottom=1650.0)
+    fig, ax = env.plot()
+    try:
+        fig.canvas.draw()
+        bars = {c.get_ylabel(): c for c in ax.child_axes}
+        for label in (WATER_C_LABEL, BOTTOM_CP_LABEL):
+            bar = bars[label]
+            ticks = [t for t in bar.get_yticklabels() if t.get_text()]
+            assert ticks
+            assert {t.get_fontsize() for t in ticks} == {
+                bar.yaxis.label.get_fontsize()}, label
+    finally:
+        plt.close(fig)
+
+
 def test_a_panel_grid_warning_points_at_the_caller():
     """``typed_plot_error`` wraps every plotter, so a plotter's own
     ``stacklevel`` lands on the decorator: the user was told to fix a call and
@@ -5173,7 +5765,7 @@ def test_a_panel_grid_warning_points_at_the_caller():
     module never matched."""
     other = Field(data=_grid().data,
                   coords={'depth': _DEPTH, 'range': _RANGE + 1.0})
-    with pytest.warns(UserWarning, match='axis differs') as record:
+    with pytest.warns(UserWarning, match='is not on') as record:
         compare_models([_grid(), other])
     assert Path(record[0].filename).name == Path(__file__).name
 
@@ -6032,17 +6624,16 @@ def test_rejected_call_leaves_no_figure_behind():
     assert set(plt.get_fignums()) == before
 
 
-class TestThePlottersRefuseAndLabelWhatTheAuditFound:
-    """Pins for the visualization findings: the SSP heatmap interpolates like
-    the models, a probability defaults to its linear view, empty input and
-    mismatched grids are refused with typed errors, one field draws alike
-    through either signal-excess door, and snapshot panels keep a readable
-    height."""
+class TestThePlottersDrawTheirDefaultsAndRefuseWhatTheyCannotDraw:
+    """The SSP heatmap interpolates like the models, a probability defaults
+    to its linear view, empty input and mismatched grids are refused with
+    typed errors, one field draws alike through either signal-excess door,
+    and snapshot panels keep a readable height."""
 
-    def _rgb_at(self, fig, ax, r_km, depth_m):
+    def _rgb_at(self, fig, ax, r_km, depth):
         fig.canvas.draw()
         buf = np.asarray(fig.canvas.buffer_rgba())
-        x, y = ax.transData.transform((r_km, depth_m))
+        x, y = ax.transData.transform((r_km, depth))
         h = buf.shape[0]
         return tuple(int(v) for v in buf[int(round(h - y)), int(round(x)), :3])
 
@@ -6135,9 +6726,9 @@ class TestThePlottersRefuseAndLabelWhatTheAuditFound:
         plt.close('all')
 
     @staticmethod
-    def _snapshot_aspect(depth_m, range_m, *, n_depth=11):
+    def _snapshot_aspect(depth, range_m, *, n_depth=11):
         from uacpy.visualization.plots.animation import plot_time_snapshots
-        d = np.linspace(0, depth_m, n_depth); r = np.linspace(0, range_m, 61)
+        d = np.linspace(0, depth, n_depth); r = np.linspace(0, range_m, 61)
         t = np.linspace(0, 1, 5)
         f = Field(data=np.random.default_rng(0).normal(size=(n_depth, 61, 5)),
                   coords={'depth': d, 'range': r, 'time': t}, model='Synth',
@@ -6152,17 +6743,65 @@ class TestThePlottersRefuseAndLabelWhatTheAuditFound:
         assert self._snapshot_aspect(100.0, 3000.0) == pytest.approx(
             0.25 / (100.0 / 3000.0) / 1000.0)
 
-    @pytest.mark.parametrize('depth_m, range_m', [
+    @pytest.mark.parametrize('depth, range_m', [
         (100.0, 3000.0), (50.0, 20000.0), (5.0, 400.0), (1000.0, 60000.0),
     ])
-    def test_every_long_panel_lands_on_the_same_4_to_1_floor(self, depth_m,
+    def test_every_long_panel_lands_on_the_same_4_to_1_floor(self, depth,
                                                              range_m):
         """The aspect is in km-per-metre, so the panel's rendered height over
         its width is ``aspect * 1000 * depth_span / range_span``. Whatever the
         spans, a long panel comes out a quarter as tall as it is wide."""
-        aspect = self._snapshot_aspect(depth_m, range_m)
-        rendered = aspect * 1000.0 * depth_m / range_m
+        aspect = self._snapshot_aspect(depth, range_m)
+        rendered = aspect * 1000.0 * depth / range_m
         assert rendered == pytest.approx(0.25)
+
+    def test_a_floored_montage_sizes_its_slots_to_the_panels(self):
+        """Every panel at the 4:1 floor, the default slot is a quarter of its
+        3.2 in width tall plus 1 in of title and labels; drawn into the 2.8 in
+        slot, three snapshot strips filled a fifth of their own figure."""
+        from uacpy.visualization.plots.animation import plot_time_snapshots
+        fig, axes = plot_time_snapshots(_snapshot_field(), [0.5, 1.0, 1.5])
+        try:
+            assert fig.get_size_inches() == pytest.approx((3 * 3.2, 1.8))
+            fig.canvas.draw()
+            heights = [ax.get_window_extent().height / fig.bbox.height
+                       for ax in np.ravel(axes)]
+            assert min(heights) > 0.25, heights
+        finally:
+            plt.close(fig)
+        squarer = Field(data=np.zeros((11, 11, 5)),
+                        coords={'depth': np.linspace(0.0, 500.0, 11),
+                                'range': np.linspace(0.0, 3000.0, 11),
+                                'time': np.linspace(0.0, 1.0, 5)},
+                        model='Synth', unit='Pa')
+        fig, axes = plot_time_snapshots(squarer, [0.5])
+        try:
+            assert fig.get_size_inches() == pytest.approx((3.2, 2.8))
+        finally:
+            plt.close(fig)
+
+    def test_each_cell_is_titled_with_the_time_it_draws(self):
+        """Each row picks its own nearest time bin, so a column of rows on
+        different time grids holds different times; only row 0's used to be
+        titled."""
+        from uacpy.visualization.plots.animation import plot_time_snapshots
+        fine = _snapshot_field()
+        coarse = Field(data=np.asarray(fine.data)[:, :, ::10],
+                       coords={'depth': fine.coords['depth'],
+                               'range': fine.coords['range'],
+                               'time': fine.coords['time'][::10]},
+                       model='Synth', unit='Pa')
+        fig, axes = plot_time_snapshots({'fine': fine, 'coarse': coarse},
+                                        [0.5])
+        try:
+            want = [f"t = {t * 1000:.0f} ms" for t in (
+                fine.coords['time'][np.argmin(np.abs(fine.coords['time'] - 0.5))],
+                coarse.coords['time'][np.argmin(np.abs(coarse.coords['time']
+                                                       - 0.5))])]
+            assert [ax.get_title() for ax in np.ravel(axes)] == want
+            assert want[0] != want[1]
+        finally:
+            plt.close(fig)
 
     def test_a_single_receiver_depth_gets_an_auto_aspect(self):
         """A one-depth time series has no depth span to scale the aspect by.
@@ -6170,14 +6809,14 @@ class TestThePlottersRefuseAndLabelWhatTheAuditFound:
         plotter, so the whole figure was lost rather than one row's aspect."""
         assert self._snapshot_aspect(0.0, 3000.0, n_depth=1) == 'auto'
 
-    @pytest.mark.parametrize('depth_m, range_m', [
+    @pytest.mark.parametrize('depth, range_m', [
         (100.0, 900.0), (500.0, 3000.0), (2000.0, 5000.0),
     ])
-    def test_a_panel_that_is_not_long_is_left_to_matplotlib(self, depth_m,
+    def test_a_panel_that_is_not_long_is_left_to_matplotlib(self, depth,
                                                             range_m):
         """The floor exists for slivers only; anything squarer keeps 'auto',
         so the panel fills the space the figure gave it."""
-        assert self._snapshot_aspect(depth_m, range_m) == 'auto'
+        assert self._snapshot_aspect(depth, range_m) == 'auto'
 
     def test_a_uniform_bottom_property_gets_a_relative_window(self):
         from uacpy.visualization.plots.environment import plot_bottom_properties
@@ -6296,18 +6935,18 @@ def test_a_band_averaged_map_is_titled_with_its_band_not_its_centroid():
     """``broadband_loss`` and ``sound_exposure_level`` collapse a band and
     pin its weighted CENTROID, so a 50 Hz and a 400 Hz average about the
     same centre would otherwise caption identically — naming the one
-    frequency the map is not. Both record ``band_hz`` for this,
+    frequency the map is not. Both record ``band`` for this,
     and the subtitle prefers it. A field that really is at one frequency
-    carries no ``band_hz`` and must be unaffected."""
+    carries no ``band`` and must be unaffected."""
     from uacpy.visualization.plots._common import _pinned_subtitle
     narrow = Field(data=np.zeros((2, 2)),
                    coords={'depth': np.arange(2.0), 'range': np.arange(2.0)},
                    pinned={'frequency': 1000.0},
-                   kind='pressure', unit='dB', band_hz=(975.0, 1025.0))
+                   kind='pressure', unit='dB', band=(975.0, 1025.0))
     wide = Field(data=np.zeros((2, 2)),
                  coords={'depth': np.arange(2.0), 'range': np.arange(2.0)},
                  pinned={'frequency': 1000.0},
-                 kind='pressure', unit='dB', band_hz=(800.0, 1200.0))
+                 kind='pressure', unit='dB', band=(800.0, 1200.0))
     assert 'average' in _pinned_subtitle(narrow)
     assert _pinned_subtitle(narrow) != _pinned_subtitle(wide)
     assert '0.975' in _pinned_subtitle(narrow)
@@ -6334,7 +6973,7 @@ def test_an_exposure_map_is_captioned_by_the_band_it_spans():
                      coords={'depth': np.arange(2.0),
                              'range': np.arange(2.0)},
                      pinned={'frequency': 1338.36}, kind=kind, unit='dB',
-                     band_hz=(25.0, 20000.0), **kw)
+                     band=(25.0, 20000.0), **kw)
 
     sel = band_map('sound_exposure', weighting='VHF')
     assert _pinned_subtitle(sel) == 'Frequency band 0.025-20 kHz, VHF-weighted'
@@ -6349,6 +6988,73 @@ def test_an_exposure_map_is_captioned_by_the_band_it_spans():
         'LF-weighted cumulative SEL, 401 events (dB re 1 µPa²·s)')
     assert _coord_label('range', track) == 'Distance from track (km)'
     assert _coord_label('range', sel) == 'Range (km)'
+
+
+def test_default_labels_tell_two_fields_of_one_model_apart():
+    """``compare([...])`` without ``labels=`` labelled four cuts 'Bellhop,
+    Bellhop, Kraken, Kraken'. A shared model is completed by what differs —
+    here the pinned depth — or by the order when nothing does; distinct
+    models keep their bare names."""
+    ranges = np.linspace(100.0, 5000.0, 20)
+    depths = np.array([20.0, 50.0])
+
+    def cut(model, depth):
+        grid = Field(data=np.ones((2, ranges.size), dtype=complex),
+                     coords={'depth': depths, 'range': ranges}, model=model,
+                     frequencies=100.0)
+        return grid.at(depth=depth)
+
+    fig, ax = compare([cut('Bellhop', 20.0), cut('Bellhop', 50.0),
+                       cut('Kraken', 20.0), cut('Kraken', 50.0)])
+    try:
+        assert [t.get_text() for t in ax.get_legend().get_texts()] == [
+            'Bellhop — Depth = 20 m', 'Bellhop — Depth = 50 m',
+            'Kraken — Depth = 20 m', 'Kraken — Depth = 50 m']
+    finally:
+        plt.close(fig)
+    fig, ax = compare([cut('Bellhop', 20.0), cut('Bellhop', 20.0),
+                       cut('RAM', 20.0)])
+    try:
+        assert [t.get_text() for t in ax.get_legend().get_texts()] == [
+            'Bellhop (1)', 'Bellhop (2)', 'RAM']
+    finally:
+        plt.close(fig)
+
+
+def test_an_axis_shared_by_several_weightings_names_them_all():
+    """``compare`` / ``compare_models`` check the kind, not the weighting,
+    so SEL maps of three hearing groups share one axis — which was labelled
+    by the first one alone ('LF-weighted SEL'). It names all of them; one
+    weighting keeps its own label."""
+    ranges = np.linspace(100.0, 5000.0, 20)
+    depths = np.linspace(5.0, 95.0, 5)
+
+    def exposure_map(weighting, shape):
+        coords = ({'range': ranges} if shape == 1
+                  else {'depth': depths, 'range': ranges})
+        data = np.full((ranges.size,) if shape == 1
+                       else (depths.size, ranges.size), 150.0)
+        return Field(data=data, coords=coords, kind='sound_exposure',
+                     unit='dB', weighting=weighting, model='Synth')
+
+    groups = {'LF': exposure_map('LF', 1), 'HF': exposure_map('HF', 1), 'VHF': exposure_map('VHF', 1)}
+    fig, ax = compare(groups)
+    try:
+        assert ax.get_ylabel() == ('SEL — LF-weighted, HF-weighted, '
+                                   'VHF-weighted (dB re 1 µPa²·s)')
+    finally:
+        plt.close(fig)
+    fig, ax = compare({'a': exposure_map('HF', 1), 'b': exposure_map('HF', 1)})
+    try:
+        assert ax.get_ylabel() == 'HF-weighted SEL (dB re 1 µPa²·s)'
+    finally:
+        plt.close(fig)
+    fig, axes = compare_models({'LF': exposure_map('LF', 2), 'raw': exposure_map(None, 2)})
+    try:
+        labels = [c.ax.get_ylabel() for c in _colorbars(fig)]
+        assert labels == ['SEL — LF-weighted, unweighted (dB re 1 µPa²·s)']
+    finally:
+        plt.close(fig)
 
 
 class TestSharedColorbar:
@@ -6540,7 +7246,7 @@ def test_every_multi_field_plotter_takes_a_labelled_dict_and_drops_none():
     fig, axes = compare_models(full)
     assert [a.get_title() for a in axes.ravel()] == ['Bellhop', 'RAM']
     plt.close(fig)
-    fig, axes = plots.plot_field_statistics(full, depth=30.0)
+    fig, axes = uacpy.metrics.field_statistics(full, depth=30.0).plot()
     assert [t.get_text() for t in axes[0].get_xticklabels()] == ['Bellhop',
                                                                  'RAM']
     plt.close(fig)
@@ -6652,7 +7358,7 @@ def test_the_dB_legend_names_a_hidden_far_arrival_once():
         "delays": np.array([1.000, 1.010, 1.050]),
         "amplitudes": np.array([1.0, 0.3, 1e-5]), "phases": np.zeros(3),
         "n_top_bounces": np.array([0, 1, 0]), "n_bot_bounces": np.array([0, 0, 1]),
-        "source_angles": np.zeros(3), "receiver_angles": np.zeros(3),
+        "source_angles_deg": np.zeros(3), "receiver_angles_deg": np.zeros(3),
         "delays_imag": np.zeros(3),
     }
     arr = Arrivals(by_receiver=[[[cell]]], receiver_depths=np.array([100.0]),
@@ -6709,7 +7415,7 @@ class TestModalSpeedPlots:
         if group:
             # Below the phase speed, as waveguide dispersion requires.
             gv = 2 * np.pi * f / np.real(k) - 10.0 * np.arange(1, n + 1)
-        return Modes(k=k, phi=phi, depths=depths, group_velocity=gv,
+        return Modes(k=k, phi=phi, depths=depths, group_speeds=gv,
                      model='Test', frequencies=float(f))
 
     def test_mode_speeds_draws_phase_speed_alone_without_group(self):
@@ -6720,11 +7426,25 @@ class TestModalSpeedPlots:
         assert np.allclose(ax.lines[0].get_ydata(), m.phase_speeds)
         plt.close(fig)
 
+    @pytest.mark.parametrize('name', ['plot_mode_speeds',
+                                      'plot_mode_wavenumbers'])
+    def test_the_mode_index_axis_names_only_whole_modes(self, name):
+        """Mode 1.5 does not exist; three modes drew ticks every quarter
+        mode on both per-mode plots, where plot_modes_heatmap already
+        forced integers."""
+        fig, ax = getattr(plots, name)(self._modes_at(200.0, n=3))
+        try:
+            ticks = [t for t in ax.get_xticks()
+                     if ax.get_xlim()[0] <= t <= ax.get_xlim()[1]]
+            assert ticks and all(float(t).is_integer() for t in ticks), ticks
+        finally:
+            plt.close(fig)
+
     def test_mode_speeds_overlays_group_speed_when_present(self):
         m = self._modes_at(200.0, group=True)
         fig, ax = plots.plot_mode_speeds(m)
         assert len(ax.lines) == 2
-        assert np.allclose(ax.lines[1].get_ydata(), m.group_velocity)
+        assert np.allclose(ax.lines[1].get_ydata(), m.group_speeds)
         plt.close(fig)
 
     def test_mode_speeds_marks_the_trapped_leaky_boundary(self):
@@ -6744,11 +7464,11 @@ class TestModalSpeedPlots:
         plt.close(fig)
 
     def test_dispersion_places_a_differenced_group_speed_at_the_midpoint(self):
-        # group_velocity_between estimates d(omega)/dk for the PAIR, so it
+        # group_speeds_between estimates d(omega)/dk for the PAIR, so it
         # belongs at (f0 + f1)/2. Plotting it at the left endpoint shifted the
         # curve half a step on the plot used to read off the Airy frequency.
         sets = [self._modes_at(f, group=False) for f in (100.0, 200.0)]
-        fig, ax = plots.plot_dispersion(sets, n_modes=1)
+        fig, ax = Modes.dispersion(sets).plot(n_modes=1)
         phase, group = ax.lines[0], ax.lines[1]
         assert list(phase.get_xdata()) == [100.0, 200.0]
         assert list(group.get_xdata()) == [150.0]
@@ -6757,8 +7477,29 @@ class TestModalSpeedPlots:
     def test_dispersion_uses_the_solver_value_at_its_own_frequency(self):
         # A reported group speed is AT that frequency, not between two.
         sets = [self._modes_at(f, group=True) for f in (100.0, 200.0)]
-        fig, ax = plots.plot_dispersion(sets, n_modes=1)
+        fig, ax = Modes.dispersion(sets).plot(n_modes=1)
         assert list(ax.lines[1].get_xdata()) == [100.0, 200.0]
+        plt.close(fig)
+
+    def test_mode_speeds_draws_the_seabed_speed_the_result_records(self):
+        """``c_bottom=None`` is the result's own fluid half-space speed
+        (``media.halfspace_sound_speed``), counted by ``Modes.trapped``; a
+        result recording none draws no boundary."""
+        from uacpy.core.results import MediaTable
+        m = self._modes_at(200.0)
+        cp = np.sort(m.phase_speeds)
+        cb = float(0.5 * (cp[1] + cp[2]))
+        own = Modes(k=m.k, phi=m.phi, depths=m.depths, model='Test',
+                    frequencies=200.0,
+                    media=MediaTable(water_density=1.0,
+                                     halfspace_sound_speed=cb))
+        fig, ax = plots.plot_mode_speeds(own)
+        assert any(np.allclose(ln.get_ydata(), cb) for ln in ax.lines)
+        assert any(f'{int(np.sum(own.trapped))} trapped' in t.get_text()
+                   for t in ax.texts)
+        plt.close(fig)
+        fig, ax = plots.plot_mode_speeds(m)
+        assert len(ax.lines) == 1 and not ax.texts
         plt.close(fig)
 
     def test_mode_speeds_rejects_a_non_modes_result(self):
@@ -6890,42 +7631,44 @@ class TestModalSpeedPlots:
 
     def test_dispersion_draws_two_curves_per_mode(self):
         sets = [self._modes_at(f, group=True) for f in (100.0, 150.0, 200.0)]
-        fig, ax = plots.plot_dispersion(sets, n_modes=3)
+        fig, ax = Modes.dispersion(sets).plot(n_modes=3)
         assert len(ax.lines) == 6            # phase + group for each of 3
         plt.close(fig)
 
     def test_dispersion_sorts_by_frequency_so_input_order_is_free(self):
         freqs = (200.0, 100.0, 150.0)
         sets = [self._modes_at(f, group=True) for f in freqs]
-        fig, ax = plots.plot_dispersion(sets, n_modes=1)
+        fig, ax = Modes.dispersion(sets).plot(n_modes=1)
         x = ax.lines[0].get_xdata()
         assert list(x) == sorted(freqs)
         plt.close(fig)
 
     def test_dispersion_needs_more_than_one_frequency(self):
         with pytest.raises(ConfigurationError, match='two or more'):
-            plots.plot_dispersion([self._modes_at(100.0)])
+            Modes.dispersion([self._modes_at(100.0)])
 
     def test_dispersion_rejects_duplicate_frequencies(self):
         with pytest.raises(ConfigurationError, match='distinct'):
-            plots.plot_dispersion([self._modes_at(100.0),
-                                   self._modes_at(100.0)])
+            Modes.dispersion([self._modes_at(100.0),
+                              self._modes_at(100.0)])
 
     def test_dispersion_takes_a_sequence_not_a_mapping_of_frequency(self):
         """The parameter is named ``modes_by_frequency`` and the guide read
         that as a mapping. Iterating a dict yields its KEYS, so the mistake
         arrives as a float where a result was expected -- say so by name."""
         sets = [self._modes_at(100.0), self._modes_at(200.0)]
-        fig, ax = plots.plot_dispersion(sets)
+        fig, ax = Modes.dispersion(sets).plot()
         plt.close(fig)
         with pytest.raises(ConfigurationError, match='sequence of Modes'):
-            plots.plot_dispersion({m.f0: m for m in sets})
+            Modes.dispersion({m.f0: m for m in sets})
+        with pytest.raises(ConfigurationError, match=r'Modes\.dispersion'):
+            plots.plot_dispersion(sets)
 
     def test_dispersion_rejects_modes_without_a_frequency(self):
         m = self._modes_at(100.0)
         bare = Modes(k=m.k, phi=m.phi, depths=m.depths, model='Test')
         with pytest.raises(ConfigurationError, match='frequency'):
-            plots.plot_dispersion([m, bare])
+            Modes.dispersion([m, bare])
 
     def test_dispersion_skips_frequencies_below_a_mode_cutoff(self):
         # A mode that does not exist at the low frequencies must not be
@@ -6933,7 +7676,7 @@ class TestModalSpeedPlots:
         few = self._modes_at(100.0, n=2, group=True)
         many = self._modes_at(200.0, n=5, group=True)
         more = self._modes_at(300.0, n=5, group=True)
-        fig, ax = plots.plot_dispersion([few, many, more], n_modes=4)
+        fig, ax = Modes.dispersion([few, many, more]).plot(n_modes=4)
         mode1_x = ax.lines[0].get_xdata()
         assert list(mode1_x) == [100.0, 200.0, 300.0]
         mode4_x = ax.lines[-2].get_xdata()    # last mode's phase curve
@@ -6982,6 +7725,20 @@ class TestGreensFunctionPlot:
         assert len(ax.lines[0].get_xdata()) == len(grn.phase_speeds)
         # 50 m is the nearest stored depth to 52 m on this grid.
         assert '50' in ax.get_title()
+        plt.close(fig)
+
+    @pytest.mark.parametrize('knob', [{'cmap': 'magma'},
+                                      {'show_colorbar': False}])
+    def test_a_colour_knob_on_the_cut_is_refused_not_dropped(self, knob):
+        """The cut is a line with no colour axis: a colour knob given with
+        ``depth=`` used to be dropped without a word, where ``plot_field``
+        and the reflection view refuse a knob their branch cannot use."""
+        name = next(iter(knob))
+        with pytest.raises(ConfigurationError,
+                           match=f"{name}= has no effect on the depth= cut"):
+            plots.plot_greens_function(self._grn(), depth=52.0, **knob)
+        assert not plt.get_fignums()
+        fig, ax = plots.plot_greens_function(self._grn(), **knob)
         plt.close(fig)
 
     def test_modes_overlay_draws_one_line_per_eigenvalue(self):
@@ -7057,14 +7814,14 @@ class TestWavenumberSamplingPlot:
     def test_says_the_field_folds_when_the_farthest_range_exceeds_the_alias_period(self):
         dk = 2 * np.pi / 2900.0                      # alias period 2900 m
         fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, dk,
-                                                 rmax_m=5000.0)
+                                                 rmax=5000.0)
         assert 'BEYOND' in ax.get_title()
         plt.close(fig)
 
     def test_says_it_fits_when_the_farthest_range_is_inside_the_alias_period(self):
         dk = 2 * np.pi / 22000.0
         fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, dk,
-                                                 rmax_m=5000.0)
+                                                 rmax=5000.0)
         # "inside" must NOT be reported as sufficient: this book's own ch05
         # has a run that is inside the period and still 4.86 dB out.
         assert 'is inside it' in ax.get_title()
@@ -7126,9 +7883,9 @@ class TestWavenumberSamplingPlot:
                                            r_max=5000.0)
 
     def test_rejects_a_non_positive_range(self):
-        with pytest.raises(ConfigurationError, match='rmax_m'):
+        with pytest.raises(ConfigurationError, match='rmax'):
             plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
-                                           rmax_m=-5000.0)
+                                           rmax=-5000.0)
 
 
 class TestMatchedFieldSurface:
@@ -7315,7 +8072,7 @@ class TestBroadbandReflectionOrientation:
         theta = np.linspace(0.0, 90.0, 31)
         freqs = np.linspace(50.0, 2000.0, 10)
         R = np.tile(np.linspace(1.0, 0.0, 31)[:, None], (1, 10))
-        return ReflectionCoefficient(angles=theta, magnitude=R, phase=np.zeros_like(R),
+        return ReflectionCoefficient(angles_deg=theta, magnitude=R, phase=np.zeros_like(R),
                                      frequencies=freqs, model='Bounce')
 
     def test_frequency_is_on_the_abscissa_by_default(self):
@@ -7411,7 +8168,7 @@ def _one_call_per_title_spelling(title):
                 WenzNoise(freqs, wind_speed_kn=10.0, shipping_level='medium'),
                 title=title),
         'noise.plot_roc':
-            lambda: plots.plot_roc(deflection=2.0, title=title),
+            lambda: plots.plot_roc(uacpy.sonar.roc_curve(2.0), title=title),
         'signal.plot_psd':
             lambda: plots.plot_psd(freqs, np.abs(rng.normal(size=freqs.size)) + 1e-9,
                                    title=title),
@@ -7596,7 +8353,7 @@ class TestWavenumberSamplingKeepsItsLabelsOnTheCanvas:
         with plt.rc_context({'font.size': font_size}):
             fig, ax = plots.plot_wavenumber_sampling(
                 200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
-                rmax_m=5000.0, water_sound_speed=1500.0, c_bottom=1650.0)
+                rmax=5000.0, water_sound_speed=1500.0, c_bottom=1650.0)
             fig.canvas.draw()
             renderer = fig.canvas.get_renderer()
             width, height = fig.bbox.width, fig.bbox.height
@@ -7641,7 +8398,7 @@ class TestWavenumberSamplingKeepsItsLabelsOnTheCanvas:
         with plt.rc_context({'font.size': 9}):
             fig, ax = plots.plot_wavenumber_sampling(
                 200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
-                rmax_m=5000.0, water_sound_speed=1500.0, c_bottom=1650.0)
+                rmax=5000.0, water_sound_speed=1500.0, c_bottom=1650.0)
             labels = [t.get_text() for t in ax.texts]
             plt.close(fig)
         assert any('0.8' in t for t in labels), (
@@ -7658,7 +8415,7 @@ class TestWavenumberSamplingKeepsItsLabelsOnTheCanvas:
         with plt.rc_context({'font.size': 20}):
             fig, ax = plots.plot_wavenumber_sampling(
                 200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
-                rmax_m=5000.0, water_sound_speed=1500.0, c_bottom=1650.0)
+                rmax=5000.0, water_sound_speed=1500.0, c_bottom=1650.0)
             marks = [t for t in ax.texts if 'omega' in t.get_text()
                      or t.get_text().strip() in ('water', 'seabed')]
             sizes = [t.get_fontsize() for t in marks]
@@ -7822,65 +8579,6 @@ def test_one_ambiguity_surface_gets_one_colormap_from_the_registry():
         plt.close(fig_m)
 
 
-def test_two_different_quantities_score_blank_not_green():
-    """`compare_models`' agreement matrix used to difference any two fields.
-    `uacpy.metrics.tl_rmse` refuses a kind mismatch — "their difference is
-    not an agreement metric" (`metrics._validate_tl_pair_and_window`) —
-    while the figure
-    printed a number, and a small number lands on the colormap's deep green.
-
-    The figure keeps its own interpolation onto a shared range grid, which
-    `tl_rmse` deliberately will not do; it does not get to keep the missing
-    refusal as well. NaN is the figure's existing "no answer" and is masked
-    grey.
-    """
-    import numpy as _np
-    from uacpy.core.results import Field
-    from uacpy.visualization.plots.fields import _rms_between
-
-    r = _np.linspace(100.0, 1000.0, 10)
-    z = _np.array([50.0])
-
-    def field(kind):
-        return Field(data=_np.full((1, r.size), 60.0),
-                     coords={'depth': z, 'range': r}, model='T',
-                     frequencies=100.0,
-                     kind=kind, unit='dB')
-
-    with recorded_warnings() as caught:
-        mismatched = _rms_between(field('pressure'), field('reverberation'),
-                                  50.0)
-    assert _np.isnan(mismatched)
-    assert any('agreement metric' in str(w.message) for w in caught)
-    # The like-for-like pair still scores.
-    assert _rms_between(field('pressure'), field('pressure'), 50.0) == 0.0
-
-
-def test_a_kind_mismatch_warns_once_per_pair_naming_plot_field_statistics():
-    """The warning names the function the user called, and the two
-    off-diagonal cells of one pair raise it once."""
-    import numpy as _np
-    from uacpy.core.results import Field
-    from uacpy.plot import plot_field_statistics
-
-    r = _np.linspace(100.0, 1000.0, 10)
-    z = _np.array([50.0])
-
-    def field(kind):
-        return Field(data=_np.full((1, r.size), 60.0),
-                     coords={'depth': z, 'range': r}, model='T',
-                     frequencies=100.0,
-                     kind=kind, unit='dB')
-
-    with recorded_warnings() as caught:
-        fig, _ = plot_field_statistics(
-            [field('pressure'), field('reverberation')], depth=50.0)
-    plt.close(fig)
-    kind_warnings = [str(w.message) for w in caught
-                     if 'agreement metric' in str(w.message)]
-    assert len(kind_warnings) == 1
-    assert kind_warnings[0].startswith('plot_field_statistics:')
-
 
 def test_plotting_the_seabed_from_the_seabed_says_why_it_needs_the_environment():
     """The seabed is the one environment component with no `.plot()`, and the
@@ -7915,7 +8613,7 @@ def test_the_arrivals_legend_counts_add_up_to_what_is_drawn():
         "phases": np.zeros(6),
         "n_top_bounces": np.zeros(6, int),
         "n_bot_bounces": np.array([0, 1, 1, 1, 1, 1]),
-        "source_angles": np.zeros(6), "receiver_angles": np.zeros(6),
+        "source_angles_deg": np.zeros(6), "receiver_angles_deg": np.zeros(6),
         "delays_imag": np.zeros(6),
     }
     arr = Arrivals(by_receiver=[[[cell]]], receiver_depths=np.array([100.0]),
@@ -8146,7 +8844,8 @@ class TestTheNoEnergyMarkerIsNotALevel:
 
     def test_field_statistics_bars_are_unchanged_by_one_marked_cell(self):
         f1, f2 = _marker_pair()
-        fig, axes = plots.plot_field_statistics([f1, f2], depth=5.0)
+        fig, axes = uacpy.metrics.field_statistics([f1, f2],
+                                                   depth=5.0).plot()
         try:
             heights = [p.get_height() for p in axes[0].patches]
             # Bars are (mean f1, mean f2, std f1, std f2). f2 is f1 with its
@@ -8159,6 +8858,83 @@ class TestTheNoEnergyMarkerIsNotALevel:
             plt.close(fig)
 
 
+class TestALinePlotLeavesTheNoEnergyMarkerOut:
+    """A dB line or bar plotter draws a no-energy sample (the ±600 dB
+    marker, :func:`~uacpy.core.acoustics.levels.no_energy_mask`) as a gap:
+    no point at ±600 dB and no part in the axis, while a real deep level
+    beside it is drawn — the line plots' counterpart of the heatmaps' grey
+    cells. Display only."""
+
+    @staticmethod
+    def _cut():
+        """A TL range cut holding a no-energy sample (exact zero: 600 dB)
+        and a real deep loss (1e-8 Pa: 160 dB) beside it."""
+        ranges = np.linspace(100.0, 5000.0, 50)
+        p = (1.0 / ranges) + 0j
+        p[0], p[1] = 0.0, 1e-8
+        return Field(data=p[None, :],
+                     coords={'depth': np.array([5.0]), 'range': ranges},
+                     model='Synthetic').at(depth=5.0)
+
+    @pytest.mark.parametrize('draw', ['plot_field', 'compare'])
+    def test_a_tl_line_cut(self, draw):
+        cut = self._cut()
+        assert np.asarray(cut.dB, dtype=float)[0] == pytest.approx(600.0)
+        fig, ax = (plot_field(cut) if draw == 'plot_field'
+                   else compare([cut, cut], labels=['a', 'b']))
+        try:
+            y = np.asarray(ax.lines[0].get_ydata(), dtype=float)
+            assert np.isnan(y[0])
+            assert y[1] == pytest.approx(160.0)
+            assert max(ax.get_ylim()) < 300.0
+        finally:
+            plt.close(fig)
+
+    @pytest.mark.parametrize('plotter', ['plot_psd', 'plot_constant_q_psd'])
+    def test_a_psd_line(self, plotter):
+        f = np.array([10.0, 20.0, 40.0, 80.0, 160.0])
+        # An exact-zero bin (-600 dB) and a real 1e-20 Pa²/Hz bin (-80 dB
+        # re 1 µPa²/Hz).
+        psd = np.array([1e-6, 0.0, 1e-20, 1e-6, 1e-6])
+        fig, ax = getattr(plots, plotter)(f, psd)
+        try:
+            y = np.asarray(ax.lines[0].get_ydata(), dtype=float)
+            assert np.isnan(y[1])
+            assert y[2] == pytest.approx(-80.0)
+            assert min(ax.get_ylim()) == pytest.approx(-90.0)
+        finally:
+            plt.close(fig)
+
+    def test_a_band_level_bar(self):
+        lower = np.array([90.0, 180.0, 355.0])
+        upper = np.array([180.0, 355.0, 710.0])
+        fig, ax = plots.plot_band_levels(
+            np.sqrt(lower * upper), np.array([60.0, -600.0, -80.0]),
+            lower=lower, upper=upper)
+        try:
+            heights = [patch.get_height() for patch in ax.patches]
+            assert np.isnan(heights[1])
+            assert heights[2] == pytest.approx(-80.0)
+            assert min(ax.get_ylim()) == pytest.approx(-90.0)
+        finally:
+            plt.close(fig)
+
+    def test_a_cumulative_exposure_curve(self):
+        from uacpy.core.acoustics.levels import (
+            cumulative_sound_exposure_level, no_energy_mask)
+        fs = 100.0
+        p = np.r_[np.zeros(300), np.full(300, 1e-3)]
+        exposure = cumulative_sound_exposure_level(p, fs)
+        assert no_energy_mask(exposure.levels)[:3].all()
+        fig, ax = exposure.plot()
+        try:
+            y = np.asarray(ax.lines[0].get_ydata(), dtype=float)
+            assert np.isnan(y[:3]).all() and np.isfinite(y[3:]).all()
+            assert min(ax.get_ylim()) > 0.0
+        finally:
+            plt.close(fig)
+
+
 def test_the_plotting_guide_signature_rows_state_the_live_defaults():
     """Every ``| `plotter(arg=literal, …)` |`` row of the plotting guide's
     tables names a real argument with its real default.
@@ -8166,7 +8942,7 @@ def test_the_plotting_guide_signature_rows_state_the_live_defaults():
     A row is the reader's copy of the signature: one taught
     ``plot_mode_excitation(sound_speed=1500.0)`` against a ``None`` default the
     code refuses to fill in, one named a ``plot_result_stack`` that does not
-    exist, and one gave ``plot_sel`` a ``'decidecade'`` default it does not
+    exist, and one gave a band plotter a ``'decidecade'`` default it does not
     have.
     """
     import ast
@@ -8210,6 +8986,32 @@ def test_the_plotting_guide_signature_rows_state_the_live_defaults():
                 problems.append(f"{name}: {kw.arg}={claimed!r} in the guide, "
                                 f"{param.default!r} in the code")
     assert rows > 50 and compared > 100, (rows, compared)
+    assert not problems, "\n".join(problems)
+
+
+def test_the_plotting_guide_field_method_rows_name_their_own_keywords():
+    """Every ``| `H.method(kw=…, …)` |`` (or ``ir.``) row of the plotting
+    guide names a keyword the ``Field`` method itself declares. Its
+    ``**kwargs`` reach
+    matplotlib, so a misnamed keyword there is no forward but a crash: the
+    guide's ``axes=(ax_mag, ax_phase)`` met ``Axes.plot``'s own ``axes``
+    argument as a raw ``TypeError``."""
+    import ast
+    guide = (Path(__file__).resolve().parents[2] / 'docs' / 'guide'
+             / 'plotting.md')
+    rows, problems = 0, []
+    for line in guide.read_text(encoding='utf-8').splitlines():
+        match = re.match(r'\| `(?:H|ir)\.(\w+)\((.*?)\)` \|', line)
+        if not match:
+            continue
+        name, args = match.groups()
+        args = re.sub(r',?\s*…', '', args).strip(', ')
+        call = ast.parse(f"f({args})", mode='eval').body
+        params = inspect.signature(getattr(Field, name)).parameters
+        rows += 1
+        problems += [f"H.{name}: {kw.arg}= is not a keyword of it"
+                     for kw in call.keywords if kw.arg not in params]
+    assert rows >= 2, rows
     assert not problems, "\n".join(problems)
 
 
@@ -8318,6 +9120,28 @@ class TestSonarMapsPlotThemselvesAsTheirDedicatedPlotters:
             plt.close(fig)
 
 
+def test_contour_labels_are_not_printed_over_each_other():
+    """Two segments of the SE = 0 dB boundary running side by side each got
+    a label, printed over one another. A label overlapping one already
+    placed is left out; the boundary keeps at least one."""
+    depths = np.linspace(0.0, 100.0, 41)
+    ranges = np.linspace(100.0, 20000.0, 200)
+    R, _ = np.meshgrid(ranges, depths)
+    se = np.clip(np.abs(R - 10000.0) / 100.0 - 0.6, -20.0, 20.0)
+    field = Field(data=se, coords={'depth': depths, 'range': ranges},
+                  kind='signal_excess', unit='dB', model='Synth',
+                  frequencies=100.0)
+    fig, ax = plot_signal_excess(field)
+    try:
+        fig.canvas.draw()
+        boxes = [t.get_window_extent() for t in ax.texts]
+        assert boxes
+        assert not any(a.overlaps(b) for i, a in enumerate(boxes)
+                       for b in boxes[i + 1:])
+    finally:
+        plt.close(fig)
+
+
 def test_a_plot_field_keyword_on_a_sonar_map_is_refused():
     """``se.plot()`` draws the signal-excess map, whose plotter does not take
     ``plot_field``'s view keywords: naming one raises rather than being
@@ -8400,7 +9224,7 @@ def test_sea_ice_ranges_are_metres_drawn_on_the_km_axis(env):
     through the track's ranges / 1000, coloured by the mean of the two ends'
     concentrations."""
     track = _ice_track()
-    fig, ax = env.plot(sea_ice=track, x_max_m=50_000.0)
+    fig, ax = env.plot(sea_ice=track, x_max=50_000.0)
     try:
         lines = [c for c in ax.collections
                  if isinstance(c, mcoll.LineCollection)]
@@ -8414,16 +9238,16 @@ def test_sea_ice_ranges_are_metres_drawn_on_the_km_axis(env):
 
 
 def test_a_hand_built_ice_track_draws_and_exports(env):
-    """``provenance=None`` is user-supplied data: the track draws and
-    round-trips with no provenance."""
+    """No provenance (``()``) is user-supplied data: the track draws and
+    round-trips with no records."""
     from uacpy.data import AlongTrack
     t = _ice_track()
     track = AlongTrack(ranges=t.ranges, lats=t.lats, lons=t.lons, data=t.data,
                        unit='1', quantity='sea_ice_concentration')
-    assert track.provenance is None
+    assert track.provenance == ()
     back = AlongTrack.from_dict(track.to_dict())
-    assert back.provenance is None and np.array_equal(back.data, track.data)
-    fig, ax = env.plot(sea_ice=track, x_max_m=50_000.0)
+    assert back.provenance == () and np.array_equal(back.data, track.data)
+    fig, ax = env.plot(sea_ice=track, x_max=50_000.0)
     try:
         assert any(isinstance(c, mcoll.LineCollection) for c in ax.collections)
     finally:
@@ -8439,7 +9263,7 @@ def test_sea_ice_refuses_what_it_cannot_draw(env, bad, match):
     value = ((track.ranges, track.data) if bad == 'tuple'
              else _ice_track('wind_speed'))
     with pytest.raises(ConfigurationError, match=match):
-        env.plot(sea_ice=value, x_max_m=50_000.0)
+        env.plot(sea_ice=value, x_max=50_000.0)
 
 
 def _fake_radon_result(kind):
@@ -8469,9 +9293,9 @@ def test_plot_radon_scales_the_axis_by_the_kind_the_result_carries():
         plt.close(fig)
 
 
-@pytest.mark.parametrize('kind', ['parabolix', 'Linear'])
+@pytest.mark.parametrize('kind', ['parabolix', 'Linear', 'linear'])
 def test_plot_radon_refuses_an_unknown_kind(kind):
-    r = _fake_radon_result('linear')
+    r = _fake_radon_result('parabolic')
     with pytest.raises(ConfigurationError, match='not a Radon moveout family'):
         plots.plot_radon(r.moveout, r.taus, r.panel, kind=kind)
     assert not plt.get_fignums()
@@ -8479,7 +9303,7 @@ def test_plot_radon_refuses_an_unknown_kind(kind):
 
 def test_plot_radon_refuses_a_kind_that_contradicts_the_result():
     with pytest.raises(ConfigurationError, match='contradicts the RadonResult'):
-        plots.plot_radon(_fake_radon_result('parabolic'), kind='linear')
+        plots.plot_radon(_fake_radon_result('parabolic'), kind='hyperbolic')
 
 
 def _one_depth_pair():
@@ -8514,14 +9338,47 @@ def test_compare_overlays_single_depth_runs_as_range_cuts():
         plt.close(fig)
 
 
+def test_compare_captions_the_sample_its_cuts_are_pinned_at():
+    # Field.at takes the nearest sample: a cut asked at 50 m on a grid
+    # holding 49 m sits at 49 m, and compare says so as plot_field does for
+    # one cut; cuts pinned at different depths share no caption, and a
+    # caller's title (or '') wins.
+    def cut(value):
+        return Field(data=np.full((2, 3), value, dtype=complex),
+                     coords={'depth': [10.0, 49.0],
+                             'range': [100.0, 200.0, 300.0]},
+                     model='Test', frequencies=100.0,
+                     phase_reference='travelling_wave')
+
+    a, b = cut(1.0).at(depth=50.0), cut(2.0).at(depth=50.0)
+    fig, ax = compare([a, b], labels=['a', 'b'])
+    try:
+        assert ax.get_title() == 'Depth = 49 m'
+        _, single = plots.plot_field(a)
+        assert single.get_title() == ax.get_title()
+    finally:
+        plt.close('all')
+    fig, ax = compare([a, cut(2.0).at(depth=10.0)], labels=['a', 'b'])
+    try:
+        assert ax.get_title() == ''
+    finally:
+        plt.close(fig)
+    for title, shown in (('Mine', 'Mine'), ('', '')):
+        fig, ax = compare([a, b], labels=['a', 'b'], title=title)
+        try:
+            assert ax.get_title() == shown
+        finally:
+            plt.close(fig)
+
+
 def test_the_difference_of_two_cuts_is_drawn_as_a_residual_line():
     a, b = _one_depth_pair()
-    fig, ax = plots.plot_field_difference(a, b)
+    fig, ax = plots.plot_field_difference(uacpy.metrics.tl_difference(a, b))
     try:
         (line,) = ax.lines
         # |a| is twice |b|, so a is 6.02 dB louder: TL(a) - TL(b) = -6.02.
         assert np.allclose(line.get_ydata(), -20.0 * np.log10(2.0))
-        assert ax.get_ylabel().startswith('ΔTL (dB)')
+        assert ax.get_ylabel().startswith('Difference (dB)')
         assert ax.get_title() == 'Depth = 50 m'
     finally:
         plt.close(fig)
@@ -8530,12 +9387,14 @@ def test_the_difference_of_two_cuts_is_drawn_as_a_residual_line():
 def test_a_colour_window_on_a_one_axis_difference_is_refused():
     a, b = _one_depth_pair()
     with pytest.raises(ConfigurationError, match='vmin= sets a colour window'):
-        plots.plot_field_difference(a, b, vmin=-5.0)
+        plots.plot_field_difference(uacpy.metrics.tl_difference(a, b),
+                                    vmin=-5.0)
 
 
-def test_the_difference_keeps_the_pins_and_credits_both_models(complex_field):
-    """A sliced pair keeps its 'Frequency = …' subtitle, and the owned figure
-    credits the models that produced both fields."""
+def test_the_difference_keeps_the_pins_and_credits_no_model(complex_field):
+    """A sliced pair keeps its 'Frequency = …' subtitle. The difference is a
+    metric of two models, produced by neither, so its figure credits no
+    model."""
     from uacpy.models.provenance import model_provenance
     a = Field(data=complex_field.data, coords=dict(complex_field.coords),
               pinned={'frequency': 250.0}, model='Bellhop',
@@ -8543,29 +9402,20 @@ def test_the_difference_keeps_the_pins_and_credits_both_models(complex_field):
     b = Field(data=complex_field.data * 0.5, coords=dict(complex_field.coords),
               pinned={'frequency': 250.0}, model='RAM',
               model_source=model_provenance('collins_ram'))
-    fig, ax = plots.plot_field_difference(a, b)
+    fig, ax = uacpy.metrics.tl_difference(a, b).plot()
     try:
         assert ax.get_title() == 'Frequency = 250 Hz'
         credit = ' '.join(t.get_text() for t in fig.texts)
-        assert 'Bellhop' in credit and 'RAM' in credit, credit
+        assert 'Bellhop' not in credit and 'RAM' not in credit, credit
     finally:
         plt.close(fig)
-
-
-@pytest.mark.parametrize('fraction, agree', [(0.9e-3, True), (1.1e-3, False)])
-def test_two_axes_agree_within_a_thousandth_of_their_own_cell(fraction, agree):
-    """Both sides of the tolerance, on a 41.6 m grid far from zero: the
-    offset is measured against the cell, not the coordinate's magnitude."""
-    axis = np.linspace(50.0, 5000.0, 120)
-    cell = axis[1] - axis[0]
-    assert _fields._axes_agree(axis, axis + fraction * cell) is agree
 
 
 def test_compare_models_does_not_warn_on_a_sub_millimetre_range_offset(
         complex_field):
     """Two engines on one receiver grid differ by half a millimetre at
-    short range; compare_models and plot_field_difference both call that
-    one grid."""
+    short range; compare_models and tl_difference both call that one
+    grid."""
     shifted = Field(data=complex_field.data,
                     coords={'depth': complex_field.coords['depth'],
                             'range': complex_field.coords['range'] + 5e-4})
@@ -8573,14 +9423,7 @@ def test_compare_models_does_not_warn_on_a_sub_millimetre_range_offset(
         warnings.simplefilter('error')
         fig, _axes = compare_models([complex_field, shifted])
     plt.close(fig)
-    fig, _ax = plots.plot_field_difference(complex_field, shifted)
-    plt.close(fig)
-
-
-def test_plot_channel_refuses_a_single_axes_by_name():
-    fig, ax = plt.subplots()
-    with pytest.raises(ConfigurationError, match=r'\(ax_delay, ax_freq\)'):
-        plots.plot_channel(np.array([1.0, 0.5, 0.2]), 1000.0, ax=ax)
+    fig, _ax = uacpy.metrics.tl_difference(complex_field, shifted).plot()
     plt.close(fig)
 
 
@@ -8628,11 +9471,54 @@ def test_a_private_plotters_generic_refusal_names_its_public_call():
         arrivals.plot()
 
 
+@pytest.mark.parametrize('call, name', [
+    (lambda: uacpy.plot.plot_environment(5), 'plot_environment'),
+    (lambda: uacpy.plot.plot_range_profile(5), 'plot_range_profile'),
+    (lambda: uacpy.plot.plot_transfer_function(
+        Field(data=np.full(4, 60.0), coords={'frequency': np.arange(1.0, 5.0)},
+              unit='dB', model='Synth')),
+     'plot_transfer_function'),
+])
+def test_a_public_plotters_refusal_names_the_public_plotter(call, name):
+    """A public plotter is the call the user made, so its refusal names it —
+    these named a method form (``Environment.plot``,
+    ``Field.plot_transfer_function``), and ``plot_range_profile(5)`` leaked a
+    raw AttributeError."""
+    with pytest.raises(ConfigurationError, match=rf'^{name}: '):
+        call()
+    assert not plt.get_fignums()
+
+
+def test_band_ticks_read_the_nominal_centres():
+    """The ticks printed the exact centres rounded to whole hertz — '6' for
+    the 6.3 Hz band, 398, 794, 1585 — where the standard labels a band by its
+    nominal frequency (Jacobsen & Juhl §4.2 Table 4.1: 6.3, 400, 800, 1600).
+    Every band keeps its bar, an empty one included."""
+    centres = 10.0 ** (np.arange(9, 45) / 10.0)        # 8 Hz … 25 kHz
+    levels = np.full(centres.size, 60.0)
+    levels[-1] = np.nan                                 # past Nyquist
+    fig, ax = plots.plot_band_levels(centres, levels,
+                                     **_decidecade_edges(centres))
+    try:
+        assert len(ax.patches) == centres.size
+        labels = [t.get_text() for t in ax.get_xticklabels()]
+        assert labels == ['8', '16', '31.5', '63', '125', '250', '500',
+                          '1000', '2000', '4000', '8000', '16000'], labels
+    finally:
+        plt.close(fig)
+    from uacpy.visualization.plots.signal import _band_centre_label
+    assert [_band_centre_label(c) for c in (6.31, 398.1, 1584.9, 3162.3,
+                                            31.62, 15849.0)] == [
+        '6.3', '400', '1600', '3150', '31.5', '16000']
+    assert _band_centre_label(700.0) == '700'          # off the ladder
+
+
 def test_plot_band_levels_names_the_reference_it_is_given():
     """``ref`` is the reference pressure the levels were computed against,
     as on every sibling: 1 Pa reads 'dB re 1 Pa²', not the µPa default."""
-    fig, ax = plots.plot_band_levels(np.array([100.0, 125.0, 160.0]),
-                                     np.array([60.0, 62.0, 58.0]), ref=1.0)
+    centres = np.array([100.0, 125.0, 160.0])
+    fig, ax = plots.plot_band_levels(centres, np.array([60.0, 62.0, 58.0]),
+                                     ref=1.0, **_decidecade_edges(centres))
     try:
         assert ax.get_ylabel() == 'Band level (dB re 1 Pa²)'
     finally:
@@ -8653,7 +9539,7 @@ def test_no_plotter_takes_a_second_spelling_of_a_keyword():
     plotters = [getattr(plots, n) for n in plots.__all__
                 if callable(getattr(plots, n, None))]
     plotters += [_env_plots.plot_environment, _env_plots.plot_ssp,
-                 _rm._plot_arrivals, _rm._plot_covariance, _rm._plot_replicas]
+                 _rm.plot_arrivals, _rm.plot_covariance, _rm.plot_replicas]
     offenders = {f"{p.__name__}({name}=)" for p in plotters
                  for name in inspect.signature(p).parameters
                  if name in _RETIRED_PLOTTER_KEYWORDS}
@@ -8714,7 +9600,7 @@ def test_a_misspelt_scaling_is_refused_with_the_choices():
 
 def test_band_axes_name_the_band_ladder_in_words():
     bands = [(89.1, 100.0, 112.2), (112.2, 125.0, 141.3)]
-    fig, ax = plot_sel(np.array([1.0, 2.0]), bands, band_type='octave')
+    fig, ax = plot_band_levels(_banded([1.0, 2.0], bands, band_type='octave'))
     try:
         assert ax.get_xlabel() == 'Frequency, octave bands (Hz)'
     finally:
@@ -8739,7 +9625,7 @@ def test_the_beam_pattern_plotter_takes_the_record_the_reader_returns():
     from uacpy.io import BeamPatternTable
     angles = np.array([-90.0, 0.0, 90.0])
     levels = np.array([-20.0, 6.0, -20.0])
-    record = BeamPatternTable(angles=angles, levels_dB=levels)
+    record = BeamPatternTable(angles_deg=angles, levels_dB=levels)
     for polar in (False, True):
         fig_a, ax_a = plot_beam_pattern(np.column_stack([angles, levels]),
                                         polar=polar)
@@ -8811,8 +9697,8 @@ def test_every_multi_panel_plotter_takes_a_figure(plotter, complex_field):
     parent = plt.figure(figsize=(12, 5), layout='constrained')
     try:
         if plotter == 'plot_field_statistics':
-            fig, _ = plots.plot_field_statistics(
-                [complex_field, complex_field], depth=50.0, fig=parent)
+            fig, _ = uacpy.metrics.field_statistics(
+                [complex_field, complex_field], depth=50.0).plot(fig=parent)
         elif plotter == 'plot_bottom_properties':
             fig, _ = plots.plot_bottom_properties(env, fig=parent)
         else:
@@ -8856,7 +9742,7 @@ class TestBandLevelsPlotNamesItsLadderAndReference:
         f = np.linspace(10.0, 5000.0, 4000)
         levels = band_levels(np.full_like(f, 1e-6), f, band_type=band_type)
         fig, ax = levels.plot()
-        assert ax.get_xlabel() == f'{word} band centre (Hz)'
+        assert ax.get_xlabel() == f'Frequency, {word.lower()} bands (Hz)'
         assert ax.get_title() == f'{word} band levels'
         unit = levels.units['levels']
         assert ax.get_ylabel() == f'Band level ({unit})'
@@ -8865,7 +9751,9 @@ class TestBandLevelsPlotNamesItsLadderAndReference:
     @pytest.mark.parametrize('ref, spelled', [
         (1e-6, '1 µPa²'), (20e-6, '20 µPa²'), (1.0, '1 Pa²')])
     def test_the_reference_is_spaced(self, ref, spelled):
-        fig, ax = plots.plot_band_levels([100.0, 125.0], [60.0, 61.0], ref=ref)
+        fig, ax = plots.plot_band_levels([100.0, 125.0], [60.0, 61.0],
+                                         ref=ref,
+                                         **_decidecade_edges([100.0, 125.0]))
         assert ax.get_ylabel() == f'Band level (dB re {spelled})'
         plt.close(fig)
 
@@ -9020,7 +9908,8 @@ class TestASuperposedTotalIsCaptionedAsALoss:
         return Field(data=np.full((6, 9), 4e-3, dtype=complex),
                      coords={'depth': d, 'range': r},
                      model='Synth', frequencies=100.0,
-                     metadata={'superposed_sources': {'depths': depths}})
+                     superposed_sources={'depths': depths,
+                                         'weights': [1.0] * len(depths)})
 
     def test_a_multi_source_total_is_captioned_as_a_total_propagation_loss(self):
         fig, ax = plot_field(self._field([20.0, 40.0]))
@@ -9171,12 +10060,13 @@ def test_field_statistics_refuses_a_cut_that_spans_frequency(
     refusal names the axis to select instead of numpy's 'too deep'."""
     with pytest.raises(ConfigurationError, match=r"field\.at\(frequency=") \
             as info:
-        plots.plot_field_statistics([broadband_field, broadband_field],
-                                    depth=float(broadband_field.coords['depth'][0]))
+        uacpy.metrics.field_statistics(
+            [broadband_field, broadband_field],
+            depth=float(broadband_field.coords['depth'][0]))
     assert 'non-empty' not in str(info.value)
     one = broadband_field.at(frequency=float(broadband_field.coords['frequency'][0]))
-    fig, axes = plots.plot_field_statistics(
-        [one, one], depth=float(one.coords['depth'][0]))
+    fig, axes = uacpy.metrics.field_statistics(
+        [one, one], depth=float(one.coords['depth'][0])).plot()
     plt.close('all')
 
 
@@ -9186,8 +10076,8 @@ def test_field_statistics_refuses_a_cut_that_spans_frequency(
 _HEATMAP_PLOTTERS = {
     'plot_greens_function': ('show_colorbar',),
     'plot_modes_heatmap': ('show_colorbar', 'vmin', 'vmax'),
-    '_plot_covariance': ('show_colorbar', 'vmin', 'vmax'),
-    '_plot_replicas': ('show_colorbar', 'vmin', 'vmax'),
+    'plot_covariance': ('show_colorbar', 'vmin', 'vmax'),
+    'plot_replicas': ('show_colorbar', 'vmin', 'vmax'),
     'plot_absorption': ('show_colorbar',),
     'plot_bathymetry_map': ('show_colorbar',),
     'plot_sea_ice_map': ('show_colorbar',),
@@ -9243,30 +10133,29 @@ def test_the_source_level_axis_names_the_unit_the_producers_state():
     plt.close(fig)
 
 
-def test_each_sel_bar_spans_its_own_band_across_a_gap():
+def test_each_band_bar_spans_its_own_band_across_a_gap():
     """Every other decidecade band: a bar is [low, high] of its band, not
-    stretched to the next band's low edge."""
+    stretched to the next band's low edge — for a banded estimate and for a
+    BandLevels alike, the one band plotter drawing both."""
+    from uacpy.acoustic_signal import BandLevels
     bands = [(89.1, 100.0, 112.2), (141.3, 158.5, 177.8),
              (223.9, 251.2, 281.8)]
-    fig, ax = plot_sel(np.array([1e-6, 2e-6, 3e-6]), bands)
-    spans = [(p.get_x(), p.get_x() + p.get_width()) for p in ax.patches]
-    assert spans == pytest.approx([(low, high) for low, _, high in bands])
-    plt.close(fig)
+    lows, centres, highs = (np.array(b) for b in zip(*bands))
+    for record in (_banded([1e-6, 2e-6, 3e-6], bands),
+                   BandLevels(centres, np.array([60.0, 62.0, 61.0]),
+                              lower=lows, upper=highs,
+                              band_type='decidecade', ref=1e-6)):
+        fig, ax = record.plot()
+        spans = [(p.get_x(), p.get_x() + p.get_width()) for p in ax.patches]
+        assert spans == pytest.approx([(low, high) for low, _, high in bands])
+        assert ax.get_xscale() == 'log'
+        plt.close(fig)
 
 
-def test_the_bottom_loss_plot_says_it_draws_a_fluid_seabed():
-    """The loss drawn is the fluid half-space's; the caption says so, and an
-    elastic seabed handed to the plotter surfaces the curve's shear
-    warning."""
-    from uacpy.core.exceptions import FallbackWarning
-    fig, ax = plots.plot_bottom_loss('sand')
-    assert ax.get_title() == 'Plane-wave bottom loss (fluid seabed)'
-    plt.close(fig)
-    with pytest.warns(FallbackWarning, match='shear'):
-        fig, ax = plots.plot_bottom_loss(
-            {'basalt (elastic)': BoundaryProperties.from_preset(
-                'basalt', elastic=True)})
-    plt.close(fig)
+def test_band_arrays_need_their_edges():
+    with pytest.raises(ConfigurationError, match='lower= and upper='):
+        plot_band_levels([100.0, 125.0], [60.0, 61.0])
+    assert not plt.get_fignums()
 
 
 class TestALevelMapIsCaptionedAgainstItsOwnReference:
@@ -9303,3 +10192,61 @@ class TestALevelMapIsCaptionedAgainstItsOwnReference:
         fig, ax = plots.plot_track_exposure(plan, depth=5.0)
         assert unit in [a.get_ylabel() for a in fig.axes][-1]
         plt.close(fig)
+
+
+class TestAnAxesPassedAfterACarrierIsRefusedNamingAx:
+    """A result fills every array argument of its plotter, so an Axes
+    passed positionally after it, ``plot_X(result, ax)``, lands in an array
+    slot: refused with a ConfigurationError naming that slot and ``ax=``,
+    where it read as an array and failed on its shape."""
+
+    @staticmethod
+    def _carriers():
+        from uacpy import acoustic_signal as sig, comms, sonar
+        from uacpy.data.bathymetry import BathyGrid
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal(4096)
+        y = np.convolve(x, [1.0, 0.5, 0.2], 'same')
+        return {
+            'plot_spectrogram': (sig.spectrogram(x, 1000.0), 'times'),
+            'plot_ber_curve': (comms.ber_theory_curve('qpsk',
+                                                      np.arange(0.0, 10.0)),
+                               'ber_measured'),
+            'plot_roc': (sonar.roc_curve(2.0), 'pd'),
+            'plot_channel': (comms.pulse_shaped_taps([1.0, 0.5],
+                                                     [0.0, 0.002], 1000.0),
+                             'sample_rate'),
+            'plot_frf': (sig.frf_welch(x, y, 1000.0), 'tf'),
+            'plot_coherence': (sig.frf_welch(x, y, 1000.0), 'coherence'),
+            'plot_beam_power': (sig.beamform_field(
+                np.ones((4, 3), complex), np.arange(4) * 0.5,
+                np.linspace(-90.0, 90.0, 19), 1500.0), 'power'),
+            'plot_bathymetry_map': (BathyGrid(
+                lats=np.linspace(56.0, 57.0, 4),
+                lons=np.linspace(2.0, 3.0, 5),
+                depths=np.full((4, 5), 100.0)), 'lons'),
+        }
+
+    @pytest.mark.parametrize('plotter', [
+        'plot_spectrogram', 'plot_ber_curve', 'plot_roc', 'plot_channel',
+        'plot_frf', 'plot_coherence', 'plot_beam_power',
+        'plot_bathymetry_map'])
+    def test_the_refusal_names_the_slot_and_ax(self, plotter):
+        carrier, slot = self._carriers()[plotter]
+        fig, ax = plt.subplots()
+        try:
+            with pytest.raises(ConfigurationError,
+                               match=f"landed in the '{slot}' argument"
+                               ) as err:
+                getattr(uacpy.plot, plotter)(carrier, ax)
+            assert f"{plotter}(result, ax=ax)" in str(err.value.remediation)
+        finally:
+            plt.close(fig)
+
+    def test_the_axes_by_keyword_draws(self):
+        carrier, _ = self._carriers()['plot_roc']
+        fig, ax = plt.subplots()
+        try:
+            assert uacpy.plot.plot_roc(carrier, ax=ax)[1] is ax
+        finally:
+            plt.close(fig)

@@ -7,13 +7,11 @@ five ways on one grid, as a snapshot sheet and as one GIF per solver.
   deck carries only vacuum and rigid boundaries and it refuses the
   half-space, so its panel shows a different seabed, chosen explicitly
   below. Its range synthesis is a direct sum over a Δk grid, periodic in
-  range with period RMax, which defaults to 4× the farthest receiver
-  (`rmax_factor`; 800 m here). A receiver at r sees the fold of the arrival
-  that belongs at RMax − r, at (RMax − r)/c, so T_MAX must end before
-  3·max(r)/c (0.4 s here) or the late frames show aliasing rather than
-  propagation. At 1500 m/s, 0.18 s puts the front at 270 m — past the array,
-  so reflections are visible, and well before the wrap. Adapt it as
-  T_MAX < 3·max(receiver ranges)/c.
+  range with period RMax. Left unset, RMax is r + 1.2·c·T_MAX (r the
+  farthest receiver, c the fastest speed; 524 m here, reported as
+  `run_settings.engine.rmax`), so the folded replica stays outside the
+  record whatever T_MAX is. At 1500 m/s, 0.18 s puts the front at 270 m —
+  past the array, so reflections are visible.
 * RAM, Scooter and Kraken get there through broadband H(f) → IFFT, which is a
   wave-equation solution too.
 * Bellhop is the contrast: its TIME_SERIES output is a per-receiver
@@ -28,10 +26,8 @@ solvers) · plot_time_snapshots · save_animation
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -47,7 +43,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 # samples per minimum wavelength, so the panels render the pulse envelope and
 # the modal arrivals but not individual wavefronts up there. Raise the bin
 # count if you want those.
-T_MAX = 0.18            # s — front at 270 m: past the array, inside the wrap
+T_MAX = 0.18            # s — front at 270 m: past the array
 F_CENTER, F_MIN, F_MAX = 200.0, 50.0, 350.0
 FS = 8000.0             # ≥ 2× freq_max
 receiver = uacpy.Receiver(depths=np.linspace(1, 49, 32),
@@ -86,11 +82,11 @@ def run(name, model, waveform=None, run_env=env):
     solver's wavefront then emerges from the source at t ≈ 0, matching SPARC's
     native convention.
     """
-    # Two notices belong to what this sheet shows and are printed: the
+    # The notices belong to what this sheet shows and are printed: the
     # receivers start 2 m from the source, so RAM and Kraken drop the paths
     # steeper than their angular windows keep (Scooter integrates from
     # k = 0 and keeps them), and Bellhop's delay-and-sum drops the echoes
-    # that land after the 0.2 s window. Any other warning is shown as usual.
+    # that land after the 0.2 s window.
     with warnings.catch_warnings(record=True) as caught:
         if waveform is None:
             field = model.run(run_env, source, receiver,
@@ -102,12 +98,7 @@ def run(name, model, waveform=None, run_env=env):
                               output_duration=T_MAX + peak_time)
             field = field.shift(time=-peak_time)
     for warning in caught:
-        text = str(warning.message)
-        if 'closest receiver sees' in text or 'hold every echo' in text:
-            print(f"  noted: {text.split(';')[0]}")
-        else:
-            warnings.showwarning(warning.message, warning.category,
-                                 warning.filename, warning.lineno)
+        print(f"  noted: {str(warning.message).splitlines()[0]}")
     # Clip to 0 ≤ t ≤ T_MAX. SPARC integrates from t = -0.1 s (pre-roll) while
     # the IFFT models start at 0, so the lower bound drops that pre-roll.
     field = field.window(time=(0.0, T_MAX))
@@ -134,13 +125,13 @@ fields = {
                waveform),
     'Kraken': run('Kraken', uacpy.Kraken(), waveform),
     'Bellhop': run('Bellhop', uacpy.Bellhop(backend='fortran',
-                                            launch_angles=(-89.9, 89.9)),
+                                            launch_angles_deg=(-89.9, 89.9)),
                    waveform),
 }
 
 # Snapshots from t=0 (the emission) through the first seafloor reflection.
 fig, _ = uacpy.plot.plot_time_snapshots(
-    fields, times_s=tuple(np.linspace(0.0, T_MAX, 8)), env=env,
+    fields, times=tuple(np.linspace(0.0, T_MAX, 8)), env=env,
     title='Pulse propagation snapshots — Pekeris waveguide, fc=200 Hz '
           '(per-row colour scale: each solver has its own normalisation)')
 fig.savefig(OUT / 'example_26_wave_propagation.png', dpi=140,

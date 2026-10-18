@@ -38,7 +38,7 @@ EARTH_RADIUS_KM = EARTH_RADIUS_M / 1000.0
 #: endpoints may be before :func:`geodesic_waypoints` refuses them. The slerp
 #: divides by ``sin(ang)``, and the haversine central angle saturates at
 #: exactly π once the endpoints are within ~0.1 m of antipodal, so past this
-#: point the waypoints stop lying on the path ``ranges_m`` reports. Measured
+#: point the waypoints stop lying on the path ``ranges`` reports. Measured
 #: disagreement between a waypoint's great-circle distance from ``start`` and
 #: its reported range: 0.13 m at π − ang = 1e-5, 142 m at 1e-6, 37 km at 1e-7
 #: and 1083 km at exactly π. 1e-6 rad is ~6 m of antipodal offset, so no real
@@ -127,7 +127,7 @@ def geodesic_waypoints(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Evenly spaced great-circle waypoints between two ``(lat, lon)``.
 
-    Returns ``(lats_deg, lons_deg, ranges_m)`` where ``ranges_m`` is the
+    Returns ``(lats_deg, lons_deg, ranges)`` where ``ranges`` is the
     cumulative spherical surface distance from ``start`` (0 at the first
     point, total length at the last). Spherical-Earth slerp — accurate to a
     few parts in 10³ versus the WGS84 ellipsoid, ample for sampling a grid
@@ -167,8 +167,8 @@ def geodesic_waypoints(
     lats = np.degrees(np.arctan2(z, np.hypot(x, y)))
     lons = np.degrees(np.arctan2(y, x))
 
-    ranges_m = f * ang * EARTH_RADIUS_M
-    return lats, lons, ranges_m
+    ranges = f * ang * EARTH_RADIUS_M
+    return lats, lons, ranges
 
 
 def great_circle_midpoint(start: Coordinate, end: Coordinate) -> Coordinate:
@@ -224,9 +224,7 @@ def parse_date(date: Union[str, _dt.date],
         # feeds (WOA23, NSIDC, Copernicus) is indexed in UTC, and the month
         # selects the climatology slice — so taking the local calendar date
         # picks the wrong month either side of midnight UTC.
-        if date.tzinfo is not None:
-            date = date.astimezone(_dt.timezone.utc)
-        return date.date()
+        return _to_utc_date(date)
     if isinstance(date, _dt.date):
         return date
     if isinstance(date, np.datetime64):

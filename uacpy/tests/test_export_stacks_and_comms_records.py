@@ -42,8 +42,8 @@ def _arrivals(depth):
     cell = {'amplitudes': np.array([1.0, 0.5]), 'phases': np.array([0.1, 0.2]),
             'delays': np.array([0.10, 0.12]),
             'delays_imag': np.array([0.0, -1e-6]),
-            'source_angles': np.array([5.0, -7.0]),
-            'receiver_angles': np.array([-5.0, 7.0]),
+            'source_angles_deg': np.array([5.0, -7.0]),
+            'receiver_angles_deg': np.array([-5.0, 7.0]),
             'n_top_bounces': np.array([0, 1], dtype='int32'),
             'n_bot_bounces': np.array([1, 1], dtype='int32'), 'n_arrivals': 2}
     return Arrivals(by_receiver=[[[cell]]], receiver_depths=[20.0],

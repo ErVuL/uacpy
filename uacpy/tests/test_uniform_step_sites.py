@@ -46,7 +46,7 @@ def _angles(tmp_path):
     oases_writer.write_oasr_input(
         tmp_path / 'r.dat', env, uacpy.Source(depths=[10.0], frequencies=100.0),
         uacpy.Receiver(depths=[10.0], ranges=[100.0]),
-        angles=_jittered(10.0, 5.0, 6))
+        angles_deg=_jittered(10.0, 5.0, 6))
 
 
 SITES = {'frequency sweep': _freq_sweep, 'range axis': _range_axis,
@@ -57,7 +57,7 @@ REFUSAL = {'frequency sweep': 'frequencies is not uniformly spaced',
            'range axis': 'ranges is not uniformly spaced',
            'linear sweep': 'vector is not equispaced',
            'log sweep': 'not log-spaced',
-           'OASR angles': 'angles`` is not uniformly spaced'}
+           'OASR angles': 'angles_deg`` is not uniformly spaced'}
 
 
 def _call(site, tmp_path):

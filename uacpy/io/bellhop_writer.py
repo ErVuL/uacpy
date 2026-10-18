@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Optional, Union
 
 from uacpy._log import log_message
-from uacpy.core.absorption import ConstantAbsorption
+from uacpy.core.absorption import ConstantAbsorption, _absorption_law
 from uacpy.io.at_codes import (
-    GEOMETRY_INTERP_CODES, boundary_code, writes_alpha_per_ssp_row,
+    BELLHOP_GRID_TYPES, BELLHOP_RUN_TYPES, GEOMETRY_INTERP_CODES,
+    boundary_code, writes_alpha_per_ssp_row,
 )
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, UnsupportedFeatureError,
@@ -34,13 +35,15 @@ from uacpy.core.deck_limits import (
     DECK_DEPTH_FMT, DECK_DEPTH_RESOLUTION_M, NO_RECEIVER_RANGE_FALLBACK_M,
 )
 from uacpy.io.oalib_writer import (
-    _biological_edge_nodes, compose_topopt, deck_depth, format_halfspace_row,
+    SOURCE_TYPE_CODE,
+    _biological_edge_nodes, _refuse_attenuation_past_at_ceiling,
+    compose_topopt, deck_depth, format_halfspace_row,
     get_top_bc_code, quote_fortran_title, resolve_ssp_topopt,
     ssp_row_attenuation_texts, write_absorption_block, write_receiver_depths,
     write_receiver_ranges, write_source_depths, write_ssp,
     write_surface_halfspace,
 )
-from uacpy.io.refl_io import stage_reflection_file
+from uacpy.io.refl_io import stage_reflection_file, stage_source_beam_pattern
 from uacpy.core.units import m_to_km
 from uacpy.io.input_checks import reject_unknown_kwargs
 from uacpy.core.engine_defaults import (
@@ -49,11 +52,17 @@ from uacpy.core.engine_defaults import (
     BELLHOP_GRID_TYPE,
     BELLHOP_INTERP_ALTIMETRY,
     BELLHOP_INTERP_BATHYMETRY,
-    BELLHOP_LAUNCH_ANGLES,
+    BELLHOP_LAUNCH_ANGLES_DEG,
     BELLHOP_N_BEAMS,
     BELLHOP_RAY_STEP,
 )
 
+
+#: Height (m) of the SSP guard row above the highest altimetry crest.
+#: ``bdryMod.f90:113-114`` needs the first SSP depth only at or above every
+#: ``.ati`` point; the margin is uacpy guidance that keeps the row strictly
+#: above it.
+_ALTIMETRY_GUARD_MARGIN_M = 0.5
 
 #: The guard columns of a range-dependent ``.ssp``, at ±this factor
 #: times ``r_box``; :mod:`uacpy.io.env_reader` recognises them by it.
@@ -109,16 +118,11 @@ def cerveny_knobs(**given) -> dict:
 # ReadEnvironmentBell.f90:387-395.
 _VALID_BEAM_TYPES = frozenset({'B', 'R', 'C', 'g', 'G', 'S'})
 
-# RunType(1:1) letters ReadRunType accepts; anything else is a
-# CALL ERROUT( 'READIN', 'Unknown RunType selected' )
-# (ReadEnvironmentBell.f90:376-377). Case is significant: 'A' is ASCII
-# arrivals, 'a' binary.
-_VALID_RUN_TYPES = frozenset({'C', 'I', 'S', 'A', 'a', 'E', 'R'})
-# RunType(4:4) and (5:5). Both have a silent CASE DEFAULT
-# (ReadEnvironmentBell.f90:403-404 and :416-419), so a typo is never reported
-# by the binary — it is overridden, and the deck no longer says what ran.
+# RunType(4:4) and (5:5) (BELLHOP_GRID_TYPES, at_codes). Both have a silent
+# CASE DEFAULT (ReadEnvironmentBell.f90:403-404 and :416-419), so a typo is
+# never reported by the binary — it is overridden, and the deck no longer says
+# what ran.
 _VALID_SOURCE_TYPES = frozenset({'R', 'X'})
-_VALID_GRID_TYPES = frozenset({'R', 'I'})
 
 # Cerveny beam-shape letters (ReadEnvironmentBell.f90:178-185).
 _VALID_BEAM_WIDTH_TYPES = frozenset({'F', 'M', 'W'})
@@ -304,11 +308,11 @@ def _check_bellhop_options(run_type, beam_type, source_type, grid_type,
     the beam count (``None`` is 0, Bellhop's own estimate)."""
     validate_beam_type(beam_type, 'write_bellhop_env_file')
     for _value, _allowed, _name, _cite in (
-        (run_type, _VALID_RUN_TYPES, 'run_type',
+        (run_type, BELLHOP_RUN_TYPES, 'run_type',
          "ReadEnvironmentBell.f90:376-377 ERROUTs any other RunType(1:1)"),
         (source_type, _VALID_SOURCE_TYPES, 'source_type',
          "ReadEnvironmentBell.f90:403-404 silently overrides RunType(4:4) to 'R'"),
-        (grid_type, _VALID_GRID_TYPES, 'grid_type',
+        (grid_type, BELLHOP_GRID_TYPES, 'grid_type',
          "ReadEnvironmentBell.f90:416-419 silently overrides RunType(5:5) to 'R'"),
     ):
         if str(_value) not in _allowed:
@@ -328,7 +332,7 @@ def _check_bellhop_options(run_type, beam_type, source_type, grid_type,
             f"(:54) and the beam loop (bellhop.f90:262) then traces nothing, "
             f"leaving an all-zero field."
         )
-    if n_beams == 1 and str(run_type)[:1] in ('C', 'I', 'S', 'A', 'E'):
+    if n_beams == 1 and str(run_type)[:1] != 'R':
         raise ConfigurationError(
             f"write_bellhop_env_file(n_beams=1, run_type={run_type!r}): a "
             f"single beam cannot carry an influence calculation — "
@@ -343,6 +347,7 @@ def _check_bellhop_options(run_type, beam_type, source_type, grid_type,
 def _check_bellhop_env(env, interp_ssp) -> str:
     """Refuse an environment the deck cannot describe to Bellhop; return the
     ``TopOpt(1)`` SSP letter."""
+    _refuse_attenuation_past_at_ceiling(env, 'write_bellhop_env_file')
     interp_char = resolve_ssp_topopt(env, interp_ssp)
     # ReadEnvironmentBell.f90:459 accepts the 'P' (precalculated IRC) letter
     # but bellhop.f90:681's boundary SELECT CASE has no 'P' branch, so its
@@ -392,7 +397,9 @@ def _check_irregular_grid(receiver, grid_type) -> None:
 
 
 def _write_top_block(f, filepath: Path, env, source, receiver, *,
-                     interp_char: str, ati_code: str, verbose) -> bool:
+                     interp_char: str, ati_code: str, verbose,
+                     drop_repeated_angles: bool,
+                     single_beam: bool = False) -> bool:
     """Title, frequency, NMedia, TopOpt, the absorption rows and the top
     half-space row, staging the ``.ati`` and ``.trc`` the surface needs;
     return whether the surface carries an altimetry."""
@@ -410,7 +417,11 @@ def _write_top_block(f, filepath: Path, env, source, receiver, *,
     has_altimetry = (env.altimetry is not None
                      and env.altimetry.n_ranges >= 1)
     alti_char = '~' if has_altimetry else ' '
-    f.write(f"'{compose_topopt(interp_char, top_bc, env, pos5=alti_char)}'\n")
+    # Position 6: 'I' traces one beam of the fan, whose index follows NBeams
+    # (ReadEnvironmentBell.f90:337-342, angleMod.f90:32-33).
+    top_opt = compose_topopt(interp_char, top_bc, env, pos5=alti_char,
+                             pos6='I' if single_beam else ' ')
+    f.write(f"'{top_opt}'\n")
 
     # ReadEnvironmentBell.f90:59 calls ReadTopOpt, which consumes the
     # Francois-Garrison / biological records itself (:308-320); only then
@@ -430,6 +441,7 @@ def _write_top_block(f, filepath: Path, env, source, receiver, *,
         stage_reflection_file(
             getattr(env.surface, 'reflection_file', None),
             filepath, boundary='top', verbose=verbose,
+            drop_repeated_angles=drop_repeated_angles,
         )
     return has_altimetry
 
@@ -448,7 +460,7 @@ def _bellhop_ssp(env, *, has_altimetry: bool, interp_char: str):
     if has_altimetry:
         max_alti_above_msl = env.altimetry.heights.max()
         if max_alti_above_msl > 0:
-            z_min = -max_alti_above_msl - 0.5
+            z_min = -max_alti_above_msl - _ALTIMETRY_GUARD_MARGIN_M
 
     z_max = deck_depth(env.depth)
 
@@ -470,7 +482,7 @@ def _bellhop_ssp(env, *, has_altimetry: bool, interp_char: str):
     # (Bellhop/sspMod.f90:906): a node pair across each layer edge, in
     # the .env rows and the .ssp matrix alike, confines it to the layer.
     ssp_depths, ssp_matrix = _biological_edge_nodes(
-        ssp_depths, ssp_matrix, env.absorption, interp_char,
+        ssp_depths, ssp_matrix, _absorption_law(env.absorption), interp_char,
         who='write_bellhop_env_file')
     return ssp_depths, ssp_matrix, z_max
 
@@ -481,7 +493,7 @@ def _warn_if_quad_rows_hold_range0_absorption(env, ssp_matrix) -> None:
     range-0 column: Bellhop takes the imaginary sound speed from the
     ``.env`` rows alone (``Bellhop/sspMod.f90:520``), so the range-0 α(z),
     converted at the range-0 speed, is used at every range."""
-    absorption = env.absorption
+    absorption = _absorption_law(env.absorption)
     if (not writes_alpha_per_ssp_row(absorption)
             or isinstance(absorption, ConstantAbsorption)):
         return
@@ -596,7 +608,8 @@ def _write_ssp_block(f, env, ssp_depths, ssp_matrix, z_max, *,
 
 
 def _write_bottom_block(f, filepath: Path, env, receiver, *, z_max,
-                        bty_code: str, verbose) -> None:
+                        bty_code: str, verbose,
+                        drop_repeated_angles: bool) -> None:
     """``BotOpt Sigma`` and the bottom half-space row, staging the ``.bty``
     and ``.brc`` the seabed needs."""
     hs = env.bottom.halfspace_at(range=0.0)
@@ -616,7 +629,8 @@ def _write_bottom_block(f, filepath: Path, env, receiver, *, z_max,
         # .env), so staging it beside the file is the whole job — no extra
         # lines go into the env.
         stage_reflection_file(hs.reflection_file, filepath,
-                              boundary='bottom', verbose=verbose)
+                              boundary='bottom', verbose=verbose,
+                              drop_repeated_angles=drop_repeated_angles)
     elif bottom_type == "A":  # Acousto-elastic halfspace
         # Per ReadEnvironmentBell.f90:474 the row is
         # READ(ENVFile,*) zTemp, alphaR, betaR, rhoR, alphaI, betaI
@@ -675,20 +689,23 @@ def _bellhop_run_type(run_type: str, beam_type: str, *,
             f"{source_type}{grid_type}{position_6}{position_7}")
 
 
-def _write_beam_block(f, beam_type: str, *, n_beams: int, launch_angles, ray_step,
-                      z_box, r_box, cerveny) -> None:
-    """The beam count, the launch-angle fan, the step and ray box, and the
-    two Cerveny lines when ``beam_type`` is 'C' or 'R'. ``cerveny`` holds
-    the Cerveny knobs given; the rest take :data:`CERVENY_DEFAULTS`."""
-    f.write(f"{int(n_beams)}\n")
+def _write_beam_block(f, beam_type: str, *, n_beams: int, launch_angles_deg, ray_step,
+                      z_box, r_box, cerveny, single_beam=None) -> None:
+    """The beam count (and, with ``single_beam``, the index of the one beam
+    to trace, ``angleMod.f90:32-33``), the launch-angle fan, the step and
+    ray box, and the two Cerveny lines when ``beam_type`` is 'C' or 'R'.
+    ``cerveny`` holds the Cerveny knobs given; the rest take
+    :data:`CERVENY_DEFAULTS`."""
+    f.write(f"{int(n_beams)}\n" if single_beam is None
+            else f"{int(n_beams)} {int(single_beam)}\n")
 
-    # Launch angles. ``angleMod.f90:58`` READs the whole ``launch_angles`` array;
+    # Launch angles. ``angleMod.f90:58`` READs the whole ``launch_angles_deg`` array;
     # the trailing '/' terminates list-directed input after two values, so
     # alpha(3) keeps the -999.9 sentinel planted at :57 and SubTab
     # (:60, misc/subtabulate.f90:41-45) fills the fan uniformly between
     # alpha(1) and alpha(2). Dropping the '/' would make Bellhop read the
     # step-size and box lines as further launch angles.
-    f.write(f"{launch_angles[0]:.6f} {launch_angles[1]:.6f} /\n")
+    f.write(f"{launch_angles_deg[0]:.6f} {launch_angles_deg[1]:.6f} /\n")
 
     # Step size (0 for automatic), then the ray box: z in m, r in km
     # (converted back at ReadEnvironmentBell.f90:154). All three are one
@@ -717,6 +734,33 @@ def _write_beam_block(f, beam_type: str, *, n_beams: int, launch_angles, ray_ste
             f"'{knobs['component']}'\n")
 
 
+def _source_letters(source: Source, source_type: Optional[str],
+                    source_beam_pattern: Optional[bool]):
+    """RunType positions 4 and 3 as the Source states them: the letter of
+    ``source.source_type`` (:data:`~uacpy.io.oalib_writer.SOURCE_TYPE_CODE`)
+    and whether it carries a beam pattern. A value given that contradicts
+    the Source is refused naming both, since the deck would describe another
+    source than the one handed in."""
+    from_source = SOURCE_TYPE_CODE.get(source.source_type, source.source_type)
+    if source_type is not None and source_type != from_source:
+        raise ConfigurationError(
+            f"write_bellhop_env_file(source_type={source_type!r}) "
+            f"contradicts the Source (source_type={source.source_type!r}, "
+            f"letter {from_source!r}).",
+            remediation="Leave source_type unset to write the Source's "
+                        "letter, or pass a Source of the type you mean.")
+    has_pattern = source.beam_pattern is not None
+    if source_beam_pattern is not None and bool(source_beam_pattern) != has_pattern:
+        raise ConfigurationError(
+            f"write_bellhop_env_file(source_beam_pattern="
+            f"{source_beam_pattern!r}) contradicts the Source, which "
+            f"{'carries' if has_pattern else 'carries no'} beam pattern.",
+            remediation="Leave source_beam_pattern unset to follow the "
+                        "Source, or pass a Source with (or without) "
+                        "beam_pattern=.")
+    return from_source, has_pattern
+
+
 def write_bellhop_env_file(
     filepath: Union[str, Path],
     env: Environment,
@@ -724,19 +768,21 @@ def write_bellhop_env_file(
     receiver: Receiver,
     run_type: str = "C",
     beam_type: Optional[str] = None,
-    source_type: str = "R",
+    source_type: Optional[str] = None,
     grid_type: Optional[str] = None,
     interp_ssp: Optional[str] = None,
     interp_bathymetry: Optional[str] = None,
     interp_altimetry: Optional[str] = None,
-    source_beam_pattern: bool = False,
+    source_beam_pattern: Optional[bool] = None,
     beam_shift: Optional[bool] = None,
     n_beams: Optional[int] = None,
-    launch_angles: Optional[tuple] = None,
+    single_beam: Optional[int] = None,
+    launch_angles_deg: Optional[tuple] = None,
     ray_step: Optional[float] = None,
     z_box: Optional[float] = None,
     r_box: Optional[float] = None,
     verbose: Union[bool, str] = False,
+    backend: Optional[str] = None,
     **kwargs
 ):
     """
@@ -780,7 +826,10 @@ def write_bellhop_env_file(
         - G: Geometric hat, Cartesian
         - S: Simple Gaussian
     source_type : str, optional
-        Source type (position 4): 'R' (point), 'X' (line). Default is 'R'.
+        Source type (position 4): 'R' (point), 'X' (line). ``None`` takes
+        the letter of ``source.source_type`` (``'point'`` → 'R', ``'line'``
+        → 'X'); a letter that contradicts the Source is refused naming
+        both.
     grid_type : str, optional
         Grid type (position 5): 'R' (rectilinear), 'I' (irregular). Default is 'R'.
     interp_ssp : str, optional
@@ -794,9 +843,12 @@ def write_bellhop_env_file(
     interp_altimetry : str, optional
         ``.ati`` interpolation: ``'linear'`` (default) or ``'curvilinear'``.
     source_beam_pattern : bool, optional
-        When True, emits '*' in RunType position 3 so Bellhop reads
-        ``<base>.sbp`` (source beam pattern file). The caller is
-        responsible for staging that file next to the .env. Default: False.
+        '*' in RunType position 3, so Bellhop reads ``<base>.sbp`` (the
+        source beam pattern). ``None`` follows the Source: a
+        ``source.beam_pattern`` sets it and is staged as ``<base>.sbp``
+        beside the deck (:func:`~uacpy.io.refl_io.stage_source_beam_pattern`);
+        none leaves position 3 blank. A value that contradicts the Source is
+        refused naming both.
     beam_shift : bool, optional
         When True, sets RunType position 7 to 'S' enabling beam-shift
         on boundary reflections per Beam%Type(4:4)
@@ -807,7 +859,14 @@ def write_bellhop_env_file(
         ``MAX(INT(0.3 * Rmax * f / c0), 300)`` raised further by a
         beam-width-versus-depth rule (``angleMod.f90:44-50``); a ray-trace
         run gets 50. Negative values are rejected.
-    launch_angles : tuple, optional
+    single_beam : int, optional
+        Index (1-based, lowest launch angle first) of the one beam of the
+        fan to trace and sum: ``TopOpt(6:6) = 'I'`` and the index after
+        ``NBeams`` (``angleMod.f90:32-33``; Bellhop User Guide §6.2,
+        "Plotting a single beam"). ``None`` (default) sums every beam. An
+        index below 1 or past a positive ``n_beams`` is refused
+        (``angleMod.f90:80-83`` stops on it).
+    launch_angles_deg : tuple, optional
         Launch angle limits (min, max) in degrees. Default is (-80, 80).
     ray_step : float, optional
         Step size in meters. If 0, uses automatic. Default is 0.
@@ -818,6 +877,15 @@ def write_bellhop_env_file(
         Maximum range for ray box. If None, uses 1.2 * receiver.range_max.
     verbose : bool or str, optional
         Print verbose output. Default is False.
+    backend : {'fortran', 'cxx', 'cuda'}, optional
+        The Bellhop binary the deck is for, as ``Bellhop(backend=)`` names
+        it. For ``'cxx'`` / ``'cuda'`` a copied ``reflection_file=`` table
+        keeps the first row of each repeated angle, which bellhopcxx and
+        bellhopcuda refuse (``src/module/reflcoef.hpp:135-141``), with an
+        ``IOWarning`` naming the rows dropped
+        (:func:`~uacpy.io.refl_io.stage_reflection_file`). ``None`` or
+        ``'fortran'`` stages every row, which the Fortran binary reads with
+        no monotonicity test (``misc/RefCoef.f90:45-55``).
     **kwargs
         Advanced Cerveny beam parameters (for beam_type 'C' or 'R'); one
         absent or ``None`` takes :data:`CERVENY_DEFAULTS`:
@@ -865,7 +933,8 @@ def write_bellhop_env_file(
     """
     beam_type = BELLHOP_BEAM_TYPE if beam_type is None else beam_type
     n_beams = BELLHOP_N_BEAMS if n_beams is None else n_beams
-    launch_angles = BELLHOP_LAUNCH_ANGLES if launch_angles is None else launch_angles
+    launch_angles_deg = (BELLHOP_LAUNCH_ANGLES_DEG if launch_angles_deg is None
+                         else launch_angles_deg)
     ray_step = BELLHOP_RAY_STEP if ray_step is None else ray_step
     grid_type = BELLHOP_GRID_TYPE if grid_type is None else grid_type
     interp_bathymetry = BELLHOP_INTERP_BATHYMETRY if interp_bathymetry is None else interp_bathymetry
@@ -877,8 +946,18 @@ def write_bellhop_env_file(
     # consumed by the beam block; anything else is a typo'd option and is
     # rejected instead of silently dropped.
     reject_unknown_kwargs('write_bellhop_env_file', kwargs, CERVENY_DEFAULTS)
+    source_type, source_beam_pattern = _source_letters(
+        source, source_type, source_beam_pattern)
     n_beams = _check_bellhop_options(run_type, beam_type, source_type,
                                      grid_type, n_beams)
+    if single_beam is not None and (
+            int(single_beam) != single_beam or single_beam < 1
+            or (n_beams and single_beam > n_beams)):
+        raise ConfigurationError(
+            f"write_bellhop_env_file(single_beam={single_beam!r}) must be a "
+            f"beam index in 1..n_beams (n_beams={n_beams}): angleMod.f90:80-83 "
+            f"stops with 'Selected beam, iSingle_alpha not in "
+            f"[ 1, Angles%Nalpha ]'.")
     z_box, r_box = bellhop_ray_box(env, receiver, z_box=z_box, r_box=r_box)
 
     # Deck-validity guards that depend only on the environment run BEFORE the
@@ -887,11 +966,22 @@ def write_bellhop_env_file(
     bty_code, ati_code = _boundary_interp_codes(interp_bathymetry,
                                                 interp_altimetry)
     _check_irregular_grid(receiver, grid_type)
+    # bellhopcxx / bellhopcuda test a reflection table's angle column with
+    # '<=' (src/module/reflcoef.hpp:135-141, src/common_setup.hpp:243-253);
+    # the Fortran binary reads it with no monotonicity test
+    # (misc/RefCoef.f90:45-55).
+    drop_repeated_angles = backend in ('cxx', 'cuda')
+    if source_beam_pattern:
+        # Bellhop opens <base>.sbp when RunType(3:3) is '*'.
+        stage_source_beam_pattern(source.beam_pattern,
+                                  filepath.with_suffix('.sbp'))
 
     with open(filepath, "w") as f:
         has_altimetry = _write_top_block(
             f, filepath, env, source, receiver, interp_char=interp_char,
-            ati_code=ati_code, verbose=verbose)
+            ati_code=ati_code, verbose=verbose,
+            drop_repeated_angles=drop_repeated_angles,
+            single_beam=single_beam is not None)
         ssp_depths, ssp_matrix, z_max = _bellhop_ssp(
             env, has_altimetry=has_altimetry, interp_char=interp_char)
         if interp_char == 'Q':
@@ -901,7 +991,8 @@ def write_bellhop_env_file(
         _write_ssp_block(f, env, ssp_depths, ssp_matrix, z_max,
                          frequency=float(source.frequencies[0]))
         _write_bottom_block(f, filepath, env, receiver, z_max=z_max,
-                            bty_code=bty_code, verbose=verbose)
+                            bty_code=bty_code, verbose=verbose,
+                            drop_repeated_angles=drop_repeated_angles)
         write_source_depths(f, source)
         write_receiver_depths(f, receiver)
         write_receiver_ranges(f, receiver)
@@ -910,6 +1001,6 @@ def write_bellhop_env_file(
             source_type=source_type, grid_type=grid_type,
             beam_shift=beam_shift)
         f.write(f"'{run_type_record}'\n")
-        _write_beam_block(f, beam_type, n_beams=n_beams, launch_angles=launch_angles,
+        _write_beam_block(f, beam_type, n_beams=n_beams, launch_angles_deg=launch_angles_deg,
                           ray_step=ray_step, z_box=z_box, r_box=r_box,
-                          cerveny=kwargs)
+                          cerveny=kwargs, single_beam=single_beam)

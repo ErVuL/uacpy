@@ -43,8 +43,8 @@ class TestOASTWarnings:
         """OASES-9: OAST's native FFT range step is ~half a wavelength on the
         default phase-speed window, where dB interpolation onto arbitrary
         receiver ranges moves TL by a median 0.01-0.02 dB, so an off-grid
-        request is not warned about; the native grid rides back on the
-        result for a caller who wants to align to it."""
+        request is not warned about; the TL OAST computed, on its own grid,
+        rides back on the result as ``components['native']``."""
         env = uacpy.Environment(
             name='oast_offgrid', bathymetry=100.0, ssp=1500.0,
             bottom=uacpy.BoundaryProperties(
@@ -56,7 +56,10 @@ class TestOASTWarnings:
         result = OAST(verbose=False).run(env, src, rcv)
         assert not [w for w in recwarn.list
                     if 'native FFT range grid' in str(w.message)]
-        native = np.asarray(result.metadata['native_ranges'], dtype=float)
+        native_field = result.components['native']
+        assert 'native_ranges' not in result.metadata
+        native = np.asarray(native_field.coords['range'], dtype=float)
+        assert native_field.data.shape == (1, native.size)
         assert native.ndim == 1 and native.size > 1
         assert np.all(np.diff(native) > 0)
         assert np.diff(native).max() < 15.0     # λ = 15 m at 100 Hz
@@ -124,9 +127,18 @@ class TestOASPOptionGuard:
         with pytest.raises(ConfigurationError, match="option 'O'"):
             self._run(options)
 
-    @pytest.mark.parametrize("options", ['V', 'N J V', 'NJV'])
+    @pytest.mark.parametrize("options", ['V', 'N J V', 'NJV', 'K J V'])
     def test_multi_axis_option_rejected_regardless_of_spacing(self, options):
-        with pytest.raises(ConfigurationError, match="multi-component"):
+        with pytest.raises(ConfigurationError,
+                           match="other than the pressure"):
+            self._run(options)
+
+    @pytest.mark.parametrize("options", ['N K J', 'NKJ'])
+    def test_both_pressure_letters_are_rejected(self, options):
+        """'N' and 'K' each add an IOUT slot, so every .trf record would
+        hold two components where the reader takes one."""
+        with pytest.raises(ConfigurationError,
+                           match="both 'N' \\(normal stress\\) and 'K'"):
             self._run(options)
 
     @pytest.mark.parametrize("options", ['N', 'N T', 'NT'])
@@ -142,10 +154,10 @@ class TestOASPOptionGuard:
     def test_without_J_but_pinned_sampling_passes_the_guard(self):
         """n_wavenumbers >= 1 disables AUSAMP, so the contour never engages and
         the same option line is legal."""
-        from uacpy.models.oases.oasp import _reject_unreadable_oasp_options
+        from uacpy.models.oases._common import _reject_unreadable_trf_options
         model = OASP(options='N', n_wavenumbers=2048)
-        assert _reject_unreadable_oasp_options(model.options,
-                                               model.n_wavenumbers) is None
+        assert _reject_unreadable_trf_options('OASP', model.options,
+                                              model.n_wavenumbers) is None
 
 
 @pytest.mark.requires_binary
@@ -169,11 +181,11 @@ class TestRawOptionsVoidTypedKnobs:
             uacpy.Receiver(depths=[30.0], ranges=[500.0, 1000.0])).engine
 
     def test_oast_typed_flags_derive_the_option_line(self):
-        assert self._resolved(OAST()).options == 'N T J'
-        assert self._resolved(OAST(complex_contour=False)).options == 'N T'
+        assert self._resolved(OAST()).options == 'K T J'
+        assert self._resolved(OAST(complex_contour=False)).options == 'K T'
         assert self._resolved(OAST(
             compute_contour=True,
-            compute_depth_average=True)).options == 'N T J C A'
+            compute_depth_average=True)).options == 'K T J C A'
         assert self._resolved(OAST(options='N T')).options == 'N T'
 
     def test_oast_copy_round_trips_the_option_line(self):
@@ -265,7 +277,7 @@ class TestOASNDegenerateCovarianceWarns:
         assert np.abs(np.diagonal(C[0])) == pytest.approx(1e-20)
 
     def test_configured_noise_field_is_silent(self, recwarn):
-        OASN(verbose=False, surface_noise_level=40.0).run(
+        OASN(verbose=False, surface_noise_level_dB=40.0).run(
             make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
             uacpy.Receiver(**self._RCV), RunMode.COVARIANCE)
         assert not [w for w in recwarn.list
@@ -508,7 +520,7 @@ class TestOASNSweepAndLevels:
 
     def test_a_non_uniform_sweep_is_refused_without_a_resampling_notice(
             self):
-        model = OASN(verbose=False, surface_noise_level=60.0)
+        model = OASN(verbose=False, surface_noise_level_dB=60.0)
         carriers = (make_pekeris(),
                     uacpy.Source(depths=50.0,
                                  frequencies=[100.0, 110.0, 130.0]),
@@ -525,11 +537,11 @@ class TestOASNSweepAndLevels:
     def test_the_covariance_keeps_the_noise_levels_it_is_referenced_to(
             self):
         cov = _quiet_run(
-            OASN(verbose=False, surface_noise_level=60.0).run,
+            OASN(verbose=False, surface_noise_level_dB=60.0).run,
             make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
             uacpy.Receiver(**self._RCV), RunMode.COVARIANCE)
-        assert cov.metadata['surface_noise_level'] == pytest.approx(60.0)
-        assert cov.metadata['white_noise_level'] == pytest.approx(-200.0)
+        assert cov.metadata['surface_noise_level_dB'] == pytest.approx(60.0)
+        assert cov.metadata['white_noise_level_dB'] == pytest.approx(-200.0)
 
 
 @pytest.mark.requires_binary
@@ -544,14 +556,14 @@ class TestOASTSourceGeometry:
             make_pekeris(),
             uacpy.Source(depths=50.0, frequencies=100.0, source_type='line'),
             uacpy.Receiver(**self._CARRIERS))
-        assert settings.engine.options == 'N T J P'
+        assert settings.engine.options == 'K T J P'
         assert settings.source_type == 'line'
 
     def test_a_point_source_keeps_the_cylindrical_option_line(self):
         settings = OAST(verbose=False).run_settings(
             make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
             uacpy.Receiver(**self._CARRIERS))
-        assert settings.engine.options == 'N T J'
+        assert settings.engine.options == 'K T J'
 
     def test_a_raw_P_on_a_point_source_is_refused_by_every_entry_point(
             self):
@@ -587,7 +599,7 @@ class TestTheDeckIsWrittenFromTheResolvedSettings:
         assert engine.c_low == 1400.0
         assert engine.c_low_origin == 'OAST(c_low=…)'
         assert engine.c_high_origin == (
-            'oases_wavenumber_bounds(water column)')
+            "1e8, OASES' no upper limit (oast.tex:487, :568)")
         _quiet_run(model.run, *carriers)
         deck = (tmp_path / 'oast_run.dat').read_text().splitlines()
         assert f"{engine.c_low!r} {engine.c_high!r}" in deck
@@ -620,14 +632,14 @@ class TestOASPSourceGeometry:
             make_pekeris(),
             uacpy.Source(depths=50.0, frequencies=100.0, source_type='line'),
             uacpy.Receiver(**self._CARRIERS))
-        assert settings.engine.options == 'N J P'
+        assert settings.engine.options == 'K J P'
         assert settings.source_type == 'line'
 
     def test_a_point_source_keeps_the_cylindrical_option_line(self):
         settings = OASP(verbose=False).run_settings(
             make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
             uacpy.Receiver(**self._CARRIERS))
-        assert settings.engine.options == 'N J'
+        assert settings.engine.options == 'K J'
 
     def test_a_raw_P_on_a_point_source_is_refused_by_every_entry_point(
             self):

@@ -15,7 +15,8 @@ from uacpy.core.exceptions import (ConfigurationError, FallbackWarning,
                                    ProvenanceWarning)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
-from uacpy.core.results._base import Result, coordinate_axis
+from uacpy.core.results._base import (Result, axis_match_tolerance,
+                                      coordinate_axis)
 from uacpy.core.results.quantities import coordinate_unit
 from uacpy.core.results.field import Field
 
@@ -51,7 +52,15 @@ class GreensFunction(Result):
     stabilizing_attenuation : float
         The contour offset ``Atten`` the file's header records (1/m). The
         solver evaluates the kernel on ``k + i*Atten`` (``scooter.f90:581``);
-        the transforms undo it.
+        the transforms undo it. The header is written at the first frequency
+        only (``scooter.f90:133-137``) while ``Atten = Deltak`` is set anew
+        at every frequency (``scooter.f90:123-130``), so on a broadband file
+        this is the first frequency's value: at frequency ``f_i`` the solver
+        used ``Δk_i = k[1] - k[0]`` of ``wavenumbers(f_i)`` (0 when the
+        header is 0, ``TopOpt(7:7) = '0'``). A hand transform at another
+        frequency (:func:`~uacpy.core.acoustics.hankel_transform`) takes
+        that ``Δk_i``, :meth:`contour_attenuation` ``(f_i)``, not this
+        value; the transforms here do.
     title : str
         The file's title line.
     """
@@ -150,6 +159,34 @@ class GreensFunction(Result):
             frequency = self.f0
         return wavenumbers_from_phase_speeds(self.phase_speeds, frequency)
 
+    def contour_attenuation(self, frequency: Optional[float] = None) -> float:
+        """The stabilising attenuation (1/m) the transforms undo at
+        ``frequency``: the contour offset ``Atten`` the solver evaluated the
+        kernel on there (``k + i*Atten``, ``scooter.f90:581``), the
+        ``attenuation=`` a hand :func:`~uacpy.core.acoustics.hankel_transform`
+        of that frequency's slab takes.
+
+        On a SCOOTER file it is that frequency's ``Δk = k[1] - k[0]`` of
+        :meth:`wavenumbers` (``scooter.f90:122-125`` recomputes it in the
+        frequency loop; the header, :attr:`stabilizing_attenuation`, holds
+        the first frequency's only, ``scooter.f90:133``), and 0 when the
+        header is 0 (``TopOpt(7:7) = '0'`` zeroes it at every frequency,
+        ``scooter.f90:130``). A SPARC snapshot gives 0 (``sparc.f90:313``);
+        another title's header is taken as given.
+
+        Parameters
+        ----------
+        frequency : float, optional
+            Frequency (Hz), as for :meth:`wavenumbers`: may be omitted for a
+            single-frequency file, and is not taken by a snapshot.
+
+        Returns
+        -------
+        float
+            The offset (1/m).
+        """
+        return self._contour_attenuation(self.wavenumbers(frequency))
+
     def _contour_attenuation(self, k: np.ndarray) -> float:
         """The stabilising attenuation the transform undoes at grid ``k``.
 
@@ -195,16 +232,26 @@ class GreensFunction(Result):
             )
 
     def _nearest_frequency_index(self, frequency) -> int:
-        """Index of the stored frequency nearest ``frequency`` on a
-        multi-frequency file. Warns, as :meth:`Field.at` does, when the
-        request lies more than half the edge frequency step past either end
-        of the stored band, where the nearest slice is the edge one."""
+        """Index of the stored frequency nearest ``frequency``. Warns, as
+        :meth:`Field.at` does, when the request lies more than half the edge
+        frequency step past either end of the stored band, where the nearest
+        slice is the edge one; on a single-frequency file, which has no step,
+        when the request is not its one frequency (beyond a deck's rounding,
+        :func:`axis_match_tolerance`)."""
         asked = float(frequency)
         if not np.isfinite(asked):
             raise ConfigurationError(
                 f"GreensFunction.to_field: frequency must be finite; got "
                 f"{frequency!r}.")
         freqs = np.asarray(self.frequencies, dtype=float)
+        if freqs.size == 1:
+            if abs(asked - freqs[0]) > axis_match_tolerance(freqs, asked):
+                warnings.warn(
+                    f"GreensFunction.to_field: frequency={asked:g} Hz is not "
+                    f"this file's one frequency; its slice at "
+                    f"{freqs[0]:g} Hz is transformed instead.",
+                    FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            return 0
         ifreq = int(np.argmin(np.abs(freqs - asked)))
         ordered = np.sort(freqs)
         low = ordered[0] - 0.5 * (ordered[1] - ordered[0])
@@ -238,14 +285,14 @@ class GreensFunction(Result):
                             "frequency-domain Green's function.")
 
     def _pressure_slice(self, ranges, ifreq, isd, *, source_type, spectrum,
-                        cmin, cmax) -> np.ndarray:
+                        c_low, c_high) -> np.ndarray:
         """Transform one (frequency, source depth) slab to the range domain."""
         G_src = self.data[ifreq, isd, :, :]                     # (nrd, nk)
         freq_i = float(self.frequencies[ifreq])
         k = self.wavenumbers(freq_i)
         atten = self._contour_attenuation(k)
-        if cmin is not None or cmax is not None:
-            win = wavenumber_taper(k, freq_i, cmin, cmax)
+        if c_low is not None or c_high is not None:
+            win = wavenumber_taper(k, freq_i, c_low, c_high)
             G_src = G_src * win[np.newaxis, :]
         return hankel_transform(
             G_src, k, ranges,
@@ -264,8 +311,8 @@ class GreensFunction(Result):
         source_type: str = 'point',
         spectrum: str = 'positive',
         source_depth_idx: int = 0,
-        cmin: Optional[float] = None,
-        cmax: Optional[float] = None,
+        c_low: Optional[float] = None,
+        c_high: Optional[float] = None,
     ) -> Field:
         """Transform one frequency to a complex narrowband :class:`Field`.
 
@@ -290,14 +337,14 @@ class GreensFunction(Result):
             Hz. Selects the nearest frequency slice of a multi-frequency
             file; required there. A request more than half a frequency step
             outside the stored band takes the edge slice with a
-            ``FallbackWarning``, as :meth:`Field.at` does. The returned
-            field is labelled with the slice's own frequency, so on a
+            ``FallbackWarning``, as :meth:`Field.at` does. On a
             single-frequency file, whose one slice is transformed whatever
-            is asked, the label says which.
+            is asked, a request off that frequency warns the same way. The
+            returned field is labelled with the slice's own frequency.
         source_type, spectrum : see :func:`~uacpy.core.acoustics.hankel_transform`.
         source_depth_idx : int
             Index into the source-depth axis. Defaults to the first source.
-        cmin, cmax : float, optional
+        c_low, c_high : float, optional
             Phase-speed taper bounds (m/s).
 
         Raises
@@ -316,30 +363,28 @@ class GreensFunction(Result):
                 f"say which one to transform.",
                 remediation="Pass frequency= (the nearest slice is taken), "
                             "or use to_transfer_function for all of them.")
-        ifreq = (self._nearest_frequency_index(frequency)
-                 if self.n_frequencies > 1 else 0)
+        ifreq = (0 if frequency is None
+                 else self._nearest_frequency_index(frequency))
         self._check_source_depth_idx(source_depth_idx)
         _warn_zero_ranges(ranges, source_type, context=self.title)
 
         p_out = self._pressure_slice(
             ranges, ifreq, source_depth_idx,
-            source_type=source_type, spectrum=spectrum, cmin=cmin, cmax=cmax,
+            source_type=source_type, spectrum=spectrum, c_low=c_low, c_high=c_high,
         )
         return Field(
             data=p_out,
             coords={'depth': self.receiver_depths, 'range': ranges},
-            model='', backend='',
-            # The slab holds one source depth — the one ``source_depth_idx``
-            # selected — so it carries that depth alone.
-            source_depths=np.atleast_1d(self.source_depths[source_depth_idx]),
             # Labelled with the frequency of the slab transformed.
-            frequencies=float(self.frequencies[ifreq]),
-            phase_reference='travelling_wave',
-            metadata={
-                "transform_method": "direct_dft",
-                "source_type": source_type,
-                "spectrum": spectrum,
-            },
+            **self._slab_identity(
+                source_depth_idx,
+                frequencies=float(self.frequencies[ifreq]),
+                phase_reference='travelling_wave',
+                metadata={
+                    "transform_method": "direct_dft",
+                    "source_type": source_type,
+                    "spectrum": spectrum,
+                }),
         )
 
     def to_transfer_function(
@@ -349,8 +394,8 @@ class GreensFunction(Result):
         source_type: str = 'point',
         spectrum: str = 'positive',
         source_depth_idx: int = 0,
-        cmin: Optional[float] = None,
-        cmax: Optional[float] = None,
+        c_low: Optional[float] = None,
+        c_high: Optional[float] = None,
     ) -> Field:
         """Transform every frequency to a broadband :class:`Field`.
 
@@ -368,7 +413,7 @@ class GreensFunction(Result):
             ``'point'`` and ``'positive'``.
         source_depth_idx : int, optional
             Index into the source-depth axis. Default 0.
-        cmin, cmax : float, optional
+        c_low, c_high : float, optional
             Phase-speed taper bounds (m/s).
 
         Raises
@@ -387,7 +432,7 @@ class GreensFunction(Result):
             pressure[:, :, ifreq] = self._pressure_slice(
                 ranges, ifreq, source_depth_idx,
                 source_type=source_type, spectrum=spectrum,
-                cmin=cmin, cmax=cmax,
+                c_low=c_low, c_high=c_high,
             )
         freqs = self.frequencies.copy()
         return Field(
@@ -397,18 +442,13 @@ class GreensFunction(Result):
                 'range': ranges,
                 'frequency': freqs,
             },
-            phase_reference='travelling_wave',
-            model='', backend='',
-            # The slab holds one source depth — the one ``source_depth_idx``
-            # selected — so it carries that depth alone.
-            source_depths=np.atleast_1d(self.source_depths[source_depth_idx]),
-            frequencies=freqs,
-            metadata={
-                'fc': float(freqs[len(freqs) // 2]),
-                'n_frequencies': nfreq,
-                'source_type': source_type,
-                'spectrum': spectrum,
-            },
+            **self._slab_identity(
+                source_depth_idx, frequencies=freqs,
+                phase_reference='travelling_wave',
+                metadata={
+                    'source_type': source_type,
+                    'spectrum': spectrum,
+                }),
         )
 
     # ── snapshot transforms ────────────────────────────────────────────
@@ -421,8 +461,8 @@ class GreensFunction(Result):
         source_type: str = 'point',
         spectrum: str = 'positive',
         source_depth_idx: int = 0,
-        cmin: Optional[float] = None,
-        cmax: Optional[float] = None,
+        c_low: Optional[float] = None,
+        c_high: Optional[float] = None,
         source_waveform: Optional[np.ndarray] = None,
         normalize: str = 'source',
     ) -> Field:
@@ -470,7 +510,7 @@ class GreensFunction(Result):
             ``'point'`` and ``'positive'``.
         source_depth_idx : int, optional
             Index into the source-depth axis. Default 0.
-        cmin, cmax : float, optional
+        c_low, c_high : float, optional
             Phase-speed taper bounds (m/s).
         source_waveform : ndarray, optional
             The pulse SPARC marched, sampled at :attr:`times` (see above).
@@ -521,8 +561,8 @@ class GreensFunction(Result):
 
         # SPARC's k grid does not depend on the frequency asked for.
         k = self.wavenumbers()
-        if cmin is not None or cmax is not None:
-            taper = wavenumber_taper(k, frequency, cmin, cmax)
+        if c_low is not None or c_high is not None:
+            taper = wavenumber_taper(k, frequency, c_low, c_high)
             G_at_f0 = G_at_f0 * taper[np.newaxis, :]
 
         p_out = hankel_transform(
@@ -544,22 +584,19 @@ class GreensFunction(Result):
         return Field(
             data=p_out,
             coords={'depth': self.receiver_depths, 'range': ranges},
-            model='', backend='',
-            # The slab holds one source depth — the one ``source_depth_idx``
-            # selected — so it carries that depth alone.
-            source_depths=np.atleast_1d(self.source_depths[source_depth_idx]),
-            frequencies=float(frequency),
-            phase_reference='travelling_wave',
-            metadata={
-                "transform_method": "time_fft+hankel",
-                "normalize": normalize,
-                "absolute_tl_calibrated": normalize == 'source',
-                "snapshot_freq_bin": nearest_bin,
-                "snapshot_dt": dt,
-                "snapshot_nt": nt,
-                "source_type": source_type,
-                "spectrum": spectrum,
-            },
+            **self._slab_identity(
+                source_depth_idx, frequencies=float(frequency),
+                phase_reference='travelling_wave',
+                metadata={
+                    "transform_method": "time_fft+hankel",
+                    "normalize": normalize,
+                    "absolute_tl_calibrated": normalize == 'source',
+                    "snapshot_freq_bin": nearest_bin,
+                    "snapshot_dt": dt,
+                    "snapshot_nt": nt,
+                    "source_type": source_type,
+                    "spectrum": spectrum,
+                }),
         )
 
     def snapshot_to_time_field(
@@ -627,28 +664,36 @@ class GreensFunction(Result):
         # The snapshot is a real transient field; the Hankel transform
         # carries the analytic-signal convention, so the physical pressure
         # is its real part.
-        dt = float(tout[1] - tout[0]) if tout.size > 1 else float('nan')
-
         return Field(
             data=np.real(p_t),
             coords={'depth': self.receiver_depths, 'range': ranges,
                     'time': tout},
-            model='', backend='',
-            # The slab holds one source depth — the one ``source_depth_idx``
-            # selected — so it carries that depth alone.
-            source_depths=np.atleast_1d(self.source_depths[source_depth_idx]),
-            frequencies=self.f0,
-            phase_reference='time_domain_native',
-            metadata={
-                "transform_method": "hankel_per_snapshot_time",
-                "dt": dt,
-                "fs": (1.0 / dt) if dt == dt and dt else float('nan'),
-                "nt": int(tout.size),
-                "t_start": float(tout[0]) if tout.size else 0.0,
-                "source_type": source_type,
-                "spectrum": spectrum,
-            },
+            **self._slab_identity(
+                source_depth_idx, frequencies=self.f0,
+                phase_reference='time_domain_native',
+                metadata={
+                    "transform_method": "hankel_per_snapshot_time",
+                    "source_type": source_type,
+                    "spectrum": spectrum,
+                }),
         )
+
+    def _slab_identity(self, source_depth_idx: int, *, frequencies,
+                       phase_reference: str, metadata: dict) -> dict:
+        """The identity of the Field a transform builds from the source
+        depth ``source_depth_idx``: this Green's function's own (model,
+        backend, run mode, run settings, provenance, source level), on the
+        one source depth the slab holds — one plane of a multi-depth run,
+        which carries no weight stamp, as :meth:`Field.at` gives a plane —
+        with ``frequencies``, ``phase_reference`` and the transform's
+        ``metadata`` keys over this result's."""
+        identity = self.id_kwargs()
+        identity.update(
+            source_depths=np.atleast_1d(self.source_depths[source_depth_idx]),
+            source_weights=None, frequencies=frequencies,
+            phase_reference=phase_reference,
+            metadata={**identity['metadata'], **metadata})
+        return identity
 
     # ── persistence ────────────────────────────────────────────────────
 

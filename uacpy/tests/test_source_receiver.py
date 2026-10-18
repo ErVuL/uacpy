@@ -313,7 +313,7 @@ def test_a_normalized_field_is_annotated_as_what_the_attribute_holds(
         f"{type(getattr(carrier, field))!r} after construction")
 
 
-_SPLIT_CLASSES = [Source, uacpy.Receiver, BoundaryProperties]
+_SPLIT_CLASSES = [Source, uacpy.Receiver, BoundaryProperties, uacpy.Environment]
 
 
 @pytest.mark.parametrize('cls', _SPLIT_CLASSES,
@@ -334,7 +334,10 @@ def test_the_type_checking_constructor_matches_the_one_python_compiles(cls):
 
     initializer = _type_checking_init(cls)
     assert initializer is not None, cls.__name__
-    guarded = [a.arg for a in initializer.args.args if a.arg != 'self']
+    # Positional parameters, then keyword-only ones (``Environment``'s
+    # metadata after ``_: KW_ONLY``), each with its declared default.
+    arguments = initializer.args.args + initializer.args.kwonlyargs
+    guarded = [a.arg for a in arguments if a.arg != 'self']
     compiled = list(inspect.signature(cls).parameters)
     assert guarded == compiled, (
         f"{cls.__name__}'s `if TYPE_CHECKING:` __init__ takes {guarded} and "
@@ -343,8 +346,9 @@ def test_the_type_checking_constructor_matches_the_one_python_compiles(cls):
     namespace = vars(inspect.getmodule(cls))
     padding = [None] * (len(initializer.args.args)
                         - len(initializer.args.defaults))
-    declared_defaults = padding + list(initializer.args.defaults)
-    for argument, default in zip(initializer.args.args, declared_defaults):
+    declared_defaults = (padding + list(initializer.args.defaults)
+                         + list(initializer.args.kw_defaults))
+    for argument, default in zip(arguments, declared_defaults):
         if argument.arg == 'self':
             continue
         parameter = inspect.signature(cls).parameters[argument.arg]

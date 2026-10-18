@@ -21,8 +21,9 @@ class SoundSpeeds(FrozenRecord):
     """Named sound speeds (m/s) of the medium a Field was computed in, each
     ``None`` where its producer states none.
 
-    :meth:`Field.to_time_trace` and :meth:`Field.synthesize_time_series`
-    anchor the record on the fastest physical speed (``water_max``, else
+    :meth:`Field.impulse_response` and :meth:`Field.synthesize_time_series`
+    (and so :meth:`Field.to_time_trace`) anchor the record on the fastest
+    physical speed (``water_max``, else
     ``waveguide_max``; ``surface`` competes with it), so the earliest
     arrival falls inside the window, and time the receiver range span with
     ``surface``, else ``waveguide_min``.
@@ -80,12 +81,25 @@ class SoundSpeeds(FrozenRecord):
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'SoundSpeeds':
+        """The record :meth:`to_dict` wrote.
+
+        Parameters
+        ----------
+        d : mapping
+            The named speeds (m/s), ``None`` where none is stated.
+        """
         return cls(**d)
 
     def with_waveguide(self, waveguide) -> 'SoundSpeeds':
         """This record with ``waveguide_min`` / ``waveguide_max`` taken from
-        ``waveguide`` (a record with ``c_min`` / ``c_max``) where it states
-        none."""
+        ``waveguide`` where it states none.
+
+        Parameters
+        ----------
+        waveguide : record or None
+            A record with ``c_min`` / ``c_max`` (m/s), such as a run's
+            ``run_settings.waveguide``; ``None`` returns this record.
+        """
         if waveguide is None:
             return self
         return dataclasses.replace(

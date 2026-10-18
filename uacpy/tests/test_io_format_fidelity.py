@@ -59,8 +59,8 @@ class TestReflectionTableIsOneListDirectedRead:
         p = tmp_path / 'multi.brc'
         p.write_text(self.TABLE)
         d = read_reflection_coefficient(p)
-        assert len(d.angles) == 4
-        assert d.angles.tolist() == [0.0, 10.0, 20.0, 30.0]
+        assert len(d.angles_deg) == 4
+        assert d.angles_deg.tolist() == [0.0, 10.0, 20.0, 30.0]
         assert d.magnitude.tolist() == [1.0, 0.9, 0.8, 0.7]
 
     def test_reader_takes_wrapped_records(self, tmp_path):
@@ -68,7 +68,7 @@ class TestReflectionTableIsOneListDirectedRead:
         p = tmp_path / 'wrap.brc'
         p.write_text("2\n0.0 1.0\n180.0\n10.0 0.9 170.0\n")
         d = read_reflection_coefficient(p)
-        assert d.angles.tolist() == [0.0, 10.0]
+        assert d.angles_deg.tolist() == [0.0, 10.0]
 
     def test_dedupe_keeps_every_packed_record(self, tmp_path):
         from uacpy.io.refl_io import (
@@ -77,8 +77,8 @@ class TestReflectionTableIsOneListDirectedRead:
         p.write_text(self.TABLE)
         dedupe_reflection_file(p)
         d = read_reflection_coefficient(p)
-        assert len(d.angles) == 4, "dedupe dropped legally packed records"
-        assert d.angles.tolist() == [0.0, 10.0, 20.0, 30.0]
+        assert len(d.angles_deg) == 4, "dedupe dropped legally packed records"
+        assert d.angles_deg.tolist() == [0.0, 10.0, 20.0, 30.0]
 
     def test_dedupe_drops_the_evanescent_head(self, tmp_path):
         from uacpy.io.refl_io import (
@@ -88,7 +88,7 @@ class TestReflectionTableIsOneListDirectedRead:
                      "0.0 1.0 180.0  10.0 0.9 170.0\n")
         dedupe_reflection_file(p)
         d = read_reflection_coefficient(p)
-        assert d.angles.tolist() == [0.0, 10.0]
+        assert d.angles_deg.tolist() == [0.0, 10.0]
 
 
 class TestBoundaryFilesAreListDirected:
@@ -133,11 +133,11 @@ class TestBoundaryFilesAreListDirected:
         p = tmp_path / 'c.brc'
         p.write_text("2, ! npts\n0.0 1.0 180.0\n10.0 0.9 170.0\n")
         d = read_reflection_coefficient(p)
-        assert len(d.angles) == 2
-        assert d.angles.tolist() == [0.0, 10.0]
+        assert len(d.angles_deg) == 2
+        assert d.angles_deg.tolist() == [0.0, 10.0]
         # The staging dedupe accepts the same count record the reader does.
         dedupe_reflection_file(p)
-        assert len(read_reflection_coefficient(p).angles) == 2
+        assert len(read_reflection_coefficient(p).angles_deg) == 2
 
     def test_sbp_blank_lines_and_wrapped_pairs(self, tmp_path):
         from uacpy.io.refl_io import read_source_beam_pattern
@@ -148,7 +148,7 @@ class TestBoundaryFilesAreListDirected:
                      "0.0 0.0\n"
                      "45.0\n\n-10.0\n")
         pat = read_source_beam_pattern(p)
-        assert pat.angles.tolist() == [-45.0, 0.0, 45.0]
+        assert pat.angles_deg.tolist() == [-45.0, 0.0, 45.0]
         assert pat.levels_dB.tolist() == [-10.0, 0.0, -10.0]
 
     def test_truncated_sbp_is_a_typed_error(self, tmp_path):
@@ -175,7 +175,7 @@ class TestRepeatCountsReadAsRepeatedValues:
         # grazing), exactly what an ifort WRITE compresses.
         p.write_text("2\n2*0.0 180.0\n10.0 0.9 170.0\n")
         d = read_reflection_coefficient(p)
-        assert d.angles.tolist() == [0.0, 10.0]
+        assert d.angles_deg.tolist() == [0.0, 10.0]
         assert d.magnitude.tolist() == [0.0, 0.9]
 
     def test_rts_repeat_count_reads_as_repeated_values(self, tmp_path):
@@ -186,11 +186,11 @@ class TestRepeatCountsReadAsRepeatedValues:
         assert d.positions.tolist() == [5000.0, 10000.0]
         assert d.pressure.tolist() == [[0.5, 0.5]]
 
-    def test_ts_repeat_count_reads_as_repeated_values(self, tmp_path):
-        from uacpy.io.oalib_reader import read_ts
-        p = tmp_path / 'rep.ts'
-        p.write_text("t\n2 10.0 20.0\n0.0 2*1.5\n0.1 3.0 4.0\n")
-        d = read_ts(p)
+    def test_rts_repeat_count_reads_across_time_steps(self, tmp_path):
+        from uacpy.io.oalib_reader import read_rts_file
+        p = tmp_path / 'rep.rts'
+        p.write_text("'t'\n2 10.0 20.0\n0.0 2*1.5\n0.1 3.0 4.0\n")
+        d = read_rts_file(p)
         assert d.pressure.tolist() == [[1.5, 1.5], [3.0, 4.0]]
 
     @pytest.mark.parametrize('token', [
@@ -247,9 +247,9 @@ class TestRepeatCountsReadAsRepeatedValues:
                                       read_reflection_coefficient)
         p = tmp_path / 'd.brc'
         p.write_text("3\n0.0 1.0 180.0\n10.0 2*0.5\n20.0 0.25 90.0\n")
-        assert len(read_reflection_coefficient(p).angles) == 3
+        assert len(read_reflection_coefficient(p).angles_deg) == 3
         dedupe_reflection_file(p)
-        assert len(read_reflection_coefficient(p).angles) == 3
+        assert len(read_reflection_coefficient(p).angles_deg) == 3
 
 
 class TestSspRecordsSpanLines:
@@ -282,44 +282,41 @@ class TestSspRecordsSpanLines:
             read_ssp_2d(p)
 
 
-class TestReadTsTokenStream:
-    """``read_ts.m`` reads everything after the title with ``fscanf``, a
-    free token stream in which line breaks carry no meaning."""
+class TestReadRtsTokenStream:
+    """OALIB's ``read_ts.m`` reads everything after the title with
+    ``fscanf``, a free token stream in which line breaks carry no meaning,
+    and so does :func:`read_rts_file`."""
 
     def test_wrapped_and_packed_stream(self, tmp_path):
-        from uacpy.io.oalib_reader import read_ts
-        p = tmp_path / 't.ts'
-        p.write_text("my title\n3 10.0\n20.0 30.0\n"
+        from uacpy.io.oalib_reader import read_rts_file
+        p = tmp_path / 't.rts'
+        p.write_text("'my title'\n3 10.0\n20.0 30.0\n"
                      "0.0 1 2 3 0.1 4\n5 6\n0.2 7 8 9\n")
-        t = read_ts(p)
+        t = read_rts_file(p)
         assert t.title == 'my title'
         assert t.positions.tolist() == [10.0, 20.0, 30.0]
         assert t.times.tolist() == [0.0, 0.1, 0.2]
         assert t.pressure.tolist() == [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
 
-    def test_partial_trailing_block_is_dropped(self, tmp_path):
-        from uacpy.io.oalib_reader import read_ts
-        p = tmp_path / 't.ts'
-        p.write_text("t\n2 10.0 20.0\n0.0 1 2 0.1 3\n")
-        t = read_ts(p)
+    def test_partial_trailing_block_is_dropped_and_said(self, tmp_path):
+        """A run killed mid-write: the whole steps are kept and an IOWarning
+        names the values dropped, as the tl.grid reader does."""
+        import uacpy
+        from uacpy.io.oalib_reader import read_rts_file
+        p = tmp_path / 't.rts'
+        p.write_text("'t'\n2 10.0 20.0\n0.0 1 2 0.1 3\n")
+        with pytest.warns(uacpy.IOWarning,
+                          match=r'2 value\(s\) into a time step of 3'):
+            t = read_rts_file(p)
         assert t.times.tolist() == [0.0]
 
     def test_empty_payload_is_a_typed_error(self, tmp_path):
-        from uacpy.io.oalib_reader import read_ts
-        p = tmp_path / 't.ts'
-        p.write_text("title only\n")
+        from uacpy.io.oalib_reader import read_rts_file
+        p = tmp_path / 't.rts'
+        p.write_text("'title only'\n")
         with pytest.raises(FileFormatError,
                            match='carries no data after the title line'):
-            read_ts(p)
-
-    def test_mat_container_is_a_typed_error(self, tmp_path):
-        """read_ts parses the ASCII token-stream format only; a .mat path is
-        refused with a typed error rather than parsed by guesswork."""
-        from uacpy.io.oalib_reader import read_ts
-        p = tmp_path / 'ts.mat'
-        p.write_bytes(b'MATLAB 5.0 MAT-file' + b'\x00' * 32)
-        with pytest.raises(FileFormatError, match=r'\.mat'):
-            read_ts(p)
+            read_rts_file(p)
 
 
 class TestSbpAngleResolution:
@@ -334,7 +331,7 @@ class TestSbpAngleResolution:
         p = tmp_path / 'fine.sbp'
         write_source_beam_pattern(p, angles, np.zeros(5))
         back = read_source_beam_pattern(p)
-        assert np.array_equal(back.angles, angles), \
+        assert np.array_equal(back.angles_deg, angles), \
             "distinct angles collided on the file's angle grid"
 
     def test_sub_resolution_step_is_refused(self, tmp_path):
@@ -344,9 +341,11 @@ class TestSbpAngleResolution:
                                       np.array([0.0, 1e-8, 1.0]), np.zeros(3))
 
 
-def _plp_tl_pair(tmp_path, curves, n_ranges=4, stem='r'):
+def _plp_tl_pair(tmp_path, curves, n_ranges=4, stem='r', tags=None):
     """Write a ``.plp``/``.plt`` pair holding ``curves`` TL-vs-range records.
 
+    ``tags`` gives each curve's 6-character tag (``'NTLRAN'``, the normal
+    stress, for every curve when ``None``).
     ``curves`` is a list of ``(freq, rd, xoff, dx)``; ``freq``/``rd`` go into
     the ``Freq:``/``RD:`` A16 labels PLTLOS writes ahead of the axis block
     (``oasfun22.f:334-337``, ``:368-370``), which is what the reader keys the
@@ -360,7 +359,8 @@ def _plp_tl_pair(tmp_path, curves, n_ranges=4, stem='r'):
     lines = [' OAST  MODU']
     blocks = []
     for curve_id, (freq, rd, xoff, dx) in enumerate(curves):
-        lines += [' OAST  NTLRAN', 'ptit', 'title']
+        tag = 'NTLRAN' if tags is None else tags[curve_id]
+        lines += [f' OAST  {tag}', 'ptit', 'title']
         if freq is None:
             lines += [rec(0, 'NUMBER OF LABELS')]
         else:
@@ -426,6 +426,18 @@ class TestOastTlMultiFrequency:
         plp = _plp_tl_pair(tmp_path, curves)
         with pytest.raises(FileFormatError, match='whole multiple'):
             parse_oast_tl(plp, [10.0, 20.0])
+
+    def test_two_output_parameters_are_a_typed_error(self, tmp_path):
+        """PLTLOS writes one TL curve per output parameter per receiver
+        (unoast31.f:631-638), so a run with two parameters (the normal
+        stress 'N' and the bulk pressure, tagged 'B') holds two TL grids
+        where the reader returns one."""
+        from uacpy.io._parsers import parse_oast_tl
+        plp = _plp_tl_pair(tmp_path, [(100.0, 10.0, 1.0, 0.5)] * 2,
+                           tags=['NTLRAN', 'BTLRAN'])
+        with pytest.raises(FileFormatError,
+                           match=r"2 output parameters \['B', 'N'\]"):
+            parse_oast_tl(plp, [10.0])
 
     def test_a_label_less_plp_warns_before_walking_by_position(self, tmp_path):
         """Nothing but PLTLOS writes a ``…TLRAN`` curve, so a block without
@@ -641,12 +653,12 @@ class TestPlpCountsAreValidated:
         return p
 
     def test_a_negative_label_count_is_a_typed_error(self, tmp_path):
-        from uacpy.io.oases_reader import _parse_oast_plp
+        from uacpy.io._parsers import _parse_oast_plp
         with pytest.raises(FileFormatError, match='NLAB=-5'):
             _parse_oast_plp(self._truncated(tmp_path, -5))
 
     def test_a_label_count_past_the_end_is_a_typed_error(self, tmp_path):
-        from uacpy.io.oases_reader import _parse_oast_plp
+        from uacpy.io._parsers import _parse_oast_plp
         with pytest.raises(FileFormatError, match='NLAB=9999'):
             _parse_oast_plp(self._truncated(tmp_path, 9999))
 
@@ -863,7 +875,7 @@ class TestShdExtraAxesAreCapabilityRefusals:
         return ShdFile(
             title='t', plot_type='rectilin  ', frequencies=np.array(freqVec),
             source_frequency=100.0, stabilizing_attenuation=0.0,
-            bearings=np.array(theta), source_x=np.array(sx),
+            bearings_deg=np.array(theta), source_x=np.array(sx),
             source_y=np.array([0.0]), source_depths=np.array([5.0]),
             receiver_depths=np.array([10.0, 20.0]),
             receiver_ranges=np.array([100.0, 200.0]),
@@ -1071,7 +1083,7 @@ def test_an_empty_reflection_table_reads_as_three_empty_float_columns(tmp_path):
     path.write_text('0\n')
     table = read_reflection_coefficient(path)
     assert table.n_angles == 0
-    for column in ('angles', 'magnitude', 'phase'):
+    for column in ('angles_deg', 'magnitude', 'phase'):
         assert getattr(table, column).shape == (0,)
         assert getattr(table, column).dtype == float
 
@@ -1186,9 +1198,10 @@ class TestDeckTitlesAreAscii:
 
 
 class TestTheTransferFunctionReaderReturnsPressure:
-    """``read_oasp_trf`` returns the pressure Field of an ``'N'`` file —
-    the normal stress negated (``oasp.tex:185``) — and refuses any other
-    OASP output parameter rather than label it a pressure."""
+    """``read_oasp_trf`` returns the pressure Field of a ``'K'`` file — the
+    bulk pressure as written (``oasaun31.f:1448-1449``) — or of an ``'N'``
+    file — the normal stress negated (``oasp.tex:185``) — and refuses any
+    other OASP output parameter rather than label it a pressure."""
 
     @staticmethod
     def _raw(option):
@@ -1201,10 +1214,10 @@ class TestTheTransferFunctionReaderReturnsPressure:
                 'fc': 105.0, 'omegim': 0.0}
 
     def test_normal_stress_becomes_the_pressure(self, monkeypatch):
-        import uacpy.io._parsers as parsers
+        import uacpy.io.oases_reader as oases_reader
         from uacpy.io import read_oasp_trf
         raw = self._raw('N')
-        monkeypatch.setattr(parsers, 'parse_oasp_trf',
+        monkeypatch.setattr(oases_reader, 'parse_oasp_trf',
                             lambda path, depths: raw)
         field = read_oasp_trf('x.trf', [10.0, 20.0, 30.0, 40.0])
         assert list(field.coords) == ['depth', 'range', 'frequency']
@@ -1213,13 +1226,27 @@ class TestTheTransferFunctionReaderReturnsPressure:
         assert field.phase_reference == 'travelling_wave'
         assert field.source_depths.tolist() == [25.0]
 
-    @pytest.mark.parametrize('option', ['V', 'H'])
+    def test_the_bulk_pressure_is_read_as_written(self, monkeypatch):
+        import uacpy.io.oases_reader as oases_reader
+        from uacpy.io import read_oasp_trf
+        raw = self._raw('K')
+        monkeypatch.setattr(oases_reader, 'parse_oasp_trf',
+                            lambda path, depths: raw)
+        field = read_oasp_trf('x.trf', [10.0, 20.0, 30.0, 40.0])
+        assert field.data[3, 2, 1] == raw['transfer_function'][1, 2, 3]
+        assert field.data.dtype == np.complex128
+
+    @pytest.mark.parametrize('option', ['V', 'H', 'NK'])
     def test_another_parameter_is_refused(self, monkeypatch, option):
-        import uacpy.io._parsers as parsers
+        """The refusal names the file's letter and points at no private
+        module (``uacpy.io._parsers`` is not part of the user API)."""
+        import uacpy.io.oases_reader as oases_reader
         from uacpy.core.exceptions import UnsupportedFeatureError
         from uacpy.io import read_oasp_trf
-        monkeypatch.setattr(parsers, 'parse_oasp_trf',
+        monkeypatch.setattr(oases_reader, 'parse_oasp_trf',
                             lambda path, depths: self._raw(option))
-        with pytest.raises(UnsupportedFeatureError, match=repr(option)):
+        with pytest.raises(UnsupportedFeatureError,
+                           match=repr(option)) as caught:
             read_oasp_trf('x.trf', [10.0])
+        assert '_parsers' not in str(caught.value)
 

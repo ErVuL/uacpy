@@ -5,9 +5,20 @@ import json
 import pytest
 
 from uacpy.core.environment import BoundaryProperties
-from uacpy.core.exceptions import DataFetchError
-from uacpy.data import seabed
-from uacpy.data.sediment import transect_fetcher
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.data import emodnet_local, seabed
+from uacpy.data.sediment import SeabedSample, transect_fetcher
+from uacpy.data.sources import SOURCES, DataProvenance
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_cache(monkeypatch, tmp_path):
+    """``fetch_emodnet_substrate`` is cache-first; the stubbed WFS these tests
+    read must not be pre-empted by the workspace's installed polygons."""
+    from uacpy.data import _cache
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'no_cache'))
+    _cache.invalidate_grids()
+    emodnet_local._index.memo.clear()
 
 
 def _live_emodnet_transect(start, end, **kw):
@@ -31,6 +42,76 @@ def test_web_mercator_transform():
     assert x == pytest.approx(10018754.17, rel=1e-6)   # quarter of the world
     # Longitude is normalized: 220 (== -140) maps the same as -140.
     assert seabed._to_web_mercator(0.0, 220.0) == seabed._to_web_mercator(0.0, -140.0)
+
+
+def _cached_record(folk):
+    return SeabedSample(
+        grain_size_phi=None, material=None, folk_class=folk,
+        folk_class_scheme='folk5', sample_point=None, distance_km=None,
+        provenance=DataProvenance(source=SOURCES['emodnet'],
+                                  data_point=(56.0, 3.0),
+                                  requested_point=(56.0, 3.0)))
+
+
+def _installed_polygons(monkeypatch, answer):
+    """The installed-polygon lookup replaced: ``answer`` is the record it
+    returns, or the exception it raises."""
+    def lookup(point, **kw):
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    monkeypatch.setattr(emodnet_local, 'fetch_emodnet_substrate_local', lookup)
+
+
+def _counted_wfs(monkeypatch):
+    calls = []
+
+    def http_get(url, **kw):
+        calls.append(url)
+        return _geojson(2, '2. Sand')
+    monkeypatch.setattr(seabed, 'http_get', http_get)
+    return calls
+
+
+def test_the_record_comes_from_the_installed_polygons_first(monkeypatch):
+    calls = _counted_wfs(monkeypatch)
+    _installed_polygons(monkeypatch, _cached_record(4))
+    for source in ('emodnet', 'local', 'EMODnet'):
+        sub = seabed.fetch_emodnet_substrate((56.0, 3.0), source=source)
+        assert sub.folk_class == 4 and sub.details == {}
+    assert calls == []
+
+
+def test_the_live_wfs_answers_only_when_the_polygons_are_absent(monkeypatch):
+    calls = _counted_wfs(monkeypatch)
+    _installed_polygons(monkeypatch, ConfigurationError('not installed'))
+    sub = seabed.fetch_emodnet_substrate((56.0, 3.0))
+    assert sub.folk_class == 2 and sub.details['folk_5cl_txt'] == '2. Sand'
+    assert len(calls) == 1
+    with pytest.raises(ConfigurationError, match='not installed'):
+        seabed.fetch_emodnet_substrate((56.0, 3.0), source='local')
+    assert len(calls) == 1
+
+
+def test_polygons_that_answered_no_substrate_end_the_call(monkeypatch):
+    calls = _counted_wfs(monkeypatch)
+    _installed_polygons(monkeypatch, DataFetchError('no seabed substrate'))
+    with pytest.raises(DataFetchError, match='no seabed substrate'):
+        seabed.fetch_emodnet_substrate((56.0, 3.0))
+    assert calls == []
+
+
+@pytest.mark.parametrize('kwargs, match', [
+    (dict(source='wfs'), "source must be one of"),
+    (dict(source='local', base_url='http://mirror/wfs'), "base_url="),
+    (dict(source='local', layer='other:layer'), "layer="),
+])
+def test_a_source_the_record_fetcher_cannot_read_is_refused(monkeypatch,
+                                                            kwargs, match):
+    calls = _counted_wfs(monkeypatch)
+    with pytest.raises(ConfigurationError, match=match):
+        seabed.fetch_emodnet_substrate((56.0, 3.0), **kwargs)
+    assert calls == []
 
 
 def test_fetch_seabed_substrate_parses(monkeypatch):

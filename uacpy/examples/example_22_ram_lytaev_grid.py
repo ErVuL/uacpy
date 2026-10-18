@@ -6,14 +6,12 @@ that centres [ξ_min, ξ_max] and minimises the Padé error. Same accuracy budge
 in both, so the only difference is c₀ — and here it buys a 1.6× coarser dr
 for TL that agrees to a fraction of a dB.
 
-Uses: uacpy.RAM(c0=) · RunMode.COHERENT_TL · Field.metadata (the chosen grid) ·
-plot_field · plot.plot_field_difference
+Uses: uacpy.RAM(c0=) · Field.run_settings (the chosen grid) · metrics.tl_rmse ·
+plot_field · metrics.tl_difference
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -41,10 +39,10 @@ receiver = uacpy.Receiver(depths=np.linspace(2.0, 98.0, 30),
 # (fluid seabed, flat surface). A pinned accuracy= is met as given: the
 # Padé-error search sets both dr and dz under the 1e-2 budget, so c0 is the
 # only difference between the two runs.
-pinned = uacpy.RAM(accuracy=1e-2, angle_max=20.0, c0=1500.0).run(
-    env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
-optimized = uacpy.RAM(accuracy=1e-2, angle_max=20.0).run(
-    env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+pinned = uacpy.RAM(accuracy=1e-2, angle_max_deg=20.0, c0=1500.0).run(
+    env, source, receiver)
+optimized = uacpy.RAM(accuracy=1e-2, angle_max_deg=20.0).run(
+    env, source, receiver)
 
 # The grid the Padé optimizer settled on comes back in the run settings.
 for label, field in (('c₀=1500 pinned', pinned), ('c₀=Eq.(15)', optimized)):
@@ -53,7 +51,7 @@ for label, field in (('c₀=1500 pinned', pinned), ('c₀=Eq.(15)', optimized)):
     print(f"  {label:16s} c₀={engine.c0:6.1f} m/s  "
           f"dr={grid.dr:7.2f} m  dz={grid.dz:6.3f} m")
 
-rms = float(np.sqrt(np.nanmean((pinned.dB - optimized.dB) ** 2)))
+rms = uacpy.metrics.tl_rmse(pinned, optimized)
 print(f"  RMS |ΔTL| between the two grids: {rms:.2f} dB")
 
 fig, axes = plt.subplots(1, 3, figsize=(16, 4.4), sharey=True)
@@ -65,9 +63,9 @@ for ax, field, title in ((axes[0], pinned, 'c₀=1500 (pinned)\nasymmetric ξ-ra
                      title=f"{title}\nc₀={engine.c0:.1f} m/s, "
                            f"dr={grid.dr:.2f} m, dz={grid.dz:.3f} m")
 # The signed residual, on a ±5 dB diverging window.
-uacpy.plot.plot_field_difference(pinned, optimized, axes[2], env=env,
-                                 diff_vmax=5,
-                                 title=f'pinned − optimized, RMS {rms:.2f} dB')
+uacpy.metrics.tl_difference(pinned, optimized).plot(
+    ax=axes[2], env=env, diff_vmax=5,
+    title=f'pinned − optimized, RMS {rms:.2f} dB')
 fig.suptitle('RAM Padé-error grid optimizer (Lytaev) — Pekeris 100 Hz, '
              'src 25 m, 10 km', y=1.02)
 fig.tight_layout()

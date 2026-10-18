@@ -98,8 +98,8 @@ def shear_loss():
     for elastic, colour, label in ((False, 'C0', 'Fluid (shear dropped)'),
                                    (True, 'C3', 'Elastic (shear kept)')):
         env = rock_seabed(elastic=elastic)
-        rc = OASR(angles=angles).run(env, source, receiver)
-        axes[0].plot(rc.angles, -20.0 * np.log10(np.maximum(rc.magnitude, 1e-6)),
+        rc = OASR(angles_deg=angles).run(env, source, receiver)
+        axes[0].plot(rc.angles_deg, -20.0 * np.log10(np.maximum(rc.magnitude, 1e-6)),
                      color=colour, label=label)
         tl = OAST().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
         smoothed = _range_average(tl.dB.ravel())
@@ -135,8 +135,8 @@ def oasr_reflection():
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.2), sharey=True)
     for ax, (env, label) in zip(axes, cases):
-        rc = OASR(angles=angles).run(env, source, receiver,
-                                     run_mode=RunMode.REFLECTION)
+        rc = OASR(angles_deg=angles).run(env, source, receiver,
+                                         run_mode=RunMode.REFLECTION)
         rc.plot(ax=ax, show_phase=True, title=label)
         ax.set_ylim(0.0, 1.05)
     fig.suptitle('OASR — plane-wave reflection off sand over granite, 200 Hz',
@@ -150,7 +150,7 @@ def oasr_broadband():
     _, source, receiver = layered_elastic()
     band = uacpy.Source(depths=source.depths,
                         frequencies=np.linspace(20.0, 2000.0, 120))
-    rc = OASR(angles=np.linspace(0.0, 90.0, 181)).run(
+    rc = OASR(angles_deg=np.linspace(0.0, 90.0, 181)).run(
         elastic_stack(), band, receiver, run_mode=RunMode.REFLECTION)
     fig, ax = rc.plot(
         figsize=WIDE,
@@ -188,8 +188,8 @@ def oasn_covariance():
     source = uacpy.Source(depths=40.0, frequencies=100.0)
     array = uacpy.Receiver(depths=np.linspace(20.0, 90.0, 24), ranges=0.0)
 
-    cov = OASN(surface_noise_level=60.0,
-               white_noise_level=20.0).compute_covariance(env, source, array)
+    cov = OASN(surface_noise_level_dB=60.0,
+               white_noise_level_dB=20.0).compute_covariance(env, source, array)
     fig, ax = cov.plot(figsize=SQUARE,
                        title='OASN — surface-noise |C|, 24-element VLA')
     return fig
@@ -207,9 +207,9 @@ def oasn_mfp():
     array = uacpy.Receiver(depths=np.linspace(20.0, 90.0, 24), ranges=0.0)
 
     cov = OASN(
-        white_noise_level=40.0,
+        white_noise_level_dB=40.0,
         discrete_sources=[{'depth': 40.0, 'x': 3000.0, 'y': 0.0,
-                           'level': 100.0}],
+                           'level_dB': 100.0}],
     ).compute_covariance(env, source, array)
     replicas = OASN(
         replica_xmin=500.0, replica_xmax=6000.0, replica_nx=111,
@@ -218,23 +218,19 @@ def oasn_mfp():
 
     # Each processor returns an ambiguity Field on (frequency, depth, x, y),
     # in dB re its peak; this run has one frequency and one y plane.
-    surfaces = ((cov.bartlett(replicas).data[0, :, :, 0], 'Bartlett'),
-                (cov.mvdr(replicas).data[0, :, :, 0], 'MVDR (Capon)'))
+    surfaces = ((cov.bartlett(replicas), 'Bartlett'),
+                (cov.mvdr(replicas), 'MVDR (Capon)'))
 
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2), sharey=True)
     for ax, (surface, label) in zip(axes, surfaces):
-        im = ax.pcolormesh(replicas.candidates['x'] / 1000.0,
-                           replicas.candidates['depth'], surface,
-                           shading='nearest', cmap='inferno',
-                           vmin=-15.0, vmax=0.0)
-        ax.plot(3.0, 40.0, marker='*', ms=15, mfc='none', mec='cyan', mew=1.5)
-        ax.set_title(label, fontweight='bold', fontsize=11)
-        ax.set_xlabel('Range (km)')
-    axes[0].set_ylabel('Depth (m)')
-    axes[0].invert_yaxis()
-    fig.colorbar(im, ax=axes, label='Ambiguity power (dB re peak)')
-    fig.suptitle('OASN — matched-field ambiguity surfaces; ☆ is the true '
-                 'source', fontweight='bold', fontsize=13)
+        uacpy.plot.plot_matched_field(
+            surface, ax, dynamic_range_dB=15.0,
+            true_position=(3000.0, 40.0), show_colorbar=False,
+            show_legend=ax is axes[0], title=label)
+    uacpy.plot.shared_colorbar(fig, axes,
+                               label='Ambiguity power (dB re peak)')
+    fig.suptitle('OASN — matched-field ambiguity surfaces',
+                 fontweight='bold', fontsize=13)
     return fig
 
 

@@ -13,12 +13,12 @@ from uacpy.core._repr import SettingsRepr
 
 
 #: The LMS step size and the RLS forgetting factor the adaptive
-#: equalizers default to.
+#: equalizers default to (uacpy guidance).
 LMS_DEFAULT_STEP = 0.01
 RLS_DEFAULT_FORGET = 0.99
 
 
-#: The RLS initialisation ``P(0) = I / RLS_INIT_DELTA``.
+#: The RLS initialisation ``P(0) = I / RLS_INIT_DELTA`` (uacpy guidance).
 RLS_INIT_DELTA = 1e-2
 
 
@@ -28,11 +28,12 @@ RLS_INIT_DELTA = 1e-2
 _COLUMN_NORM_REL_FLOOR = 1e-12
 
 
-def _conv_matrix(tx, n_taps, n_rows):
-    """Tall convolution matrix ``A`` with ``A[k, l] = tx[k - l]`` (causal)."""
+def _conv_matrix(tx, n_taps, n_rows, who):
+    """Tall convolution matrix ``A`` with ``A[k, l] = tx[k - l]`` (causal),
+    its refusal naming ``who``."""
     if n_taps > n_rows:
         raise ConfigurationError(
-            f"channel estimate: n_taps ({n_taps}) exceeds the number of "
+            f"{who}: n_taps ({n_taps}) exceeds the number of "
             f"available pilot/received samples ({n_rows}); reduce n_taps or "
             "provide more pilots."
         )
@@ -60,7 +61,7 @@ def ls_estimate(received, tx_pilots, n_taps):
     """
     r = np.asarray(received, dtype=complex).ravel()
     n = min(r.size, np.asarray(tx_pilots).size)
-    A = _conv_matrix(tx_pilots, n_taps, n)
+    A = _conv_matrix(tx_pilots, n_taps, n, "ls_estimate")
     h, *_ = np.linalg.lstsq(A, r[:n], rcond=None)
     return h
 
@@ -89,7 +90,7 @@ def omp_estimate(received, tx_pilots, n_taps, sparsity):
             f"sparsity={sparsity}, n_taps={n_taps}.")
     r = np.asarray(received, dtype=complex).ravel()
     n = min(r.size, np.asarray(tx_pilots).size)
-    A = _conv_matrix(tx_pilots, n_taps, n)
+    A = _conv_matrix(tx_pilots, n_taps, n, "omp_estimate")
     y = r[:n]
     residual = y.copy()
     support: list[int] = []
@@ -259,9 +260,9 @@ def lms_equalizer(received, constellation, n_taps=11, step=LMS_DEFAULT_STEP,
     constellation : array_like
         The symbol set the decisions are sliced to (Gray-mapped).
     n_taps : int, optional
-        Equalizer taps. Default 11.
+        Equalizer taps. Default 11 (uacpy guidance).
     step : float, optional
-        LMS step size. Default 0.01.
+        LMS step size. Default 0.01 (uacpy guidance).
     train : array_like, optional
         Training symbols, delayed by ``n_taps // 2`` (see above); after them
         the equalizer runs decision-directed. ``None`` runs
@@ -291,9 +292,10 @@ def rls_equalizer(received, constellation, n_taps=11,
     constellation : array_like
         The symbol set the decisions are sliced to (Gray-mapped).
     n_taps : int, optional
-        Equalizer taps. Default 11.
+        Equalizer taps. Default 11 (uacpy guidance).
     forget : float, optional
-        RLS forgetting factor, in ``(0, 1]``. Default 0.99.
+        RLS forgetting factor, in ``(0, 1]``. Default 0.99 (uacpy
+        guidance).
     train : array_like, optional
         Training symbols, delayed by ``n_taps // 2`` (see above); after them
         the equalizer runs decision-directed. ``None`` runs
@@ -313,7 +315,7 @@ class DFE(SettingsRepr):
     Parameters
     ----------
     n_ff, n_fb : int
-        Feedforward / feedback tap counts.
+        Feedforward / feedback tap counts. Default 12 / 6 (uacpy guidance).
     step : float
         LMS step size (used when ``forget`` is None).
     forget : float, optional

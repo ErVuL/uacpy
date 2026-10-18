@@ -54,6 +54,29 @@ def _settings_as_run(settings: RunSettings, result) -> RunSettings:
                             notes=settings.notes + (note,))
 
 
+def add_run_note(result, note: str) -> None:
+    """Hand stage 6 one line on how the run went, for
+    ``run_settings.notes``: what the engine decided at run time and wrote to
+    its own output (a beam count it chose), or a step the read took (a bin
+    solved again on a deck of its own) — what the settings, resolved before
+    the launch, cannot hold. :meth:`PropagationModel._stamp_run_settings
+    <uacpy.models.base.PropagationModel._stamp_run_settings>` moves it into
+    the record it stamps."""
+    for slab in _slabs_of(result):
+        slab._run_notes = tuple(getattr(slab, '_run_notes', ())) + (note,)
+
+
+def run_notes_of(slabs) -> tuple:
+    """The notes :func:`add_run_note` left on ``slabs``, each once, in
+    the order given, taken off the slabs."""
+    notes = []
+    for slab in slabs:
+        for note in slab.__dict__.pop('_run_notes', ()):
+            if note not in notes:
+                notes.append(note)
+    return tuple(notes)
+
+
 def _restore_requested_axis(read_back: np.ndarray, requested: np.ndarray,
                             rtol: float) -> np.ndarray:
     """``requested`` when the axis an engine's output file gave back,
@@ -273,7 +296,8 @@ def warn_zero_range(model_name: str, n_zero: int, singular_term: str) -> None:
 
 #: The end of a time record measured for a response still ringing there (a
 #: fraction of the record), and the level, re the record's peak (-20 dB), at
-#: which that end counts as still ringing.
+#: which that end counts as still ringing: uacpy guidance, no source names a
+#: threshold.
 RECORD_TAIL_FRACTION = 0.1
 RECORD_TAIL_LEVEL = 0.1
 

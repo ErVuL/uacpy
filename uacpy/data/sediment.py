@@ -1,11 +1,15 @@
-"""Seafloor sediment → geoacoustic ``BoundaryProperties``.
+"""Seafloor sediment samples, and range-dependent seabeds sampled from them.
 
 Unlike bathymetry and sound speed, there is **no reliable global, no-auth point
 service** for seabed geoacoustics: usSEABED / dbSEABED are sparse survey
 compilations (US waters, frequently empty at an arbitrary coordinate), so a
 "fetch sediment at lat/lon" call would return nothing almost everywhere. The
-durable, verifiable contribution is therefore the *conversion*: turn a mean
-grain size (Wentworth ϕ) or a named sediment class into a model-ready bottom.
+durable, verifiable contribution is therefore the *conversion*: a mean grain
+size (Wentworth ϕ) or a named sediment class into a model-ready bottom, by
+:meth:`BoundaryProperties.from_grain_size
+<uacpy.core.environment.BoundaryProperties.from_grain_size>` and
+:meth:`BoundaryProperties.from_preset
+<uacpy.core.environment.BoundaryProperties.from_preset>`.
 
 The lat/lon seabed fetchers built on this conversion live in their own
 modules: EMODnet substrate for European seas (:mod:`uacpy.data.seabed` live,
@@ -14,17 +18,15 @@ modules: EMODnet substrate for European seas (:mod:`uacpy.data.seabed` live,
 Diesing deep-sea map (:mod:`uacpy.data.diesing_local`), the Graw density grid
 (:mod:`uacpy.data.graw_local`) and the global pelagic rule
 (:mod:`uacpy.data.pelagic`); ``fetch_environment(bottom_sources=...)`` chains
-them. Where none covers a site, supply a grain size or class here.
+them. Where none covers a site, build the seabed from a grain size or class
+with those two constructors.
 
 The ϕ → ``sound_speed`` / ``density`` / ``attenuation`` conversion itself lives
 in :mod:`uacpy.core.sediment` (``grain_size_to_geoacoustics`` and its inverse
 ``grain_size_from_density``), so a bottom can be built without importing the data
-layer. Every
-builder below returns a **half-space** bottom usable by all models — a
-grain-size bottom is fluid, while a named class keeps the material's shear
-speed and shear attenuation, which the fluid-only models collapse for
-themselves (with a ``FallbackWarning``); ``grain_size_phi`` is retained as
-informational metadata. There is no ``'grain-size'`` boundary type.
+layer. This module holds the seabed-sample record (:class:`SeabedSample`) and
+the sampling of a point fetcher along a transect into a range-dependent
+``Bottom`` (:func:`range_dependent_bottom_along`, :func:`transect_fetcher`).
 """
 
 from dataclasses import dataclass, field
@@ -35,23 +37,20 @@ import numpy as np
 from uacpy.core._export import ExportRecord, require_extra
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.core.materials import MATERIALS, list_materials
-from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL, GRAIN_SIZE_MODELS
+from uacpy.core.sediment import GRAIN_SIZE_MODELS
 from uacpy.data._cache import UnreadableCacheError
 from uacpy.data.sources import DataProvenance
 from uacpy.data._provenance_notice import provenance_fallback
 from uacpy.core.geo import geodesic_waypoints
 from uacpy.data._geo import (
-    run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
-    checked_n_points, capped_n_points,
+    run_boundary_indices, auto_budget, checked_max_points,
+    checked_n_points, checked_explicit_n_points, default_n_points,
 )
 
 __all__ = [
     'SeabedSample',
     'samples_table',
     'GRAIN_SIZE_MODELS',
-    'bottom_from_grain_size',
-    'bottom_from_class',
     'range_dependent_bottom_along',
     'transect_fetcher',
     'water_sound_speed_at',
@@ -61,13 +60,16 @@ __all__ = [
 #: The Folk classification schemes a :class:`SeabedSample` names: EMODnet's
 #: five-class code (``folk_5cl``, 1-5) and Folk's full class (``'sG'`` ...).
 FOLK_CLASS_SCHEMES = ('folk5', 'folk')
+#: Waypoints of a bottom transect whose ``n_points`` is unset: a small count,
+#: since the seabed sources expose no cheap sample identity and every
+#: waypoint is a fetch (one live request on the EMODnet WFS). uacpy guidance.
+DEFAULT_BOTTOM_TRANSECT_POINTS = 6
 
 
 @dataclass(frozen=True, eq=False)
 class SeabedSample(ExportRecord):
     """One seabed record at a point, as the raw seabed fetchers return it
     (:func:`~uacpy.data.fetch_emodnet_substrate`,
-    :func:`~uacpy.data.fetch_emodnet_substrate_local`,
     :func:`~uacpy.data.fetch_sediment_sample`,
     :func:`~uacpy.data.fetch_seafloor_lithology`,
     :func:`~uacpy.data.fetch_mars_sediment`). Each source fills what it
@@ -144,77 +146,6 @@ def water_sound_speed_at(water_sound_speed, lat: float, lon: float):
             else water_sound_speed)
 
 
-def bottom_from_grain_size(
-    grain_size_phi: float, *, roughness: float = 0.0, model: str = DEFAULT_GRAIN_SIZE_MODEL,
-    hamilton_fit: Optional[str] = None,
-    water_sound_speed: Optional[float] = None,
-    water_density: Optional[float] = None,
-) -> BoundaryProperties:
-    """Build a half-space ``BoundaryProperties`` bottom from a mean grain size (ϕ).
-
-    Thin wrapper over :meth:`BoundaryProperties.from_grain_size` — emits a
-    half-space with explicit ``sound_speed`` / ``density`` / ``attenuation`` (via
-    :func:`uacpy.core.sediment.grain_size_to_geoacoustics`) so the bottom works
-    in *every* model. ``grain_size_phi`` is retained as informational metadata.
-
-    Parameters
-    ----------
-    grain_size_phi : float
-        Mean grain size on the Wentworth ϕ scale.
-    roughness : float, optional
-        RMS interface roughness (m). Default 0.
-    model, hamilton_fit, water_sound_speed, water_density
-        Forwarded to
-        :func:`uacpy.core.sediment.grain_size_to_geoacoustics`. ``hamilton_fit``
-        picks which of Hamilton & Bachman's three fits ``'hamilton'`` uses;
-        ``None`` takes the continental-terrace default, and nothing infers an
-        abyssal site for the caller.
-    """
-    from uacpy.core.sediment import canonical_grain_size_selection
-    model, hamilton_fit = canonical_grain_size_selection(
-        model, hamilton_fit, who='bottom_from_grain_size')
-    return BoundaryProperties.from_grain_size(
-        grain_size_phi, model=model, hamilton_fit=hamilton_fit,
-        roughness=roughness,
-        water_sound_speed=water_sound_speed, water_density=water_density)
-
-
-def bottom_from_class(name: str, *, roughness: float = 0.0,
-                      elastic: bool = True) -> BoundaryProperties:
-    """Build a half-space ``BoundaryProperties`` from a named sediment class.
-
-    ``name`` is a key of :data:`uacpy.materials.MATERIALS` (e.g. ``'sand'``,
-    ``'silt'``, ``'clay'``, ``'gravel'``, ``'basalt'``).
-
-    Thin wrapper over :meth:`BoundaryProperties.from_preset`, which copies the
-    preset's shear *speed* and shear *attenuation* together — they are one
-    property of the material, and an elastic half-space carrying a shear speed
-    but no shear loss under-predicts bottom loss in every elastic solver.
-    ``elastic=True`` (the default) keeps the pair: the classes reached
-    automatically are hard substrata (EMODnet Folk class 5 and DECK41 ``'rock'``
-    both route to ``'limestone'``), where shear support *is* the seabed's
-    acoustic identity. The fluid-only models collapse the shear themselves,
-    with a ``FallbackWarning``; pass ``elastic=False`` to drop it here instead.
-
-    Parameters
-    ----------
-    name : str
-        A preset of :data:`uacpy.materials.MATERIALS`.
-    roughness : float, optional
-        RMS interface roughness (m). Default 0.
-    elastic : bool, optional
-        Keep the preset's shear speed and attenuation. Default True.
-    """
-    key = str(name).lower()
-    if key not in MATERIALS:
-        raise ConfigurationError(
-            f"bottom_from_class: unknown sediment class {name!r}.",
-            remediation=f"Use one of: {', '.join(list_materials())}.",
-        )
-    return BoundaryProperties.from_preset(key, elastic=elastic,
-                                          roughness=roughness)
-
-
 def range_dependent_bottom_along(
     point_bottom: Callable[[float, float], BoundaryProperties],
     start, end, n_points='auto', *, source_label: str,
@@ -245,16 +176,22 @@ def range_dependent_bottom_along(
     here**, so 'auto' calls ``point_bottom`` once per probe point: cheap for
     the local sample DBs, but up to
     ``max_points`` network calls for the live EMODnet WFS — hence bottom fetches
-    default to an explicit small ``n_points`` and opt into 'auto'. An explicit
-    integer samples exactly that many points (capped at ``max_points``).
+    default to a small count and opt into 'auto'. An unset ``max_points``
+    (``None``) probes :data:`~uacpy.data._geo.DEFAULT_MAX_TRANSECT_POINTS`.
+    An explicit integer samples exactly that many points; one above an
+    explicit ``max_points`` is refused. ``n_points=None`` is
+    :data:`DEFAULT_BOTTOM_TRANSECT_POINTS`, within ``max_points`` when that
+    is set — the count the bottom transect fetchers take when theirs is
+    unset.
     """
-    if max_points is None:
-        max_points = DEFAULT_MAX_TRANSECT_POINTS
     max_points = checked_max_points(max_points, source_label)
+    if n_points is None:
+        n_points = default_n_points(DEFAULT_BOTTOM_TRANSECT_POINTS, max_points)
     n_points = checked_n_points(n_points, source_label, allow_auto=True)
-    probe_n = (max_points if n_points == 'auto'
-               else capped_n_points(n_points, max_points, source_label))
-    lats, lons, ranges_m = geodesic_waypoints(start, end, probe_n)
+    probe_n = (auto_budget(max_points) if n_points == 'auto'
+               else checked_explicit_n_points(n_points, max_points,
+                                              source_label))
+    lats, lons, ranges = geodesic_waypoints(start, end, probe_n)
     props: List = []
     for la, lo in zip(lats, lons):
         try:
@@ -270,14 +207,14 @@ def range_dependent_bottom_along(
             remediation="Use a transect the source covers, or pass an explicit "
                         "grain size / class for a uniform bottom.",
         )
-    props, filled = _fill_gaps_from_nearest(props, np.asarray(ranges_m))
+    props, filled = _fill_gaps_from_nearest(props, np.asarray(ranges))
     _warn_filled_gaps(source_label, filled, len(props))
     if n_points == 'auto':
         reps = run_boundary_indices([_seabed_identity(p) for p in props])
     else:
         reps = list(range(len(props)))
     props = [props[r] for r in reps]
-    rr = np.asarray(ranges_m)[reps]
+    rr = np.asarray(ranges)[reps]
     bottom = Bottom.from_halfspaces(
         rr,
         sound_speed=np.array([p.sound_speed for p in props]),
@@ -309,7 +246,7 @@ def transect_fetcher(point_fn: Callable[..., BoundaryProperties], label: str,
 
     ``point_fn(point, **options)`` is sampled along the great circle by
     :func:`range_dependent_bottom_along`, under ``label`` in its coverage
-    messages. The returned ``transect(start, end, *, n_points=6,
+    messages. The returned ``transect(start, end, *, n_points=None,
     max_points=None, **options)`` passes ``options`` to ``point_fn`` at every
     waypoint; ``water_sound_speed`` and ``depth`` also take a ``(lat, lon) ->
     value`` callable, evaluated per waypoint, so each column scales to the
@@ -318,7 +255,7 @@ def transect_fetcher(point_fn: Callable[..., BoundaryProperties], label: str,
     itself rather than as a gap at every waypoint. The point fetcher is
     ``transect.point_fetcher``, whose signature names the options.
     """
-    def transect(start, end, *, n_points=6, max_points=None, **options):
+    def transect(start, end, *, n_points=None, max_points=None, **options):
         if preload is not None:
             preload()
 
@@ -381,7 +318,7 @@ def _warn_filled_gaps(source_label, filled, n_total):
         f"transect to the covered region, or name a source that spans it.")
 
 
-def _fill_gaps_from_nearest(values: List, ranges_m):
+def _fill_gaps_from_nearest(values: List, ranges):
     """Fill each uncovered waypoint from the NEAREST covered one.
 
     Returns ``(filled_values, report)`` where ``report`` is ``None`` when
@@ -396,7 +333,7 @@ def _fill_gaps_from_nearest(values: List, ranges_m):
     covered = [i for i, v in enumerate(values) if v is not None]
     if len(covered) == len(values):
         return list(values), None
-    r = np.asarray(ranges_m, dtype=float)
+    r = np.asarray(ranges, dtype=float)
     r_cov = r[covered]
     out = list(values)
     worst = 0.0

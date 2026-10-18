@@ -9,7 +9,7 @@ import numpy as np
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.absorption import (
-    ConstantAbsorption, warn_if_band_absorption_frozen)
+    ConstantAbsorption, _absorption_law, _warn_if_band_absorption_frozen)
 from uacpy.core.results import Field, PhaseReference, SoundSpeeds
 from uacpy.core.run_settings import RunMode
 from uacpy.models._extract import result_kwargs
@@ -46,9 +46,9 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
 
     1. **BROADBAND**: the frequency-domain transfer function H(f) on
        ``settings.frequencies`` from the arrivals → ``Field``. Use
-       ``Field.to_time_trace()`` (raw IFFT) or
-       ``Field.synthesize_time_series(source_waveform, sample_rate)``
-       (windowed convolution) downstream.
+       ``Field.impulse_response(sample_rate)`` (the impulse response) or
+       ``Field.synthesize_time_series(source_waveform=, sample_rate=)`` (a
+       waveform's reception) downstream.
 
     2. **TIME_SERIES**: the source pulse through every receiver's arrivals
        (amplitude, phase, delay, absorption across the band) — each cell's
@@ -144,8 +144,6 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
             output_duration=effective_output_duration,
             t_start=effective_t_start,
             who=f"{model_name}.run(run_mode=TIME_SERIES)")
-        t_start_locked = float(t_vec[0])
-        n_t = len(t_vec)
 
         data, coords = _emit(data, 'time', t_vec)
         # The stamped frequency axis is the band the synthesised p(t)
@@ -161,9 +159,7 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
             **result_kwargs(
                 model_name, provenance, source, backend=backend,
                 frequencies=stamp_freqs if stamp_freqs is not None else fc,
-                dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
-                t_start=t_start_locked, fc=fc,
-                components=components, **arr_paths,
+                fc=fc, components=components, **arr_paths,
             ),
         )
         field = mask_unwritten_origin(field, source_type=source.source_type,
@@ -204,7 +200,7 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
 
     # Sea-surface sound speed of the first profile: ``ssp.sound_speed`` is
     # (n_depths, n_ranges) of speeds alone, the depths living on
-    # ``ssp.depths``. Carried on the result for ``Field.to_time_trace`` /
+    # ``ssp.depths``. Carried on the result for ``Field.impulse_response`` /
     # ``Field.synthesize_time_series``, which use it as the reference speed
     # that anchors the synthesis window to r/c.
     c0 = float(env.ssp.sound_speed[0, 0])
@@ -267,7 +263,7 @@ def warn_if_attenuation_extrapolates(env, frequencies, fc: float, *,
     dependence follows the local water, a tabulated α(f, z) — is scaled
     linearly in ``f`` from the ``Im(tau)`` the rows' ``alphaI`` gave at
     ``fc``. The shared band check
-    (:func:`~uacpy.core.absorption.warn_if_band_absorption_frozen`)
+    (:func:`~uacpy.core.absorption._warn_if_band_absorption_frozen`)
     measures the scaling applied against the law over the whole band and
     water column, so a resonance inside the band, a layer below the surface
     and the depth bend of a ratio are all seen; Thorp measures zero.
@@ -279,7 +275,7 @@ def warn_if_attenuation_extrapolates(env, frequencies, fc: float, *,
     (8-16 kHz around a 10 kHz source reads 12 kHz), which names a
     frequency no ray was traced at.
     """
-    absorption = env.absorption
+    absorption = _absorption_law(env.absorption)
     if absorption is None or isinstance(absorption, ConstantAbsorption):
         return
     by_ratio = absorption._scales_by_frequency_ratio
@@ -290,7 +286,7 @@ def warn_if_attenuation_extrapolates(env, frequencies, fc: float, *,
                f"a {absorption._short()} absorption that varies with depth "
                f"does not scale from one frequency by one ratio, so it is "
                f"applied linearly in frequency")
-    warn_if_band_absorption_frozen(
+    _warn_if_band_absorption_frozen(
         model_name, absorption, frequencies, float(fc),
         water_depth=float(env.depth), by_ratio=by_ratio,
         mechanism=(

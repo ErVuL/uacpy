@@ -24,15 +24,13 @@ Bottom.halfspace_at · Kraken.compute_modes · Kraken(backend='krakenc') ·
 Kraken(c_low=, c_high=) · Kraken(mode_coupling='adiabatic', n_segments=) ·
 Field.mask_below_seafloor ·
 multi-depth Source(weights=) → one Field over source_depth · Field.superpose ·
-Modes.excitation · Modes.phase_speeds · Modes.plot(show_imaginary=) ·
+Modes.excitation · Modes.phase_speeds · Modes.plot(show_imaginary=, mode_numbers=) ·
 plot_mode_wavenumbers · plot_modes_heatmap · plot_field(contours=, source=)
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -62,8 +60,8 @@ ssp_pairs = np.array([[0, 1520], [50, 1505], [100, 1495],
                       [200, 1490], [400, 1485]])
 # Francois-Garrison lives on the Environment, so the same volume attenuation
 # acts in the mode computations and in the segmented TL run.
-absorption = uacpy.FrancoisGarrison(temperature=10.0, salinity=35.0,
-                                    pH=8.0)
+# At its defaults: 10 °C, 35 PSU, pH 8.
+absorption = uacpy.FrancoisGarrison()
 
 env = uacpy.Environment(name="Continental shelf", bathymetry=bathymetry,
                         ssp=uacpy.SoundSpeedProfile.from_pairs(ssp_pairs),
@@ -86,58 +84,48 @@ slope_env = uacpy.Environment(
     bottom=bottom.halfspace_at(range=20000, interp='nearest'),
     absorption=absorption)
 
-# Francois & Garrison fitted their equation from 200 Hz up, so at this 50 Hz
-# every run evaluates it below its fitted band, and says so. The notice is
-# printed once here and filtered for the runs that follow.
-with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter('always')
-    shelf_modes = uacpy.Kraken().compute_modes(shelf_env, source)
-for warning in caught:
-    if 'below 200 Hz' in str(warning.message):
-        print(f"  noted: {str(warning.message).split(' — ')[0]}")
-    else:
-        warnings.showwarning(warning.message, warning.category,
-                             warning.filename, warning.lineno)
-warnings.filterwarnings('ignore', message='FrancoisGarrison: .* below 200 Hz',
-                        category=uacpy.ValidityWarning)
 # The slope bottom has shear, which is what krakenc adds over kraken. Its
 # Scholte wave travels at about 0.85 × the 600 m/s shear speed (JKPS §5.10.5),
 # below the slowest water speed where the derived window opens, so c_low is
 # set under it.
-slope_modes = uacpy.Kraken(backend='krakenc', c_low=400.0).compute_modes(
-    slope_env, source)
-print(f"  shelf (cs={shelf_env.bottom.halfspace_at(range=0).shear_speed:.0f} "
-      f"m/s): {len(shelf_modes.k)} modes; "
-      f"slope (cs={slope_env.bottom.halfspace_at(range=0).shear_speed:.0f} "
-      f"m/s): {len(slope_modes.k)} modes")
-
 # The segmented runs keep the mode search under the slowest seabed speed,
 # 1600 m/s at r = 0: that is every mode the shelf traps, a window of
 # arccos(1520/1600) = 18° grazing. Above it the window holds leaky modes
 # (docs/models/kraken.md §6.5), on which krakenc's root finder fails to
 # converge in this guide and says so in its .prt log.
 C_HIGH = 1600.0
+# Two sources 20 m apart with weights [1, -1] for the last run.
+dipole_source = uacpy.Source(depths=[40.0, 60.0], frequencies=50.0,
+                             weights=[1, -1])
+# Francois & Garrison fitted their equation from 200 Hz up, so every 50 Hz run
+# says so with a ValidityWarning; it is set aside for these four runs.
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore', uacpy.ValidityWarning)
+    shelf_modes = uacpy.Kraken().compute_modes(shelf_env, source)
+    slope_modes = uacpy.Kraken(backend='krakenc', c_low=400.0).compute_modes(
+        slope_env, source)
+    tl = uacpy.Kraken(mode_coupling='adiabatic', n_segments=N_SEGMENTS,
+                      c_high=C_HIGH).run(env, source, receiver)
+    pair = uacpy.Kraken(mode_coupling='adiabatic', n_segments=N_SEGMENTS,
+                        c_high=C_HIGH).run(env, dipole_source, receiver)
+print(f"  shelf (cs={shelf_env.bottom.halfspace_at(range=0).shear_speed:.0f} "
+      f"m/s): {len(shelf_modes.k)} modes; "
+      f"slope (cs={slope_env.bottom.halfspace_at(range=0).shear_speed:.0f} "
+      f"m/s): {len(slope_modes.k)} modes")
+
 # Kraken's deck carries the sediment under the shelf down to the deepest
 # receiver and returns a field there; each field is cut at the seafloor.
-tl = uacpy.Kraken(mode_coupling='adiabatic', n_segments=N_SEGMENTS,
-                  c_high=C_HIGH).run(env, source, receiver)
 tl = tl.mask_below_seafloor(env)
 # result.data is complex pressure; min/max on complex is numpy's lexicographic
 # order, not a TL bound, so TL is read off .dB.
 print(f"  adiabatic run over {N_SEGMENTS} segments: TL "
       f"{np.nanmin(tl.dB):.1f} to {np.nanmax(tl.dB):.1f} dB")
 
-# Two sources 20 m apart with weights [1, -1]: the run returns one Field
-# whose source_depth axis holds the unit-amplitude field of each depth, and
-# superpose() adds them
-# with the Source's weights — Σ wᵢ·pᵢ as one complex Field. Each shelf mode
-# is excited in proportion to φ_m(40) − φ_m(60), so the modes whose shapes
-# match at the two depths drop out of the dipole's field.
-dipole_source = uacpy.Source(depths=[40.0, 60.0], frequencies=50.0,
-                             weights=[1, -1])
-pair = uacpy.Kraken(mode_coupling='adiabatic', n_segments=N_SEGMENTS,
-                    c_high=C_HIGH).run(
-    env, dipole_source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+# The dipole run returns one Field whose source_depth axis holds the
+# unit-amplitude field of each depth, and superpose() adds them with the
+# Source's weights — Σ wᵢ·pᵢ as one complex Field. Each shelf mode is excited
+# in proportion to φ_m(40) − φ_m(60), so the modes whose shapes match at the
+# two depths drop out of the dipole's field.
 pair = pair.mask_below_seafloor(env)
 dipole = pair.superpose()                         # weights = [1, -1]
 in_phase = pair.superpose(weights=[1, 1])
@@ -170,21 +158,14 @@ print(f"  slope: {n_interface} interface mode(s) below {c_water_min:.0f} m/s "
       f"{water_borne.size} water-borne")
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-for index in range(min(5, shelf_modes.phi.shape[1])):
-    axes[0].plot(shelf_modes.phi[:, index].real, shelf_modes.depths,
-                 label=f'Mode {index + 1}')
-axes[0].set_title(f'Shelf modes (100 m)\n{shelf_modes.phi.shape[1]} total')
-for index in water_borne[:5]:
-    axes[1].plot(slope_modes.phi[:, index].real, slope_modes.depths,
-                 label=f'Mode {index + 1}')
-axes[1].set_title(f'Slope modes (400 m)\n{slope_modes.phi.shape[1]} total '
-                  f'({n_interface} interface, {water_borne.size} water-borne)')
-for ax in axes:
-    ax.invert_yaxis()
-    ax.set_xlabel('Mode amplitude')
-    ax.set_ylabel('Depth (m)')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+shelf_modes.plot(ax=axes[0], n_modes=5,
+                 title=f'Shelf modes (100 m)\n{shelf_modes.n_modes} total')
+# The slope's water-borne set starts after its interface mode: pick them by
+# number (mode 1 the first).
+slope_modes.plot(ax=axes[1], mode_numbers=water_borne[:5] + 1,
+                 title=f'Slope modes (400 m)\n{slope_modes.n_modes} total '
+                       f'({n_interface} interface, {water_borne.size} '
+                       f'water-borne)')
 fig.suptitle('Mode evolution: shelf to slope', fontsize='xx-large', fontweight='bold')
 fig.tight_layout()
 fig.savefig(OUT / 'example_06_modes.png', dpi=150, bbox_inches='tight')
@@ -202,8 +183,7 @@ ax.set_title('Mode shapes with imaginary parts\n'
 fig.savefig(OUT / 'example_06_mode_shapes.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fig, _ = uacpy.plot.plot_modes_heatmap(shelf_modes, mode_range=None,
-                                       normalize=True, figsize=(14, 8))
+fig, _ = uacpy.plot.plot_modes_heatmap(shelf_modes, figsize=(14, 8))
 fig.suptitle('All shelf mode shapes', fontsize='x-large', fontweight='bold')
 fig.savefig(OUT / 'example_06_modes_heatmap.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

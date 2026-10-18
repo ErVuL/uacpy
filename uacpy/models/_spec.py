@@ -31,7 +31,8 @@ from uacpy.models._projection import (
 # The list is intentionally bounded. Add a flag ONLY for a question of the
 # form "does this env shape work with this model?". Niche numerical-method
 # requirements (3-D, broadband, specific SSP interp scheme,
-# volume-attenuation formula) belong in run()-time asserts, not here.
+# volume-attenuation formula) belong in the stage-2 checks of a run
+# (``_validate_engine``), not here.
 # ``PropagationModel.__init__`` sets every flag False before
 # :meth:`PropagationModel._apply_spec` reads them off the spec.
 _CAPABILITY_FLAGS: frozenset = frozenset({
@@ -103,7 +104,7 @@ class EngineTraits:
     none_receiver_modes : frozenset of RunMode
         The run modes where ``run(env, source, None)`` is legal: an output
         with no receiver geometry — Bounce's reflection table, where
-        ``rmax_m=`` can stand in, and Kraken's MODES, whose depth grid the
+        ``rmax=`` can stand in, and Kraken's MODES, whose depth grid the
         engine builds itself. Any other mode refuses ``None`` as the wrong
         carrier type.
     consumes_run_t_start : bool
@@ -129,11 +130,10 @@ class EngineTraits:
         whose STSFIL carries the pulse unpadded.
     receivers_reach_sediment : bool
         The engine resolves the field THROUGH the sediment layers it is
-        given (Kraken, Scooter, SPARC, OASES mesh them as media), so a
-        receiver — or a buried source — inside the seabed is a supported
-        geometry down to the deepest interface. Ray models stop at the
-        seafloor; RAM keeps the seafloor by its own override even though its
-        PE marches deeper (``RAM._max_receiver_depth``).
+        given (Kraken, Scooter, SPARC, OASES mesh them as media; RAM marches
+        its PE through them down to its absorbing layer), so a receiver — or
+        a buried source — inside the seabed is a supported geometry down to
+        the deepest interface. Ray models stop at the seafloor.
     native_multi_depth_modes : frozenset of RunMode
         Modes in which the engine writes every source depth into one deck
         and its reader splits the output by source depth (a Field's
@@ -198,8 +198,8 @@ class ModelSpec(FieldsRepr):
     """Declarative per-model metadata read by :class:`PropagationModel`.
 
     Consolidates the *static* facts about a model — the run modes it
-    emits, the environment shapes it handles natively, its physics-aware
-    collapse defaults, and how to locate its binary — into one block the
+    emits, the environment shapes it handles natively and its
+    physics-aware collapse defaults — into one block the
     base class reads and **validates at class-definition time**, instead
     of scattering them across ``__init__``. The model stays a
     ``PropagationModel`` subclass, so all generic machinery (collapse
@@ -278,6 +278,21 @@ class ModelSpec(FieldsRepr):
             raise ConfigurationError(
                 f"{model_name}.spec.supports has unknown capability flags: "
                 f"{sorted(bad_flags)}. Valid: {sorted(_CAPABILITY_FLAGS)}."
+            )
+        if 'volume_attenuation' in self.supports:
+            raise ConfigurationError(
+                f"{model_name}.spec.supports must not list "
+                f"'volume_attenuation': it mirrors the class attribute "
+                f"spec.traits.consumes_volume_absorption, so declaring it "
+                f"here would give the same question two answers."
+            )
+        if 'multi_source_depth' in self.supports:
+            raise ConfigurationError(
+                f"{model_name}.spec.supports must not list "
+                f"'multi_source_depth': it is read off "
+                f"spec.traits.native_multi_depth_modes (the modes whose deck "
+                f"carries every source depth), so declaring it here would "
+                f"give the same question two answers."
             )
         bad_types = set(self.source_types) - VALID_SOURCE_TYPES
         if bad_types:

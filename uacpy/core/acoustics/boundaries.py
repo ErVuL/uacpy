@@ -1,17 +1,19 @@
 """What a boundary does to a plane wave.
 
 :func:`reflection_coeff` is the Rayleigh coefficient for a fluid half-space —
-complex, so it carries the phase — and :func:`bottom_loss_curve` sweeps it
-over grazing angle for a named sediment. :func:`pekeris_root` picks the branch
+complex, so it carries the phase — and
+:func:`uacpy.acoustics.bottom_loss_curve` (in
+:mod:`uacpy.core.results.reflection`, as the
+:class:`~uacpy.core.results.ReflectionCoefficient` it returns) sweeps it over
+grazing angle for a named sediment. :func:`pekeris_root` picks the branch
 of the complex square root that keeps a vertical wavenumber physical, which is
 what a mode below cutoff needs to decay into the half-space instead of growing.
 
-The sediment sits against a water column, and both entry points default it
-to the package's one water: the nominal ``DEFAULT_SOUND_SPEED`` (1500 m/s) and
-``DEFAULT_WATER_DENSITY_G_CM3`` (1.027 g/cm³, the value every deck writes).
-Both speak the package's units — grazing degrees, m/s, g/cm³, dB/wavelength —
-and :func:`bottom_loss_curve` is :func:`reflection_coeff` swept over angle for
-a named or carried seabed.
+The sediment sits against a water column, and :func:`reflection_coeff`
+defaults it to the package's one water: the nominal ``DEFAULT_SOUND_SPEED``
+(1500 m/s) and ``DEFAULT_WATER_DENSITY_G_CM3`` (1.027 g/cm³, the value every
+deck writes). It speaks the package's units — grazing degrees, m/s, g/cm³,
+dB/wavelength.
 
 -------------------------------------------------------------------------------
 Portions of this file are adapted from arlpy (https://github.com/org-arl/arlpy)
@@ -30,20 +32,15 @@ in this file.
 """
 
 
-import warnings
-from collections.abc import Mapping
-
 import numpy as np
-from typing import Union, Optional, Tuple
+from typing import Union
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3
-from uacpy.core.exceptions import ConfigurationError, FallbackWarning
-from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._validate import DENSITY_UNITS_SUSPECT_G_CM3
 
 __all__ = [
     'reflection_coeff',
-    'bottom_loss_curve',
     'critical_angle',
     'pekeris_root',
 ]
@@ -170,8 +167,10 @@ def critical_angle(
     zero there would read as "totally reflecting everywhere", the opposite of
     the truth.
 
-    :func:`uacpy.plot.plot_bottom_loss` rules this angle on its axes
-    by calling here, so the figure and the number are the same arithmetic.
+    :func:`uacpy.acoustics.bottom_loss_curve` carries this angle on the
+    table it returns (``critical_angle_deg``), which its loss view rules
+    (``mark_critical=True``), so the figure and the number are the same
+    arithmetic.
 
     Parameters
     ----------
@@ -190,115 +189,6 @@ def critical_angle(
     if c_b <= c_w:
         return float('nan')
     return float(np.degrees(np.arccos(c_w / c_b)))
-
-
-def bottom_loss_curve(
-    material,
-    *,
-    grazing_angles_deg: Optional[np.ndarray] = None,
-    water_sound_speed: float = DEFAULT_SOUND_SPEED,
-    water_density: float = DEFAULT_WATER_DENSITY_G_CM3,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Plane-wave fluid–fluid bottom loss vs grazing angle.
-
-    Wraps :func:`reflection_coeff` with the property dict from
-    :mod:`uacpy.core.materials`, returning grazing-angle / loss-in-dB
-    arrays ready to plot. Shear is ignored (fluid–fluid only): a preset
-    name is its fluid curve, and a carrier or dict whose ``shear_speed`` is
-    positive (``BoundaryProperties.from_preset(name, elastic=True)``, the
-    half-space of an elastic environment) is evaluated as that fluid with a
-    :class:`~uacpy.core.exceptions.FallbackWarning`. An elastic seabed also
-    loses energy to shear waves (Jensen et al., *Computational Ocean
-    Acoustics*, §1.6.2, Eq. 1.61), most between the shear and compressional
-    critical angles: lossless basalt (c_p 5250, c_s 2500 m/s) loses 2.7-3.4 dB
-    per bounce at 55-70° grazing where this curve gives 0 dB. BOUNCE and
-    OASR compute the elastic coefficient.
-
-    Parameters
-    ----------
-    material : str, dict, BoundaryProperties or SedimentLayer
-        Preset name (``'sand'``, ``'silt'``, …), a dict carrying
-        ``sound_speed`` (m/s), ``density`` (g/cm³), ``attenuation``
-        (dB/λ_p), or a seabed carrier holding those three attributes — e.g.
-        ``env.bottom.halfspace_at(range=0.0)``. A carrier's
-        ``acoustic_type`` decides what those attributes mean: a
-        ``'half-space'`` reads them; a ``'rigid'`` or ``'vacuum'`` boundary
-        reflects totally (``|R| = 1``, 0 dB at every angle) and its three
-        numbers are construction placeholders, so they are not read; a
-        ``'file'`` or ``'precalc'`` boundary carries its loss in a
-        reflection table and is refused.
-    grazing_angles_deg : array_like, optional
-        Grazing-angle grid in degrees (``0`` = parallel to interface,
-        ``90`` = normal incidence). Default ``np.linspace(0, 90, 181)``.
-    water_sound_speed, water_density : float
-        Water-column reference values (m/s, g/cm³). ``water_density``
-        defaults to :data:`~uacpy.core.constants.DEFAULT_WATER_DENSITY_G_CM3`
-        (1.027 g/cm³), the value every deck writes for the water column, so
-        the curve matches what the propagation models see; pass ``1.0`` to
-        reproduce a textbook benchmark that takes ρ_w = 1 (on 'sand' the
-        two differ by at most 0.28 dB, at normal incidence).
-
-    Returns
-    -------
-    grazing_angles_deg : ndarray
-    loss_dB : ndarray
-        Bottom loss ``-20·log10|R|`` at each angle.
-    """
-    if grazing_angles_deg is None:
-        grazing_angles_deg = np.linspace(0.0, 90.0, 181)
-    grazing_angles_deg = np.asarray(grazing_angles_deg, dtype=float)
-    if isinstance(material, str):
-        from uacpy.core.materials import get_material
-        m = get_material(material)
-    elif isinstance(material, Mapping):
-        m = dict(material)
-    elif all(hasattr(material, k)
-             for k in ('sound_speed', 'density', 'attenuation')):
-        acoustic_type = str(getattr(material, 'acoustic_type',
-                                    'half-space')).lower()
-        if acoustic_type in ('file', 'precalc'):
-            raise ConfigurationError(
-                f"bottom_loss_curve: a {acoustic_type!r} seabed carries its "
-                f"loss in a reflection-coefficient table; its sound_speed, "
-                f"density and attenuation are placeholders, not a half-space.",
-                remediation="Read the table itself (uacpy.io."
-                            "read_reflection_coefficient), or pass a "
-                            "half-space carrier or a preset name.")
-        if acoustic_type in ('rigid', 'vacuum'):
-            # A rigid (R = +1) and a pressure-release (R = -1) boundary
-            # reflect totally at every angle.
-            return grazing_angles_deg, np.zeros(grazing_angles_deg.shape)
-        m = {k: getattr(material, k)
-             for k in ('sound_speed', 'density', 'attenuation')}
-        m['shear_speed'] = getattr(material, 'shear_speed', 0.0)
-    else:
-        raise ConfigurationError(
-            f"bottom_loss_curve: material must be a preset name, a dict or a "
-            f"seabed carrier (BoundaryProperties / SedimentLayer) with "
-            f"sound_speed, density and attenuation; got "
-            f"{type(material).__name__}.")
-    shear_speed = (0.0 if isinstance(material, str)
-                   else float(m.get('shear_speed') or 0.0))
-    if shear_speed > 0.0:
-        warnings.warn(
-            f"bottom_loss_curve: the seabed's shear speed ({shear_speed:g} "
-            f"m/s) is ignored. This is the fluid-fluid Rayleigh curve; an "
-            f"elastic seabed also loses energy to shear waves (Jensen et al., "
-            f"Computational Ocean Acoustics, §1.6.2, Eq. 1.61), most between "
-            f"the shear and compressional critical angles, where this curve "
-            f"can report total reflection. BOUNCE and OASR compute the "
-            f"elastic coefficient.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    R = reflection_coeff(
-        grazing_angles_deg,
-        sound_speed=float(m['sound_speed']),
-        density=float(m['density']),
-        attenuation=float(m['attenuation']),
-        water_sound_speed=float(water_sound_speed),
-        water_density=float(water_density),
-    )
-    loss_dB = -20.0 * np.log10(np.abs(R) + 1e-300)
-    return grazing_angles_deg, np.asarray(loss_dB, dtype=float)
 
 
 def pekeris_root(gamma2: np.ndarray) -> np.ndarray:

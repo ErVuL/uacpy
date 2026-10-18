@@ -95,12 +95,12 @@ class TestChannel:
         _, ref = simulate_arrival_reception([1.0], [0.01], source_waveform=tx,
                                             sample_rate=FS,
                                             trace_frequency=2000.0,
-                                            phases_rad=[np.pi / 2],
+                                            phases=[np.pi / 2],
                                             t_start=0.0)
         from uacpy.acoustic_signal import arrival_transfer_function
         L = 1 << 16
         f = np.fft.rfftfreq(L, 1.0 / FS)
-        H = arrival_transfer_function(f, [1.0], [0.01], phases_rad=[np.pi / 2])
+        H = arrival_transfer_function(f, [1.0], [0.01], phases=[np.pi / 2])
         H[0], H[-1] = H[0].real, H[-1].real
         exact = np.fft.irfft(np.fft.rfft(tx, L) * H, L)
         i0 = int(round(0.01 * FS))
@@ -132,7 +132,7 @@ class TestChannel:
         assert np.min(np.abs(spec[in_band])) > 0.5
 
     def test_negative_delay_raises(self):
-        with pytest.raises(ConfigurationError, match='delays_s must be >= 0'):
+        with pytest.raises(ConfigurationError, match='delays must be >= 0'):
             impulse_response([1.0], [-0.01], sample_rate=FS)
 
 
@@ -349,6 +349,23 @@ class TestTransferFunctionIRGridSpacing:
                 np.ones(grid.size, dtype=complex), frequencies=grid, sample_rate=self.FS)
             assert h.size == n
 
+    @pytest.mark.parametrize("n_samples", [None, 50])
+    def test_a_single_frequency_has_no_response_and_is_refused(
+            self, n_samples):
+        # One line states no spacing, so no record: a 100 Hz line returned
+        # h = [0, 0] on the default 2-sample grid and max|h| = 0.04 on a
+        # 50-sample one, as Field.impulse_response refuses it.
+        with pytest.raises(ConfigurationError,
+                           match="need at least 2 frequencies; got 1"):
+            impulse_response_from_transfer_function(
+                np.ones(1, complex), frequencies=[100.0], sample_rate=1000.0,
+                n_samples=n_samples)
+        # Two lines are a band.
+        _, h = impulse_response_from_transfer_function(
+            np.ones(2, complex), frequencies=[100.0, 110.0],
+            sample_rate=1000.0, n_samples=n_samples)
+        assert np.max(np.abs(h)) > 0.0
+
     def test_absurdly_fine_spacing_raises_instead_of_allocating(self):
         f = np.array([0.0, 1e-4, 2e-4])
         with pytest.raises(ConfigurationError, match="n_samples"):
@@ -465,7 +482,7 @@ class TestChannelResponseIsObtainableWithoutDrawingIt:
         assert H[neg].size == H[pos].size == 31
         assert np.allclose(H[neg], np.conj(H[pos][::-1]), atol=1e-12)
 
-    def test_plot_channel_draws_exactly_what_the_transform_returns(self):
+    def test_its_plot_draws_exactly_what_the_transform_returns(self):
         """The plotter is a consumer: its curve is the transform in dB.
 
         Pinned by value, so extracting the computation cannot quietly
@@ -473,15 +490,19 @@ class TestChannelResponseIsObtainableWithoutDrawingIt:
         """
         import matplotlib
         matplotlib.use('Agg')
-        from uacpy.visualization.plots.comms import plot_channel
+        from uacpy.visualization.plots.comms import plot_channel_response
         h = self._taps()
-        fig, ax = plot_channel(h, self.FS)
+        response = channel_response(h, self.FS)
+        fig, ax = response.plot()
+        fig2, ax2 = plot_channel_response(response)
         try:
-            drawn_f, drawn_db = ax[1].lines[0].get_data()
+            drawn_f, drawn_db = ax.lines[0].get_data()
+            assert np.array_equal(ax2.lines[0].get_ydata(), drawn_db)
         finally:
             import matplotlib.pyplot as plt
             plt.close(fig)
-        f, H = channel_response(h, self.FS)
+            plt.close(fig2)
+        f, H = response
         assert np.array_equal(drawn_f, f)
         # 20·log10|H| floored 120 dB below its peak, the plotters' null
         # policy (no epsilon added to every value).
@@ -503,6 +524,22 @@ class TestChannelResponseIsObtainableWithoutDrawingIt:
         the returned H says so — so it is refused at the call."""
         with pytest.raises(ConfigurationError, match='shorter than the 37-tap'):
             channel_response(self._taps(), self.FS, nfft=8)
+
+    def test_channel_taps_bring_their_own_rate(self):
+        """A ChannelTaps sits at ``symbol_rate * sps`` samples per second,
+        so it is transformed at that rate; a second rate is refused, and
+        array taps without one are refused."""
+        from uacpy.comms.channel import ChannelTaps
+        taps = ChannelTaps(taps=self._taps(8), delays=np.arange(8) / 2000.0,
+                           symbol_rate=500.0, fc=None, sps=4,
+                           first_arrival=0.0)
+        f, H = channel_response(taps)
+        f_ref, H_ref = channel_response(taps.taps, 2000.0)
+        assert np.array_equal(f, f_ref) and np.array_equal(H, H_ref)
+        with pytest.raises(ConfigurationError, match='second one'):
+            channel_response(taps, 2000.0)
+        with pytest.raises(ConfigurationError, match='need their sample_rate'):
+            channel_response(taps.taps)
 
     @pytest.mark.parametrize('rate', [0.0, -1.0, np.nan, np.inf])
     def test_an_unusable_sample_rate_is_refused(self, rate):
@@ -637,7 +674,7 @@ class TestTheBandEdgeSurvivesFloatingPointDust:
 class TestFieldToTransferFunctionDelegates:
     """The Field method is the array function plus axis bookkeeping, a
     band read off the identity, and the ``dt`` that carries the result
-    into the density convention ``to_time_trace`` produces. What it must
+    into the density convention ``impulse_response`` produces. What it must
     NOT be is a second implementation of the transform."""
 
     def test_the_method_carries_no_fft_of_its_own(self):
@@ -770,7 +807,9 @@ class TestAnOffsetGridRoundTripsExactly:
         field = Field(data=self.two_paths(f).reshape(1, 1, -1),
                       coords={'depth': [10.0], 'range': [100.0],
                               'frequency': f}, frequencies=f)
-        back = field.to_time_trace(window=None,
+        # 10 kHz is a whole multiple of either spacing, so the record's
+        # resolution is the grid's own.
+        back = field.to_time_trace(sample_rate=10000.0,
                                    t_start=0.0).to_transfer_function()
         np.testing.assert_allclose(back.coords['frequency'], f, rtol=0.0,
                                    atol=1e-9)
@@ -920,7 +959,7 @@ class TestAnArrivalGridSharesOneClock:
                                                 sample_rate=self.FS,
                                                 trace_frequency=self.FC,
                                                 output_duration=t[-1] - t[0] + 1.0 / self.FS,
-                                                t_start=t[0], report={})
+                                                t_start=t[0])
             np.testing.assert_array_equal(traces[0, j], ref[:t.size])
 
     def test_the_window_spans_the_earliest_and_latest_arrival_of_the_grid(
@@ -955,7 +994,7 @@ class TestAnArrivalGridSharesOneClock:
                                               source_waveform=self._pulse(),
                                               sample_rate=self.FS,
                                               trace_frequency=self.FC)
-        rts, _ = delayandsum({'n_arrivals': 0}, source_waveform=self._pulse(),
+        _, rts = delayandsum({'n_arrivals': 0}, source_waveform=self._pulse(),
                              sample_rate=self.FS, trace_frequency=self.FC)
         H_alone = arrival_transfer_function(freqs, [], [])
         assert alone.size and np.all(alone == 0.0)
@@ -1020,9 +1059,9 @@ class TestAnArrivalGridSharesOneClock:
                                                 source_waveform=self._pulse(),
                                                 sample_rate=self.FS,
                                                 trace_frequency=self.FC,
-                                                delays_imag_s=cell['delays_imag'],
+                                                delays_imag=cell['delays_imag'],
                                                 output_duration=t.size / self.FS,
-                                                t_start=t[0], report={},
+                                                t_start=t[0],
                                                 absorption=Thorp())
             np.testing.assert_allclose(traces[0, j], ref, rtol=0.0,
                                        atol=1e-12 * np.abs(ref).max())
@@ -1345,10 +1384,10 @@ class TestAnArrivalReceptionIsTheExactProduct:
         x = self._pulse()
         t, y = simulate_arrival_reception(
             amp, d, source_waveform=x, sample_rate=self.FS,
-            trace_frequency=self.FC, delays_imag_s=di, phases_rad=ph,
+            trace_frequency=self.FC, delays_imag=di, phases=ph,
             absorption=Thorp())
-        exact = self._exact(x, amp, d, t[0], delays_imag_s=di,
-                            phases_rad=ph, trace_frequency=self.FC,
+        exact = self._exact(x, amp, d, t[0], delays_imag=di,
+                            phases=ph, trace_frequency=self.FC,
                             absorption=Thorp())[:y.size]
         assert np.max(np.abs(y - exact)) < 1e-7 * np.max(np.abs(exact))
 
@@ -1365,7 +1404,7 @@ class TestAnArrivalReceptionIsTheExactProduct:
         ph = rng.uniform(-np.pi, np.pi, 20)
         di = -rng.uniform(0.0, 2e-6, 20)
         x = self._pulse()
-        kw = dict(delays_imag_s=di, phases_rad=ph, trace_frequency=self.FC,
+        kw = dict(delays_imag=di, phases=ph, trace_frequency=self.FC,
                   absorption=Thorp())
         th, h = arrival_impulse_response(amp, d, sample_rate=self.FS, **kw)
         t, y = apply_impulse_response(h, source_waveform=x,
@@ -1378,9 +1417,9 @@ class TestAnArrivalReceptionIsTheExactProduct:
         x = self._pulse()
         t, y = simulate_arrival_reception(
             [1.0], [0.0123456], source_waveform=x, sample_rate=self.FS,
-            trace_frequency=self.FC, phases_rad=[np.pi / 2])
+            trace_frequency=self.FC, phases=[np.pi / 2])
         exact = self._exact(x, [1.0], [0.0123456], t[0],
-                            phases_rad=[np.pi / 2])[:y.size]
+                            phases=[np.pi / 2])[:y.size]
         assert np.max(np.abs(y - exact)) < 1e-7 * np.max(np.abs(exact))
 
     def test_two_hundred_lossy_paths_over_a_second(self):
@@ -1398,10 +1437,10 @@ class TestAnArrivalReceptionIsTheExactProduct:
              * np.hanning(n))
         t, y = simulate_arrival_reception(
             amp, d, source_waveform=x, sample_rate=self.FS,
-            trace_frequency=3000.0, delays_imag_s=di, phases_rad=ph,
+            trace_frequency=3000.0, delays_imag=di, phases=ph,
             absorption=Thorp())
-        exact = self._exact(x, amp, d, t[0], delays_imag_s=di,
-                            phases_rad=ph, trace_frequency=3000.0,
+        exact = self._exact(x, amp, d, t[0], delays_imag=di,
+                            phases=ph, trace_frequency=3000.0,
                             absorption=Thorp())[:y.size]
         assert np.max(np.abs(y - exact)) < 1e-5 * np.max(np.abs(exact))
 
@@ -1415,7 +1454,7 @@ class TestAnArrivalReceptionIsTheExactProduct:
             simulate_arrival_reception(
                 [1.0, 1.0], [0.05, 0.15], source_waveform=x,
                 sample_rate=self.FS, trace_frequency=1000.0,
-                delays_imag_s=[0.0, -2e-4], t_start=0.0,
+                delays_imag=[0.0, -2e-4], t_start=0.0,
                 output_duration=0.1)
         said = [str(w.message) for w in record
                 if 'fall entirely outside' in str(w.message)]
@@ -1432,11 +1471,11 @@ class TestAnArrivalReceptionIsTheExactProduct:
                   trace_frequency=self.FC, t_start=0.0, output_duration=0.1)
         with recorded_warnings() as record:
             _, both = simulate_arrival_reception(
-                [1.0, 1.0], [0.05, 0.11], phases_rad=[0.0, np.pi / 2], **kw)
+                [1.0, 1.0], [0.05, 0.11], phases=[0.0, np.pi / 2], **kw)
         assert any('1 echo(es) fall entirely outside' in str(w.message)
                    for w in record)
         _, alone = simulate_arrival_reception([1.0], [0.05],
-                                              phases_rad=[0.0], **kw)
+                                              phases=[0.0], **kw)
         np.testing.assert_array_equal(both, alone)
 
     def _burst(self, f0, n_cycles):
@@ -1455,9 +1494,9 @@ class TestAnArrivalReceptionIsTheExactProduct:
         x = self._burst(50.0, 4)
         t, y = simulate_arrival_reception(
             amps, delays, source_waveform=x, sample_rate=self.FS,
-            trace_frequency=50.0, phases_rad=phases)
+            trace_frequency=50.0, phases=phases)
         exact = self._exact(x, amps, delays, t[0],
-                            phases_rad=phases)[:y.size]
+                            phases=phases)[:y.size]
         assert np.max(np.abs(y - exact)) < 1e-4 * np.max(np.abs(exact))
 
 
@@ -1608,9 +1647,9 @@ class TestALongListCostsItsArrivalsNotItsSpan:
             if route == 'reception':
                 return lambda: simulate_arrival_reception(
                     amps, delays, source_waveform=pulse, sample_rate=self.FS,
-                    trace_frequency=3000.0, phases_rad=phases)
+                    trace_frequency=3000.0, phases=phases)
             return lambda: arrival_impulse_response(
-                amps, delays, sample_rate=self.FS, phases_rad=phases)
+                amps, delays, sample_rate=self.FS, phases=phases)
         assert self._seconds(run(4.0)) < 3.0 * self._seconds(run(0.25))
 
 
@@ -1858,7 +1897,7 @@ class TestAStatedRecordHoldsTheResponsesOwnSamples:
     def _error(self, phases, t_start, n_samples):
         from uacpy.acoustic_signal import arrival_impulse_response
         t, h = arrival_impulse_response(
-            self.AMPS, self.DELAYS, phases_rad=phases, sample_rate=self.FS,
+            self.AMPS, self.DELAYS, phases=phases, sample_rate=self.FS,
             t_start=t_start, n_samples=n_samples)
         positions = (self.DELAYS - t[0]) * self.FS
         truth = self._true(self.AMPS, positions, phases, n_samples)
@@ -1971,8 +2010,8 @@ class TestAnArrivalColumnHoldsRealNumbers:
     WF = np.hanning(64) * np.sin(2 * np.pi * 1000.0 * np.arange(64) / 8000.0)
 
     @pytest.mark.parametrize('column, values', [
-        ('phases_rad', [0.5 + 0.1j, 0.0]), ('phases_rad', [True, 0.0]),
-        ('delays_imag_s', [0.0, '1e-6']), ('delays_s', [0.1, True]),
+        ('phases', [0.5 + 0.1j, 0.0]), ('phases', [True, 0.0]),
+        ('delays_imag', [0.0, '1e-6']), ('delays', [0.1, True]),
         ('amplitudes', ['1.0', 0.5])])
     @pytest.mark.parametrize('name', ['arrival_transfer_function',
                                       'arrival_impulse_response',
@@ -1980,9 +2019,9 @@ class TestAnArrivalColumnHoldsRealNumbers:
     def test_a_column_that_is_not_real_numbers_is_refused(self, name, column,
                                                           values):
         from uacpy import acoustic_signal as sig
-        kw = dict(amplitudes=[1.0, 0.5], delays_s=[0.1, 0.1031])
+        kw = dict(amplitudes=[1.0, 0.5], delays=[0.1, 0.1031])
         kw[column] = values
-        amps, delays = kw.pop('amplitudes'), kw.pop('delays_s')
+        amps, delays = kw.pop('amplitudes'), kw.pop('delays')
         calls = {
             'arrival_transfer_function': lambda: sig.arrival_transfer_function(
                 [100.0], amps, delays, **kw),
@@ -2141,7 +2180,7 @@ class TestEveryArrivalCellFunctionTakesOneCell:
 
     def test_delayandsum_takes_it(self):
         from uacpy.acoustic_signal import delayandsum
-        y, t = delayandsum(self.CELL, source_waveform=self.WF,
+        t, y = delayandsum(self.CELL, source_waveform=self.WF,
                            sample_rate=8000.0, trace_frequency=1000.0)
         t0, y0 = self._plain()
         np.testing.assert_array_equal(t, t0)
@@ -2161,9 +2200,9 @@ class TestAnArrivalListIsSummedInBoundedMemory:
     def _list(self, n, span):
         rng = np.random.default_rng(0)
         delays = 30.0 + np.sort(rng.uniform(0.0, span, n))
-        return dict(amplitudes=rng.uniform(0.1, 1.0, n), delays_s=delays,
-                    phases_rad=rng.uniform(-np.pi, np.pi, n),
-                    delays_imag_s=-rng.uniform(0.0, 1e-5, n))
+        return dict(amplitudes=rng.uniform(0.1, 1.0, n), delays=delays,
+                    phases=rng.uniform(-np.pi, np.pi, n),
+                    delays_imag=-rng.uniform(0.0, 1e-5, n))
 
     @pytest.mark.parametrize('route, bound', [
         ('reception', 60e6), ('impulse_response', 60e6),
@@ -2175,7 +2214,7 @@ class TestAnArrivalListIsSummedInBoundedMemory:
                                            simulate_arrival_reception)
         arrivals = (self._list(200, 1.0) if route == 'transfer_function'
                     else self._list(400, 2.0))
-        amps, delays = arrivals.pop('amplitudes'), arrivals.pop('delays_s')
+        amps, delays = arrivals.pop('amplitudes'), arrivals.pop('delays')
         pulse = (np.hanning(480)
                  * np.sin(2 * np.pi * 3000.0 * np.arange(480) / self.FS))
         tracemalloc.start()
@@ -2205,16 +2244,16 @@ class TestAnArrivalListIsSummedInBoundedMemory:
         arrivals = self._list(200, 1.0)
         assert 200 * f.size > _ARRIVAL_SUM_BLOCK_ELEMS
         H = arrival_transfer_function(f, arrivals['amplitudes'],
-                                      arrivals['delays_s'],
-                                      delays_imag_s=arrivals['delays_imag_s'],
-                                      phases_rad=arrivals['phases_rad'])
+                                      arrivals['delays'],
+                                      delays_imag=arrivals['delays_imag'],
+                                      phases=arrivals['phases'])
         omega = 2 * np.pi * f
         closed = sum(
             a * np.exp(1j * ph) * np.exp(omega * ti) * np.exp(-1j * omega * tr)
             for a, tr, ti, ph in zip(arrivals['amplitudes'],
-                                     arrivals['delays_s'],
-                                     arrivals['delays_imag_s'],
-                                     arrivals['phases_rad']))
+                                     arrivals['delays'],
+                                     arrivals['delays_imag'],
+                                     arrivals['phases']))
         assert np.max(np.abs(H - closed)) < 1e-12 * np.max(np.abs(closed))
 
 
@@ -2254,7 +2293,7 @@ class TestARecordThatMissesAnArrivalLeavesItOut:
         amps = [1.0, 0.5][:len(delays)]
         phases = [0.0, 1.0][:len(delays)]
         return arrival_impulse_response(amps, delays, sample_rate=self.FS,
-                                        phases_rad=phases, t_start=0.0,
+                                        phases=phases, t_start=0.0,
                                         n_samples=100, **kw)
 
     @pytest.mark.parametrize('delay', [0.0, 0.099])
@@ -2273,7 +2312,7 @@ class TestARecordThatMissesAnArrivalLeavesItOut:
         with recorded_warnings() as record:
             arrival_impulse_response(
                 [1.0, 1.0], [0.05, 0.15], sample_rate=self.FS,
-                delays_imag_s=[0.0, -2e-4], trace_frequency=1000.0,
+                delays_imag=[0.0, -2e-4], trace_frequency=1000.0,
                 t_start=0.0, n_samples=100)
         messages = [str(w.message) for w in record
                     if issubclass(w.category, NumericsWarning)]
@@ -2316,8 +2355,8 @@ class TestEchoesLandAtTheDelayTheyWereGiven:
                     delays_imag=np.array([0.0]),
                     n_top_bounces=np.array([0]),
                     n_bot_bounces=np.array([0]),
-                    source_angles=np.array([0.0]),
-                    receiver_angles=np.array([0.0]))
+                    source_angles_deg=np.array([0.0]),
+                    receiver_angles_deg=np.array([0.0]))
 
     @staticmethod
     def _waveform(fs, fc, n=256):
@@ -2326,7 +2365,7 @@ class TestEchoesLandAtTheDelayTheyWereGiven:
 
     def _trace(self, delay, **kw):
         from uacpy.acoustic_signal import delayandsum
-        rts, _ = delayandsum(
+        _, rts = delayandsum(
             rcv_arrivals=self._cell(delay),
             source_waveform=self._waveform(self.FS, self.FC),
             sample_rate=self.FS, trace_frequency=self.FC,
@@ -2398,8 +2437,8 @@ class TestVolumeAttenuationFromImaginaryDelay:
                     delays_imag=np.array([self.TAU_I]),
                     n_top_bounces=np.array([0]),
                     n_bot_bounces=np.array([0]),
-                    source_angles=np.array([0.0]),
-                    receiver_angles=np.array([0.0]))
+                    source_angles_deg=np.array([0.0]),
+                    receiver_angles_deg=np.array([0.0]))
 
     def test_transfer_function_applies_it(self):
         H = _cell_tf(self._cell(), np.array([self.FC]))
@@ -2420,10 +2459,10 @@ class TestVolumeAttenuationFromImaginaryDelay:
         # A 10-30 kHz chirp, so every checked frequency carries energy.
         wf = np.hanning(n) * np.sin(
             2 * np.pi * (10000.0 * t + 0.5 * (20000.0 / t[-1]) * t ** 2))
-        loud, _ = delayandsum(self._cell(), source_waveform=wf, sample_rate=fs,
+        _, loud = delayandsum(self._cell(), source_waveform=wf, sample_rate=fs,
                               trace_frequency=self.FC)
         lossless = dict(self._cell(), delays_imag=np.array([0.0]))
-        ref, _ = delayandsum(lossless, source_waveform=wf, sample_rate=fs,
+        _, ref = delayandsum(lossless, source_waveform=wf, sample_rate=fs,
                              trace_frequency=self.FC)
         f = np.fft.rfftfreq(loud.size, 1.0 / fs)
         ratio = np.abs(np.fft.rfft(loud)) / np.abs(np.fft.rfft(ref))
@@ -2450,7 +2489,7 @@ class TestDelayAndSumSaysWhatTheWindowLeavesOut:
                     delays_imag=np.zeros(n),
                     n_top_bounces=np.zeros(n, dtype=int),
                     n_bot_bounces=np.zeros(n, dtype=int),
-                    source_angles=np.zeros(n), receiver_angles=np.zeros(n))
+                    source_angles_deg=np.zeros(n), receiver_angles_deg=np.zeros(n))
 
     def _waveform(self, n=200):
         # 2 ms hann-windowed tone burst
@@ -2497,20 +2536,6 @@ class TestDelayAndSumSaysWhatTheWindowLeavesOut:
         msgs = self._run(self._cell(0.010, 0.050),
                          t_start=0.0, output_duration=0.030)
         assert msgs and msgs[0].startswith('delayandsum:'), msgs
-
-    def test_a_report_dict_totals_the_cells_and_stays_silent(self):
-        from uacpy.acoustic_signal import delayandsum
-        report = {}
-        with recorded_warnings() as rec:
-            for cell in (self._cell(0.010, 0.050), self._cell(0.012, 0.060)):
-                delayandsum(cell, source_waveform=self._waveform(),
-                            sample_rate=self.FS, trace_frequency=self.FC,
-                            t_start=0.0, output_duration=0.030, report=report)
-        assert not [w for w in rec if "does not hold every echo"
-                    in str(w.message)]
-        assert report['omitted'] == 2
-        assert report['omitted_power'] == pytest.approx(2.0)
-        assert report['total_power'] == pytest.approx(4.0)
 
 
 class TestTransferFunctionImpulseResponseValidatesItsSampleRate:
@@ -2661,3 +2686,83 @@ class TestSynthesizeTimeSeriesOnArrays:
             _, p = synthesize_time_series(H, frequencies=f, source_waveform=s,
                                           sample_rate=self.FS, t_start=0.0)
         assert np.all(np.isfinite(p[0])) and np.all(np.isnan(p[1]))
+
+
+class TestTheArrivalFamilyAgreesOnItsSmallContracts:
+    """The arrival functions and their method share their small contracts:
+    a 0 Hz bin (the first of ``np.fft.rfftfreq``) is a frequency on the
+    method as on the function, ``trace_frequency`` is needed only by a list
+    that carries absorption, and the grid reception takes the cell
+    reception's ``phase_offset`` and ``fractional``."""
+
+    FS, FC = 8000.0, 1000.0
+    CELL = {'amplitudes': np.array([1.0, 0.5]),
+            'delays': np.array([0.010, 0.0123]),
+            'phases': np.array([0.0, 2.0])}
+
+    def _wave(self):
+        t = np.arange(64) / self.FS
+        return np.hanning(t.size) * np.sin(2.0 * np.pi * self.FC * t)
+
+    def test_the_method_takes_a_zero_hertz_bin(self):
+        from uacpy.acoustic_signal import arrival_transfer_function
+        from uacpy.core.results import Arrivals
+        arr = Arrivals(by_receiver=[[[dict(self.CELL)]]],
+                       receiver_depths=np.array([50.0]),
+                       receiver_ranges=np.array([1000.0]), model='Test',
+                       frequencies=self.FC)
+        f = np.fft.rfftfreq(16, 1.0 / self.FS)
+        H = np.ravel(arr.transfer_function(f).data)
+        np.testing.assert_allclose(H, arrival_transfer_function(
+            f, self.CELL['amplitudes'], self.CELL['delays'],
+            phases=self.CELL['phases']), rtol=1e-12)
+        assert H[0] == pytest.approx(1.0 + 0.5 * np.exp(2.0j))
+        with pytest.raises(ConfigurationError, match='non-negative'):
+            arr.transfer_function([-1.0, 100.0])
+
+    @pytest.mark.parametrize('name', ['simulate_arrival_reception',
+                                      'simulate_arrival_grid',
+                                      'delayandsum'])
+    def test_a_lossless_list_needs_no_trace_frequency(self, name):
+        from uacpy import acoustic_signal as sig
+        lossy = dict(self.CELL, delays_imag=np.array([0.0, -1e-6]))
+        calls = {
+            'simulate_arrival_reception':
+                lambda cell, **kw: sig.simulate_arrival_reception(
+                    cell['amplitudes'], cell['delays'],
+                    phases=cell['phases'],
+                    delays_imag=cell.get('delays_imag'),
+                    source_waveform=self._wave(), sample_rate=self.FS, **kw),
+            'simulate_arrival_grid':
+                lambda cell, **kw: sig.simulate_arrival_grid(
+                    [[cell]], source_waveform=self._wave(),
+                    sample_rate=self.FS, **kw),
+            'delayandsum':
+                lambda cell, **kw: sig.delayandsum(
+                    cell, source_waveform=self._wave(), sample_rate=self.FS,
+                    **kw)}
+        bare = calls[name](self.CELL)
+        traced = calls[name](self.CELL, trace_frequency=self.FC)
+        np.testing.assert_array_equal(bare[1], traced[1])
+        with pytest.raises(ConfigurationError,
+                           match=rf"^{name}: the arrivals carry volume "
+                                 rf"absorption.*(.|\n)*trace_frequency="):
+            calls[name](lossy)
+
+    @pytest.mark.parametrize('kw', [{'phase_offset': -np.pi / 4},
+                                    {'fractional': False}])
+    def test_the_grid_reception_takes_the_cell_receptions_knobs(self, kw):
+        from uacpy import acoustic_signal as sig
+        t, grid = sig.simulate_arrival_grid(
+            [[self.CELL]], source_waveform=self._wave(), sample_rate=self.FS,
+            **kw)
+        _, cell = sig.simulate_arrival_reception(
+            self.CELL['amplitudes'], self.CELL['delays'],
+            phases=self.CELL['phases'], source_waveform=self._wave(),
+            sample_rate=self.FS, t_start=t[0],
+            output_duration=t.size / self.FS, **kw)
+        np.testing.assert_allclose(grid[0, 0], cell, rtol=0.0,
+                                   atol=1e-12 * np.abs(cell).max())
+        _, plain = sig.simulate_arrival_grid(
+            [[self.CELL]], source_waveform=self._wave(), sample_rate=self.FS)
+        assert not np.allclose(grid[0, 0], plain[0, 0])

@@ -69,7 +69,8 @@ from uacpy.comms.constellations import _require_binary_bits
 
 JANUS_VERSION = 3
 
-# Initial JANUS acoustic band (STANAG 4748 sec. K)
+# Initial JANUS acoustic band: Potter et al. (2014) §II.K, "Fc = 11520 Hz,
+# Bw = 4160 Hz" (STANAG 4748 sec. K).
 FC_INITIAL = 11520.0        # centre frequency [Hz]
 BW_INITIAL = 4160.0         # bandwidth [Hz]
 
@@ -93,7 +94,7 @@ _N_SLOTS = 13                       # frequency-hop slot pairs
 _N_TOTAL_CHIPS = _PREAMBLE_CHIPS + _N_CODED   # 176: 32 preamble + 144 data
 
 WAKEUP_GAP = 0.4                   # s silence after wake-up tones (CMRE JANUS_WUT_GAP)
-DEFAULT_DOPPLER_MAX_SPEED = 5.0    # m/s search half-range (CMRE reference default)
+DEFAULT_DOPPLER_MAX_SPEED = 5.0    # m/s search half-range (CMRE, external:parameters.c:63)
 # Maximum-likelihood Doppler bank (_estimate_doppler): scales per grid, the
 # coarse start-offset step and the fine offset half-width (samples).
 _ML_SCALE_STEPS = 21
@@ -363,6 +364,17 @@ def _tone_freq(fh_index, bit, freq_min, fsw):
     return freq_min + (2 * int(fh_index) + int(bit)) * fsw
 
 
+def _require_band_sampled(sample_rate, fc, bandwidth, who, consequence):
+    """Refuse a ``sample_rate`` whose Nyquist frequency lies below the band
+    edge ``fc + bandwidth/2``, saying what aliasing does there."""
+    if sample_rate < 2 * (fc + bandwidth / 2):
+        raise ConfigurationError(
+            f"{who}: the band edge fc + bw/2 = {fc + bandwidth / 2:g} Hz "
+            f"is above the Nyquist frequency sample_rate/2 = "
+            f"{sample_rate / 2:g} Hz, so {consequence}; require "
+            f"sample_rate >= {2 * (fc + bandwidth / 2):g} Hz.")
+
+
 def _require_hop_sequence(hop_sequence, who):
     """Validate a hop sequence and return it as an int array.
 
@@ -398,17 +410,23 @@ def _preamble_tones(fh, freq_min, fsw):
                      for k in range(_PREAMBLE_CHIPS)])
 
 
-def janus_modulate(bits64, *, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_INITIAL,
-                   chip_duration=None, hop_sequence=None, window='tukey', wakeup=False):
+def janus_modulate(bits64, *, sample_rate, fc=FC_INITIAL, bandwidth=BW_INITIAL,
+                   chip_duration=None, hop_sequence=None, window='boxcar',
+                   wakeup=False):
     """Generate the real FH-BFSK JANUS waveform for a 64-bit packet.
 
     The waveform is ``[optional wake-up tones][32-chip preamble][144 data chips]``;
     each chip is a CW tone (duration ``chip_duration``, default ``1/FSw`` = 6.25 ms in the
     initial band) at the frequency selected by the hop index and the bit value.
 
-    ``window='tukey'`` tapers each chip with a tapered cosine over 5 % of its
-    length (2.5 % at each end), softening the edge transient a rectangular
-    chip would radiate; ``window=None`` emits the plain rectangular CW chip. The CMRE
+    The chip envelope is the standard's: "While the chip amplitude envelope
+    should be nominally square, a Tukey window may optionally be applied to
+    smoothly modulate the initial and final 2.5% of the window" (Potter et
+    al. 2014, §II.I). ``window='boxcar'`` (the default) is that nominal
+    square chip, and ``None`` derives that default; ``window='tukey'`` is
+    the option, a tapered
+    cosine over 5 % of the chip (2.5 % at each end) that softens the edge
+    transient a rectangular chip radiates. The CMRE
     reference tapers too, but differently — external:modulator.c:78-90 puts a
     Hamming half-taper over ``lt/16`` samples (6.25 %) at each end, from 0.08
     rather than from 0 — so neither setting is sample-identical to it, and the
@@ -429,8 +447,8 @@ def janus_modulate(bits64, *, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_I
     ----------
     bits64 : array_like of int
         The 64 baseline-packet bits, 0/1.
-    sample_rate : float, optional
-        Sample rate (Hz), at least ``2*(fc + bandwidth/2)``. Default 48 kHz.
+    sample_rate : float
+        Sample rate (Hz), at least ``2*(fc + bandwidth/2)``.
     fc : float, optional
         Band centre frequency (Hz). Default 11520, the JANUS initial band.
     bandwidth : float, optional
@@ -440,15 +458,17 @@ def janus_modulate(bits64, *, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_I
         the initial band.
     hop_sequence : array_like of int, optional
         Frequency-hop indices, each in 0..12; ``None`` is the JANUS sequence.
-    window : {'tukey', None}, optional
-        Chip taper (see above). Default ``'tukey'``.
+    window : {'boxcar', 'tukey', None}, optional
+        Chip envelope (see above). Default ``'boxcar'``, the standard's
+        nominal square chip; ``None`` derives that default.
     wakeup : bool, optional
         Prepend the three wake-up tones. Default False.
     """
-    if window not in ('tukey', None):
+    if window not in (None, 'boxcar', 'tukey'):
         raise ConfigurationError(
-            f"janus_modulate: window must be 'tukey' (5 % tapered-cosine "
-            f"chips) or None (rectangular chips); got {window!r}.")
+            f"janus_modulate: window must be 'boxcar' (the standard's "
+            f"nominal square chips; None derives it) or 'tukey' (5 % "
+            f"tapered-cosine chips); got {window!r}.")
     sample_rate = require_positive_finite_scalar(
         sample_rate, "janus_modulate", "sample_rate", " Hz")
     if wakeup:
@@ -459,12 +479,8 @@ def janus_modulate(bits64, *, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_I
                               "janus_modulate",
                               "the top wake-up tone fc + bandwidth/2",
                               "the tone is degenerate (two samples a cycle)")
-    if sample_rate < 2 * (fc + bandwidth / 2):
-        raise ConfigurationError(
-            f"janus_modulate: the band edge fc + bw/2 = {fc + bandwidth / 2:g} Hz "
-            f"is above the Nyquist frequency sample_rate/2 = "
-            f"{sample_rate / 2:g} Hz, so the tones alias; require "
-            f"sample_rate >= {2 * (fc + bandwidth / 2):g} Hz.")
+    _require_band_sampled(sample_rate, fc, bandwidth, "janus_modulate",
+                          "the tones alias")
     sym = janus_encode(bits64)
     freq_min, fsw = _band_params(fc, bandwidth)
     chip_duration = 1.0 / fsw if chip_duration is None else float(chip_duration)
@@ -731,7 +747,7 @@ def _detect_near(x, guess, sample_rate, freq_min, fsw, fh, chip_duration,
     return None if start is None else lo + start
 
 
-def janus_detect(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_INITIAL,
+def janus_detect(waveform, sample_rate, fc=FC_INITIAL, bandwidth=BW_INITIAL,
                  chip_duration=None, hop_sequence=None, doppler_max_speed=DEFAULT_DOPPLER_MAX_SPEED):
     """Locate the 32-chip preamble (CMRE GO-CFAR). Returns ``(start, statistic)``.
 
@@ -753,8 +769,8 @@ def janus_detect(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_INIT
     ----------
     waveform : array_like
         The real passband recording.
-    sample_rate : float, optional
-        Sample rate (Hz), at least ``2*(fc + bandwidth/2)``. Default 48 kHz.
+    sample_rate : float
+        Sample rate (Hz) of the recording, at least ``2*(fc + bandwidth/2)``.
     fc : float, optional
         Band centre frequency (Hz). Default 11520, the JANUS initial band.
     bandwidth : float, optional
@@ -771,6 +787,8 @@ def janus_detect(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_INIT
     """
     sample_rate = require_positive_finite_scalar(
         sample_rate, "janus_detect", "sample_rate", " Hz")
+    _require_band_sampled(sample_rate, fc, bandwidth, "janus_detect",
+                          "the recording holds those tones aliased")
     freq_min, fsw = _band_params(fc, bandwidth)
     chip_duration = 1.0 / fsw if chip_duration is None else float(chip_duration)
     fh = (FH_SEQUENCE if hop_sequence is None else
@@ -875,6 +893,9 @@ class JanusReception(ResultTuple,
                      namedtuple("JanusReception", "bits crc_ok")):
     """What :func:`janus_demodulate` returns: the 64 decoded ``bits`` and
     ``crc_ok``, whether the CRC-8 over the first 56 bits matches the last 8.
+    When the frame found runs past the end of the recording — on a buffer
+    of noise alone the detector's best candidate often does — nothing is
+    decoded: ``bits`` is ``None`` and ``crc_ok`` is ``False``.
 
     The tuple is the decode, so ``bits, crc_ok = janus_demodulate(x, fs)``
     unpacks it. How the packet was found rides on attributes, which survive
@@ -911,7 +932,7 @@ class JanusReception(ResultTuple,
         return {"bits": "", "crc_ok": ""}
 
 
-def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_INITIAL,
+def janus_demodulate(waveform, sample_rate, fc=FC_INITIAL, bandwidth=BW_INITIAL,
                      chip_duration=None, hop_sequence=None, start=None,
                      doppler_max_speed=DEFAULT_DOPPLER_MAX_SPEED,
                      sound_speed=DEFAULT_SOUND_SPEED):
@@ -928,8 +949,14 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_
     recordings. The 144 data chips are detected non-coherently
     and decoded. Parse the 64 bits with :meth:`JanusPacket.from_bits`, or use
     :func:`janus_receive`. A frame whose data chips run past the end of the
-    recording is refused with :class:`ConfigurationError` rather than
-    decoded.
+    recording is not decoded: a cut-off chip scores as silence, and a frame
+    of such chips decodes to the all-zero packet, whose CRC-8 is valid. Its
+    :class:`JanusReception` holds ``bits=None`` and ``crc_ok=False``, with
+    where the frame was found. On a recording of noise alone the detector's
+    best candidate often lands there: 6 of 12 white-noise records (2 s and
+    6 s at 48 kHz) did, and the other 6 decoded to bits with
+    ``crc_ok=False`` (measured), so a loop over a stream reads both as "no
+    packet" from ``crc_ok``.
 
     The :class:`JanusReception` carries, beside the bits and ``crc_ok``,
     whether the detector's GO-CFAR threshold was crossed, the preamble
@@ -948,8 +975,8 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_
     ----------
     waveform : array_like
         The real passband recording.
-    sample_rate : float, optional
-        Sample rate (Hz), at least ``2*(fc + bandwidth/2)``. Default 48 kHz.
+    sample_rate : float
+        Sample rate (Hz) of the recording, at least ``2*(fc + bandwidth/2)``.
     fc : float, optional
         Band centre frequency (Hz). Default 11520, the JANUS initial band.
     bandwidth : float, optional
@@ -972,12 +999,8 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_
     """
     sample_rate = require_positive_finite_scalar(
         sample_rate, "janus_demodulate", "sample_rate", " Hz")
-    if sample_rate < 2 * (fc + bandwidth / 2):
-        raise ConfigurationError(
-            f"janus_demodulate: the band edge fc + bw/2 = {fc + bandwidth / 2:g} Hz "
-            f"is above the Nyquist frequency sample_rate/2 = "
-            f"{sample_rate / 2:g} Hz, so the recording holds those tones "
-            f"aliased; require sample_rate >= {2 * (fc + bandwidth / 2):g} Hz.")
+    _require_band_sampled(sample_rate, fc, bandwidth, "janus_demodulate",
+                          "the recording holds those tones aliased")
     freq_min, fsw = _band_params(fc, bandwidth)
     chip_duration = 1.0 / fsw if chip_duration is None else float(chip_duration)
     fh = (FH_SEQUENCE if hop_sequence is None else
@@ -1046,15 +1069,12 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_
     held = np.clip(x.size - data[:-1], 0, np.diff(data))
     past = int(np.count_nonzero(held < np.diff(data) / 2.0))
     if past:
-        raise ConfigurationError(
-            f"janus_demodulate: the frame found at {(offset + start) / fs:.3f} s "
-            f"runs past the end of the {record_size / fs:.3f} s recording: "
-            f"{past} of "
-            f"its {_N_CODED} data chips hold less than half their samples, "
-            f"so it is not decoded. Record the whole packet "
-            f"({_N_TOTAL_CHIPS} chips of "
-            f"{chip_duration * 1e3:g} ms after the preamble start); on a recording that "
-            f"holds no packet this is the detector's best candidate in noise.")
+        # No complete frame: an outcome, as on a buffer holding no packet,
+        # not an error in what was asked.
+        return JanusReception(
+            None, False, detected=detected,
+            start=given_start if given_start is not None else found_at,
+            doppler_scale=a, statistic=statistic)
     sym = np.empty(_N_CODED, dtype=int)
     for i in range(_N_CODED):
         seg = x[bounds[_PREAMBLE_CHIPS + i]:bounds[_PREAMBLE_CHIPS + i + 1]]
@@ -1072,36 +1092,42 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_
         doppler_scale=a, statistic=statistic)
 
 
-def janus_transmit(packet: JanusPacket, *, sample_rate=48000.0, **kwargs):
+def janus_transmit(packet: JanusPacket, *, sample_rate, **kwargs):
     """Convenience: a :class:`JanusPacket` -> real JANUS waveform.
 
     Parameters
     ----------
     packet : JanusPacket
         The packet to send.
-    sample_rate : float, optional
-        Sample rate (Hz). Default 48 kHz.
+    sample_rate : float
+        Sample rate (Hz).
     **kwargs
         :func:`janus_modulate`'s keywords.
     """
     return janus_modulate(packet.to_bits(), sample_rate=sample_rate, **kwargs)
 
 
-def janus_receive(waveform, sample_rate=48000.0, **kwargs):
-    """Convenience: a JANUS waveform -> ``(JanusPacket, crc_ok)``.
+def janus_receive(waveform, sample_rate, **kwargs):
+    """Convenience: a JANUS waveform -> ``(packet, reception)``.
 
-    ``kwargs`` are :func:`janus_demodulate`'s, whose
-    :class:`JanusReception` also says how the packet was found.
+    ``packet`` is the :class:`JanusPacket` the decoded bits parse to, and
+    ``reception`` the :class:`JanusReception` :func:`janus_demodulate`
+    returned: ``reception.crc_ok`` says whether the packet's CRC-8 holds,
+    and its attributes how the packet was found. When no complete frame was
+    in the recording, ``packet`` is ``None`` and ``reception.crc_ok`` is
+    ``False``.
 
     Parameters
     ----------
     waveform : array_like
         The real passband recording.
-    sample_rate : float, optional
-        Sample rate (Hz). Default 48 kHz.
+    sample_rate : float
+        Sample rate (Hz) of the recording.
     **kwargs
         :func:`janus_demodulate`'s keywords.
     """
-    bits64, crc_ok = janus_demodulate(waveform, sample_rate, **kwargs)
-    pkt, _ = JanusPacket.from_bits(bits64)
-    return pkt, crc_ok
+    reception = janus_demodulate(waveform, sample_rate, **kwargs)
+    if reception.bits is None:
+        return None, reception
+    pkt, _ = JanusPacket.from_bits(reception.bits)
+    return pkt, reception

@@ -9,9 +9,7 @@ Field.at().plot() · env.plot()
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -39,10 +37,9 @@ source = uacpy.Source(depths=50.0, frequencies=100.0)
 receiver = uacpy.Receiver(depths=np.linspace(5, 95, 50),
                           ranges=np.linspace(100, 10000, 100))
 
-# 300 beams over ±80°, enough to fill a 100 m duct out to 10 km.
-field = uacpy.Bellhop(backend='fortran', n_beams=300,
-                      launch_angles=(-80, 80)).run(
-    env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+# 300 beams over the default ±80° fan, enough to fill a 100 m duct out to
+# 10 km; one frequency runs coherent TL by default.
+field = uacpy.Bellhop(backend='fortran', n_beams=300).run(env, source, receiver)
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 # The field is complex pressure; it draws itself as TL on the fixed 20–120 dB

@@ -27,7 +27,7 @@ aspect of the ocean:
 |---|---|---|---|
 | `bathymetry` | `Bathymetry` | seafloor depth vs range | **required** |
 | `ssp` | `SoundSpeedProfile` | water sound speed `c(z)` or `c(z, r)` | isovelocity 1500 m/s |
-| `bottom` | `Bottom` | seabed acoustic properties | 1600 m/s / 1.5 g/cm³ / 0.5 dB/λ half-space |
+| `bottom` | `Bottom` | seabed acoustic properties | 1600 m/s / 1.5 g/cm³ / 0.5 dB/λ half-space (uacpy guidance) |
 | `surface` | `Surface` | top-boundary acoustic properties | vacuum (pressure release) |
 | `altimetry` | `Altimetry` or `None` | sea-surface **shape** vs range | `None` (flat, z = 0) |
 | `absorption` | `Absorption`, `AbsorptionCoefficient` or `None` | water-column volume attenuation | `None` |
@@ -79,7 +79,7 @@ env = uacpy.Environment(
         ranges=[0.0, 20_000.0],
     ),
     altimetry=uacpy.generate_sea_surface(
-        20_000.0, wind_speed_kn=30.0, n_points=1200,
+        20_000.0, wind_speed_19_5m_kn=30.0, n_points=1200,
         rng=np.random.default_rng(0)),
 )
 source = uacpy.Source(depths=40.0, frequencies=150.0)
@@ -141,7 +141,7 @@ uacpy.Environment(bathymetry=100.0, ssp=[(0, 1500), (200, 1480)]).depth
 | `env.depth` | max seafloor depth (m) |
 | `env.range_max` | range extent across all carriers (m) |
 | `env.ssp.sound_speed_at(depths, range=0.0, method='linear')` | `c` at depth(s) |
-| `env.bathymetry.collapse_range(method)` | `'max'`/`'median'`/`'mean'`/`'min'`/`'initial'` |
+| `env.bathymetry.collapse_range(method)` | `'max'`/`'median'`/`'mean'`/`'min'`/`'r0'`/`'rmax'` |
 | `env.is_range_dependent` | does *anything* vary with range? |
 | `env.bathymetry.is_range_dependent` / `env.ssp.is_range_dependent` / `env.bottom.is_range_dependent` / `env.surface.is_range_dependent` | per-axis: more than one range node |
 | `env.bathymetry.varies_with_range` | do the depths change with range? |
@@ -180,8 +180,12 @@ speed on `(depth, range)`, the seafloor depth and the surface height on
 field as JSON in the group's `uacpy_fields` attribute. It needs a NetCDF engine
 that writes groups (netCDF4 or h5netcdf, through the `uacpy[xarray]` extra).
 
-Every carrier has the same calls on its own: `to_dict()` / `from_dict()`, and
-`to_xarray()` / `from_xarray()`. `Bottom`, `SeabedColumn` and `Surface` also
+Every carrier has the same calls on its own: `to_dict()` / `from_dict()`,
+`to_xarray()` / `from_xarray()` and `to_netcdf(path)` / `from_netcdf(path)`
+(`uacpy.SoundSpeedProfile.from_netcdf('ssp.nc')`; a file of another class is
+refused, naming the call that reads it). A `Source` exports its depths and
+frequencies, a `Receiver` its depths and ranges, as labelled coordinates.
+`Bottom`, `SeabedColumn` and `Surface` also
 have `to_dataframe()`: one row per layer, then the half-space, with its `top`
 and `bottom` below the seafloor (one row per range node for a surface);
 `Receiver.grid()` gives the `(Z, R)` depth and range of every receiver,
@@ -235,7 +239,7 @@ from figure_scripts._common import sloping_shelf   # 100 m shelf → 400 m over 
 
 env, _, _ = sloping_shelf()
 altimetry = uacpy.Altimetry.coerce(uacpy.generate_sea_surface(
-    2000.0, wind_speed_kn=24.0, n_points=800,
+    2000.0, wind_speed_19_5m_kn=24.0, n_points=800,
     rng=np.random.default_rng(7)))
 
 altimetry.plot(title='Altimetry — sea-surface height, positive up')
@@ -246,7 +250,7 @@ env.bathymetry.plot(title='Bathymetry — seafloor depth, positive down')
 
 The two panels are the same kind of object with opposite sign conventions:
 the altimetry axis points up and crosses zero, the bathymetry axis points down
-and cannot. `wind_speed_kn` is the wind at 19.5 m (the Pierson–Moskowitz
+and cannot. `wind_speed_19_5m_kn` is the wind at 19.5 m (the Pierson–Moskowitz
 convention), in knots; significant wave height is `Hs ≈ 0.021·U²` with `U`
 in m/s, so 24 kn (12.3 m/s) gives `Hs ≈ 3 m` — consistent with the ±2 m
 excursions above. Pass
@@ -277,7 +281,7 @@ range-independent case.
 | `SoundSpeedProfile.from_pairs([(z, c), …])` | measured cast — the common case |
 | `SoundSpeedProfile.from_isovelocity(depth_max, sound_speed=1500.0)` | constant column |
 | `SoundSpeedProfile.from_munk(depth_max, n_points=101)` | deep-water canonical profile |
-| `SoundSpeedProfile.from_temperature_salinity(depths, temperature, salinity, *, formula=None, latitude_deg=None)` | from in-situ `T(z)` and `S(z)`: values on `depths`, single values, or `(depth, value)` pairs (§6 states the rule); `formula=None` is TEOS-10 |
+| `SoundSpeedProfile.from_temperature_salinity(depths, temperature, salinity, *, formula=None, latitude=None)` | from in-situ `T(z)` and `S(z)`: values on `depths`, single values, or `(depth, value)` pairs (§6 states the rule); `formula=None` is TEOS-10 |
 | `SoundSpeedProfile.from_2d(depths, ranges, matrix)` | range-dependent `c(z, r)` on one shared depth axis |
 | `SoundSpeedProfile.from_casts(ranges, casts, *, depths=None)` | range-dependent from casts on their own depth grids: sorted, repeated depths averaged, interpolated onto the union of depths, a short cast holding its deepest value |
 
@@ -328,8 +332,9 @@ profiles).
 This split matters and is easy to trip over:
 
 - The **carrier** declares what its samples *are*, via
-  `SoundSpeedProfile(kind=…)`: `'measured'` (default), `'isovelocity'`,
-  `'munk'`, `'analytic'` or `'n2linear'`.
+  `SoundSpeedProfile(kind=…)`: `'measured'` (default), `'isovelocity'` or
+  `'munk'`. The scheme names `'analytic'` and `'n2linear'` are refused as a
+  `kind`, naming `interp_ssp=`.
 - The **model** decides how to *connect* those samples, via
   `Model(interp_ssp=…)`: `'linear'`, `'n2linear'`, `'pchip'`, `'spline'`,
   `'quad'` (Bellhop only), or `None` for auto. `'analytic'` is refused: the
@@ -492,9 +497,11 @@ Wentworth grain size, undefined for consolidated rocks. Rows `clay` … `basalt`
 are Jensen, Kuperman, Porter & Schmidt Table 1.3; `granite` has no row there and
 is Ainslie, *Principles of Sonar Performance Modelling* (2010), Table 4.20
 instead — two sources, each row the one named for it, never a blend. The `c_s`
-of silt, sand and gravel stands in for a depth-dependent `c_s(z̄)` that Table 1.3
-leaves as a relation, and the depth that single value refers to is not recorded
-there, so pass an explicit `shear_speed` when the depth matters.
+of silt, sand and gravel is Table 1.3's depth-dependent law (its footnotes:
+`c_s = 80 z̄^0.3`, `110 z̄^0.3`, `180 z̄^0.3`) evaluated at `z̄ = 1`; ten
+depth units down the same law gives about twice that, so pass an explicit
+`shear_speed` when the depth matters. Clay's 80 m/s is uacpy guidance under the
+table's "< 100".
 
 Three constructors read the catalogue:
 
@@ -705,7 +712,7 @@ evaluated per bin on a broadband sweep.
 | `Thorp()` | none | no |
 | `FrancoisGarrison(temperature=10, salinity=35, pH=8, ph_scale='nbs')` | the water (reference water by default) and the scale `pH` is on; `(depth, value)` pairs per property for a T/S profile | yes |
 | `Biological(layers=[(z_top, z_bottom, f0, Q, a0), …])` | per-layer resonance | yes, by layer |
-| `ConstantAbsorption(value_dB_per_wavelength)` | one | no |
+| `ConstantAbsorption(value)` | one | no |
 
 ```python
 freqs = np.logspace(1, 5.7, 400)
@@ -715,7 +722,7 @@ uacpy.FrancoisGarrison(temperature=20.0, salinity=35.0,
                        pH=8.0).table(freqs, depths=50.0).plot(ax=ax)
 uacpy.FrancoisGarrison(temperature=4.0, salinity=35.0,
                        pH=8.0).table(freqs, depths=3000.0).plot(ax=ax)
-uacpy.ConstantAbsorption(value_dB_per_wavelength=1.0e-4).table(freqs).plot(ax=ax)
+uacpy.ConstantAbsorption(value=1.0e-4).table(freqs).plot(ax=ax)
 uacpy.Biological(layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)]).table(
     freqs, depths=50.0).plot(ax=ax)
 ```
@@ -735,7 +742,7 @@ reference-water defaults (10 °C, 35 PSU, pH 8) of
 `absorption_francois_garrison`, so `FrancoisGarrison().table(f)` is that
 formula's surface curve like `Thorp().table(f)` is Thorp's. The law has no
 depth of its own: the formula's depth (pressure) term varies down the
-column, so every evaluation — `table`, `alpha_dB_per_m`, every engine —
+column, so every evaluation — `table`, every engine —
 takes the depth it is evaluated at, and every engine sees the same α(z). The
 carrier's
 `.parameters` records the values used (`FrancoisGarrison(**a.parameters)` is
@@ -744,7 +751,7 @@ dB/km, named `absorption_<model>` like `sound_speed_mackenzie` —
 `uacpy.acoustics.absorption_thorp(frequency, depth=None)`,
 `uacpy.acoustics.absorption_francois_garrison(frequency, temperature=10.0,
 salinity=35.0, pH=8.0, depth=None)` and
-`uacpy.acoustics.absorption_biological(frequency, f0_hz, Q, a0)`, one
+`uacpy.acoustics.absorption_biological(frequency, f0, Q, a0)`, one
 biological layer's resonance.
 
 Reading the curves:
@@ -860,8 +867,12 @@ What the environment does with a table:
   its frequencies. A run at a frequency outside the table is refused
   (`ConfigurationError`): a table has no law to extrapolate with. Rows that
   stop short of the water column are held at the end row, and the
-  environment says so (`ValidityWarning`). `env.absorption` prints as the
-  table, and the environment's repr shows `absorption=tabulated`.
+  environment says so (`ValidityWarning`). `env.absorption` is your
+  table — the environment's own copy, still an `AbsorptionCoefficient`
+  with its `.plot()`, `.data`, `.frequencies` and exports — and the
+  environment's repr shows `absorption=tabulated`. Every engine reads it
+  through the same tabulated law, and a Bellhop `Arrivals` keeps it as its
+  `.absorption`.
 
 A measured table also comes from `(frequency, value)` pairs, the counterpart
 of `SoundSpeedProfile.from_pairs`:
@@ -939,7 +950,8 @@ Seven solvers make seven different approximations, and the approximation
 decides what each can represent. [Scooter](../models/scooter.md) integrates over
 a horizontally stratified medium, so a sloping seafloor is not something it can
 express. [Bellhop](../models/bellhop.md) is a fluid ray tracer with no layered
-seabed. [RAM](../models/ram.md) is one-way, so it cannot take a rough surface.
+seabed. [RAM](../models/ram.md) reads a sea-surface shape (`ramsurf`,
+depressions only) but no interface RMS roughness.
 
 A library has three options when you hand a model something it cannot consume:
 refuse, silently ignore, or reduce it under a stated policy. uacpy takes the
@@ -956,7 +968,7 @@ overrides it.
 ```
 FallbackWarning: Scooter does not support range-dependent bathymetry;
 collapsed to 380.0 m (method='max', range 90.0–380.0 m). Override via
-`collapse={'bathymetry': 'max'|'median'|'mean'|'min'|'initial'}`.
+`collapse={'bathymetry': 'max'|'median'|'mean'|'min'|'r0'|'rmax'}`.
 ```
 
 Your `env` is never mutated — the model works on a copy.
@@ -965,7 +977,7 @@ Your `env` is never mutated — the model works on a copy.
 
 | Key | Applies when | Methods | Default |
 |---|---|---|---|
-| `bathymetry` | seafloor varies with range | `max`, `median`, `mean`, `min`, `initial` | `max` |
+| `bathymetry` | seafloor varies with range | `max`, `median`, `mean`, `min`, `r0`, `rmax` | `max` |
 | `ssp` | 2-D sound-speed profile | `r0`, `rmax`, `mean`, `median` | `r0` |
 | `bottom_range` | seabed varies with range | `r0`, `rmax`, `mean`, `median` | `median` |
 | `bottom_layers` | seabed has layers | `halfspace`, `top_layer`, `volume_average` | `halfspace` |
@@ -973,15 +985,13 @@ Your `env` is never mutated — the model works on a copy.
 | `surface` | top properties vary with range | `r0`, `rmax`, `mean`, `median` | `r0` |
 | `elastic` | any shear present | `fluid`, `vacuum` | `fluid` |
 
-`bottom_layers='volume_average'` is a thickness-weighted **arithmetic** mean of
-`c`, `ρ` and dB/λ (and the shear pair) over the finite layers *and* the
+`bottom_layers='volume_average'` is the thickness-weighted **arithmetic** mean
+of `c`, `ρ` and dB/λ (and the shear pair) over the finite layers *and* the
 half-space, which is weighted by the deepest layer's thickness because it has
-none of its own. It is a bookkeeping number with no acoustic basis: 1 m of
-1500 m/s, 1.4 g/cm³ mud over a 5250 m/s, 2.7 g/cm³ basalt half-space collapses
-to 3375 m/s, where Wood's rule (averaging ρ and the compliance 1/ρc² over the
-same two metres) would give about 1720 m/s. When the top layer is what the
-field sees, use `'top_layer'`; when the stack matters, use a model that keeps
-it (`supports_feature('layered_bottom')`).
+none of its own: 1 m of 1500 m/s, 1.4 g/cm³ mud over a 5250 m/s, 2.7 g/cm³
+basalt half-space collapses to 3375 m/s and 2.05 g/cm³. `'top_layer'` keeps the
+top layer's values; a model that keeps the whole stack is listed by
+`supports_feature('layered_bottom')`.
 
 Set them on the constructor:
 
@@ -1030,7 +1040,7 @@ whole path.
 ### What it looks like
 
 ```python
-env, source, _ = shelf_break()   # the §1 environment: RD layered bottom, rough surface
+env, source, _ = shelf_break()   # the §1 environment (figure_scripts/environment.py): RD layered bottom, rough surface
 
 # Bellhop(auto_bounce=False) takes range dependence and the rough surface
 # natively. It reads no layered bottom, so every column is flattened to its
@@ -1098,7 +1108,7 @@ undocumented and unwarned.
 
 **The reduction is yours to choose.** `max` is the safe default for bathymetry
 because it never puts a receiver below the seafloor, but if you are modelling
-the shallow end, `initial` or `min` is the better answer. The policy is a
+the shallow end, `r0` or `min` is the better answer. The policy is a
 keyword, not a hard-coded assumption.
 
 When the collapse is not acceptable, that is the signal to change model, not to
@@ -1117,9 +1127,13 @@ construction, naming the g/cm³ value meant: no seabed is that dense. Two
 slips that could in principle be a real value warn instead, with a
 `ValidityWarning`: a sound speed under 10 m/s (typed in km/s) on a profile or
 a seabed, and a seabed attenuation over 10 dB/wavelength, ten times the most
-lossy seabed of JKPS Table 1.3 (typed in dB/km or dB/m). Receiver ranges all
-inside one wavelength of the source warn at run time (typed in km at low
-frequency).
+lossy seabed of JKPS Table 1.3 (typed in dB/km or dB/m). Past 54.575
+dB/wavelength the imaginary sound speed exceeds the real one and the
+Acoustics-Toolbox solvers abort (`misc/AttenMod.f90:116`): the carrier keeps
+the value with a `ValidityWarning`, OASES and RAM run it, and a Kraken,
+Scooter, SPARC, Bounce or Bellhop deck refuses it, naming the medium. Receiver
+ranges all inside one wavelength of the source warn at run time (typed in km
+at low frequency).
 
 **Depth is positive down, altimetry positive up.** Range is measured from the
 source, which sits at `r = 0`.
@@ -1137,7 +1151,7 @@ engine would agree. `env.water_density`
 rows of every deck that has one — Acoustics Toolbox and Bellhop SSP rows,
 OASES water layers — and the engines that fix the water at 1 and read seabed densities
 as ratios (the four RAM codes, and BOUNCE, whose `R` is referenced to a unit
-density) receive each seabed density divided by it. `uacpy.acoustics.density(T, S) / 1000` gives the value for a measured
+density) receive each seabed density divided by it. `uacpy.acoustics.density(T, S)` (g/cm³) gives the value for a measured
 column, and `fetch_environment` sets it from the same T/S row that builds its
 Francois-Garrison absorption. Textbook benchmarks take ρw = 1 by convention:
 pass `water_density=1.0` to reproduce one.
@@ -1155,11 +1169,10 @@ Without `env=`, a TL plot spans only the receiver grid and draws no seabed.
 That is correct behaviour, not a missing feature: the result genuinely does not
 know what water it came from. See [results](results.md).
 
-**Carriers are stored by reference, not copied.** `Environment` does not
-deep-copy the `ssp` / `bottom` / `surface` you pass. Models copy the whole
-environment before touching anything, so your object is safe from *them* — but
-if you mutate `env.ssp` in place yourself, you mutate the original. Use
-`env.copy()` first.
+**The environment keeps its own copy of every carrier.** Editing the `ssp` /
+`bottom` / `surface` object you passed does not change `env` afterwards. To
+change the environment, assign the new carrier (`env.ssp = ssp`): the
+assignment is checked as the constructor checks the same argument.
 
 **`at` never fabricates, `eval` interpolates.** Across every uacpy carrier and
 result: `at` returns the nearest stored sample, `eval` interpolates, `isel`

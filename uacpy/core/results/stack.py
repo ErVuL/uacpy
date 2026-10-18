@@ -14,6 +14,7 @@ from uacpy.core._plotting import plotter
 from uacpy.core._grid import nearest_index_on_axis
 from uacpy.core.results._base import Result, _integer_index, coordinate_axis
 from uacpy.core.results.field import Field, _AXIS_IDENTITY_ATTR
+from uacpy.core.results._superposition import _same_value, _stacked_record
 
 
 class ResultStack(Result):
@@ -31,10 +32,13 @@ class ResultStack(Result):
     bundles the non-Field results of a sweep the same way. A Field is never
     a slab.
 
-    Every slab has the same concrete type, ``model`` and ``backend``, and
-    the same identity along every axis *except* the stacking one. The stack
-    is a :class:`Result`: its identity is its first slab's (the stacking
-    axis excepted), and it saves and loads as every result does —
+    Every slab has the same concrete type, ``model``, ``backend``,
+    ``run_mode``, ``phase_reference``, ``source_level_dB`` and
+    ``source_weights``, and the same identity along every axis *except* the
+    stacking one. The stack is a :class:`Result`: its identity is the one
+    its slabs share (the stacking axis excepted; :attr:`run_settings` is
+    ``None`` when their records differ), and it saves and loads as every
+    result does —
     :meth:`to_dict` / :meth:`from_dict` (npz), :meth:`to_netcdf` /
     :meth:`~Result.from_netcdf` (each slab in its own NetCDF group), and
     :meth:`~uacpy.core._export.Exportable.to_dataframe` (the slabs' tables
@@ -92,28 +96,23 @@ class ResultStack(Result):
                 f"type; got {sorted(t.__name__ for t in types)}."
             )
 
+        # The identity the stack states as its own, which every slab must
+        # share (the one rule stack_fields applies to a Field); the run
+        # settings may differ, and then the stack states none
+        # (:attr:`run_settings`).
         varying_attr = _AXIS_IDENTITY_ATTR.get(str(coordinate_name))
-        shared_attrs = ['model', 'backend']
+        shared_attrs = ['model', 'backend', 'run_mode', 'phase_reference',
+                        'source_level_dB', 'source_weights']
         for attr in ('frequencies', 'source_depths'):
             if attr != varying_attr:
                 shared_attrs.append(attr)
 
         first = slabs[0]
-
-        def _equal(a, b):
-            if a is None or b is None:
-                return a is None and b is None
-            if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
-                a = np.asarray(a)
-                b = np.asarray(b)
-                return a.shape == b.shape and np.array_equal(a, b)
-            return bool(a == b)
-
         for attr in shared_attrs:
             ref = getattr(first, attr, None)
             for i, s in enumerate(slabs[1:], start=1):
                 val = getattr(s, attr, None)
-                if not _equal(ref, val):
+                if not _same_value(ref, val):
                     # The two attributes a stack may vary along name their
                     # own stacking coordinate, so a sweep over one of them
                     # is told which coordinate_name admits it.
@@ -200,9 +199,16 @@ class ResultStack(Result):
 
     @property
     def run_settings(self):
-        """The settings the run that produced the stack used (every slab
-        carries the same record)."""
-        return self.slabs[0].run_settings
+        """The run record the slabs share, by the rule
+        :func:`~uacpy.core.results.stack_fields` gives a Field: the one record
+        when every slab holds the same (the slabs of one run); the
+        multi-depth record (``source_depths`` the axis, ``depth_loop=
+        'per_depth'``) when one-depth runs differ only in their source depth
+        and the stack is over ``'source_depth'``; ``None`` when the records
+        differ otherwise (a sweep over a knob), each slab keeping its own
+        (``stack[i].run_settings``)."""
+        return _stacked_record(self.slabs, self.coordinate,
+                               self.coordinate_name)
 
     @property
     def frequencies(self) -> Optional[np.ndarray]:
@@ -374,6 +380,12 @@ class ResultStack(Result):
             out[column] = np.concatenate([np.asarray(t[column])
                                           for t in tables])
         return out
+
+    def _table_units(self) -> Dict[str, str]:
+        """The slabs' column units, after the stacking axis's own."""
+        from uacpy.core.results.quantities import coordinate_unit
+        return {self.coordinate_name: coordinate_unit(self.coordinate_name),
+                **self.slabs[0]._table_units()}
 
     def _netcdf_parts(self, group, parts) -> None:
         """The stack's own part — its coordinate, named by the stacking

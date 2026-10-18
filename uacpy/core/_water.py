@@ -33,6 +33,12 @@ class WaterProfile(ExportRecord):
     so a law's water can be passed to a formula as it is. It saves and
     loads with the law that holds it.
 
+    ``profile.values`` is the array of property values, not a method: on
+    this record the field takes the name of the ``values()`` method every
+    other exported object carries, so ``profile.values()`` raises
+    ``TypeError`` ('numpy.ndarray' object is not callable). Read
+    ``profile.values`` and ``profile.depths`` directly.
+
     Parameters
     ----------
     depths : array_like
@@ -49,7 +55,9 @@ class WaterProfile(ExportRecord):
 
     depths: np.ndarray
     # An explicit field() keeps the inherited protocol method values() from
-    # becoming this field's default, so the field is required.
+    # becoming this field's default, so the field is required. The field
+    # shadows the export protocol's values() on purpose: the record is the
+    # carriers' storage of a profile, read as ``profile.values``.
     values: np.ndarray = field()
 
     _ARRAY_FIELDS = ('depths', 'values')

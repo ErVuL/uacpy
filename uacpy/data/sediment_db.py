@@ -43,10 +43,12 @@ from uacpy.core.geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
 from uacpy.data._geo import checked_max_distance, checked_offset
 from uacpy.data._http import http_get, checked_member_size
 from uacpy.data.sources import SOURCES, DataProvenance
-from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
+from uacpy.core.environment import BoundaryProperties
+from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_ENVIRONMENT,
+                                 DEFAULT_GRAIN_SIZE_MODEL,
+                                 _grain_size_to_geoacoustics)
 from uacpy.data._provenance_notice import provenance_notice
-from uacpy.data.sediment import (SeabedSample, bottom_from_class,
-                                 bottom_from_grain_size,
+from uacpy.data.sediment import (SeabedSample,
                                  range_dependent_bottom_along,
                                  water_sound_speed_at)
 
@@ -58,7 +60,7 @@ __all__ = ['download_sediment_db', 'fetch_sediment_sample', 'fetch_bottom_grains
 #: Farthest sample (km) searched without a caller's ``max_distance_km``: past
 #: it no sample answers, so ``bottom_sources='auto'`` falls through to the
 #: Diesing map and the pelagic model rather than taking a sample from
-#: another sea.
+#: another sea. uacpy guidance (a search budget), not a physical bound.
 SAMPLE_SEARCH_RADIUS_KM = 250.0
 
 # NCEI Seafloor Sediment Grain-Size Database (G00127, public domain): a ~3 MB
@@ -66,11 +68,16 @@ SAMPLE_SEARCH_RADIUS_KM = 250.0
 # from the grain-size distribution to build the normalized grainsize.csv.
 GRAINSIZE_TARBALL_URL = (
     'https://www.ngdc.noaa.gov/mgg/geology/data/g00127/g00127.tar.gz')
-# Clamp the open-ended catch-all ϕ bins to the real Wentworth range before
-# taking bin centres (the raw data uses sentinels like -50 / 51).
+# Clamp the open-ended catch-all ϕ bins (the raw data uses sentinels like
+# -50 / 51) to these limits before taking bin centres. uacpy guidance: the
+# limits are a choice, not a published range.
 _PHI_CLAMP = (-5.0, 13.0)
 
-# DECK41 dominant-lithology terms → representative Wentworth grain size (ϕ).
+# DECK41 dominant-lithology terms → representative grain size (ϕ). 'sand',
+# 'silt' and 'clay' take APL-UW TR 9407 Table 2's medium sand (1.5), medium
+# silt (5.5) and clay (9.0) rows; 'mud' the midpoint of Folk's mud aggregate
+# (7.5, ``mars._grade_midpoint_phi``). The oozes' values are uacpy guidance:
+# no source cited here gives a grain size for them.
 _DECK41_LITHOLOGY_TO_PHI = {
     'sand': 1.5, 'silt': 5.5, 'clay': 9.0, 'mud': 7.5,
     'ooze': 7.5, 'calcareous ooze': 7.5, 'siliceous ooze': 8.5,
@@ -381,22 +388,17 @@ _PHI_CLASS_SENTINEL_MATERIAL = {-99.0: 'limestone', -98.0: 'gravel'}
 
 #: Separation (km) within which a grain-size sample and a lithology
 #: description are treated as describing the same patch of seabed, so the
-#: quantitative one wins on precision alone. Both numbers here are a judgement
-#: about how fast the seabed decorrelates with distance, not a measurement:
-#: they are deliberately round, and nothing published pins them. The scale they
-#: are set against is the one the geoacoustic literature works at — Jensen,
-#: Kuperman, Porter & Schmidt §1.6 requires "information on the variation of
-#: all of these parameters with geographical position", and shelf sediment
-#: provinces turn over in tens of kilometres — so a few km is inside one
-#: province and a hundred is not.
+#: quantitative one wins on precision alone. uacpy guidance: both numbers here
+#: are a judgement, deliberately round, and nothing published pins them —
+#: Jensen, Kuperman, Porter & Schmidt §1.6 require "information on the
+#: variation of all of these parameters with geographical position" but give
+#: no distance over which a seabed stays the same.
 _SAME_SEABED_KM = 5.0
 
 #: How much farther than the nearest lithology description a grain-size sample
-#: may sit and still be preferred, once both are past :data:`_SAME_SEABED_KM`.
-#: A measured mean ϕ is worth perhaps ±0.2 against ±1 for a class-derived one,
-#: which buys some distance but nowhere near an order of magnitude: past this
-#: the sample is describing different seabed, and being quantitative about the
-#: wrong place is worse than being approximate about the right one.
+#: may sit and still be preferred, once both are past :data:`_SAME_SEABED_KM`:
+#: a measured mean ϕ is preferred to a class-derived one up to this factor,
+#: and past it the nearer description answers. uacpy guidance (see above).
 _QUANTITATIVE_REACH_FACTOR = 3.0
 
 
@@ -435,9 +437,9 @@ def fetch_sediment_sample(point, *, max_distance_km=None):
     quantitative grain-size sample is preferred over a lithology description
     at *comparable* range (see :func:`_prefers_grain_size` and the constants
     above it), and the nearer sample wins once they are far enough apart to be
-    describing different seabed. Merging them into one tree let a marginally
+    describing different seabed. One merged tree would let a marginally
     nearer class beat a better sample; preferring the sample unconditionally
-    let one a hundred times farther away beat a class next door.
+    would let one a hundred times farther away beat a class next door.
 
     A sample farther than :data:`SAMPLE_OFFSET_WARN_KM` is returned with a
     ``ProvenanceWarning`` (the offset rule: sparse point data, no nearby
@@ -499,9 +501,9 @@ def fetch_sediment_sample(point, *, max_distance_km=None):
 
 
 def fetch_bottom_grainsize(point, *, roughness=0.0, water_sound_speed=None,
+                       water_density=None,
                        model=DEFAULT_GRAIN_SIZE_MODEL, hamilton_fit=None,
-                       max_distance_km=None,
-                       timeout=None, verbose=False):
+                       max_distance_km=None):
     """Model-ready bottom from the nearest local sediment sample.
 
     The NCEI grain-size / DECK41 sample-database provider
@@ -509,18 +511,17 @@ def fetch_bottom_grainsize(point, *, roughness=0.0, water_sound_speed=None,
     EMODnet substrate map is :func:`uacpy.data.emodnet_local.fetch_bottom_emodnet_local`,
     a different dataset.
 
-    ``timeout``/``verbose`` are accepted (and ignored — this backend is offline)
-    for signature uniformity with the network bottom fetchers.
     ``water_sound_speed`` (m/s) scales the grain-size velocity ratio to the
     in-situ near-seabed water; ``None`` uses the Hamilton reference.
+    ``water_density`` (g/cm³) is the near-seabed water the density ratio is carried against; ``None`` uses the package's one water (1.027).
     ``model`` picks the grain-size relations (``'hamilton'`` or
     ``'apl-uw'``); a DECK41 sample whose lithology those relations cannot
     evaluate — rock, and gravel and coarser — routes through its material
     preset and ignores it. ``max_distance_km`` is as in
     :func:`fetch_sediment_sample`.
     """
-    from uacpy.core.sediment import canonical_grain_size_selection
-    model, hamilton_fit = canonical_grain_size_selection(
+    from uacpy.core.sediment import _canonical_grain_size_selection
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who='fetch_bottom_grainsize')
     sample = fetch_sediment_sample(point, max_distance_km=max_distance_km)
     if sample.material is not None:
@@ -533,13 +534,13 @@ def fetch_bottom_grainsize(point, *, roughness=0.0, water_sound_speed=None,
         # depth relation rather than a half-space property. ``porosity`` is
         # the catalogue's own rock/sediment split (None for rocks).
         elastic = MATERIALS[sample.material]['porosity'] is None
-        bottom = bottom_from_class(sample.material, roughness=roughness,
-                                   elastic=elastic)
+        bottom = BoundaryProperties.from_preset(
+            sample.material, elastic=elastic, roughness=roughness)
     else:
-        bottom = bottom_from_grain_size(
+        bottom = BoundaryProperties.from_grain_size(
             sample.grain_size_phi, roughness=roughness, model=model,
             hamilton_fit=hamilton_fit,
-            water_sound_speed=water_sound_speed)
+            water_sound_speed=water_sound_speed, water_density=water_density)
     # Point samples are sparse, so the nearest one can be far from the
     # requested position; the sample's own record says where it came from,
     # so ``citations(env)`` reports the hop and ``prov.offset_km`` measures it.
@@ -577,24 +578,20 @@ def _checked_samples(lats, lons, phis, who):
     return lats, (lons + 180.0) % 360.0 - 180.0, phis
 
 
-def _report_sample_substitutions(phis, who, **conversion):
+def _report_sample_substitutions(phis, who, *, model, hamilton_fit,
+                                 water_sound_speed):
     """One ``ValidityWarning``, under ``who``, naming the samples whose
     grain size lies outside the data the relations come from: the array
     report of :func:`~uacpy.data.grain_size_to_geoacoustics` over every
     sample's ϕ, so a survey of any size reports once. Its counts are of
-    samples. That report, a ``ValidityWarning``, is the only warning the
-    conversion of finite ϕ values gives."""
-    from uacpy.core.sediment import grain_size_to_geoacoustics
-    prefix = 'grain_size_to_geoacoustics: '
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        grain_size_to_geoacoustics(np.asarray(phis, dtype=float),
-                                   **conversion)
-    for w in caught:
-        text = str(w.message)
-        if text.startswith(prefix):
-            text = f"{who}: of the samples, {text[len(prefix):]}"
-        warnings.warn(text, ValidityWarning,
+    samples. The report is taken from the conversion's non-warning twin, so
+    no process-global ``warnings.catch_warnings`` window is opened."""
+    _result, report = _grain_size_to_geoacoustics(
+        np.asarray(phis, dtype=float), model=model,
+        hamilton_fit=hamilton_fit or DEFAULT_GRAIN_SIZE_ENVIRONMENT,
+        water_sound_speed=water_sound_speed, water_density=None, who=who)
+    if report:
+        warnings.warn(f"{who}: of the samples, {report}.", ValidityWarning,
                       skip_file_prefixes=USER_FRAME_SKIP)
 
 
@@ -632,7 +629,9 @@ def bottom_from_samples(lats, lons, phis, start, end, *, n_points='auto',
         Waypoints sampled along the transect; ``'auto'`` (default) probes
         ``max_points`` and keeps the edges of each run of one sample.
     max_points : int, optional
-        The probe count (and the cap on ``n_points``); default 1000.
+        The probe count of ``'auto'``; ``None`` (default) is 1000 (uacpy
+        guidance). An explicit ``n_points`` above an explicit
+        ``max_points`` is refused.
     max_distance_km : float, optional
         Farthest sample (km) a waypoint takes. A waypoint with no sample
         that close is a gap, filled from the nearest covered waypoint with a
@@ -683,15 +682,14 @@ def bottom_from_samples(lats, lons, phis, start, end, *, n_points='auto',
     [1.5, 3.0, 3.0, 7.5, 7.5]
     """
     who = 'bottom_from_samples'
-    from uacpy.core.sediment import canonical_grain_size_selection
-    model, hamilton_fit = canonical_grain_size_selection(
+    from uacpy.core.sediment import _canonical_grain_size_selection
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who=who)
     samples = _checked_samples(lats, lons, phis, who)
     index = _sample_index(*samples)
     limit = checked_max_distance(max_distance_km, who)
     _report_sample_substitutions(
-        samples[2], who, model=model,
-        **({} if hamilton_fit is None else {'hamilton_fit': hamilton_fit}),
+        samples[2], who, model=model, hamilton_fit=hamilton_fit,
         water_sound_speed=(None if callable(water_sound_speed)
                            else water_sound_speed))
     offsets, misses, converted = [], [], {}
@@ -707,14 +705,17 @@ def bottom_from_samples(lats, lons, phis, start, end, *, n_points='auto',
         speed = water_sound_speed_at(water_sound_speed, lat, lon)
         if (phi, speed) not in converted:
             # Reported once for every sample above, under this function's
-            # name; the conversion of each sample would repeat it per ϕ.
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    'ignore', message='grain_size_to_geoacoustics:',
-                    category=ValidityWarning)
-                converted[phi, speed] = bottom_from_grain_size(
-                    phi, roughness=roughness, model=model,
-                    hamilton_fit=hamilton_fit, water_sound_speed=speed)
+            # name, so each sample converts through the twin that returns
+            # its report rather than warning it again per ϕ; the half-space
+            # is the one BoundaryProperties.from_grain_size builds.
+            g, _report = _grain_size_to_geoacoustics(
+                phi, model=model,
+                hamilton_fit=hamilton_fit or DEFAULT_GRAIN_SIZE_ENVIRONMENT,
+                water_sound_speed=speed, water_density=None, who=who)
+            converted[phi, speed] = BoundaryProperties(
+                acoustic_type='half-space', grain_size_phi=float(phi),
+                sound_speed=g['sound_speed'], density=g['density'],
+                attenuation=g['attenuation'], roughness=roughness)
         return converted[phi, speed]
 
     try:

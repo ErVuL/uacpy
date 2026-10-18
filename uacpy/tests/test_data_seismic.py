@@ -60,6 +60,29 @@ def test_globsed_transect(cache):
     r, thk = track.ranges, track.data
     assert (track.quantity, track.unit) == ('sediment_thickness', 'm')
     assert r.shape == (3,) and thk.shape == (3,) and np.allclose(thk, 500.0)
+    # One record per waypoint: the 1° node each read, 30, 30.5 → 31 (the tie
+    # rounds to even) and 31 N, with its own offset from its waypoint.
+    assert [p.data_point for p in track.provenance] == \
+        [(30.0, -40.0), (30.0, -40.0), (31.0, -40.0)]
+    assert [p.offset_km for p in track.provenance] == \
+        pytest.approx([0.0, 55.6, 0.0], abs=0.1)
+    from uacpy.data import provenance_table
+    pytest.importorskip('pandas')
+    assert len(provenance_table(track)) == 3
+
+
+def test_an_auto_globsed_transect_keeps_one_waypoint_per_node(cache):
+    # 30 → 33 N along a meridian on the 1° gridline nodes: the nodes of 30,
+    # 31, 32 and 33 N, the ends anchored to the transect's endpoints.
+    track = globsed_local.fetch_sediment_thickness_transect(
+        (30.0, -40.0), (33.0, -40.0), n_points='auto')
+    assert [p.data_point[0] for p in track.provenance] == \
+        [30.0, 31.0, 32.0, 33.0]
+    assert (track.lats[0], track.lats[-1]) == pytest.approx((30.0, 33.0))
+    assert track.ranges[0] == 0.0
+    with pytest.raises(ConfigurationError, match='n_points=4 exceeds'):
+        globsed_local.fetch_sediment_thickness_transect(
+            (30.0, -40.0), (33.0, -40.0), n_points=4, max_points=3)
 
 
 def test_globsed_0_360_longitude_wraps(cache):
@@ -387,21 +410,67 @@ def test_every_bottom_fetcher_takes_a_roughness_argument():
     assert missing == []
 
 
+@pytest.mark.parametrize('module_name, name, ignored', [
+    ('uacpy.data.crust1_local', 'fetch_bottom_crust1',
+     ('timeout', 'water_sound_speed')),
+    ('uacpy.data.crust1_local', 'fetch_bottom_crust1_transect',
+     ('timeout', 'verbose', 'water_sound_speed')),
+    ('uacpy.data.diesing_local', 'fetch_bottom_diesing', ('timeout',)),
+    ('uacpy.data.graw_local', 'fetch_bottom_graw', ('timeout', 'verbose')),
+    ('uacpy.data.emodnet_local', 'fetch_bottom_emodnet_local', ('timeout',)),
+    ('uacpy.data.sediment_db', 'fetch_bottom_grainsize',
+     ('timeout', 'verbose')),
+])
+def test_an_offline_seabed_backend_takes_no_setting_it_would_ignore(
+        module_name, name, ignored):
+    """An offline backend reads no network and CRUST1.0 converts no grain
+    size, so these keywords would change nothing; the bottom chain hands
+    each backend only what it takes."""
+    import importlib
+    import inspect
+    params = inspect.signature(
+        getattr(importlib.import_module(module_name), name)).parameters
+    assert not set(ignored) & set(params)
+
+
 def test_crust1_transect_accepts_max_points(cache):
     # environment._fetch_bottom forwards max_points to every transect bottom
-    # fetcher; crust1's must accept it and clamp n_points to it, warning like
-    # the other transect fetchers.
-    with pytest.warns(UserWarning, match=r'n_points=6 exceeds max_points=3'):
-        rdl = crust1_local.fetch_bottom_crust1_transect(
-            (30.0, -40.0), (31.0, -40.0), n_points=6, max_points=3)
+    # fetcher; crust1's takes it as the others do: an explicit n_points at or
+    # below it is used as given, one above it refused naming both.
+    rdl = crust1_local.fetch_bottom_crust1_transect(
+        (30.0, -40.0), (31.0, -40.0), n_points=3, max_points=3)
     assert isinstance(rdl, Bottom)
-    assert len(rdl.columns) == 3                         # clamped to max_points
+    assert len(rdl.columns) == 3
+    with pytest.raises(ConfigurationError,
+                       match=r'n_points=4 exceeds max_points=3'):
+        crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (31.0, -40.0), n_points=4, max_points=3)
+
+
+def test_crust1_auto_transect_takes_its_budget(cache):
+    # 'auto' wants one waypoint per degree (11 over 10 degrees of a
+    # meridian); a budget of 4 takes 4, announced; the default budget takes
+    # all 11.
+    from uacpy.core.exceptions import FallbackWarning
+    assert len(crust1_local.fetch_bottom_crust1_transect(
+        (30.0, -40.0), (40.0, -40.0), n_points='auto').columns) == 11
+    with pytest.warns(FallbackWarning, match='needs 11 waypoints'):
+        rdl = crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (40.0, -40.0), n_points='auto', max_points=4)
+    assert len(rdl.columns) == 4
 
 
 def test_crust1_transect_without_max_points_is_uncapped(cache):
     rdl = crust1_local.fetch_bottom_crust1_transect(
         (30.0, -40.0), (31.0, -40.0), n_points=7)
     assert len(rdl.columns) == 7
+
+
+def test_an_unset_crust1_count_takes_six_waypoints_within_the_budget(cache):
+    for max_points, expected in ((None, 6), (3, 3)):
+        rdl = crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (31.0, -40.0), max_points=max_points)
+        assert len(rdl.columns) == expected
 
 
 def test_crust1_transect_rejects_max_points_below_two(cache):
@@ -423,6 +492,36 @@ def test_crust1_emits_commercial_warning(cache):
                   if issubclass(w.category, UserWarning)
                   and 'commercial' in str(w.message)]
     assert len(commercial) == 1
+
+
+@pytest.mark.parametrize('speed, notices', [(1480.0, 1), (None, 0)])
+def test_a_water_sound_speed_crust1_does_not_use_is_announced(cache, speed,
+                                                              notices):
+    """CRUST1.0 carries measured layer speeds and converts no grain size,
+    so a water_sound_speed= it answers changed nothing: one FallbackWarning
+    says so; without the argument there is nothing to announce."""
+    from uacpy.core.exceptions import FallbackWarning
+    from uacpy.data import fetch_bottom
+    with recorded_warnings() as caught:
+        fetch_bottom((30.0, -40.0), source='crust1', depth=3000.0,
+                     water_sound_speed=speed)
+    unused = [w for w in caught if issubclass(w.category, FallbackWarning)
+              and 'water_sound_speed= was not used' in str(w.message)]
+    assert len(unused) == notices
+
+
+def test_a_crust1_environment_lists_the_licence_once(cache):
+    """The CRUST1.0 fetcher and fetch_environment's catalogue check give the
+    one licence wording, so the call's single summary lists it once."""
+    from uacpy.core.exceptions import ProvenanceWarning
+    from uacpy.data import fetch_environment
+    with recorded_warnings() as caught:
+        env = fetch_environment((30.0, -40.0), bathymetry=3000.0, ssp=1500.0,
+                                bottom_sources='crust1')
+    assert 'crust1' in [p.source.id for p in env.data_sources]
+    (notice,) = [str(w.message) for w in caught
+                 if issubclass(w.category, ProvenanceWarning)]
+    assert notice.count('does not permit commercial use') == 1
 
 
 @pytest.mark.parametrize('read', [
@@ -589,6 +688,17 @@ def test_globsed_interrupted_curl_no_final_file(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         globsed_local.download_globsed_db(cache_dir=str(dest))
     assert not (dest / globsed_local.GLOBSED_FILE).exists()
+
+
+def test_crust1_compressional_attenuation_follows_coa_table_1_3(cache):
+    # CRUST1.0 carries no Q: the sediment layers take 0.6 dB/λ, the median of
+    # COA Table 1.3's unconsolidated rows (clay 0.2, silt 1.0, sand 0.8,
+    # gravel 0.6, moraine 0.4); the basement 0.1, basalt's and limestone's.
+    assert np.median([0.2, 1.0, 0.8, 0.6, 0.4]) == 0.6
+    bottom = crust1_local.fetch_bottom_crust1((30.0, -40.0))
+    assert [layer.attenuation for layer in bottom.layers] == \
+        pytest.approx([0.6] * len(bottom.layers))
+    assert bottom.halfspace.attenuation == pytest.approx(0.1)
 
 
 def test_crust1_shear_attenuation_follows_coa_table_1_3(cache):

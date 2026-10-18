@@ -43,7 +43,7 @@ def test_a_wrong_unit_is_refused_naming_engine_mode_and_mismatch():
 
 
 def test_a_wrong_result_class_is_refused():
-    table = ReflectionCoefficient(angles=[10.0, 20.0], magnitude=[0.9, 0.8],
+    table = ReflectionCoefficient(angles_deg=[10.0, 20.0], magnitude=[0.9, 0.8],
                                   phase=[0.0, 0.1])
     with pytest.raises(uacpy.OutputContractError,
                        match='result class ReflectionCoefficient, declared '

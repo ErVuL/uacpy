@@ -21,7 +21,7 @@ class _BounceKnobs(NamedTuple):
     each to :class:`~uacpy.models.bounce.Bounce`'s own default."""
     c_low: Optional[float] = None
     c_high: Optional[float] = None
-    rmax_m: Optional[float] = None
+    rmax: Optional[float] = None
 
 
 class _BounceTable(NamedTuple):
@@ -104,7 +104,7 @@ def bounce_producer(knobs: _BounceKnobs, *, verbose, user_collapse,
         verbose=verbose,
         c_low=knobs.c_low,
         c_high=knobs.c_high,
-        rmax_m=knobs.rmax_m,
+        rmax=knobs.rmax,
         collapse=dict(user_collapse) or None,
         timeout=timeout,
         cleanup=cleanup,

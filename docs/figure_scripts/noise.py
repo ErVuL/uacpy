@@ -16,6 +16,7 @@ from uacpy.noise import (
     RNL_UNCERTAINTY_DB,
     WenzNoise,
     apply_weighting,
+    auditory_weighting,
     lloyd_mirror_correction,
     monopole_source_level,
     nominal_source_depth,
@@ -227,11 +228,14 @@ def weighting_groups():
     in_water = ['LF', 'HF', 'VHF', 'SI', 'PCW', 'OCW']
     in_air = [g for g in HEARING_GROUPS if g not in in_water]
 
-    fig, ax = uacpy.plot.plot_weighting(in_water, figsize=(9.0, 4.8))
-    uacpy.plot.plot_weighting(
-        in_air, ax=ax, linestyle='--',
-        title='Marine-mammal auditory weighting (Southall et al. 2019) — '
-              'in-water solid, in-air dashed')
+    f = np.logspace(1.0, 5.5, 400)
+    fig, ax = plt.subplots(figsize=(9.0, 4.8))
+    for group in in_water + in_air:
+        uacpy.plot.plot_weighting(
+            f, auditory_weighting(f, group), ax=ax, label=group,
+            linestyle='-' if group in in_water else '--',
+            title='Marine-mammal auditory weighting (Southall et al. 2019) — '
+                  'in-water solid, in-air dashed')
     ax.legend(fontsize=8, ncol=2, loc='lower center')
     return fig
 
@@ -243,13 +247,13 @@ def weighted_soundscape():
     in_water = ['LF', 'HF', 'VHF', 'SI', 'PCW', 'OCW']
 
     unweighted = 10.0 * np.log10(np.trapezoid(10.0 ** (wenz.total / 10.0), f))
-    weighted = {g: weighted_level(wenz.total, frequency=f, group=g) for g in in_water}
+    weighted = {g: weighted_level(wenz.total, frequency=f, weighting=g) for g in in_water}
 
     fig, (ax_s, ax_b) = plt.subplots(1, 2, figsize=(11.0, 4.4))
     ax_s.semilogx(f, wenz.total, color='black', linewidth=2.0,
                   label=f'unweighted ({unweighted:.0f} dB)')
     for i, g in enumerate(['LF', 'HF', 'VHF']):
-        ax_s.semilogx(f, apply_weighting(wenz.total, frequency=f, group=g), color=f'C{i}',
+        ax_s.semilogx(f, apply_weighting(wenz.total, frequency=f, weighting=g), color=f'C{i}',
                       label=f'{g}-weighted ({weighted[g]:.0f} dB)')
     ax_s.set_ylim(0.0, 100.0)
     ax_s.set_xlabel('Frequency [Hz]')

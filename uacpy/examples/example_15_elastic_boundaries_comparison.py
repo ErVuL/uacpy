@@ -15,14 +15,12 @@ SPARC reads neither.
 
 Uses: Kraken auto-detection · Bounce(work_dir=) · BoundaryProperties(
 acoustic_type='file', reflection_file=) · ReflectionCoefficient.plot ·
-plot_field · plot.compare · plot.plot_field_difference · uacpy.acoustics.critical_angle
+plot_field · plot.compare · metrics.tl_difference · uacpy.acoustics.critical_angle
 """
 
 import os
-import sys
 import time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -74,7 +72,7 @@ kraken_tl, t_kraken = median_time(
 # Approach 2: BOUNCE writes the reflection coefficients, Scooter reads them.
 # A pinned work_dir keeps the .brc/.irc files after the run.
 bounce, t_bounce = median_time(
-    lambda: uacpy.Bounce(c_low=1400.0, c_high=10000.0, rmax_m=10000.0,
+    lambda: uacpy.Bounce(c_low=1400.0, c_high=10000.0, rmax=10000.0,
                          work_dir=OUT / 'bounce_brc').run(
         env=env, source=source,
         receiver=uacpy.Receiver(depths=np.array([50.0]),
@@ -92,31 +90,29 @@ scooter_tl, t_scooter = median_time(
                           c_high=bounce.run_settings.engine.c_high).run(
         env_from_file, source, receiver))
 
-residual = kraken_tl.dB - scooter_tl.dB
-mean_diff = float(np.nanmean(np.abs(residual)))
-p95_diff = float(np.nanpercentile(np.abs(residual), 95))
-max_diff = float(np.nanmax(np.abs(residual)))
+residual = uacpy.metrics.tl_difference(kraken_tl, scooter_tl)
+mean_diff = float(np.nanmean(np.abs(residual.data)))
+p95_diff = float(np.nanpercentile(np.abs(residual.data), 95))
+max_diff = float(np.nanmax(np.abs(residual.data)))
+# Judge the two on the mean and the percentile: a large single-cell gap is
+# where the methods put an interference null a little apart, and near a null
+# a small shift in position is a big shift in dB.
 print(f"  |Kraken − Scooter|: mean {mean_diff:.2f} dB, "
       f"95th pct {p95_diff:.2f} dB, worst cell {max_diff:.2f} dB")
-print("  Judge the two on the mean and the percentile: a large single-cell gap "
-      "is where the\n  methods put an interference null a little differently, "
-      "and near a null a small\n  shift in position is a big shift in dB.")
-print(f"  {len(bounce.angles)} reflection angles, "
+print(f"  {len(bounce.angles_deg)} reflection angles, "
       f"|R| in [{bounce.magnitude.min():.3f}, {bounce.magnitude.max():.3f}]")
+# The timing ratio belongs to this grid and frequency; the .brc is reusable,
+# so a second run pays Scooter alone.
 print(f"  timing: Kraken {t_kraken:.3f} s against BOUNCE {t_bounce:.3f} s + "
       f"Scooter {t_scooter:.3f} s (medians of {N_REPEATS})")
-print("  That ratio is a property of THIS grid and frequency — a krakenc mode "
-      "sum against\n  a Scooter FFP integration — and the .brc is reusable, "
-      "which changes the sum\n  entirely once you run more than once.")
 
 fig, axes = plt.subplots(2, 3, figsize=(18, 9))
 uacpy.plot.plot_field(kraken_tl, axes[0, 0], vmin=50, vmax=100,
                  title='1: Kraken (auto krakenc)')
 uacpy.plot.plot_field(scooter_tl, axes[0, 1], vmin=50, vmax=100,
                  title='2: Scooter (BOUNCE .brc)')
-uacpy.plot.plot_field_difference(
-    kraken_tl, scooter_tl, axes[0, 2],
-    diff_vmax=max(5, max_diff),
+residual.plot(
+    ax=axes[0, 2], diff_vmax=max(5, max_diff),
     title=f'Kraken − Scooter (mean |Δ| {mean_diff:.2f} dB)')
 
 # The BOUNCE result plots itself: |R| against grazing angle.

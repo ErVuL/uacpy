@@ -11,14 +11,12 @@ for the 50 m layer in scenario C, five times its 100 Hz.
 
 Uses: SoundSpeedProfile.from_munk / from_pairs · a float ssp for isovelocity ·
 elastic bottom via shear_speed · Kraken.compute_modes().n_modes / .k ·
-env.plot · compare_models · plot.compare · plot.plot_field_statistics
+env.plot · compare_models · plot.compare · metrics.field_statistics
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -87,13 +85,12 @@ n_rigid = uacpy.Kraken(backend='kraken').compute_modes(
     rigid_env, pekeris_source).n_modes
 print(f"  Trapped modes at 50 Hz: elastic {elastic_modes.n_modes}, fluid "
       f"same c_p {fluid_modes.n_modes}, rigid {n_rigid}")
-# Modal attenuation in dB/km: 20·log10(e)·|Im k| per metre, times 1000.
-n_shared = min(elastic_modes.n_modes, fluid_modes.n_modes)
-for m in range(n_shared):
-    loss_elastic = 8.686e3 * abs(elastic_modes.k[m].imag)
-    loss_fluid = 8.686e3 * abs(fluid_modes.k[m].imag)
-    print(f"    mode {m + 1}: {loss_elastic:6.3f} dB/km elastic vs "
-          f"{loss_fluid:6.3f} dB/km fluid")
+# Modal attenuation in dB/km, one column of the modes' table
+loss_elastic = elastic_modes.to_dataframe()['attenuation_dB_per_km']
+loss_fluid = fluid_modes.to_dataframe()['attenuation_dB_per_km']
+for m in range(min(elastic_modes.n_modes, fluid_modes.n_modes)):
+    print(f"    mode {m + 1}: {loss_elastic[m]:6.3f} dB/km elastic vs "
+          f"{loss_fluid[m]:6.3f} dB/km fluid")
 
 scenarios = [
     ('example_02a_munk', munk_env,
@@ -114,13 +111,11 @@ scenarios = [
       'Kraken': uacpy.Kraken(), 'Scooter': uacpy.Scooter()}),
 ]
 
-# Three model limits stay in the comparison on purpose, and their notices are
-# printed rather than hidden: in the Munk column the 1 km receivers see paths
-# steeper than Kraken's mode window keeps (none are past about 14 km); at
-# 50 Hz the 100 m Pekeris guide is 3.3 wavelengths deep, under the D/λ >= 5
-# floor of ray theory; and Scooter's derived c_low leaves out the elastic
-# seabed's interface (Scholte) wave, which the deepest receivers, 2 m above
-# the seafloor, sit within a wavelength of. The panels show where each
+# Two model limits stay in the comparison on purpose: in the Munk column the
+# 1 km receivers see paths steeper than Kraken's mode window keeps (none are
+# past about 14 km), a notice printed rather than hidden; at 50 Hz the 100 m
+# Pekeris guide is 3.3 wavelengths deep, where Stergiopoulos §10.2.2 puts
+# mode methods (D/λ ≲ 30), not rays (≳ 100). The panels show where each
 # departs from the others.
 for prefix, env, source, receiver, models in scenarios:
     with warnings.catch_warnings(record=True) as caught:
@@ -157,6 +152,6 @@ for prefix, env, source, receiver, models in scenarios:
     fig.savefig(OUT / f'{prefix}_curves.png', dpi=150, bbox_inches='tight')
     plt.close(fig)
 
-    fig, _ = uacpy.plot.plot_field_statistics(fields, depth=depth)
+    fig, _ = uacpy.metrics.field_statistics(fields, depth=depth).plot()
     fig.savefig(OUT / f'{prefix}_stats.png', dpi=150, bbox_inches='tight')
     plt.close(fig)

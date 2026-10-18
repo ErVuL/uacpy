@@ -9,15 +9,18 @@ The wave height drives the Pierson-Moskowitz sea surface in
 :func:`uacpy.data.fetch_sea_surface`.
 """
 
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
 from uacpy.core._export import ExportRecord
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.geo import as_coordinate
 from uacpy.data._chain import first_answer, lower_source_spec
 from uacpy.data._geo import checked_max_days, checked_max_distance
 from uacpy.data.sources import DataProvenance
+from uacpy.data._provenance_notice import one_provenance_notice
 
 __all__ = ['SeaStateRecord', 'fetch_waves', 'WAVE_SOURCES']
 
@@ -66,6 +69,8 @@ def _resolve_order(source):
     return order
 
 
+@one_provenance_notice(subject="the sea state's data",
+                       record="the result's .provenance")
 def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
                 verbose=False, max_distance_km=None) -> SeaStateRecord:
     """Significant wave height (m) at a ``(lat, lon)`` point and date.
@@ -91,7 +96,9 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
     source : str or sequence of str, optional
         ``'waverys'``, ``'ww3'``, a sequence of them, or ``'auto'`` (default).
     max_days : int, optional
-        Time tolerance forwarded to the wave source; ``None`` keeps its own.
+        Time tolerance of the WAVERYS read; ``None`` keeps its own. WaveWatch
+        III reads ``date`` itself, so a ``max_days`` it answers gives a
+        ``FallbackWarning`` that the value was not used.
     timeout : float, optional
         WaveWatch III request timeout in seconds. Default 120.
     verbose : bool or str, optional
@@ -118,5 +125,12 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
                          max_distance_km=limit, who='fetch_waves')
         return SeaStateRecord(hs=hs, tp=None, provenance=prov)
 
-    out, _attempt = first_answer(((name, None) for name in order), call)
+    out, (name, _backend) = first_answer(((name, None) for name in order),
+                                         call)
+    if max_days is not None and name == 'ww3':
+        warnings.warn(
+            f"fetch_waves: max_days={max_days} was not used: WaveWatch III "
+            f"answered, and it reads the field at 00:00 UTC of date= itself, "
+            f"with no time tolerance (only WAVERYS reads max_days).",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     return out

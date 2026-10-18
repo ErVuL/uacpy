@@ -1,6 +1,6 @@
 """Time-resolved views of a signal: when its content occurs.
 
-:func:`spectrogram`, :func:`cwt` / :func:`inverse_cwt`,
+:func:`spectrogram`, :func:`stft`, :func:`cwt` / :func:`inverse_cwt`,
 :func:`wigner_ville`, the analytic signal and its :func:`envelope` and
 :func:`instantaneous_frequency`, and the cepstra (:func:`cepstrum`,
 :func:`complex_cepstrum` / :func:`inverse_complex_cepstrum`).
@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+import numbers
 import warnings
 from collections import namedtuple
 import numpy as np
@@ -18,7 +19,7 @@ from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.acoustics import power_to_dB
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import (
-    require_at_most_nyquist, require_finite_signal,
+    normalize_axis, require_at_most_nyquist, require_finite_signal,
     require_positive_finite_scalar, require_real_signal,
 )
 from uacpy.acoustic_signal._results import POWER_UNITS, PlottedResult
@@ -26,7 +27,9 @@ from functools import lru_cache
 from scipy.integrate import cumulative_trapezoid
 from scipy.signal import hilbert
 from scipy.special import gamma
-from uacpy.acoustic_signal.spectral import _time_axis_last, _warn_two_sided
+from uacpy.acoustic_signal.spectral import (
+    _require_bin_scaling, _time_axis_last, _warn_two_sided,
+)
 from uacpy.acoustic_signal.windows import _DEFAULT_NPERSEG, _default_noverlap
 
 
@@ -64,7 +67,8 @@ class CWTResult(PlottedResult,
     The tuple is the measurement, so
     ``frequencies, times, coefficients = cwt(x, fs)`` unpacks it, in the
     order :class:`SpectrogramResult` uses; :meth:`plot` is the one obvious
-    way to draw it.
+    way to draw it. A multichannel record's ``coefficients`` carry its
+    channel axes first, then ``(frequencies, times)``.
     """
 
     __slots__ = ()
@@ -74,9 +78,17 @@ class CWTResult(PlottedResult,
     def _field_units(self):
         return {"frequencies": "Hz", "times": "s", "coefficients": None}
 
+    def _declared_dims(self):
+        # Channel axes lead, so a channel axis as long as the frequency or
+        # time axis is not read as either.
+        ndim = np.ndim(self.coefficients)
+        return {"coefficients":
+                tuple(f"coefficients_dim{i}" for i in range(ndim - 2))
+                + ("frequencies", "times")}
 
-#: Unit of a ``'magnitude'`` / ``'complex'`` spectrogram, per scaling: the
-#: STFT carries the square root of the scaling's factor.
+
+#: Unit of the STFT coefficients, per scaling: they carry the square root of
+#: the scaling's factor.
 _STFT_UNITS = {"density": "Pa/√Hz", "spectrum": "Pa"}
 
 
@@ -87,33 +99,27 @@ class SpectrogramResult(PlottedResult,
 
     The tuple is the measurement, so ``frequencies, times, power = ...``
     keeps working; :meth:`plot` is the one obvious way to draw it. What the
-    panel holds rides on attributes, as on :class:`SpectralEstimate`:
-    ``scaling`` (``'density'`` Pa²/Hz or ``'spectrum'`` Pa²) and ``mode``
-    (``'psd'``, or ``'magnitude'`` / ``'complex'`` / ``'angle'`` /
-    ``'phase'``, for which ``power`` is not a power). :meth:`level_dB`
-    gives a ``'psd'`` panel as levels in dB re a reference pressure.
+    panel holds rides on the ``scaling`` attribute, as on
+    :class:`SpectralEstimate`: ``'density'`` (Pa²/Hz) or ``'spectrum'``
+    (Pa²). :meth:`level_dB` gives the panel as levels in dB re a reference
+    pressure.
     """
 
-    _attrs = ("scaling", "mode")
+    _attrs = ("scaling",)
     _plotter = "plot_spectrogram"
     _plot_fields = ("frequencies", "times", "power")
-    _plot_defaults = ("scaling", "mode")
+    _plot_defaults = ("scaling",)
 
-    def __new__(cls, frequencies, times, power, scaling="density",
-                mode="psd"):
+    def __new__(cls, frequencies, times, power, scaling="density"):
         self = super().__new__(cls, frequencies, times, power)
         self.scaling = str(scaling)
-        self.mode = str(mode)
         return self
 
     def level_dB(self, ref=REFERENCE_PRESSURE_WATER):
-        """The ``'psd'`` panel as levels in dB re the reference pressure
-        ``ref`` (Pa, 1 µPa by default): :func:`~uacpy.core.acoustics.power_to_dB`
-        of ``power``, in dB re 1 µPa²/Hz under ``scaling='density'`` and
+        """The panel as levels in dB re the reference pressure ``ref`` (Pa,
+        1 µPa by default): :func:`~uacpy.core.acoustics.power_to_dB` of
+        ``power``, in dB re 1 µPa²/Hz under ``scaling='density'`` and
         dB re 1 µPa² under ``'spectrum'`` — the levels :meth:`plot` draws.
-
-        A ``'magnitude'`` / ``'complex'`` / ``'angle'`` / ``'phase'`` panel
-        holds no power, so it is refused.
 
         Parameters
         ----------
@@ -125,72 +131,119 @@ class SpectrogramResult(PlottedResult,
         numpy.ndarray
             The levels, shaped as ``power``.
         """
-        if self.mode != "psd":
-            raise ConfigurationError(
-                f"SpectrogramResult.level_dB: this panel was computed with "
-                f"mode={self.mode!r}, which holds no power to take a level "
-                f"of.",
-                remediation="Compute the spectrogram with mode='psd' (the "
-                            "default).")
         return power_to_dB(self.power, ref)
 
     def _field_units(self):
-        # 'psd' holds the power the scaling names, 'angle' / 'phase' a
-        # phase in radians; 'magnitude' and 'complex' hold the STFT scaled
-        # by the square root of the scaling's factor: Pa/√Hz under
-        # 'density', Pa under 'spectrum'.
-        if self.mode == "psd":
-            power = POWER_UNITS[self.scaling]
-        elif self.mode in ("angle", "phase"):
-            power = "rad"
-        else:
-            power = _STFT_UNITS.get(self.scaling)
-        return {"frequencies": "Hz", "times": "s", "power": power}
+        return {"frequencies": "Hz", "times": "s",
+                "power": POWER_UNITS[self.scaling]}
 
 
-def analytic_signal(data):
-    """Analytic signal ``data + j*Hilbert(data)`` of a real signal.
+class STFTResult(PlottedResult,
+                 namedtuple("STFTResult", "frequencies times coefficients")):
+    """Short-time Fourier transform: ``frequencies``, ``times`` and the
+    complex ``coefficients`` panel, one column per segment.
+
+    The tuple is the measurement, so ``frequencies, times, coefficients =
+    stft(x, fs)`` unpacks it. ``scaling`` rides as an attribute and names
+    the coefficients' unit: the windowed transform scaled by the square root
+    of the scaling's factor, Pa/√Hz under ``'density'`` and Pa under
+    ``'spectrum'`` (a tone of amplitude A reads A/2), with no one-sided
+    doubling. ``np.abs`` gives the magnitude and ``np.angle`` the phase in
+    radians. :meth:`plot` draws ``|coefficients|²``, the two-sided density
+    (or band power), with :func:`~uacpy.plot.plot_spectrogram`, which reads
+    the panel kind from :attr:`mode`.
+    """
+
+    _attrs = ("scaling",)
+    _plotter = "plot_spectrogram"
+    _plot_fields = ("frequencies", "times", "coefficients")
+    _plot_defaults = ("scaling", "mode")
+
+    #: The panel kind :func:`~uacpy.plot.plot_spectrogram` draws: complex
+    #: coefficients, drawn as their square.
+    mode = "complex"
+
+    def __new__(cls, frequencies, times, coefficients, scaling="density"):
+        self = super().__new__(cls, frequencies, times, coefficients)
+        self.scaling = str(scaling)
+        return self
+
+    def _field_units(self):
+        return {"frequencies": "Hz", "times": "s",
+                "coefficients": _STFT_UNITS[self.scaling]}
+
+
+def _real_record(data, axis, who, why):
+    """``(x, axis)``: ``data`` as a real ``float`` array with a time axis,
+    and that axis as a non-negative index. Every other axis is a channel."""
+    arr = np.asarray(data)
+    if arr.ndim == 0:
+        raise ConfigurationError(
+            f"{who}: data must have a time axis; got a scalar.")
+    x = require_real_signal(arr, who, ndim=arr.ndim, why=why)
+    return x, normalize_axis(x, axis, who)
+
+
+def analytic_signal(data, *, axis=-1):
+    """Analytic signal ``data + j*Hilbert(data)`` of a real signal, along
+    ``axis``; the output has the shape of ``data``.
 
     Parameters
     ----------
     data : array_like
-        A real 1-D signal.
+        A real signal, time along ``axis``; every other axis is a channel.
+    axis : int, optional
+        The time axis. Default ``-1``.
     """
-    xr = require_real_signal(
-        data, "analytic_signal",
+    return _analytic_signal(data, "analytic_signal", axis)
+
+
+def _analytic_signal(data, who, axis=-1):
+    """:func:`analytic_signal`, its refusals naming ``who`` — the public
+    function the caller used."""
+    xr, axis = _real_record(
+        data, axis, who,
         why="; the analytic/Hilbert representation is only defined for a "
             "real signal.")
-    return hilbert(xr)
+    return hilbert(xr, axis=axis)
 
 
-def envelope(data):
-    """Instantaneous amplitude envelope ``|analytic_signal(data)|``.
+def envelope(data, *, axis=-1):
+    """Instantaneous amplitude envelope ``|analytic_signal(data)|``, along
+    ``axis``; the output has the shape of ``data``.
 
     Parameters
     ----------
     data : array_like
-        A real 1-D signal.
+        A real signal, time along ``axis``; every other axis is a channel.
+    axis : int, optional
+        The time axis. Default ``-1``.
     """
-    return np.abs(analytic_signal(data))
+    return np.abs(_analytic_signal(data, "envelope", axis))
 
 
-def instantaneous_frequency(data, sample_rate: float):
+def instantaneous_frequency(data, sample_rate: float, *, axis=-1):
     """Instantaneous frequency (Hz) from the analytic-signal phase derivative.
 
-    Returns an array of length ``len(data)`` (centred differences of the
-    unwrapped phase via :func:`numpy.gradient`, time-aligned with ``data``).
+    Returns an array of the shape of ``data`` (centred differences of the
+    unwrapped phase via :func:`numpy.gradient` along ``axis``, time-aligned
+    with ``data``).
 
     Parameters
     ----------
     data : array_like
-        A real 1-D signal.
+        A real signal, time along ``axis``; every other axis is a channel.
     sample_rate : float
         Sample rate (Hz).
+    axis : int, optional
+        The time axis. Default ``-1``.
     """
     fs = require_positive_finite_scalar(
         sample_rate, "instantaneous_frequency", "sample_rate", " Hz")
-    phase = np.unwrap(np.angle(analytic_signal(data)))
-    return np.gradient(phase) / (2.0 * np.pi) * fs
+    z = _analytic_signal(data, "instantaneous_frequency", axis)
+    axis = normalize_axis(z, axis, "instantaneous_frequency")
+    phase = np.unwrap(np.angle(z), axis=axis)
+    return np.gradient(phase, axis=axis) / (2.0 * np.pi) * fs
 
 
 def _smoothing_window(spec, name):
@@ -464,7 +517,7 @@ def _reconstruction_constants(wavelet, w0, order):
 
 
 def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
-        order=None, n_frequencies=64):
+        order=None, n_frequencies=64, axis=-1):
     """Continuous wavelet transform with a selectable wavelet (FFT-based).
 
     At each scale the signal is filtered by the chosen analysing wavelet
@@ -474,13 +527,14 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
 
     Parameters
     ----------
-    data : 1-D array
-        Real signal.
+    data : array_like
+        Real signal, time along ``axis``; every other axis is a channel.
     sample_rate : float
         Sample rate (Hz).
     frequencies : array, optional
-        Frequencies (Hz) to analyse. Default: ``n_frequencies`` log-spaced
-        points from ``4*fs/N`` to ``fs/2``.
+        Frequencies (Hz) to analyse. Default: ``n_frequencies`` (64)
+        log-spaced points from ``4*fs/N`` (four cycles per record) to
+        ``fs/2`` (uacpy guidance).
     wavelet : {'morlet', 'paul', 'dog'}
         Analysing wavelet. ``'morlet'`` (complex, best frequency resolution),
         ``'paul'`` (complex, best time resolution), ``'dog'`` (real Derivative
@@ -493,6 +547,8 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
         for ``'morlet'``.
     n_frequencies : int
         Number of log-spaced frequencies when ``frequencies`` is None.
+    axis : int, optional
+        The time axis of ``data``. Default ``-1``.
 
     Notes
     -----
@@ -513,15 +569,18 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
         ``(frequencies, times, coefficients)``: the analysis frequencies
         (Hz), the time (s) of each sample, ``arange(len(data)) /
         sample_rate``, and the complex CWT coefficients, shape
-        ``(n_frequencies, len(data))``; ``abs(coefficients)`` is the scalogram.
+        ``(n_frequencies, n_samples)`` for one record — the channel axes of
+        a multichannel one first; ``abs(coefficients)`` is the scalogram.
     """
-    xr = require_real_signal(
-        data, "cwt", why="; the transform analyses a real signal.")
+    xr, axis = _real_record(data, axis, "cwt",
+                            why="; the transform analyses a real signal.")
+    xr = np.moveaxis(xr, axis, -1)
     fs = require_positive_finite_scalar(sample_rate, "cwt", "sample_rate",
                                         " Hz")
     if order is None:
         order = 4 if wavelet == "paul" else 2
-    n = xr.size
+    n = xr.shape[-1]
+    channels = xr.shape[:-1]
     if frequencies is None:
         f_lo = 4.0 * fs / n  # lowest default frequency = 4 cycles per record
         if f_lo >= fs / 2.0:
@@ -541,26 +600,29 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
     require_at_most_nyquist(frequencies, fs, "cwt", "analysis frequencies",
                             "the sampled wavelet aliases and the coefficients "
                             "are numerical residue, not band content")
-    # The scalogram is one complex128 row per frequency, as long as the record.
-    nbytes = 16 * frequencies.size * n
+    # The scalogram is one complex128 row per frequency, as long as the
+    # record, per channel.
+    n_channels = int(np.prod(channels))
+    nbytes = 16 * frequencies.size * n * n_channels
     if nbytes > _MAX_SURFACE_BYTES:
+        per = "" if n_channels == 1 else f" x {n_channels} channels"
         raise ConfigurationError(
             f"cwt: the scalogram would be {frequencies.size} x {n} complex "
-            f"cells ({nbytes / 2 ** 30:.2f} GiB), past the "
+            f"cells{per} ({nbytes / 2 ** 30:.2f} GiB), past the "
             f"{_MAX_SURFACE_BYTES / 2 ** 30:.2f} GiB cap. Decimate or shorten "
             f"the record, or pass fewer n_frequencies / frequencies.")
     omega = 2.0 * np.pi * np.fft.fftfreq(n)  # rad/sample
-    Xf = np.fft.fft(xr)
+    Xf = np.fft.fft(xr, axis=-1)
     # One scale gives the factor; scales follow from f = factor*fs/s.
     _, factor = _wavelet_fourier(wavelet, 1.0, omega, w0, order)
     scales = factor * fs / frequencies  # scale in samples
-    W = np.empty((frequencies.size, n), dtype=complex)
+    W = np.empty(channels + (frequencies.size, n), dtype=complex)
     for i, s in enumerate(scales):
         psi_hat, _ = _wavelet_fourier(wavelet, s, omega, w0, order)
         # Torrence & Compo eq. 6 normalisation sqrt(2*pi*s/dt), with dt = 1
         # because `omega` is rad/sample: equal energy at every scale.
         psi_hat = np.sqrt(2.0 * np.pi * s) * psi_hat
-        W[i] = np.fft.ifft(Xf * np.conj(psi_hat))
+        W[..., i, :] = np.fft.ifft(Xf * np.conj(psi_hat), axis=-1)
     return CWTResult(frequencies, np.arange(n) / fs, W)
 
 
@@ -649,7 +711,7 @@ def _apply_lifter(c, lifter):
     int long-passes (zeros ``|quefrency| <= |L|`` -> excitation / echo). An
     array multiplies the cepstrum element-wise (symmetric weighting is on you).
     """
-    nf = c.size
+    nf = c.shape[-1]
     if np.isscalar(lifter):
         L = int(lifter)
         w = np.zeros(nf)
@@ -665,9 +727,10 @@ def _apply_lifter(c, lifter):
             w = 1.0 - w
         return c * w
     w = np.asarray(lifter, dtype=float)
-    if w.shape != c.shape:
+    if w.shape != (nf,):
         raise ConfigurationError(
-            f"cepstrum: lifter array {w.shape} must match cepstrum {c.shape}.")
+            f"cepstrum: lifter array {w.shape} must be one weight per "
+            f"quefrency, ({nf},).")
     return c * w
 
 
@@ -679,7 +742,8 @@ class Cepstrum(PlottedResult,
     unpacks it. ``sample_rate`` rides as an attribute: given, the
     quefrencies are in seconds (``arange(n) / sample_rate``); ``None``, in
     samples (``arange(n)``). It survives pickling and copying and takes no
-    part in equality.
+    part in equality. A multichannel record's ``cepstrum`` carries its
+    channel axes first and the quefrencies last.
     """
 
     _attrs = ("sample_rate",)
@@ -694,8 +758,14 @@ class Cepstrum(PlottedResult,
         return {"quefrencies": "samples" if self.sample_rate is None else "s",
                 "cepstrum": ""}
 
+    def _declared_dims(self):
+        ndim = np.ndim(self.cepstrum)
+        return {"cepstrum": tuple(f"cepstrum_dim{i}" for i in range(ndim - 1))
+                + ("quefrencies",)}
 
-def cepstrum(data, sample_rate=None, *, window=None, nfft=None, lifter=None):
+
+def cepstrum(data, sample_rate=None, *, window="boxcar", nfft=None,
+             lifter=None, axis=-1):
     """Real cepstrum ``irfft(log|rfft(data)|)``, as a :class:`Cepstrum`.
 
     Not invertible: discards phase. Use :func:`complex_cepstrum` /
@@ -703,41 +773,49 @@ def cepstrum(data, sample_rate=None, *, window=None, nfft=None, lifter=None):
 
     Parameters
     ----------
-    data : 1-D array
-        Real signal.
+    data : array_like
+        Real signal, time along ``axis``; every other axis is a channel.
     sample_rate : float, optional
         Sample rate (Hz) of ``data``. Given, the quefrencies are in seconds;
         ``None``, in samples.
-    window : None, str, or tuple
+    window : str or tuple, optional
         :func:`scipy.signal.get_window` spec applied before the FFT to curb
-        spectral leakage. ``None`` is rectangular.
+        spectral leakage. Default ``'boxcar'``, no taper, which ``None``
+        also selects.
     nfft : int, optional
-        Zero-pad the FFT to ``nfft >= len(data)`` bins (finer quefrency
-        spacing). ``None`` uses ``len(data)``.
+        Zero-pad the FFT to ``nfft >= n_samples`` bins (finer quefrency
+        spacing). ``None`` uses the record length.
     lifter : None, int, or 1-D array
         Quefrency liftering — see :func:`_apply_lifter`. ``None`` returns the
         raw cepstrum; a positive int keeps low quefrencies (spectral envelope),
         a negative int keeps high quefrencies (pitch / echo structure).
+    axis : int, optional
+        The time axis of ``data``. Default ``-1``.
 
     Returns
     -------
     Cepstrum
-        ``(quefrencies, cepstrum)``, both of length ``nfft``.
+        ``(quefrencies, cepstrum)``, both of length ``nfft`` along the
+        quefrency axis; a multichannel ``cepstrum`` carries the channel axes
+        first and the quefrencies last.
     """
-    xr = require_real_signal(
-        data, "cepstrum",
+    xr, axis = _real_record(
+        data, axis, "cepstrum",
         why="; the real cepstrum irfft(log|rfft(x)|) is defined for a real "
             "signal. For a complex spectrum use complex_cepstrum.")
-    n = xr.size
+    xr = np.moveaxis(xr, axis, -1)
+    n = xr.shape[-1]
     NF = n if nfft is None else int(nfft)
     if NF < n:
         raise ConfigurationError(
-            f"cepstrum: nfft ({NF}) must be >= len(x) ({n}) (zero-pad only)")
-    if window is not None:
-        xr = xr * _sig.get_window(window, n, fftbins=True).astype(float)
-    spectrum = np.abs(np.fft.rfft(xr, n=NF))
+            f"cepstrum: nfft ({NF}) must be >= the record length ({n}) "
+            f"(zero-pad only)")
+    if window is None:
+        window = "boxcar"
+    xr = xr * _sig.get_window(window, n, fftbins=True).astype(float)
+    spectrum = np.abs(np.fft.rfft(xr, n=NF, axis=-1))
     spectrum = np.maximum(spectrum, np.finfo(float).tiny)
-    c = np.fft.irfft(np.log(spectrum), n=NF)
+    c = np.fft.irfft(np.log(spectrum), n=NF, axis=-1)
     if lifter is not None:
         c = _apply_lifter(c, lifter)
     if sample_rate is None:
@@ -753,18 +831,43 @@ class ComplexCepstrum(PlottedResult,
 
     The tuple is the measurement, so ``cepstrum, delay = ...``
     keeps working; :meth:`plot` is the one obvious way to draw it.
+
+    ``sample_rate`` rides as an attribute and :attr:`quefrencies` is the
+    axis of ``cepstrum``: ``arange(n) / sample_rate`` seconds when the rate
+    was given, ``arange(n)`` samples otherwise, as :func:`cepstrum`'s are.
     """
 
-    __slots__ = ()
-
+    _attrs = ("sample_rate",)
     _plotter = "plot_cepstrum"
     _plot_fields = ("cepstrum",)
+    _plot_defaults = ("sample_rate",)
+
+    def __new__(cls, cepstrum, delay, *, sample_rate=None):
+        self = super().__new__(cls, cepstrum, delay)
+        self.sample_rate = sample_rate
+        return self
+
+    @property
+    def quefrencies(self):
+        """The quefrency of each entry of ``cepstrum``: seconds when
+        ``sample_rate`` is set, samples otherwise."""
+        n = np.size(self.cepstrum)
+        return (np.arange(n, dtype=float) if self.sample_rate is None
+                else np.arange(n) / float(self.sample_rate))
 
     def _field_units(self):
         return {"cepstrum": "", "delay": "samples"}
 
+    def _declared_dims(self):
+        return {"cepstrum": ("quefrencies",)}
 
-def complex_cepstrum(data):
+    def _axis_coords(self):
+        return {"quefrencies": (
+            self.quefrencies,
+            "samples" if self.sample_rate is None else "s")}
+
+
+def complex_cepstrum(data, sample_rate=None):
     """Complex cepstrum with the linear-phase (rotation) term removed.
 
     Returns ``ComplexCepstrum(cepstrum, delay)``. ``delay`` is the integer
@@ -785,12 +888,16 @@ def complex_cepstrum(data):
 
     The cepstrum stays **complex**: unwrapping breaks the Hermitian symmetry
     of ``log(fft(x))``, and the imaginary part is what makes the homomorphic
-    transform reversible.
+    transform reversible. Its quefrency axis is the result's
+    :attr:`~ComplexCepstrum.quefrencies`: ``np.arange(len(data)) /
+    sample_rate`` seconds when ``sample_rate`` is given, samples otherwise.
 
     Parameters
     ----------
     data : array_like
         A real 1-D signal.
+    sample_rate : float, optional
+        Sample rate (Hz) of ``data``, for the quefrency axis in seconds.
     """
     xr = require_real_signal(
         data, "complex_cepstrum",
@@ -808,7 +915,11 @@ def complex_cepstrum(data):
     delay = -int(np.round(phase[n // 2] * n / (2.0 * np.pi * (n // 2)))) if n > 1 else 0
     phase = phase + 2.0 * np.pi * delay * np.arange(n) / n
     log_spectrum = np.log(mag) + 1j * phase
-    return ComplexCepstrum(np.fft.ifft(log_spectrum), delay)
+    if sample_rate is not None:
+        sample_rate = require_positive_finite_scalar(
+            sample_rate, "complex_cepstrum", "sample_rate", " Hz")
+    return ComplexCepstrum(np.fft.ifft(log_spectrum), delay,
+                           sample_rate=sample_rate)
 
 
 def inverse_complex_cepstrum(c):
@@ -847,12 +958,45 @@ def inverse_complex_cepstrum(c):
     return np.real(np.fft.ifft(np.exp(log_spectrum)))
 
 
-def spectrogram(data, sample_rate, *, window="hann", nperseg=_DEFAULT_NPERSEG,
-                noverlap=None, nfft=None, detrend="constant",
-                scaling="density", mode="psd", axis=None):
-    """Short-time spectrogram. Returns a :class:`SpectrogramResult`
-    ``(frequencies, times, power)`` (Pa²/Hz with the default
-    ``scaling='density'``/``mode='psd'``).
+#: The segment taper :func:`spectrogram` and :func:`stft` take when
+#: ``window`` is ``None``: hann under both scalings (see :func:`spectrogram`).
+_SHORT_TIME_WINDOW = "hann"
+
+
+def _short_time_panel(data, sample_rate, *, window, nperseg, noverlap, nfft,
+                      detrend, scaling, mode, axis, who):
+    """``(f, t, panel)`` of :func:`scipy.signal.spectrogram` in ``mode``
+    (``'psd'`` or ``'complex'``), after the checks :func:`spectrogram` and
+    :func:`stft` share; refusals name ``who``."""
+    data = _time_axis_last(data, axis, who)
+    data = require_finite_signal(data, who)
+    _warn_two_sided(who, data)
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, who, "sample_rate", " Hz")
+    if window is None:
+        window = _SHORT_TIME_WINDOW
+    _require_bin_scaling(scaling, who)
+    # nperseg=None would fail in int() below; scipy rejects the rest untyped.
+    if (isinstance(nperseg, bool) or not isinstance(nperseg, numbers.Integral)
+            or nperseg < 1):
+        raise ConfigurationError(
+            f"{who}: nperseg must be an integer number of samples of "
+            f"at least 1; got {nperseg!r}.")
+    if noverlap is None:
+        noverlap = _default_noverlap(
+            window, min(int(nperseg), np.shape(data)[-1]))
+    return _sig.spectrogram(data, sample_rate, window=window,
+                            nperseg=nperseg, noverlap=noverlap, nfft=nfft,
+                            detrend=detrend, scaling=scaling, mode=mode)
+
+
+def spectrogram(data, sample_rate, *, window=_SHORT_TIME_WINDOW,
+                nperseg=_DEFAULT_NPERSEG, noverlap=None, nfft=None,
+                detrend="constant", scaling="density", axis=None):
+    """Short-time power spectral density. Returns a
+    :class:`SpectrogramResult` ``(frequencies, times, power)``, in Pa²/Hz
+    under the default ``scaling='density'`` and Pa² per bin under
+    ``'spectrum'``.
 
     ``window='hann'`` under both scalings, where :func:`welch` takes flat-top
     for ``scaling='spectrum'``: a spectrogram is read for where the energy
@@ -870,17 +1014,9 @@ def spectrogram(data, sample_rate, *, window="hann", nperseg=_DEFAULT_NPERSEG,
     callable, or ``False``. A segment holding part of a pulse has a mean the
     pulse does not have, and subtracting it adds a step across the segment
     that puts energy into the lowest bins; pass ``detrend=False`` for pulses
-    and model time series. ``mode`` is passed through to
-    :func:`scipy.signal.spectrogram`: ``'psd'`` (default) is the power
-    spectral density the stated Pa²/Hz units apply to; ``'complex'`` /
-    ``'magnitude'`` return the windowed STFT scaled by the square root of
-    the scaling's factor — Pa/√Hz under ``scaling='density'``, Pa under
-    ``'spectrum'``, where a tone of amplitude A reads A/2 — and carry no
-    one-sided doubling, so their square is the two-sided density (half
-    the ``'psd'`` value off DC and Nyquist); ``'angle'``/``'phase'``
-    return its phase in radians. For those four the ``power`` field is
-    not a power and the Pa²/Hz units do not apply. For logarithmic /
-    constant-Q frequency resolution, see
+    and model time series. The complex short-time transform itself (its
+    magnitude, its phase) is :func:`stft`'s. For logarithmic / constant-Q
+    frequency resolution, see
     :func:`uacpy.acoustic_signal.constant_q_spectrogram`.
 
     **Complex input** is accepted, unlike :func:`cwt` or
@@ -890,8 +1026,7 @@ def spectrogram(data, sample_rate, *, window="hann", nperseg=_DEFAULT_NPERSEG,
 
     ``axis`` is the time axis of a multichannel ``data``, as on
     :func:`welch`: ``power`` then carries ``(..., frequency, time)``. The
-    result records ``.scaling`` and ``.mode`` so its plot labels the unit it
-    holds.
+    result records ``.scaling`` so its plot labels the unit it holds.
 
     Parameters
     ----------
@@ -899,29 +1034,61 @@ def spectrogram(data, sample_rate, *, window="hann", nperseg=_DEFAULT_NPERSEG,
         Pressure record (Pa) with time along ``axis``.
     sample_rate : float
         Sample rate (Hz).
-    window : str, optional
-        Segment taper. Default ``'hann'``.
+    window : str, tuple or array_like, optional
+        Segment taper: a :func:`scipy.signal.get_window` name or
+        ``(name, *params)`` tuple, or an array. Default ``'hann'``, which
+        ``None`` also selects; ``'boxcar'`` is no taper.
     nperseg : int, optional
-        Segment length. Default 8192, clamped to the record.
+        Segment length, an integer number of samples. Default 8192 (uacpy
+        guidance), clamped to the record.
     noverlap, nfft, detrend : optional
         Overlap, zero-pad length and per-segment detrending (see above).
     scaling : {'density', 'spectrum'}, optional
         Pa²/Hz or Pa² per bin. Default ``'density'``.
-    mode : str, optional
-        :func:`scipy.signal.spectrogram`'s ``mode`` (see above). Default
-        ``'psd'``.
     axis : int, optional
         The time axis of a multichannel ``data``, as on :func:`welch`.
     """
-    data = _time_axis_last(data, axis, "spectrogram")
-    data = require_finite_signal(data, "spectrogram")
-    _warn_two_sided("spectrogram", data)
-    sample_rate = require_positive_finite_scalar(
-        sample_rate, "spectrogram", "sample_rate", " Hz")
-    if noverlap is None:
-        noverlap = _default_noverlap(
-            window, min(int(nperseg), np.shape(data)[-1]))
-    f, t, Sxx = _sig.spectrogram(data, sample_rate, window=window,
-                                 nperseg=nperseg, noverlap=noverlap, nfft=nfft,
-                                 detrend=detrend, scaling=scaling, mode=mode)
-    return SpectrogramResult(f, t, Sxx, scaling=scaling, mode=mode)
+    f, t, Sxx = _short_time_panel(
+        data, sample_rate, window=window, nperseg=nperseg, noverlap=noverlap,
+        nfft=nfft, detrend=detrend, scaling=scaling, mode="psd", axis=axis,
+        who="spectrogram")
+    return SpectrogramResult(f, t, Sxx, scaling=scaling)
+
+
+def stft(data, sample_rate, *, window=_SHORT_TIME_WINDOW,
+         nperseg=_DEFAULT_NPERSEG, noverlap=None, nfft=None,
+         detrend="constant", scaling="density", axis=None):
+    """Short-time Fourier transform on :func:`spectrogram`'s segments.
+    Returns an :class:`STFTResult` ``(frequencies, times, coefficients)``.
+
+    The coefficients are the windowed transform of each segment
+    (:func:`scipy.signal.spectrogram` with ``mode='complex'``), scaled by
+    the square root of the scaling's factor: Pa/√Hz under the default
+    ``scaling='density'``, Pa under ``'spectrum'``, where a tone of
+    amplitude A reads A/2. They carry no one-sided doubling, so
+    ``|coefficients|²`` is the two-sided density — half
+    :func:`spectrogram`'s ``power`` off DC and Nyquist. ``np.abs`` gives the
+    magnitude and ``np.angle`` the phase (radians).
+
+    Every parameter is :func:`spectrogram`'s, with the same defaults and the
+    same meaning: ``window`` (``'hann'``, which ``None`` also selects;
+    ``'boxcar'`` is no taper), ``nperseg`` (8192, uacpy guidance, clamped to
+    the record), ``noverlap`` (the window's overlap), ``nfft``, ``detrend``
+    (``'constant'``; pass ``False`` for pulses), ``scaling`` and ``axis``
+    (the time axis of a multichannel ``data``: ``coefficients`` then carries
+    ``(..., frequency, time)``).
+
+    Parameters
+    ----------
+    data : array_like
+        Pressure record (Pa) with time along ``axis``.
+    sample_rate : float
+        Sample rate (Hz).
+    window, nperseg, noverlap, nfft, detrend, scaling, axis : optional
+        As on :func:`spectrogram`.
+    """
+    f, t, Z = _short_time_panel(
+        data, sample_rate, window=window, nperseg=nperseg, noverlap=noverlap,
+        nfft=nfft, detrend=detrend, scaling=scaling, mode="complex",
+        axis=axis, who="stft")
+    return STFTResult(f, t, Z, scaling=scaling)

@@ -1,6 +1,6 @@
 # File I/O — the layer between metres and the native formats
 
-> `uacpy.io` · 78 public names · every reader and writer the models run on
+> `uacpy.io` · 77 public names · every reader and writer the models run on
 
 Underneath the Python API, uacpy drives seven native solvers by writing text
 and binary files, launching a subprocess, and parsing what comes back. Each of
@@ -68,7 +68,7 @@ negative ranges, a zero depth and the curvilinear `'C'` interpolation, so the
 table holds them. `to_bathymetry()` / `to_altimetry()` build the carrier and
 refuse — naming the file — what it cannot hold: `'C'` interpolation, a
 long-format file's geoacoustics, a range or depth outside its domain. The
-writers take `(N, 2)` rows of `(range_m, depth_m)`, so
+writers take `(N, 2)` rows of `(range, depth)`, so
 `np.column_stack([table.ranges, table.depths])` is what goes back into
 `write_bty_file`; a `(2, N)` array passed to a writer is refused before the
 file is opened.)
@@ -163,8 +163,10 @@ occupy fewer than its own itemsize on disk, so no count can exceed
 ### And the ASCII decks
 
 The Acoustics-Toolbox `.env`, `.flp`, `.bty` and `.ati` decks are text, but
-they are *Fortran* text: list-directed `READ` statements that stop at the first
-`!`, quoted character literals that may also arrive unquoted, and vector records
+they are *Fortran* text: list-directed `READ` statements (a trailing `! …`
+comment is not Fortran syntax — the runtime ignores the rest of a record only
+once its values are read — and uacpy's readers drop it as a leniency),
+quoted character literals that may also arrive unquoted, and vector records
 that keep consuming lines until `N` values have been read — or until a `/`
 terminates them early, which triggers a *generated* vector (two values before
 the slash means equally spaced, one means replicated).
@@ -199,7 +201,7 @@ of outputs. See [Bellhop](../models/bellhop.md), [Kraken](../models/kraken.md),
 | `.ray` | out | ASCII | Bellhop ray paths |
 | `.mod` | out | direct-access binary | Kraken mode shapes and wavenumbers (the only mode format any AT program writes) |
 | `.grn` | out | direct-access binary | Scooter / SPARC wavenumber-domain Green's function |
-| `.rts` | out | ASCII | SPARC time series (`read_rts_file`, or `read_ts` keeping the title verbatim as OALIB `read_ts.m` does — one layout, one `RtsFile` record, two readers) |
+| `.rts` | out | ASCII | SPARC time series (`read_rts_file` → `RtsFile`) |
 | `.prt` | out | ASCII | The binary's diagnostic log — where AT puts fatal errors instead of stderr |
 
 ### `.env` — written in pieces
@@ -215,13 +217,16 @@ contributors in `uacpy.io.oalib_writer`: `write_header`, `write_ssp_section`, `w
 Every model entry point takes `(filepath, env, source, receiver)` and writes
 what the `Environment` says: the SSP letter from `interp_ssp=` (the name the
 models take, resolved by `resolve_ssp_topopt`), the boundary letters from
-`env.surface` and the seabed half-space. The KRAKEN, SCOOTER, SPARC and
+`env.surface` and the seabed half-space, and — for Bellhop's RunType — the
+source type and beam pattern from the `Source` (a beam pattern is staged as
+`<base>.sbp` beside the deck; a `source_type=` / `source_beam_pattern=` that
+contradicts the Source is refused naming both). The KRAKEN, SCOOTER, SPARC and
 BOUNCE decks hold one sound-speed profile: their writers take `interp_ssp=None`
 as `'linear'`, refuse `'quad'` (Bellhop's `.ssp` file, which
 `ReadEnvironmentMod` cannot read), and refuse a range-dependent `env.ssp`
 (collapse it first, or run the model, which collapses or segments it). Their
 solver options default:
-`n_mesh=0` lets the engine size each medium and `rmax_m` of `None` is the
+`n_mesh=0` lets the engine size each medium and `rmax` of `None` is the
 farthest receiver range (the models pass their own padded RMax). The
 phase-speed window `c_low`/`c_high` (m/s) is required: deriving it is the
 engines' decision, so a deck written by hand states its own. SPARC's pulse
@@ -251,33 +256,43 @@ column is fine enough that none collapses to a zero-thickness AT medium.
 `kraken.exe` reads profile blocks sequentially from one `.env` and writes all
 of their modes into one `.mod`. Every block is padded to the same `NMedia`,
 because the `.mod` record length is fixed from the first profile and depends
-on the medium count; the mesh (`n_mesh`, default 0 = KRAKEN sizes each medium
-itself) may differ per profile, since the record length carries no mesh term.
+on the medium count; the mesh (`n_mesh`, unset or 0 = KRAKEN sizes each
+medium itself) may differ per profile, since the record length carries no mesh term.
 
 ### `.env` — read back
 
 `read_env(filepath)` is the inverse, and reads a deck any other tool wrote
 the way the Acoustics-Toolbox programs do. It returns
 `(env, source, receiver, options)`, with `options` keyed by the writers' own
-keyword names (`c_low`, `c_high`, `rmax_m`, `n_mesh` (one per medium),
+keyword names (`c_low`, `c_high`, `rmax`, `n_mesh` (one per medium),
 `interp_ssp`, or Bellhop's `run_type`, `beam_type`, `n_beams`,
-`launch_angles`, `ray_step`, `z_box`, `r_box`, …) beside `model` and `title`,
-which describe the deck; without those two they write it back unchanged. The
+`launch_angles_deg`, `ray_step`, `z_box`, `r_box`, …) beside `model` (`'kraken'`,
+`'sparc'` or `'bellhop'`) and `title`, which describe the deck; without those
+two they write it back unchanged. A SPARC deck is read to its end: its
+receiver ranges, and `output_mode`, `pulse_type`, `freq_min`, `freq_max`,
+`n_time_samples`, `time_max`, `march_start` and `courant_factor` for
+`write_sparc_env_file`; a Scooter deck's TopOpt(7) `'0'` comes back as
+`topopt_extra`. The
 sibling files the deck names come with it — a Bellhop
 `.bty`/`.ati` (a long-format `.bty` under an `'A'` bottom is a
 range-dependent seabed), a `'Q'` deck's `.ssp` — and a reflection table is
 referenced by path. A KRAKEN deck beside `field.exe`'s `.flp` takes the
 receivers from it (the `.env` depths are the mode-tabulation grid, returned
-as `options['mode_depths']`); beside Scooter's `fields.exe` `.flp` it takes
-the ranges. A row a `/` ends early keeps the previous row's values, as AT
+as `options['mode_depths']`, which also describes the deck: leave it out of
+the writer keywords and pass it as the receiver depths to write the `.env`
+back); beside Scooter's `fields.exe` `.flp` it takes the ranges. A row a `/` ends early keeps the previous row's values, as AT
 reads it; attenuation in dB/(m·kHz), Q or loss parameter becomes the
 dB/wavelength it equals row by row; uacpy's own Bellhop guard rows and
 columns are dropped, so its decks read back as the `Environment` they were
 written from. A construct the carriers cannot hold exactly — Np/m or dB/m
 attenuation, the analytic or 3-D SSP, a BELLHOP3D deck, a gradient
-sediment, a BOUNCE deck — raises `UnsupportedFeatureError` rather than
-being approximated. Of the 409 decks the Acoustics Toolbox ships in its
-`tests/`, 250 read (the test suite re-reads them all and pins that count).
+sediment, a BOUNCE deck, a multi-profile (range-dependent) KRAKEN deck, a
+SPARC tail `write_sparc_env_file` cannot state (output times not from 0
+evenly spaced, a non-zero `alpha`/`beta`/`V`), a Bellhop launch-angle list
+that is not one evenly spaced fan — raises `UnsupportedFeatureError` rather
+than being approximated. Of the 409 decks the Acoustics Toolbox ships in
+its `tests/`, 244 read (the test suite re-reads them all and pins that
+count).
 Re-running a uacpy Kraken deck from what `read_env`
 returns reproduces its TL exactly.
 
@@ -317,7 +332,7 @@ Example 48 runs this end to end — a `.shd` and an `.arr` read back, then the
 results written to NetCDF, xarray and pandas.
 
 `read_shd_bin` returns the file as written, a `ShdFile` record: `title`,
-`plot_type`, `frequencies`, the source and receiver coordinates (`bearings`,
+`plot_type`, `frequencies`, the source and receiver coordinates (`bearings_deg`,
 `source_x`, `source_y`, `source_depths`, `receiver_depths`,
 `receiver_ranges`, in metres) and a single-frequency `pressure` cube, the
 frequency it holds being `pressure_frequency`. The pressure is the file's
@@ -363,7 +378,7 @@ frequency-independent.
 ### `.prt` — where the errors are
 
 AT binaries write `*** FATAL ERROR ***` to `<base>.prt`, not to stderr.
-`read_prt(filepath, tail_bytes=…)` returns the log text (or `None` if absent), and
+`read_prt(filepath, tail_bytes=…)` returns the log text (a `MissingFileError` if absent), and
 the model layer appends its tail to `ModelExecutionError` so the actual cause
 surfaces instead of a "check the .prt file" pointer.
 
@@ -384,7 +399,9 @@ convention. Bellhop opens `<env>.bty`, `<env>.ati`, `<env>.brc`, `<env>.trc`,
 | `.trc` | Top reflection coefficient `R(θ)` | `read_reflection_coefficient` | `write_reflection_coefficient` (`stage_reflection_file` copies) |
 | `.sbp` | Source beam pattern, angle vs dB re peak | `read_source_beam_pattern` | `write_source_beam_pattern` |
 
-**Short vs long `.bty`.** `write_bty_file` writes range and depth only.
+**Short vs long `.bty`.** The interpolation (`interp_type=`) is the deck
+letter `'L'` / `'C'` or the name the models take, `'linear'` /
+`'curvilinear'`. `write_bty_file` writes range and depth only.
 `write_bty_long_format` adds five geoacoustic columns per range node — `c_p`,
 `c_s`, `ρ`, `α_p`, `α_s` — which is how a range-dependent bottom reaches
 Bellhop without collapsing it. `read_bathymetry` returns whichever it finds:
@@ -398,7 +415,14 @@ next to the `.env` that names it.
 `stage_reflection_file(reflection_file, env_path, boundary='bottom')` does that
 and returns the destination; a table already sitting at the destination — a
 [Bounce](../models/bounce.md) run whose `.brc` is in the same pinned `work_dir`
-— is left alone. `stage_source_beam_pattern(pattern, dest)` takes either a path
+— is left alone. A table it copies keeps every row, with its phase column
+unwrapped (no coefficient changes; `misc/RefCoef.f90:119` assumes an unwrapped
+phase): the Fortran binaries read a repeated angle without complaint. For a
+Bellhop deck written for bellhopcxx or bellhopcuda
+(`write_bellhop_env_file(..., backend='cxx'|'cuda')`, which the Bellhop model
+passes), the copy also keeps only the first row of each repeated angle, which
+those binaries refuse (`reflcoef.hpp:135-141`), and an `IOWarning` names the
+rows dropped. The caller's file is never edited. `stage_source_beam_pattern(pattern, dest)` takes either a path
 to copy or an `(N, 2)` array of `[angle_deg, level_dB]` to materialise.
 
 **`dedupe_reflection_file`.** BOUNCE tabulates `R(θ)` by sweeping phase
@@ -411,8 +435,8 @@ on the stated assumption it "has been unwrapped so that it varies smoothly",
 while BOUNCE's own unwrap can leave near-360° jumps between adjacent angles.
 It is
 lossy by exactly one sample per genuine collision, which is a slight
-under-resolution near grazing and the reason it is a separate, named step
-rather than something the writer does silently.
+under-resolution near grazing. `write_reflection_coefficient` never runs it;
+BOUNCE's own `.brc` goes through it where the Bounce model writes it.
 
 ---
 
@@ -423,7 +447,7 @@ different binary per output.
 
 | File | Direction | Idiom | Produced by / for |
 |---|---|---|---|
-| `.dat` | in | ASCII | All six sub-models — `write_oast_input`, `write_oasp_input`, `write_oasr_input`, `write_oasn_input`, `write_oass_input`, `write_oassp_input` |
+| `.dat` | in | ASCII | All six sub-models — `write_oast_input`, `write_oasp_input`, `write_oasr_input`, `write_oasn_input`, `write_oass_input`, `write_oassp_input`; each describes one range-independent waveguide and refuses a range-dependent `Environment` (`ConfigurationError`) — the OASES models collapse it first |
 | `.rhs` | out | Fortran sequential binary | Mean field a producer run with option `'s'` leaves for the OASS / OASSP scattering consumers; `read_oases_rhs_header` reads its header so the consumer deck is written from the band that actually ran |
 | `.plp` + `.plt` | out | ASCII | OAST transmission loss: `.plp` is the grid metadata, `.plt` the values |
 | `.trf` | out | Fortran sequential binary (OASP's ASCII branch is hardwired off) | OASP broadband transfer function |
@@ -459,11 +483,11 @@ and they do not share an input format.
 
 | File | Direction | Written by |
 |---|---|---|
-| `in.pe` | in | `write_inpe` |
-| SSP file | in | `write_ssp_file` |
-| bathymetry file | in | `write_bth_file` |
-| output-ranges file | in | `write_ranges_file` |
-| sediment file | in | `write_sediment_file` (range-dependent seabed) |
+| `in.pe` | in | `write_mpirams_inpe` |
+| SSP file | in | `write_mpirams_ssp` |
+| bathymetry file | in | `write_mpirams_bathymetry` |
+| output-ranges file | in | `write_mpirams_ranges` |
+| sediment file | in | `write_mpirams_sediment` (range-dependent seabed) |
 | `water_attn.dat` | in | `write_water_attenuation_file` (depth × bin table of `env.absorption` in dB/wavelength; named on the last line of `in.pe`) |
 | `psif.dat` | out | read by `read_psif` |
 
@@ -487,7 +511,7 @@ The header scalars are renamed on the way out — Fortran's `Nsam`, `cmin`,
 
 | File | Direction | Written by / read by |
 |---|---|---|
-| `rams.in` / `ram.in` / `ramgeo.in` | in | `write_ramin(..., kind='rams'\|'ramsurf'\|'ramgeo')`; `water_attn=` per segment adds the dB/wavelength block |
+| `rams.in` / `ram.in` / `ramgeo.in` | in | `write_ram_in(..., kind='rams'\|'ramsurf'\|'ramgeo')`; `water_attn=` per segment adds the dB/wavelength block |
 | `tl.line` | out | `read_tl_line` — ranges (m) and TL (dB) at the single `zr_line` receiver depth (the RAM wrapper builds its `Field` from `tl.grid` / `pcomplex.bin`) |
 | `tl.grid` | out | `read_tl_grid` — Fortran sequential, real TL on the `(z, r)` grid |
 | `pcomplex.bin` | out | `read_pcomplex_grid` — **uacpy-patched**, the complex envelope |
@@ -496,8 +520,9 @@ The header scalars are renamed on the way out — Fortran's `Nsam`, `cmin`,
 single `int32 lz` (stored depth points), records 2..N each hold `lz` samples —
 `real*8` for `tl.grid`, `complex*16` for `pcomplex.bin` (uacpy builds the
 Collins binaries with `-fdefault-real-8`) — one record per output
-range step. Both readers take `dr`, `ndr`, `dz`, `ndz` from the input deck to
-reconstruct the axes, plus a `depth_index_offset` that differs between binaries:
+range step. Both readers take `dr`, `range_decimation`, `dz` and
+`depth_decimation` (the deck's `ndr` and `ndz`) to reconstruct the axes, plus a
+`depth_index_offset` that differs between binaries:
 `ramsurf1.5` writes from grid index `ndz` (offset 0) while `rams0.5` writes from
 `1 + ndz` (offset 1) and skips the `z = 0` node.
 
@@ -533,44 +558,28 @@ rebuild.
 
 ---
 
-## 7. `FileManager` — scratch directories, `work_dir` and `cleanup`
+## 7. Scratch directories: `work_dir`, `cleanup` and `use_tmpfs`
 
-Every model run executes its binary in a scratch directory. `FileManager` owns
-that directory's lifetime, and the models reach it through two constructor
-knobs: `work_dir` and `cleanup`. It is the models' own machinery
-(`uacpy/models/_workspace.py`), not part of the io namespace.
+Every model run executes its binary in a scratch directory, and three
+constructor knobs of every model decide where it is and what happens to it:
+`work_dir`, `cleanup` and `use_tmpfs`. The class behind them is the models'
+own, private machinery (`FileManager`, [DEV.md §6.1](../DEV.md)), not part of
+the io namespace.
 
-```python
-FileManager(use_tmpfs=False, base_dir=None, prefix='uacpy_', cleanup=True)
-```
-
-| Method | What it does |
-|---|---|
-| `create_work_dir()` | Make a fresh uniquely-named directory under `base_dir`. uacpy owns it. |
-| `adopt_work_dir(path)` | Use a caller-named directory, taking ownership **only if it did not already exist**. |
-| `get_path(name)` | Full path inside the work dir, creating it on demand. |
-| `cleanup_work_dir()` | Remove uacpy's scratch — see below. |
-| `finish()` | Let go of the directory: removes the scratch only when `cleanup` is set, but always hands back the claim on a pinned `work_dir`. |
-
-It is also a context manager: `with FileManager(use_tmpfs=True) as fm:` creates
-on entry and calls `finish()` on exit.
-
-Every model's `run()` ends in `finally: fm.finish()`. The two halves of letting
-go are decided differently — whether to *remove* the files is your `cleanup`
-choice, while releasing the process-wide claim that stops two threads driving
-one scratch directory is unconditional — so `finish()` is the single exit point
-rather than a bare `cleanup_work_dir()` call.
+Whatever `run()` does, it lets go of the directory on the way out: the files
+are removed only when `cleanup` is set, and a pinned `work_dir` is always
+released, since one scratch directory is never driven by two threads at once.
 
 ### Ownership decides what cleanup removes
 
 A directory uacpy created is removed whole. A directory you named and already
-had is not: `adopt_work_dir` snapshots its existing entries, and cleanup removes
-only what this run added. That is why `cleanup=True` with `work_dir='.'` cannot
-take your tree.
+had is not: its existing entries are recorded before the run, and cleanup
+removes only what this run added. That is why `cleanup=True` with
+`work_dir='.'` cannot take your tree.
 
-The snapshot approach — rather than tracking `get_path` calls — is deliberate:
-the native binaries write files uacpy never names (`tl.grid`, `.prt`, `.shd`),
-so only a before/after comparison catches all of them.
+The before/after comparison — rather than a list of the files uacpy names —
+is deliberate: the native binaries write files uacpy never names (`tl.grid`,
+`.prt`, `.shd`), so only a comparison catches all of them.
 
 Cleanup failures are swallowed. A stale NFS lock or a file handle a subprocess
 has not released must never mask the original exception a caller is trying to
@@ -621,7 +630,7 @@ directory collide on the models' fixed scratch filenames, and
 
 ## 8. Errors
 
-Two typed exceptions carry the subpackage's own failures, and the split is by
+Typed exceptions carry the subpackage's own failures, and the split is by
 cause, not by call site:
 
 - **`FileFormatError`** — the file is wrong. Malformed, truncated, the wrong
@@ -630,21 +639,20 @@ cause, not by call site:
 - **`ConfigurationError`** — the *argument* is wrong. A base directory that
   does not exist or is not writable, an unknown `kind=`, a missing required
   parameter.
+- **`MissingFileError`** — the path names no file. Every reader raises it,
+  for a deck or recording the user wrote (`read_env`, `read_flp`,
+  `read_ssp_2d`, `read_bathymetry`, `read_wav`, …) and for the output a model
+  run should have left (`.shd`, `.arr`, `.ray`, `.mod`, `.grn`, `.rts`,
+  RAMSurf grids, OASES outputs), whose remediation says the run may have
+  failed before writing it. It is a `ConfigurationError` and a
+  `FileNotFoundError`, so `except FileNotFoundError` and `except OSError`
+  catch it as they would Python's own.
 
-Both inherit from `UACPYError`, so one `except` catches the family, and both
+All inherit from `UACPYError`, so one `except` catches the family, and all
 carry a `remediation` argument that renders as a *How to fix* line under the
 message. See [environment](environment.md) for the wider exception hierarchy.
-
-**A path that does not exist is typed by who was supposed to write it.** A
-reader of *model output* (`.shd`, `.arr`, `.ray`, `.mod`, `.grn`, `.flp`,
-`.ssp`, `.rts`, `.ts`, RAMSurf grids, and `.brc`/`.irc` after a BOUNCE run)
-raises `FileFormatError` — the run failed before writing the file. A reader of
-a deck or recording the *user* supplied — `read_bathymetry`,
-`read_altimetry`, `read_source_beam_pattern`, `read_wav`, `read_wav_info`,
-`read_wav_metadata` — raises `ConfigurationError`: the argument names a
-file that is not there. `typed_format_error` converts neither, because a
-decorator wrapped around both kinds cannot tell them apart; each reader states
-its own provenance. `except UACPYError` covers both.
+`typed_format_error` does not convert a missing path: each reader checks its
+own and names the provenance in the remediation.
 
 **A malformed file arrives as a `FileFormatError`, not a bare `ValueError`.**
 File-format readers do `int()` and `float()` on tokens, call `next()` on line
@@ -699,10 +707,9 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 | `FlpFile` | The record `read_flp` returns, in the writer's carrier-level names (`n_modes`, `profile_ranges`, …) |
 | `Flp3dFile` | The record `read_flp3d` returns |
 | `read_rts_file` | SPARC `.rts` time series → `RtsFile` (`title`, `positions`, `times`, `pressure`) |
-| `read_ts` | The SPARC `.rts` layout → the same `RtsFile`, the title verbatim (quotes kept) as OALIB `read_ts.m` reads it; `positions` holds ranges for SPARC's horizontal-array `'R'` output |
-| `RtsFile` | The record `read_rts_file` / `read_ts` return; `to_dict`, `to_xarray` |
+| `RtsFile` | The record `read_rts_file` returns; `to_dict`, `to_xarray` |
 | `read_prt` | `.prt` diagnostic log (whole file, or a trailing `tail_bytes`) |
-| `read_modes` | Binary `.mod` (a bare root gets `.mod`) or ASCII `.moa` → the `Modes` carrier `Kraken` returns. `frequency=` selects the closest entry of a multi-frequency `.mod`, which without it raises naming its frequencies; `modes=` (1-based) and `profile=` select within the file; `component='H'`/`'V'`/`'T'`/`'N'` keeps one stress-displacement component of an elastic medium; `water_density=` is stored for the modal sums. `metadata` carries the title and the `.mod`'s top/bottom half-space records with their `k2`/`gamma`/`phi` interface terms |
+| `read_modes` | Binary `.mod` (a bare root gets `.mod`) or ASCII `.moa` → the `Modes` carrier `Kraken` returns. `frequency=` selects the closest entry of a multi-frequency `.mod`, which without it raises naming its frequencies; `modes=` (1-based) and `profile=` select within the file; `component='H'`/`'V'`/`'T'`/`'N'` keeps one stress-displacement component of an elastic medium; `water_density=` is stored for the modal sums. `metadata` carries the title and the `.mod`'s top/bottom half-space records as the file holds them; `Modes.halfspace_tails` carries, per acoustic half-space, the `k2`/`gamma`/`phi` terms a mode continues into it with (OALIB `read_modes.m`) |
 | `read_grn_file` | `.grn` Green's function → `GreensFunction`, whose methods transform it to a `Field` |
 
 ### Acoustics Toolbox — writers
@@ -715,9 +722,9 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 | `write_sparc_env_file` | SPARC `.env` (pulse, time window, output mode) |
 | `write_sparc_source_time_series` | SPARC's `STSFIL` source time series beside that deck: the waveform zero-padded to `rows` rows, under every source depth |
 | `write_bounce_input_file` | Bounce `.env` |
-| `write_multi_profile_env` | Multi-profile `.env` for range-dependent Kraken |
-| `write_fieldflp` | `.flp` for FIELD/FIELDS |
-| `write_field3dflp` | `.flp` for FIELD3D, with the node and 1-based element tables — **3-D, retained for planned support** |
+| `write_multi_profile_env(filepath, segments, source, receiver, *, c_low, c_high, n_mesh=None, rmax=None, interp_ssp=None)` | Multi-profile `.env` for range-dependent Kraken; `c_high` is one value or one per profile |
+| `write_fieldflp(filepath, option, *, source_depths, receiver_depths, receiver_ranges, receiver_range_offsets=None, title, n_modes, profile_ranges=None)` | `.flp` for FIELD/FIELDS, keyed by `read_flp`'s record fields, so `write_fieldflp(path, **dataclasses.asdict(read_flp(other)))` writes a deck back; `receiver_range_offsets` is field.exe's `Rro`, one per receiver depth (array tilt) |
+| `write_field3dflp(filepath, option, *, source_x, source_y, source_depths, receiver_depths, receiver_ranges, bearings_deg, bathy, …)` | `.flp` for FIELD3D, the positions keyed by `read_flp3d`'s field names, the node and 1-based element tables from the `bathy` grid — **3-D, retained for planned support** |
 | `write_ssp` | Range-dependent `.ssp` matrix (m → km) |
 
 ### Boundary, reflection and beam-pattern files
@@ -727,16 +734,16 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 | `read_bathymetry` | `.bty` → `BoundaryTable` (m), interpolation type; long format carries geoacoustics; `to_bathymetry()` |
 | `read_altimetry` | `.ati` → `BoundaryTable` (m, positive down as on disk), interpolation type; `to_altimetry()` |
 | `BoundaryTable` | The record `read_bathymetry` / `read_altimetry` return; `to_dataframe` |
-| `read_reflection_coefficient` | `.brc`/`.trc` → a `ReflectionCoefficient`: `angles` (deg), `magnitude`, `phase` (rad); an `.irc` is refused |
-| `read_source_beam_pattern` | `.sbp` → `BeamPatternTable`: `angles` (deg), `levels_dB` (dB re peak) |
+| `read_reflection_coefficient` | `.brc`/`.trc` → a `ReflectionCoefficient`: `angles_deg`, `magnitude`, `phase` (rad); an `.irc` is refused |
+| `read_source_beam_pattern` | `.sbp` → `BeamPatternTable`: `angles_deg`, `levels_dB` (dB re peak) |
 | `BeamPatternTable` | The record `read_source_beam_pattern` returns; `to_dataframe`, `to_xarray`; `Source(beam_pattern=)` and `plot_beam_pattern` take it as is, and `np.asarray(record)` is its `(N, 2)` `[angle_deg, level_dB]` table |
 | `write_bty_file` | `.bty`, short format (range, depth) |
 | `write_bty_long_format` | `.bty` with per-range `c_p`, `c_s`, `ρ`, `α_p`, `α_s` |
 | `write_bty_3d` | BELLHOP3D `.bty` grid from `X`/`Y` (m) and a `(ny, nx)` depth array — **3-D, retained for planned support** |
 | `read_boundary_3d` | BELLHOP3D `.bty`/`.ati` grid → `Boundary3dFile`: `interpolation` (`'R'`/`'C'`), `x`, `y` (m), `depths` `(n_y, n_x)` (m) — **3-D, retained for planned support** |
 | `Boundary3dFile` | The record `read_boundary_3d` returns; `to_dict`, `to_xarray` |
-| `write_ati_file` | `.ati` altimetry |
-| `write_reflection_coefficient` | `.brc`/`.trc` from angles (deg) + complex or `(|R|, phase_rad)` coefficients — the writer side of `read_reflection_coefficient` |
+| `write_ati_file` | `.ati` altimetry: an `(N, 2)` array positive down as on disk, or an `Altimetry` (positive up), whose heights it negates |
+| `write_reflection_coefficient` | `.brc`/`.trc` from angles (deg) + complex or `[|R|, phase]` (phase in radians) coefficients — the writer side of `read_reflection_coefficient` |
 | `write_source_beam_pattern` | `.sbp` from angles (deg) + dB re peak |
 
 ### OASES
@@ -752,7 +759,7 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 | `write_oass_input` | OASS `.dat` (reverberation from a producer's `.rhs` mean field) |
 | `write_oassp_input` | OASSP `.dat` (one scattered-field realization from a producer's `.rhs`) |
 | `read_oast_tl` | `.plp` + `.plt` → a list of TL `Field`s, one per frequency, each on its own native range grid (length 1 for one frequency); the depths come from the curves' `RD:` labels, refined to full precision by an optional `receiver_depths` |
-| `read_oasp_trf` | `.trf` → the pressure `Field` of OASP's normal-stress output `'N'` (negated, `oasp.tex:185`; any other output parameter is refused); `receiver_depths` is required — the header carries only a uniform `RD`…`RDLOW` grid whatever the deck asked for, so it cannot reproduce a non-uniform array |
+| `read_oasp_trf` | `.trf` → the pressure `Field`: OASP's default output `'K'`, the bulk pressure, as written (`oasp.tex:178-183`), or the normal stress `'N'` negated (`oasp.tex:185`); any other output parameter is refused; `receiver_depths` is required — the header carries only a uniform `RD`…`RDLOW` grid whatever the deck asked for, so it cannot reproduce a non-uniform array |
 | `read_oasr_reflection_coefficients` | `.trc` grazing-angle table → `ReflectionCoefficient`, phase unwrapped along angle; a slowness-sampled `.rco` raises `UnsupportedFeatureError` (no sound speed in the file to convert with) |
 | `read_oasn_covariance` | `.xsm` → `Covariance`; `receiver_depths=` fills the positions of a vertical array; the header fields ride in `metadata` |
 | `read_oasn_replicas` | `.rpo` → `Replicas`, grid axes in metres; element types and gains (dB) in `metadata` |
@@ -763,15 +770,15 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 
 | Name | |
 |---|---|
-| `write_inpe` | mpiramS `in.pe` |
-| `write_ssp_file` | mpiramS SSP, 1-D or range-dependent (range axis m → km) |
-| `write_bth_file` | mpiramS bathymetry, `range(m) depth(m)` pairs |
-| `write_ranges_file` | mpiramS output ranges (m) |
-| `write_sediment_file` | mpiramS range-dependent sediment profiles (range axis m → km) |
+| `write_mpirams_inpe` | mpiramS `in.pe` |
+| `write_mpirams_ssp` | mpiramS SSP, 1-D or range-dependent (range axis m → km) |
+| `write_mpirams_bathymetry` | mpiramS bathymetry, `range(m) depth(m)` pairs |
+| `write_mpirams_ranges` | mpiramS output ranges (m) |
+| `write_mpirams_sediment` | mpiramS range-dependent sediment profiles (range axis m → km) |
 | `write_water_attenuation_file` | mpiramS water-column attenuation table, depths × sweep bins in dB/wavelength |
 | `read_psif` | mpiramS `psif.dat` → `PsifFile`, `pe_field` of shape `(nzo, nf, nr)`; takes the file or its containing directory. Reads the sequential layout uacpy's patched build writes; a stock direct-access file (a `recl.dat` beside it) is refused by name |
 | `PsifFile` | The record `read_psif` returns; `to_dict`, `to_xarray` |
-| `write_ramin` | Collins `ram.in` / `rams.in` / `ramgeo.in` (metres) |
+| `write_ram_in` | Collins `ram.in` / `rams.in` / `ramgeo.in` (metres) |
 | `read_tl_line` | `tl.line` → `PeGrid` (`'transmission_loss'`, dB): ranges (m), TL at the single `zr_line` receiver depth |
 | `read_tl_grid` | `tl.grid` → `PeGrid` (`'transmission_loss'`, dB): ranges, depths, TL grid |
 | `read_pcomplex_grid` | uacpy-patched `pcomplex.bin` → `PeGrid` (`'pe_envelope'`): the complex envelope before the carrier and Hankel phase — not a pressure |
@@ -781,9 +788,9 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 
 | Name | |
 |---|---|
-| `write_wav(filepath, signal, sample_rate, *, encoding, normalize, metadata)` | a real signal to `.wav`; `pcm16`/`pcm24`/`pcm32` for players and recorders, `float32`/`float64` to keep a calibrated level. `normalize` defaults to on for PCM, off for float. `metadata` writes a `LIST`/`INFO` chunk |
+| `write_wav(filepath, signal, sample_rate, *, encoding, normalize, metadata)` | a real signal to `.wav`; `pcm16`/`pcm24`/`pcm32` for players and recorders, `float32`/`float64` to keep a calibrated level. The samples are written as given (`normalize=False`), so a calibrated signal keeps its level; a sample past ±1 under PCM is clipped with a warning naming `normalize=True`, which scales the peak to full scale (by `-20·log10(peak)` dB) for playback. `metadata` writes a `LIST`/`INFO` chunk |
 | `read_wav(filepath, *, start=0, frames=None)` | `.wav` → `(signal, sample_rate)`, mono `(n,)` or `(n, n_channels)`. PCM 16/24/32-bit or IEEE float, in a plain or a `WAVE_FORMAT_EXTENSIBLE` header (what most 24-bit and multichannel recorders write); a malformed file raises `FileFormatError`, a data chunk shorter than its header declares warns and returns the whole frames present. An integer encoding comes back divided by its full scale, so it lands in ±1 whatever its depth; a float one comes back as written, which is the point of it. `start=` / `frames=` read only that span of frames (a span past the end is refused): the headers are walked without reading the samples and the span is decoded block by block, so a read takes its float64 output (8 bytes per sample) plus under 0.5 MiB, whatever the file's length — `read_wav(path, start=int(600 * fs), frames=int(10 * fs))` is ten seconds of an hour |
-| `read_wav_info(filepath)` | the headers alone → `WavInfo`: `encoding` (`write_wav`'s keys), `bits`, `n_channels`, `sample_rate` (Hz), `n_frames`. `bits` turns `read_wav`'s ±1 fractions back into ADC counts, `x * (2**(bits-1) - 1)`, for `uacpy.acoustics.pressure_from_recording(..., volt_params=(bits, v_ref))` |
+| `read_wav_info(filepath)` | the headers alone → `WavInfo`: `encoding` (`write_wav`'s keys), `bits`, `n_channels`, `sample_rate` (Hz), `n_frames`. `bits` is what `uacpy.acoustics.pressure_from_recording(x, sensitivity, gain, volt_params=(bits, v_ref), x_scale='read_wav')` needs to take `read_wav`'s ±1 fractions straight in, exactly |
 | `WavInfo` | The record `read_wav_info` returns; `to_dict` |
 | `read_wav_metadata(filepath)` | the `LIST`/`INFO` block as `write_wav`'s own keys, or `{}` — most recorders write none, so empty is the common case and not an error |
 

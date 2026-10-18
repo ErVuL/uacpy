@@ -29,7 +29,7 @@ result = Model(**knobs).run(env, source, receiver, run_mode=...)
 
 - *"What paths connect my source and receiver?"* → **[Bellhop](bellhop.md)** (eigenrays, arrivals)
 - *"It's 50 Hz in 80 m of water."* → **[Kraken](kraken.md)** — the ray approximation is invalid here
-- *"Is my answer right?"* → **[Scooter](scooter.md)** (with `c_high=1e9` and a small `taper`) or **[OASES](oases.md)** — no ray or one-way approximation
+- *"Is my answer right?"* → **[Scooter](scooter.md)** (its default spectrum is unbounded; add a small `taper`) or **[OASES](oases.md)** — no ray or one-way approximation
 - *"The seabed slopes from 100 m to 2 km."* → **[RAM](ram.md)**
 - *"I need the impulse response of a pulse."* → **[SPARC](sparc.md)** over a vacuum or rigid seabed; over a half-space, Scooter's or Bellhop's `TIME_SERIES` / `BROADBAND`
 - *"My seabed has shear."* → **[OASES](oases.md)**, or **[Bounce](bounce.md)** for the boundary alone
@@ -130,9 +130,13 @@ duct thickness and bathymetric relief included.
 
 | `D/λ` | What works |
 |---|---|
-| `≲ 5` | Modal ([Kraken](kraken.md)) or exact ([Scooter](scooter.md), [OASES](oases.md)). Rays are meaningless. |
+| `≲ 5` | Modal ([Kraken](kraken.md)) or exact ([Scooter](scooter.md), [OASES](oases.md)). Rays, a high-frequency approximation (Jensen et al. §3.4.2), are the wrong tool. |
 | `5 – 20` | Transition. Cross-check a ray answer against a modal one. |
 | `≳ 20` | [Bellhop](bellhop.md) is accurate and far cheaper. Modes become too numerous to be useful. |
+
+The 5 and 20 are uacpy guidance. Stergiopoulos gives stricter numbers: ray
+models accurate at `D/λ ≥ 100`, mode models used at `D/λ ≲ 30` (*Advanced
+Signal Processing Handbook*, §10.2.2).
 
 Independently of frequency:
 

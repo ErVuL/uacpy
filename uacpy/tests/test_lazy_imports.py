@@ -427,22 +427,6 @@ def test_no_visualization_module_imports_the_io_layer_at_module_scope():
         + '; '.join(f'{p}:{n} imports {m}' for p, n, m in offenders))
 
 
-def test_the_comms_plotter_draws_its_theory_overlay():
-    """The deferred import has to resolve when the overlay is actually asked
-    for — a plotter that only fails at call time is worse than an eager one."""
-    result = _run_python(
-        "import matplotlib\n"
-        "matplotlib.use('Agg')\n"
-        "import matplotlib.pyplot as plt\n"
-        "from uacpy.visualization.plots.comms import plot_ber_curve\n"
-        "fig, ax = plot_ber_curve([0, 5, 10], [1e-1, 1e-2, 1e-3],\n"
-        "                         scheme='bpsk')\n"
-        "assert len(ax.lines) == 2, 'theory curve missing'\n"
-        "plt.close(fig)\n"
-    )
-    _assert_clean_exit(result)
-
-
 _CORE_DIR = Path(uacpy.__file__).resolve().parent / 'core'
 
 #: The word each deferred ``core -> visualization`` import carries above it.
@@ -560,12 +544,17 @@ def test_the_restated_export_lists_stay_in_sync():
 def test_uacpy_acoustics_is_an_importable_module_over_core_acoustics():
     """The docs name ``uacpy.acoustics``; ``from uacpy.acoustics import spl``
     must work as well as attribute access, and the facade carries exactly the
-    core package's names, each the same object."""
+    core package's names, each the same object, and the three it adds from
+    where their results live (``bottom_loss_curve``, a ReflectionCoefficient;
+    ``resample_depth_range``, the grid library's regrid;
+    ``mask_below_seafloor``, beside the bathymetry carrier)."""
     import uacpy
     import uacpy.core.acoustics as core_acoustics
     from uacpy.acoustics import spl
     assert spl is core_acoustics.spl
-    assert sorted(uacpy.acoustics.__all__) == sorted(core_acoustics.__all__)
+    assert sorted(uacpy.acoustics.__all__) == sorted(
+        [*core_acoustics.__all__, 'bottom_loss_curve', 'resample_depth_range',
+         'mask_below_seafloor'])
     drifted = [n for n in core_acoustics.__all__
                if getattr(uacpy.acoustics, n) is not getattr(core_acoustics, n)]
     assert drifted == [], drifted
@@ -595,9 +584,9 @@ def test_parallel_declares_its_public_names():
 
 def test_the_child_stack_limit_and_its_opt_out_are_documented():
     """Model binaries run with a raised RLIMIT_STACK (the child alone); the
-    opt-out variable ``_stack`` reads is in the user manual."""
-    import uacpy._stack as stack
-    names = set(re.findall(r"'(UACPY_\w+)'", Path(stack.__file__).read_text()))
+    opt-out variable the launch module reads is in the user manual."""
+    import uacpy.models._launch as launch
+    names = set(re.findall(r"'(UACPY_\w+)'", Path(launch.__file__).read_text()))
     assert names == {'UACPY_NO_STACK_RAISE'}
     manual = (Path(uacpy.__file__).parents[1] / 'DOCUMENTATION.md').read_text()
     assert 'UACPY_NO_STACK_RAISE' in manual and 'RLIMIT_STACK' in manual
@@ -706,7 +695,7 @@ RETIRED_SPECTRAL_NAMES = (
 
 
 #: The retired names that are also ordinary short words: ``psd`` is a
-#: parameter of ``decidecade_band_levels``, ``sel`` a local in half a dozen
+#: parameter of ``band_levels``, ``sel`` a local in half a dozen
 #: readers, ``mode='psd'`` scipy's own. For these, only an API-SHAPED
 #: reference counts — a code span, an import, a Sphinx role or a call.
 _SHORT_RETIRED = ('psd', 'ppsd', 'sel')
@@ -716,7 +705,7 @@ _SHORT_RETIRED = ('psd', 'ppsd', 'sel')
 #: whose names embed one, and the one place the guide explains the short
 #: names are gone.
 _RETIREMENT_ALLOWED = (
-    'synthesize_noise_from_psd', 'plot_psd', 'plot_ppsd', 'plot_sel',
+    'synthesize_noise_from_psd', 'plot_psd', 'plot_ppsd',
     'plot_constant_q_psd', 'plot_constant_q_ppsd', 'as_psd', 'integrate_psd',
     'sound_exposure', 'isel',
     # xarray's own selector, which several readers document by name

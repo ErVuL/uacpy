@@ -205,6 +205,32 @@ def _oassp_wavenumber_count(*, layer_speeds, c_low, c_high, source_depth,
     return nw if cylgeo else 2 * nw
 
 
+def _oassp_fitting_c_low(*, c_low, c_low_max, **sampling):
+    """The lowest whole m/s above ``c_low``, at most ``c_low_max``, at which
+    :func:`_oassp_wavenumber_count` on ``sampling`` (its keywords other than
+    ``c_low``) fits :data:`_OASSP_MAX_WAVENUMBERS`; ``c_low_max`` itself
+    when no whole m/s below it fits, and ``None`` when ``c_low_max`` does
+    not fit either. ``c_low`` enters the count only through ``WN2 =
+    2*pi*f/C1``, so the count never grows with it and the search bisects;
+    ``c_low`` is a value whose count is past the bound."""
+    def fits(c):
+        return (_oassp_wavenumber_count(c_low=c, **sampling)
+                <= _OASSP_MAX_WAVENUMBERS)
+
+    if not fits(c_low_max):
+        return None
+    lo, hi = int(np.floor(c_low)), int(np.floor(c_low_max))
+    if hi <= lo or not fits(hi):
+        return float(c_low_max)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if fits(mid):
+            hi = mid
+        else:
+            lo = mid
+    return float(hi)
+
+
 class _OaspFftGrid(NamedTuple):
     """Block VIII's ``NX FR1 FR2 DT`` as OASP runs on them
     (``unoasp22.f:194-246``), in Fortran REAL: the values it writes to a

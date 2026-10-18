@@ -14,14 +14,16 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._spec import EngineTraits
 from uacpy.core.source import Source
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, ValidityWarning,
+    ConfigurationError, FallbackWarning, UnsupportedFeatureError,
+    ValidityWarning,
 )
+from uacpy.io.oalib_writer import writable_layers
 from uacpy.io.oases_writer import (
     MIN_SPECTRAL_EXPONENT, oass_bottom_interfaces, _OASES_MAX_WAVENUMBERS,
 )
-from uacpy.core.absorption import warn_if_band_absorption_frozen
+from uacpy.core.absorption import _warn_if_band_absorption_frozen
 from uacpy.core.engine_defaults import OASSP_SPECTRAL_EXPONENT
-from uacpy.models._knobs import whole_count
+from uacpy.models._knobs import is_real_number, whole_count
 from uacpy.models._notices import message_notice
 
 
@@ -35,8 +37,9 @@ def _rough_interface_sigma(env, interface: int, oass_index_space: bool) -> float
 
     ``INTFC`` lives in TWO different deck index spaces and
     :func:`~uacpy.io.oases_writer.oass_bottom_interfaces` says outright in its
-    own docstring that they "must not be mixed": OAST/OASS collapse an isovelocity water column to one record, the
-    OASP/OASSP decks never do, so the same seafloor is deck layer 3 in one and
+    own docstring that they "must not be mixed": OAST/OASS collapse an
+    isovelocity water column to one record, the OASP/OASSP decks never do,
+    so the same seafloor is deck layer 3 in one and
     ``2 + n_ssp_rows`` in the other. Looking an OASSP interface up in the OASS
     table therefore indexes past the end of the roughness list and reads 0.0 —
     silently disarming the caller's check.
@@ -57,6 +60,38 @@ def _rough_interface_sigma(env, interface: int, oass_index_space: bool) -> float
             if 0 <= index < len(roughness) else 0.0)
 
 
+def _speed_above_interface(env, interface: int,
+                           oass_index_space: bool) -> float:
+    """Compressional speed (m/s) of the medium the incident wave crosses to
+    reach the scattering interface: the water's at the surface and at the
+    seafloor, the sediment layer's above a sub-bottom interface.
+
+    The Rayleigh parameter's wavenumber is the one along the reflected
+    path, which lengthens by ``2 h sin(theta)`` in that medium
+    (:func:`~uacpy.sonar.scattering.rayleigh_parameter`, JKPS §1.7). The
+    bottom interfaces are numbered as :func:`oass_bottom_interfaces` lists
+    them: the seafloor, then the top of each deeper layer and of the
+    half-space. In the OASP/OASSP index space the one rough interface is
+    the roughest of the surface and those (``_rough_interface_sigma``).
+    """
+    first_bottom, roughness = oass_bottom_interfaces(env)
+    if oass_index_space:
+        k = (None if interface == _OASS_SURFACE_INTERFACE
+             else interface - first_bottom)
+    else:
+        rough = [abs(float(r)) for r in roughness]
+        surface = abs(float(env.surface.roughness))
+        k = (None if not rough or surface >= max(rough)
+             else int(np.argmax(rough)))
+    layers = (writable_layers(env.bottom.columns[0])
+              if env.bottom.is_layered else [])
+    if k is not None and 1 <= k <= len(layers):
+        return float(layers[k - 1].sound_speed)
+    depth = 0.0 if k is None else float(env.depth)
+    # ssp.sound_speed_at returns an array even for a scalar depth.
+    return float(np.ravel(env.ssp.sound_speed_at(depth))[0])
+
+
 def _roughness_notice(model_name: str, env, interface: int,
                       frequency_hz: float, rms_override,
                       *, oass_index_space: bool) -> Optional[str]:
@@ -75,28 +110,205 @@ def _roughness_notice(model_name: str, env, interface: int,
     force. For a broadband run pass the HIGHEST frequency: ``P`` grows with
     ``k``, so that is the worst case.
     """
-    from uacpy.sonar.scattering import non_perturbative_roughness_notice
+    from uacpy.sonar.scattering import _non_perturbative_roughness_notice
 
     if rms_override is not None:
         sigma = abs(float(rms_override))
     else:
         sigma = _rough_interface_sigma(env, interface, oass_index_space)
 
-    depth = (0.0 if (oass_index_space and interface == _OASS_SURFACE_INTERFACE)
-             else float(env.depth))
-    # ssp.sound_speed_at returns an array even for a scalar depth.
-    c_interface = float(np.ravel(env.ssp.sound_speed_at(depth))[0])
+    c_interface = _speed_above_interface(env, interface, oass_index_space)
     # The one Rayleigh-parameter rule is the sonar check's.
-    return message_notice(non_perturbative_roughness_notice(
+    return message_notice(_non_perturbative_roughness_notice(
                     model_name, float(frequency_hz), sigma, sound_speed=c_interface),
                        ValidityWarning)
 
 
 def _check_n_wavenumbers_knob(n_wavenumbers) -> None:
-    """Refuse a pinned wavenumber count that is not a whole number >= 1;
-    ``None`` (OASES' automatic sampling) passes."""
-    if n_wavenumbers is not None:
-        whole_count('n_wavenumbers', n_wavenumbers, 1)
+    """Refuse a pinned wavenumber count that is not a whole number >= 1 or
+    that exceeds OASES' wavenumber array bound NP (``compar.f:37-38``,
+    :data:`~uacpy.io.oases_writer._OASES_MAX_WAVENUMBERS`); ``None``
+    (OASES' automatic sampling) passes."""
+    if n_wavenumbers is None:
+        return
+    whole_count('n_wavenumbers', n_wavenumbers, 1)
+    if int(n_wavenumbers) > _OASES_MAX_WAVENUMBERS:
+        raise ConfigurationError(
+            f"n_wavenumbers={int(n_wavenumbers)} exceeds OASES' wavenumber "
+            f"array bound NP = {_OASES_MAX_WAVENUMBERS} (compar.f:37-38 "
+            f"`NPEXP = 16, NP = 2**NPEXP`).",
+            remediation=(f"Pass n_wavenumbers <= {_OASES_MAX_WAVENUMBERS}, "
+                         f"or None for OASES' automatic sampling."))
+
+
+def _refuse_volume_scattering(model_name: str, correlation_length) -> None:
+    """Refuse a negative ``correlation_length``: OASES reads a negative CL
+    as the switch to the twelve-token volume-scattering layer record
+    ``D CC CS AC AS RO RG CL SKW M RMS GAM`` (``oaseun31.f:76-90``), whose
+    last four fields have no home on any uacpy carrier. OASS and OASSP
+    refuse it alike."""
+    if is_real_number(correlation_length) and correlation_length < 0.0:
+        raise UnsupportedFeatureError(
+            model_name,
+            "volume scattering (correlation_length < 0 is OASES' switch "
+            "to the twelve-token layer record whose extra fields — SKW, "
+            "M, RMS, GAM — have no home on any uacpy carrier; "
+            "oaseun31.f:76-90)",
+            alternatives=["interface roughness scattering "
+                          "(correlation_length > 0)"],
+            alternatives_label='configurations',
+        )
+
+
+#: OASES output letters that are not a pressure: vertical and horizontal
+#: particle velocity, radial stress and the stress equivalent of the shear
+#: potential (GETOPT: V→2 H→3 R→5 S→7; unoast31.f:981-1016,
+#: unoasp22.f:887-918). uacpy reads the bulk pressure ``'K'``
+#: (:data:`~uacpy.core.engine_defaults.OASES_PRESSURE_LETTER`, IOUT 6) or the
+#: normal stress ``'N'`` (IOUT 1), which is ``-p`` in a fluid.
+_NON_PRESSURE_OUTPUT_LETTERS = frozenset('VHRS')
+
+#: OASP/OASSP letters whose ``.trf`` is not the one pressure uacpy reads: the
+#: non-pressure output parameters, each adding an ``IOUT`` slot to every
+#: ``.trf`` record, and
+#: ``'U'`` (DECOMP), which splits the output over five files opened one unit apart
+#: (unoassp30.f:459-465, :505-508). Chased through KERDEC
+#: (oasaun31.f:1626-1648) and the buffer→unit pairing at oasvun31.f:779,
+#: :862-869 and unoassp30.f:725-726, the DATA order at unoassp30.f:48-52 is
+#: the correct one: trf = total, trfdc = down-going compressional, trfds =
+#: down-going shear, trfuc = up-going compressional, trfus = up-going shear;
+#: oassp.tex:185-189 has 'ds' and 'uc' swapped.
+_TRF_OTHER_OUTPUT_LETTERS = _NON_PRESSURE_OUTPUT_LETTERS | {'U'}
+
+#: Per program, the source lines each refusal of
+#: :func:`_reject_unreadable_trf_options` cites.
+_TRF_OPTION_SOURCES = {
+    'OASP': {'output': 'unoasp22.f:887-918, :455-456',
+             'O': 'unoasp22.f:372-373',
+             't': 'unoasp22.f:178-189, :1028-1029',
+             'J': 'unoasp22.f:288-296, :372-373'},
+    'OASSP': {'output': 'unoassp30.f:897-932, :1004, :505-508',
+              'O': 'unoassp30.f:983, :382-385',
+              't': 'unoassp30.f:233-245, :1023-1024',
+              'J': 'unoassp30.f:285-290, :382-385'},
+}
+
+
+def _reject_two_pressure_letters(model_name: str, chars, cite: str,
+                                 what: str) -> None:
+    """Refuse an option line carrying both ``'N'`` and ``'K'``: two output
+    parameters, so ``what`` (the TL curves or the ``.trf`` records) holds
+    two quantities where uacpy reads one."""
+    if {'N', 'K'} <= set(chars):
+        raise ConfigurationError(
+            f"{model_name}: the option line carries both 'N' (normal "
+            f"stress) and 'K' (bulk pressure), two output parameters, so "
+            f"{what} ({cite}); uacpy reads one of them as the pressure.",
+            remediation="Keep 'K' (the default, the bulk pressure) or 'N' "
+                        "(the normal stress, -p in a fluid).")
+
+
+def _reject_unreadable_oast_options(options) -> None:
+    """Refuse an OAST option line whose TL table is not the pressure the
+    Field labels: an output parameter of
+    :data:`_NON_PRESSURE_OUTPUT_LETTERS` (velocity or stress), or ``'N'``
+    and ``'K'`` together. ``options`` is the line the deck carries; the
+    derived one hits neither."""
+    chars = set(str(options)) - set(' \t\n')
+    other = sorted(_NON_PRESSURE_OUTPUT_LETTERS & chars)
+    if other:
+        raise ConfigurationError(
+            f"OAST: options={options!r} carries {other}, output "
+            f"parameter(s) that are not a pressure (GETOPT, "
+            f"unoast31.f:981-1016); their TL would be returned labelled "
+            f"kind='pressure'.",
+            remediation="Drop these letters: the default option line "
+                        "returns the bulk pressure 'K'.")
+    _reject_two_pressure_letters(
+        'OAST', chars, 'unoast31.f:631-638',
+        "the .plp holds two TL curves per receiver")
+
+
+def _require_mean_field_rhs(model_name: str, mean, mean_options: str,
+                            cite: str, example: str) -> None:
+    """Refuse a supplied mean-field producer whose option line has no
+    ``'s'``: without it the producer opens and writes no ``.rhs`` (``cite``),
+    the only input the scattering run reads. ``mean_options`` is the line
+    the producer will write; ``example`` the remedy's producer call. The
+    option line is the caller's, so it is refused, not amended."""
+    if 's' not in set(str(mean_options)) - set(' \t\n'):
+        raise ConfigurationError(
+            f"{model_name}(mean_field={type(mean).__name__}(options="
+            f"{mean_options!r})): the producer's option line must contain "
+            f"'s' or it writes no .rhs ({cite}), which is what "
+            f"{model_name} reads.",
+            remediation=f"e.g. {model_name}(mean_field={example}).",
+        )
+
+
+def _reject_unreadable_trf_options(model_name: str, options,
+                                   n_wavenumbers) -> None:
+    """Refuse raw ``options`` letters of an OASP or OASSP run whose ``.trf``
+    uacpy cannot read back as the field it labels.
+
+    Each letter writes a valid OASES deck — the public writers write it —
+    but its ``.trf`` no longer means what uacpy's Field says:
+
+    * an output parameter other than ``'K'`` or ``'N'``
+      (:data:`_TRF_OTHER_OUTPUT_LETTERS`) is not the pressure
+      (:func:`~uacpy.io._parsers.oasp_trf_pressure` reads those two), and
+      ``'K'`` with ``'N'`` writes two parameters per record;
+    * ``'O'`` moves the frequency integration onto a complex contour,
+      ``Im(omega) = -ln(50)·Δf``, which uacpy's time-series synthesis does
+      not undo;
+    * ``'t'`` (tau-p) replaces the receiver range axis with slowness in
+      s/km (``r0 = 1e3/cmaxin``), which uacpy would label range in metres,
+      and OASP writes ``1.0E6`` times the field there (oasiun23.f:452-453);
+    * no ``'J'`` under automatic wavenumber sampling (``n_wavenumbers``
+      unset) engages the same complex frequency contour as ``'O'``.
+
+    ``options`` unset (the models' own option line) hits none of them.
+    GETOPT scans the line character by character (``unoasp22.f:871-873``),
+    ignoring blanks, so the tests are on the character set.
+    """
+    if not options:
+        return
+    cites = _TRF_OPTION_SOURCES[model_name]
+    chars = set(str(options)) - set(' \t\n')
+    other = sorted(_TRF_OTHER_OUTPUT_LETTERS & chars)
+    if other:
+        raise ConfigurationError(
+            f"{model_name}.run: options {other} ask for an output parameter "
+            f"other than the pressure ({cites['output']}); uacpy reads the "
+            f"bulk pressure 'K' or the normal stress 'N' (-p in a fluid) "
+            f"from the .trf, as the pressure.",
+            remediation="Pass options without these letters (the default "
+                        "option line returns the bulk pressure 'K').")
+    _reject_two_pressure_letters(
+        f"{model_name}.run", chars, cites['output'],
+        "every .trf record holds two components")
+    if 'O' in chars:
+        raise ConfigurationError(
+            f"{model_name}.run: option 'O' (complex frequency integration) "
+            f"bakes an exp(-ln(50)·Δf·t) contour into the spectrum "
+            f"({cites['O']}) that uacpy's time-series synthesis does not "
+            f"undo.",
+            remediation="Drop 'O' (the default option line uses a real "
+                        "frequency axis).")
+    if 't' in chars:
+        raise ConfigurationError(
+            f"{model_name}.run: option 't' (tau-p seismograms) replaces the "
+            f"receiver range axis with slowness ({cites['t']}), which "
+            f"uacpy's Field has no coordinate for and would mislabel as "
+            f"range.",
+            remediation="Drop 't'.")
+    if 'J' not in chars and n_wavenumbers is None:
+        raise ConfigurationError(
+            f"{model_name}.run: a custom options string without 'J' enables "
+            f"the complex frequency contour (OMEGIM≠0) under automatic "
+            f"wavenumber sampling ({cites['J']}), which uacpy's time-series "
+            f"synthesis cannot undo.",
+            remediation="Add 'J', or pin n_wavenumbers >= 1.")
 
 
 def _warn_offset_ignored_under_auto_sampling(model_name, integration_offset,
@@ -323,9 +535,9 @@ def _warn_if_water_ac_extrapolates(name: str, env, frequencies,
     (``oaseun31.f:1522``): the water absorption is linear in ``f``
     across the band. Exact for a constant dB/wavelength law; for Thorp,
     Francois-Garrison or a Biological resonance the shared band check
-    (:func:`~uacpy.core.absorption.warn_if_band_absorption_frozen`)
+    (:func:`~uacpy.core.absorption._warn_if_band_absorption_frozen`)
     reports the gap over the band and the water column."""
-    warn_if_band_absorption_frozen(
+    _warn_if_band_absorption_frozen(
         name, env.absorption, frequencies, float(anchor),
         water_depth=float(env.depth),
         mechanism=(

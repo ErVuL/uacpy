@@ -8,7 +8,7 @@ from uacpy.core.results._superposition import _stack_fields
 
 
 def taper_bounds(phase_speeds, *, taper):
-    """``(cmin, cmax)`` phase-speed bounds for the kernel taper.
+    """``(c_low, c_high)`` phase-speed bounds for the kernel taper.
 
     COA Sect. 4.5 prescribes the cure: since the wavenumber beyond which
     the integrand is negligible "will depend on range, and for multiple
@@ -75,15 +75,15 @@ def assemble_field_from_grn(greens_function, source, receiver, broadband_mode,
     ``spectrum`` are the model's knobs; ``log`` is the
     model's logger.
     """
-    cmin, cmax = taper_bounds(greens_function.phase_speeds, taper=taper)
-    if cmin is not None:
+    c_low, c_high = taper_bounds(greens_function.phase_speeds, taper=taper)
+    if c_low is not None:
         log(f"Kernel taper: Hanning roll-off over "
             f"{taper:.4g} of the wavenumber span at each edge "
-            f"(pass band {cmin:.1f}-{cmax:.1f} m/s)")
+            f"(pass band {c_low:.1f}-{c_high:.1f} m/s)")
     transform_kwargs = dict(
         source_type=source.source_type,
         spectrum=spectrum,
-        cmin=cmin, cmax=cmax,
+        c_low=c_low, c_high=c_high,
     )
     if broadband_mode:
         log(f"Transforming {greens_function.n_frequencies} frequencies to "

@@ -18,7 +18,7 @@ _EXPORTS = {
     # questions a RAM user has to ask before trusting a run — is this
     # (dr, dz) accurate here, what c0 should the PE expand about, what
     # step is the rotated Crank-Nicolson stable at, how much does the
-    # seabed leak — and they took only plain numbers, so they are
+    # seabed leak — and they take only plain numbers, so they are
     # reachable rather than reported as warning text.
     **{name: 'uacpy.models.pe_grid' for name in (
         'numerov_error',
@@ -35,6 +35,8 @@ _EXPORTS = {
         'rams_stable_dr',
         'rams_stable_theta',
         'GridInfeasibleError',
+        'GridChoice',
+        'GrowthMargin',
     )},
     'PropagationModel': 'uacpy.models.base',
     'RunMode': 'uacpy.core.run_settings',
@@ -67,7 +69,8 @@ if _typing.TYPE_CHECKING:
         OASES, OASN, OASP, OASR, OASS, OASSP, OAST,
     )
     from uacpy.models.pe_grid import (  # noqa: F401
-        GridInfeasibleError, combined_error, grid_error, numerov_error,
+        GridChoice, GridInfeasibleError, GrowthMargin, combined_error,
+        grid_error, numerov_error,
         optimal_c0, optimize_grid, rams_dz_shear_cap, rams_growth_margin,
         rams_stable_dr, rams_stable_theta, rotated_cn_growth,
         rotated_growth_floor, rotated_pade_coefficients, seabed_leak_rate,

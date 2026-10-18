@@ -2,7 +2,7 @@
 
 Turns geographic coordinates into a water depth (m, positive down) ready to hand to
 ``Environment(bathymetry=...)`` — either a single depth for one point, or a
-range-dependent ``(N, 2)`` ``[range_m, depth_m]`` transect sampled along the
+range-dependent ``(N, 2)`` ``[range, depth]`` transect sampled along the
 great-circle path between two points.
 
 ``source='gebco'`` (the default) is cache-first, as ``fetch_environment`` is:
@@ -42,8 +42,8 @@ from uacpy.core.geo import (
     geodesic_waypoints, EARTH_RADIUS_KM,
 )
 from uacpy.data._geo import (
-    lon_linspace, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
-    checked_n_points, capped_n_points, require_source,
+    lon_linspace, checked_max_points, auto_budget, default_n_points,
+    checked_n_points, checked_explicit_n_points, require_source,
 )
 from uacpy.data import _cache
 from uacpy.data._chain import (SourceChain, SourceProvider, first_answer,
@@ -53,7 +53,7 @@ from uacpy._log import log_message
 from uacpy.core._export import ExportRecord
 from uacpy.data.sources import SOURCES, DataProvenance
 
-__all__ = ['fetch_bathy', 'fetch_bathy_transect', 'bathy_transect_plan',
+__all__ = ['fetch_bathy', 'fetch_bathy_transect', 'bathy_transect_sampling',
            'fetch_bathy_grid', 'transect_length', 'transect_waypoints']
 
 DEFAULT_BASE_URL = 'https://api.opentopodata.org/v1'
@@ -63,6 +63,9 @@ DEFAULT_DATASET = 'gebco2020'
 #: (bilinearly served) field with no duplicate samples to collapse, so 'auto'
 #: targets native resolution, bounded by ``max_points``.
 GEBCO_NATIVE_KM = 0.45
+#: Samples of a bathymetry transect whose ``n_points`` is unset. uacpy
+#: guidance.
+DEFAULT_BATHY_TRANSECT_POINTS = 50
 MAX_LOCATIONS_PER_REQUEST = 100  # OpenTopoData public-host limit
 MAX_GRID_REQUESTS = 100          # safety cap for fetch_bathy_grid (≤10 000 points)
 #: Minimum spacing (s) between consecutive OpenTopoData calls, honouring the
@@ -157,8 +160,8 @@ def _bathymetry_vintage(src_id, backend, dataset=DEFAULT_DATASET):
         from uacpy.data import gebco_local
         try:
             return gebco_local.grid_name()
-        except (ConfigurationError, DataFetchError, FileNotFoundError):
-            return 'local'          # a stubbed backend: no grid to name
+        except (ConfigurationError, DataFetchError):
+            return 'local'          # no readable grid to name
     if backend == 'api' and src_id == 'gebco':
         return f"{dataset} via OpenTopoData"
     return f"{backend} (live)" if backend else None
@@ -266,40 +269,41 @@ def _fetch_bathy_transect_backend(
     start: Coordinate,
     end: Coordinate,
     *,
-    n_points: Union[int, str] = 50,
-    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    n_points: Union[int, str, None] = None,
+    max_points: Optional[int] = None,
     backend: str = 'api',
     dataset: str = DEFAULT_DATASET,
     base_url: str = DEFAULT_BASE_URL,
     timeout: float = 30.0,
     verbose: Union[bool, str] = False,
+    who: str = 'fetch_bathy_transect',
 ) -> np.ndarray:
     """Backend of :func:`fetch_bathy_transect`: ``backend`` is a backend token (``'api'``, ``'gmrt'``,
-    ``'emodnet'``, ``'local'``); ``fetch_environment`` resolves to these."""
+    ``'emodnet'``, ``'local'``); ``fetch_environment`` resolves to these.
+    ``who`` is the public function its notices name."""
     _check_source(backend)
-    plan = bathy_transect_plan(start, end, n_points=n_points,
-                               max_points=max_points)
+    plan = _bathy_transect_sampling(start, end, n_points=n_points,
+                                    max_points=max_points, who=who)
     n = plan['n_points']
-    lats, lons, ranges_m = plan['lats'], plan['lons'], plan['ranges_m']
-    length_km = ranges_m[-1] / 1000.0
-    if n_points == 'auto':
-        if plan['native_points'] > max_points:
-            warnings.warn(
-                f"fetch_bathy_transect: native GEBCO resolution over "
-                f"{length_km:.0f} km needs ~{plan['native_points']} points; "
-                f"capped to max_points={max_points} "
-                f"(~{length_km / (max_points - 1):.1f} km spacing). Raise "
-                f"max_points, or use GMRT / a self-hosted OpenTopoData for "
-                f"finer sampling.",
-                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    lats, lons, ranges = plan['lats'], plan['lons'], plan['ranges']
+    length_km = ranges[-1] / 1000.0
+    if n_points == 'auto' and plan['native_points'] > n:
+        warnings.warn(
+            f"{who}: native GEBCO resolution over "
+            f"{length_km:.0f} km needs ~{plan['native_points']} points; "
+            f"n_points='auto' takes {n}, its budget "
+            f"(~{length_km / (n - 1):.1f} km spacing). Raise max_points, "
+            f"pass an explicit n_points, or use GMRT / a self-hosted "
+            f"OpenTopoData for finer sampling.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     log_message(
         'bathymetry', f"sampling {n} depths (source={backend!r}) along "
-        f"{ranges_m[-1] / 1000:.1f} km transect", verbose=verbose,
+        f"{ranges[-1] / 1000:.1f} km transect", verbose=verbose,
     )
     if backend in _PER_POINT_BACKENDS and n > LIVE_POINT_REQUEST_WARN:
         warnings.warn(
-            f"fetch_bathy_transect: source "
+            f"{who}: source "
             f"{'emodnet_dtm' if backend == 'emodnet' else backend!r} serves "
             f"one point per request, so {n} waypoints are {n} sequential "
             f"requests to a public service (EMODnet tries a second tile where "
@@ -314,15 +318,15 @@ def _fetch_bathy_transect_backend(
             list(zip(lats, lons)), dataset=dataset, base_url=base_url,
             timeout=timeout, verbose=verbose,
         )
-    return np.column_stack([ranges_m, depths])
+    return np.column_stack([ranges, depths])
 
 
 def fetch_bathy_transect(
     start: Coordinate,
     end: Coordinate,
     *,
-    n_points: Union[int, str] = 50,
-    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    n_points: Union[int, str, None] = None,
+    max_points: Optional[int] = None,
     source: Union[str, Sequence[str]] = 'gebco',
     dataset: str = DEFAULT_DATASET,
     base_url: str = DEFAULT_BASE_URL,
@@ -332,20 +336,25 @@ def fetch_bathy_transect(
     """Range-dependent bathymetry along the great-circle ``start``→``end``.
 
     Samples evenly spaced (in distance) along the geodesic and returns an
-    ``(n, 2)`` array of ``[range_m, depth_m]`` with ``range`` measured from
+    ``(n, 2)`` array of ``[range, depth]`` with ``range`` measured from
     ``start`` — exactly the shape consumed by ``Environment(bathymetry=...)``
-    for range-dependent runs. :func:`bathy_transect_plan` resolves ``n``.
+    for range-dependent runs. :func:`bathy_transect_sampling` resolves ``n``.
 
     Parameters
     ----------
     start, end : (lat, lon)
         Endpoint coordinates in decimal degrees (WGS84).
     n_points : int or 'auto', optional
-        Number of samples (≥2). Default 50. ``'auto'`` targets GEBCO native
-        resolution (see :func:`bathy_transect_plan`).
+        Number of samples (≥2), used as given. ``None`` (default): 50
+        (uacpy guidance), within ``max_points`` when that is set.
+        ``'auto'`` targets GEBCO native resolution (see
+        :func:`bathy_transect_sampling`).
     max_points : int, optional
-        Ceiling on the sample count; a larger ``n_points`` (or an ``'auto'``
-        native count above it) is capped to this, with a ``FallbackWarning``.
+        The sampling budget: an ``'auto'`` native count above it takes this
+        many samples, with a ``FallbackWarning``. ``None`` (default) is 1000
+        for ``'auto'`` (uacpy guidance). An explicit ``n_points`` above an
+        explicit ``max_points`` is refused (the two contradict each
+        other).
     source, dataset, base_url, timeout, verbose
         See :func:`fetch_bathy`.
 
@@ -358,7 +367,8 @@ def fetch_bathy_transect(
     Raises
     ------
     ConfigurationError
-        ``n_points < 2`` or the two endpoints coincide.
+        ``n_points < 2``, ``n_points > max_points`` (both given), or the two
+        endpoints coincide.
     DataFetchError
         The service fails, or any sampled point falls on land.
 
@@ -380,12 +390,12 @@ def _point_depth(backend, point, *, timeout, verbose, **_request):
 
 
 def _depths_along(backend, start, end, *, n_points, max_points, timeout,
-                  verbose, **_request):
-    """A :data:`_BATHY_CHAIN` transect fetch: ``[range_m, depth_m]`` rows
+                  verbose, who='fetch_environment', **_request):
+    """A :data:`_BATHY_CHAIN` transect fetch: ``[range, depth]`` rows
     along ``start`` → ``end`` from one backend."""
     return _fetch_bathy_transect_backend(
         start, end, n_points=n_points, max_points=max_points, backend=backend,
-        timeout=timeout, verbose=verbose)
+        timeout=timeout, verbose=verbose, who=who)
 
 
 #: The bathymetry sources ``fetch_environment`` and the public fetchers
@@ -405,46 +415,59 @@ _BATHY_CHAIN = SourceChain(
 )
 
 
-def bathy_transect_plan(
+def bathy_transect_sampling(
     start: Coordinate, end: Coordinate, *,
-    n_points: Union[int, str] = 'auto',
-    max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
+    n_points: Union[int, str, None] = None,
+    max_points: Optional[int] = None,
 ) -> dict:
     """Resolve how many bathymetry samples a transect would take, and where,
     without fetching. Returns ``{'n_points', 'native_points', 'lats', 'lons',
-    'ranges_m'}``; ``native_points`` is the uncapped native-resolution count,
-    which is what :func:`fetch_bathy_transect` warns about when ``max_points``
-    binds.
+    'ranges'}``; ``native_points`` is the native-resolution count, which is
+    what :func:`fetch_bathy_transect` warns about when the budget of
+    ``'auto'`` binds.
 
     Bathymetry is continuous, so ``'auto'`` targets GEBCO native resolution
     (``length / GEBCO_NATIVE_KM``) bounded by ``max_points`` — there is no
-    duplicate-collapse step (cf. :func:`ssp_transect_plan`). This is where
-    :func:`fetch_bathy_transect` resolves its sampling, so the two can never
-    disagree.
+    duplicate-collapse step (cf. :func:`ssp_transect_sampling`). This is where
+    :func:`fetch_bathy_transect` resolves its sampling, with the same
+    defaults, so the two agree for the same arguments.
 
     Parameters
     ----------
     start, end : (lat, lon)
         Transect endpoints in decimal degrees.
     n_points : int or 'auto', optional
-        Samples, or ``'auto'`` for GEBCO native resolution. Default
-        ``'auto'``.
+        Samples, used as given, or ``'auto'`` for GEBCO native resolution.
+        ``None`` (default): 50 (uacpy guidance), within ``max_points`` when
+        that is set.
     max_points : int, optional
-        Cap on the sample count. Default 1000.
+        The sampling budget; ``None`` (default) is 1000 for ``'auto'``
+        (uacpy guidance). An explicit ``n_points`` above an explicit
+        ``max_points`` is refused.
     """
-    max_points = checked_max_points(max_points, 'bathy_transect_plan')
+    return _bathy_transect_sampling(start, end, n_points=n_points,
+                                    max_points=max_points,
+                                    who='bathy_transect_sampling')
+
+
+def _bathy_transect_sampling(start, end, *, n_points, max_points, who):
+    """:func:`bathy_transect_sampling`, its refusals named after ``who``, the
+    public function called."""
+    max_points = checked_max_points(max_points, who)
+    if n_points is not None:
+        n_points = checked_n_points(n_points, who, allow_auto=True)
     length_km = central_angle(start, end) * EARTH_RADIUS_KM
     # +1 closes the fencepost: n samples span n-1 native-resolution intervals.
     native = int(np.ceil(length_km / GEBCO_NATIVE_KM)) + 1
-    if n_points == 'auto':
-        n = min(native, max_points)
+    if n_points is None:
+        n = default_n_points(DEFAULT_BATHY_TRANSECT_POINTS, max_points)
+    elif n_points == 'auto':
+        n = min(native, auto_budget(max_points))
     else:
-        n = capped_n_points(
-            checked_n_points(n_points, 'bathy_transect_plan', allow_auto=True),
-            max_points, 'bathy_transect_plan')
-    lats, lons, ranges_m = geodesic_waypoints(start, end, n)
+        n = checked_explicit_n_points(n_points, max_points, who)
+    lats, lons, ranges = geodesic_waypoints(start, end, n)
     return {'n_points': int(n), 'native_points': native, 'lats': lats,
-            'lons': lons, 'ranges_m': ranges_m}
+            'lons': lons, 'ranges': ranges}
 
 
 @dataclass(frozen=True, eq=False)
@@ -637,7 +660,7 @@ def transect_length(start: Coordinate, end: Coordinate) -> float:
 
 def transect_waypoints(start: Coordinate, end: Coordinate, *, n_points: int
                        ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """``(lats, lons, ranges_m)`` of ``n_points`` evenly spaced waypoints on
+    """``(lats, lons, ranges)`` of ``n_points`` evenly spaced waypoints on
     the great circle ``start`` → ``end``.
 
     The geodesic every transect fetcher samples, so data of your own —
@@ -649,7 +672,7 @@ def transect_waypoints(start: Coordinate, end: Coordinate, *, n_points: int
         env = uacpy.data.fetch_environment(
             A, transect_to=B, bathymetry=np.column_stack([r, z]), ...)
 
-    ``ranges_m`` runs from 0 at ``start`` to :func:`transect_length` at
+    ``ranges`` runs from 0 at ``start`` to :func:`transect_length` at
     ``end``. ``n_points`` is an integer ``>= 2``. Coincident or antipodal
     endpoints raise :class:`~uacpy.core.exceptions.ConfigurationError`.
 

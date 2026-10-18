@@ -50,6 +50,26 @@ def test_tf_stacked_mag_dB_and_phase():
     assert ax_mag.lines[0].get_xdata().shape == _FREQS.shape
 
 
+def test_tf_shares_plot_frfs_axes_convention():
+    """Both FRF plotters draw one convention: log frequency, phase in
+    radians, |H| autoscaled; ``label=`` names a line and adds a legend, so
+    a model overlays a measurement on one pair of axes."""
+    from uacpy.plot import plot_frf
+    H = _broadband()
+    fig, (ax_mag, ax_phase) = H.plot_transfer_function(label='model')
+    # Read before the overlay: plot_frf sets both on the axes it is handed.
+    assert ax_mag.get_xscale() == ax_phase.get_xscale() == 'log'
+    assert ax_phase.get_ylabel() == 'Phase (rad)'
+    plot_frf(_FREQS, np.ones(_FREQS.size, dtype=complex), ax=(ax_mag, ax_phase),
+             label='measured')
+    assert ax_mag.get_xscale() == ax_phase.get_xscale() == 'log'
+    assert ax_phase.get_ylabel() == 'Phase (rad)'
+    assert [line.get_label() for line in ax_mag.lines] == ['model',
+                                                           'measured']
+    assert ax_mag.get_legend() is not None
+    plt.close(fig)
+
+
 def test_tf_after_at_on_grid():
     H = _broadband(n_depth=3, n_range=4)
     fig, (ax_mag, ax_phase) = (
@@ -87,56 +107,66 @@ def test_tf_non_broadband_raises():
 
 # ── plot_impulse_response ────────────────────────────────────────────────────
 
-def test_ir_single_receiver_no_at_needed():
-    fig, ax = _broadband().plot_impulse_response()
+_FS = 1000.0            # Hz: the impulse responses below, a band to 300 Hz
+
+
+def _ir(**kwargs):
+    """The impulse response of the single-receiver synthetic field."""
+    return _broadband().to_time_trace(sample_rate=_FS, **kwargs)
+
+
+def test_ir_draws_the_trace_it_is_handed():
+    trace = _ir()
+    fig, ax = trace.plot_impulse_response()
     assert ax.get_xlabel() == 'Time (s)'
     assert len(ax.lines) == 1
+    np.testing.assert_array_equal(ax.lines[0].get_xdata(), trace.times)
+    np.testing.assert_array_equal(ax.lines[0].get_ydata(),
+                                  np.asarray(trace.data))
 
 
-def test_ir_forwards_t_start_to_the_synthesis():
-    """``to_time_trace`` takes ``t_start``, and the sampling warning tells the
-    caller to pass it — so it has to reach the synthesis rather than the line
-    being drawn."""
-    fig, ax = _broadband().plot_impulse_response(t_start=0.5)
-    assert float(ax.lines[0].get_xdata()[0]) == pytest.approx(0.5)
-
-
-def test_ir_forwards_nfft_to_the_synthesis():
-    fig, ax = _broadband().plot_impulse_response(nfft=4096)
-    assert ax.lines[0].get_xdata().size == 4096
-
-
-def test_ir_after_at_on_grid():
+def test_ir_draws_one_cell_of_a_grids_impulse_response():
     H = _broadband(n_depth=3, n_range=4)
-    fig, ax = H.at(depth=25.0, range=1000.0).plot_impulse_response()
-    assert ax.get_xlabel() == 'Time (s)'
+    cell = H.impulse_response(_FS).at(depth=25.0, range=1000.0)
+    fig, ax = cell.plot_impulse_response()
+    # The grid's records run on its reduced time, and the trace says so.
+    assert ax.get_xlabel() == 'Reduced time t − r/1500 m/s (s)'
+    np.testing.assert_array_equal(ax.lines[0].get_ydata(),
+                                  np.asarray(cell.data))
+
+
+def test_ir_refuses_a_transfer_function_naming_the_calls_that_make_h():
+    """The plotter draws h(t); it computes no synthesis from an H(f)."""
+    with pytest.raises(ConfigurationError,
+                       match=r"(?s)h\(t\).*to_time_trace.*"
+                             r"impulse_response\(fs\)"):
+        _broadband().plot_impulse_response()
+    assert not plt.get_fignums()                        # no leaked figure
 
 
 def test_the_ir_axis_names_an_impulse_response_not_a_pressure():
-    """With no source spectrum the trace is H integrated over the band, per
-    second, not a pressure: its plot reads h(t) in 1/s."""
-    _, ax = _broadband().plot_impulse_response()
+    """With no source the trace is H integrated over the band, per second,
+    not a pressure: its plot reads h(t) in 1/s."""
+    _, ax = _ir().plot_impulse_response()
     assert ax.get_ylabel() == 'h(t) (1/s)'
-    _, ax2 = _broadband().to_time_trace().plot()
+    _, ax2 = _ir().plot()
     assert ax2.get_ylabel() == 'h(t) (1/s)'
 
 
 def test_a_trace_is_per_second_without_a_source_and_pa_with_one():
     """Both routes of to_time_trace: the bare impulse response is
     kind='impulse_response' in 1/s, and the same call with a source
-    waveform (or a source spectrum) is the received pressure in Pa."""
+    waveform is the received pressure in Pa."""
     from uacpy.acoustic_signal import tone_burst
     H = _broadband()
-    bare = H.to_time_trace()
-    assert (bare.kind, bare.unit) == ('impulse_response', '1/s')
     fs = 4.0 * float(_FREQS[-1])
+    bare = H.to_time_trace(sample_rate=fs)
+    assert (bare.kind, bare.unit) == ('impulse_response', '1/s')
     _, s = tone_burst(float(_FREQS[_FREQS.size // 2]), 5, sample_rate=fs)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         driven = H.to_time_trace(source_waveform=s, sample_rate=fs)
-        spectral = H.to_time_trace(source_spectrum=np.ones(_FREQS.size))
-    for trace in (driven, spectral):
-        assert (trace.kind, trace.unit) == ('pressure', 'Pa')
+    assert (driven.kind, driven.unit) == ('pressure', 'Pa')
     _, ax = driven.plot()
     assert ax.get_ylabel() == 'p(t) (Pa)'
     # The way back is a transfer function again, not an impulse response.
@@ -163,7 +193,7 @@ def test_the_tone_of_an_impulse_response_is_refused_and_its_transform_is_h(df):
     window=None, a record-dependent fraction under 'hann'), so
     extract_tone refuses it, and the refusal's remedy returns H exactly."""
     freqs, data, H = _two_path(df)
-    bare = H.to_time_trace(window=None, t_start=0.0)
+    bare = H.to_time_trace(sample_rate=3200.0, t_start=0.0)
     assert bare.kind == 'impulse_response'
     with pytest.raises(ConfigurationError,
                        match='(?s)impulse response.*to_transfer_function'):
@@ -182,7 +212,7 @@ def test_a_line_of_impulse_responses_transforms_to_a_line_of_h_in_db():
     f0 = float(_FREQS[_FREQS.size // 2])
     ranges = H.coords['range']
     traces = [H.to_time_trace(depth=10.0, range=float(r), t_start=0.0,
-                              window=None) for r in ranges]
+                              sample_rate=_FS) for r in ranges]
     line = Field(data=np.stack([t.data for t in traces]),
                  coords={'range': ranges, 'time': traces[0].coords['time']},
                  kind=traces[0].kind, unit=traces[0].unit,
@@ -196,30 +226,19 @@ def test_a_line_of_impulse_responses_transforms_to_a_line_of_h_in_db():
 
 
 def test_ir_title_passthrough():
-    fig, ax = _broadband().plot_impulse_response(title='p(t)')
+    fig, ax = _ir().plot_impulse_response(title='p(t)')
     assert ax.get_title() == 'p(t)'
 
 
 def test_ir_carries_model_credit():
-    fig, ax = _broadband().plot_impulse_response()
+    fig, ax = _ir().plot_impulse_response()
     assert any('Model' in t.get_text() for t in fig.texts)
 
 
 def test_ir_multireceiver_without_reduction_raises():
-    with pytest.raises(ConfigurationError, match='reduce to one'):
-        _broadband(n_depth=3, n_range=4).plot_impulse_response()
-
-
-def test_ir_unpinned_range_raises():
-    # A frequency-only Field with no pinned range cannot be IFFTed honestly
-    # (t_start / demodulation need r); fabricating r=0 mispositions the peak.
-    spec = Field(
-        data=np.exp(-2j * np.pi * _FREQS * 2.0),
-        coords={'frequency': _FREQS},
-        model='Synthetic', source_depths=np.array([5.0]),
-        frequencies=_FREQS, phase_reference=PhaseReference.TRAVELLING_WAVE)
-    with pytest.raises(ConfigurationError, match='pinned range|range'):
-        spec.plot_impulse_response()
+    grid = _broadband(n_depth=3, n_range=4).impulse_response(_FS)
+    with pytest.raises(ConfigurationError, match='Select one cell first'):
+        grid.plot_impulse_response()
     assert not plt.get_fignums()                        # no leaked figure
 
 
@@ -367,8 +386,8 @@ def test_the_field_plot_methods_draw_what_the_public_plotters_draw():
     for by_method, by_plotter in ((mag_m, mag_f), (phase_m, phase_f)):
         assert ([ln.get_xydata().tolist() for ln in by_method.lines]
                 == [ln.get_xydata().tolist() for ln in by_plotter.lines])
-    _, ax_m = H.plot_impulse_response(nfft=512)
-    _, ax_f = plot_impulse_response(H, nfft=512)
+    _, ax_m = _ir().plot_impulse_response()
+    _, ax_f = plot_impulse_response(_ir())
     assert ([ln.get_xydata().tolist() for ln in ax_m.lines]
             == [ln.get_xydata().tolist() for ln in ax_f.lines])
     plt.close('all')

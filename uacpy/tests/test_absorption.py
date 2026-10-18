@@ -39,8 +39,10 @@ from uacpy.io.at_codes import volume_attenuation_code
 import math
 from uacpy.tests.conftest import recorded_warnings
 from uacpy.core import Environment
-from uacpy.core.absorption import ConstantAbsorption, Thorp
-from uacpy.core.exceptions import ProvenanceWarning, ValidityWarning
+from uacpy.core.absorption import (
+    AbsorptionCoefficient, ConstantAbsorption, Thorp, _absorption_law,
+)
+from uacpy.core.exceptions import ValidityWarning
 from uacpy.io.at_codes import writes_alpha_per_ssp_row
 from uacpy.tests.conftest import (
     TWO_LAYER_DEPTHS, measured_absorption_table, two_layer_absorption,
@@ -117,9 +119,9 @@ def test_a_uniform_profile_is_the_one_row_law_exactly():
         salinity=[(0.0, 34.2), (300.0, 34.2), (1200.0, 34.2)], pH=7.95)
     z = np.array([0.0, 150.0, 300.0, 777.0, 1200.0, 3000.0])
     for f in (300.0, 3e3, 3e4):
-        np.testing.assert_array_equal(profile.alpha_dB_per_m(f, z),
-                                      row.alpha_dB_per_m(f, z))
-    assert np.all(np.diff(row.alpha_dB_per_m(3e4, z)) != 0.0)
+        np.testing.assert_array_equal(profile._alpha_dB_per_m_at_frequency(f, z),
+                                      row._alpha_dB_per_m_at_frequency(f, z))
+    assert np.all(np.diff(row._alpha_dB_per_m_at_frequency(3e4, z)) != 0.0)
 
 
 #: Temperature and salinity on depths of their own, pH a number.
@@ -152,7 +154,7 @@ class TestEachWaterPropertyHasItsOwnDepths:
         t = np.interp(z, *np.array(_T_PAIRS).T)
         s = np.interp(z, *np.array(_S_PAIRS).T)
         want = absorption_francois_garrison(1e4, t, s, 8.0, z) / 1000.0
-        np.testing.assert_allclose(law.alpha_dB_per_m(1e4, z), want,
+        np.testing.assert_allclose(law._alpha_dB_per_m_at_frequency(1e4, z), want,
                                    rtol=1e-13)
         np.testing.assert_array_equal(law.profile_depths,
                                       [0.0, 30.0, 60.0, 150.0, 200.0])
@@ -290,7 +292,7 @@ class TestTheColumnIsKeptWhole:
 
     def test_default_evaluates_each_depth_with_its_own_water(self):
         fg = self._fg()
-        alpha = fg.alpha_dB_per_m(1e4, self.Z)
+        alpha = fg._alpha_dB_per_m_at_frequency(1e4, self.Z)
         for z, t, a in zip(self.Z, self.T, alpha):
             expected = absorption_francois_garrison(1e4, t, 35.0, 8.0, z)
             assert a == pytest.approx(float(expected) / 1000.0, rel=1e-14)
@@ -303,8 +305,8 @@ class TestTheColumnIsKeptWhole:
         # The size of what the profile fixes, in dB: the surface row at
         # 500 m carries 22 °C water where the column holds 8 °C.
         zq = np.array([500.0])
-        a_col = float(np.ravel(self._fg().alpha_dB_per_m(1e4, zq))[0])
-        a_surf = float(np.ravel(self._fg(ref=0.0).alpha_dB_per_m(1e4, zq))[0])
+        a_col = float(np.ravel(self._fg()._alpha_dB_per_m_at_frequency(1e4, zq))[0])
+        a_surf = float(np.ravel(self._fg(ref=0.0)._alpha_dB_per_m_at_frequency(1e4, zq))[0])
         assert a_surf < a_col
         assert (a_col - a_surf) / a_col == pytest.approx(0.30, abs=0.02)
 
@@ -317,8 +319,8 @@ class TestTheColumnIsKeptWhole:
         row = FrancoisGarrison.from_temperature_salinity(z, t, s, collapse_to_depth=0.0)
         column = FrancoisGarrison.from_temperature_salinity(z, t, s)
         zq = np.linspace(0.0, 500.0, 11)
-        np.testing.assert_array_equal(column.alpha_dB_per_m(3e3, zq),
-                                      row.alpha_dB_per_m(3e3, zq))
+        np.testing.assert_array_equal(column._alpha_dB_per_m_at_frequency(3e3, zq),
+                                      row._alpha_dB_per_m_at_frequency(3e3, zq))
 
 
 # (kwargs, the fragment of the message that names the offending field)
@@ -409,7 +411,7 @@ def test_an_in_domain_row_is_unchanged_by_the_errstate_guard():
 
 def _biological_layer(**kw):
     """A 0-50 m BiologicalLayer at f0 = 100 Hz, Q = 10, a0 = 1; keywords override."""
-    args = {'z_top_m': 0.0, 'z_bottom_m': 50.0, 'f0_hz': 100.0,
+    args = {'z_top': 0.0, 'z_bottom': 50.0, 'f0': 100.0,
             'Q': 10.0, 'a0': 1.0}
     args.update(kw)
     return BiologicalLayer(**args)
@@ -455,10 +457,10 @@ class TestBiologicalLayerMeetsTheCrciCeiling:
         frequency buys ten times the dB/km — the same layer that warns at
         100 Hz is comfortable at 1000 Hz."""
         with pytest.warns(UserWarning, match='CRCI'):
-            _biological_layer(f0_hz=100.0, Q=61.0, a0=1.0)
+            _biological_layer(f0=100.0, Q=61.0, a0=1.0)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            _biological_layer(f0_hz=1000.0, Q=61.0, a0=1.0)
+            _biological_layer(f0=1000.0, Q=61.0, a0=1.0)
 
     def test_the_layer_is_built_and_computes(self):
         """A warning, not a refusal: the object exists and its Lorentzian is
@@ -467,11 +469,11 @@ class TestBiologicalLayerMeetsTheCrciCeiling:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             bio = Biological(layers=[(0.0, 50.0, 100.0, 61.0, 1.0)])
-        got = float(bio.alpha_dB_per_m(100.0, [25.0])[0]) * 1000.0
+        got = float(bio._alpha_dB_per_m_at_frequency(100.0, [25.0])[0]) * 1000.0
         assert got == pytest.approx(1.0 * 61.0 ** 2, rel=1e-12)
 
     @pytest.mark.parametrize('kwargs, match', [
-        (dict(f0_hz=0.0), 'f0_hz'), (dict(Q=0.0), 'Q'), (dict(a0=0.0), 'a0')])
+        (dict(f0=0.0), 'f0'), (dict(Q=0.0), 'Q'), (dict(a0=0.0), 'a0')])
     def test_the_existing_refusals_run_before_the_ceiling_check(self, kwargs,
                                                                 match):
         """f0 = 0 divides in the ceiling formula, so the ordering matters."""
@@ -515,16 +517,16 @@ class TestBiologicalLayerRefusesNonFiniteAndNegativeDepths:
     nothing, which is the failure mode the typed refusal replaces."""
 
     @pytest.mark.parametrize('kwargs, match', [
-        (dict(z_top_m=float('nan')), 'z_top_m must be finite'),
-        (dict(z_bottom_m=float('nan')), 'z_bottom_m must be finite'),
-        (dict(z_top_m=-500.0, z_bottom_m=-100.0),
-         'z_top_m must be non-negative'),
+        (dict(z_top=float('nan')), 'z_top must be finite'),
+        (dict(z_bottom=float('nan')), 'z_bottom must be finite'),
+        (dict(z_top=-500.0, z_bottom=-100.0),
+         'z_top must be non-negative'),
         (dict(a0=float('nan')), 'a0 must be finite'),
         (dict(Q=float('nan')), 'Q must be finite'),
         (dict(a0=float('inf')), 'a0 must be finite'),
         (dict(Q=float('inf')), 'Q must be finite'),
-        (dict(f0_hz=float('nan')), r'BiologicalLayer\.f0_hz must be finite'),
-        (dict(f0_hz=float('inf')), r'BiologicalLayer\.f0_hz must be finite'),
+        (dict(f0=float('nan')), r'BiologicalLayer\.f0 must be finite'),
+        (dict(f0=float('inf')), r'BiologicalLayer\.f0 must be finite'),
     ], ids=['z_top_nan', 'z_bottom_nan', 'negative_depths', 'a0_nan', 'Q_nan',
             'a0_inf', 'Q_inf', 'f0_nan', 'f0_inf'])
     def test_a_non_finite_or_negative_input_is_refused_by_name(self, kwargs,
@@ -537,26 +539,26 @@ class TestBiologicalLayerRefusesNonFiniteAndNegativeDepths:
                 _biological_layer(**kwargs)
 
     def test_a_non_finite_f0_is_named_by_the_layer_not_the_unit_converter(self):
-        """``f0_hz`` was the one field that already failed, but from inside
+        """``f0`` was the one field that already failed, but from inside
         ``convert_attenuation_units`` in the ceiling formula — the message
         named that function and its frequency argument, not the layer field
         the user wrote."""
         with pytest.raises(ConfigurationError,
-                           match='f0_hz must be finite') as excinfo:
-            _biological_layer(f0_hz=float('nan'))
+                           match='f0 must be finite') as excinfo:
+            _biological_layer(f0=float('nan'))
         assert 'convert_attenuation_units' not in str(excinfo.value)
 
     def test_a_finite_zero_reaches_the_sign_check_not_the_finiteness_guard(self):
         """The finiteness guards run first but do not take over the sign
-        verdicts: zero is finite, so ``f0_hz = 0`` still fails as a sign
+        verdicts: zero is finite, so ``f0 = 0`` still fails as a sign
         error, keeping the ``"must be positive"`` phrase those refusals own."""
-        with pytest.raises(ConfigurationError, match='f0_hz must be positive'):
-            _biological_layer(f0_hz=0.0)
+        with pytest.raises(ConfigurationError, match='f0 must be positive'):
+            _biological_layer(f0=0.0)
 
     def test_a_layer_at_zero_depth_is_accepted(self):
         """The depth bound is non-negative, not positive: a layer whose top
         sits at the sea surface is an ordinary configuration."""
-        assert _biological_layer(z_top_m=0.0, z_bottom_m=50.0).z_top_m == 0.0
+        assert _biological_layer(z_top=0.0, z_bottom=50.0).z_top == 0.0
 
 
 @pytest.mark.parametrize('cls', [BiologicalLayer, Biological, FrancoisGarrison],
@@ -592,7 +594,7 @@ class TestTheTwoAbsorptionRoutesDivergeByTheDocumentedAmount:
             self, sound_speed, expected):
         from uacpy.core.absorption import ConstantAbsorption
         python = float(np.ravel(
-            ConstantAbsorption(0.5).alpha_dB_per_m(1e3, [0.0]))[0])
+            ConstantAbsorption(0.5)._alpha_dB_per_m_at_frequency(1e3, [0.0]))[0])
         deck = float(convert_attenuation_units(
             0.5, 1e3, 'dB/wavelength', 'dB/m', sound_speed=sound_speed))
         assert 100.0 * (python - deck) / deck == pytest.approx(expected,
@@ -677,17 +679,17 @@ class TestFrancoisGarrisonPhScale:
         nbs = FrancoisGarrison(temperature=4.0, salinity=35.0, pH=converted)
         assert total.ph_nbs == pytest.approx(converted)
         for f in (100.0, 500.0, 1000.0, 10000.0):
-            assert total.alpha_dB_per_m(f, [0.0, 1000.0]) == pytest.approx(
-                nbs.alpha_dB_per_m(f, [0.0, 1000.0]))
+            assert total._alpha_dB_per_m_at_frequency(f, [0.0, 1000.0]) == pytest.approx(
+                nbs._alpha_dB_per_m_at_frequency(f, [0.0, 1000.0]))
 
     def test_total_scale_raises_low_frequency_absorption_by_about_a_fifth(self):
         """+0.10 on the boric term's ``10**(0.78·pH)`` is ×1.20; at 300 Hz
         that term is nearly all of the absorption, at 10 kHz almost none."""
         total, nbs = self._pair('total'), self._pair('nbs')
-        low = float(total.alpha_dB_per_m(300.0, [1000.0])[0]
-                    / nbs.alpha_dB_per_m(300.0, [1000.0])[0])
-        high = float(total.alpha_dB_per_m(20000.0, [1000.0])[0]
-                     / nbs.alpha_dB_per_m(20000.0, [1000.0])[0])
+        low = float(total._alpha_dB_per_m_at_frequency(300.0, [1000.0])[0]
+                    / nbs._alpha_dB_per_m_at_frequency(300.0, [1000.0])[0])
+        high = float(total._alpha_dB_per_m_at_frequency(20000.0, [1000.0])[0]
+                     / nbs._alpha_dB_per_m_at_frequency(20000.0, [1000.0])[0])
         assert 1.15 < low < 1.22
         assert 1.0 < high < 1.02
 
@@ -710,7 +712,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
 
     Before this, the package exposed the same formula twice and the two were
     transposes of each other: ``absorption_francois_garrison`` vectorised over
-    frequency with a scalar depth, ``FrancoisGarrison.alpha_dB_per_m``
+    frequency with a scalar depth, the law's one-frequency evaluation
     vectorised over depth with a scalar frequency, and an array frequency into
     the second raised ``TypeError: only 0-dimensional arrays can be converted
     to Python scalars``. Neither could answer alpha(f, z).
@@ -748,7 +750,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
         grid = law.table(f, depths=z, units='dB/m').data
         assert len(calls) == 1
         for j in (0, 31, 63):
-            np.testing.assert_allclose(grid[:, j], law.alpha_dB_per_m(f[j], z),
+            np.testing.assert_allclose(grid[:, j], law._alpha_dB_per_m_at_frequency(f[j], z),
                                        rtol=1e-12)
 
     def test_both_axes_together_give_a_depth_by_frequency_grid(self):
@@ -769,7 +771,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
         z = np.array([0.0, 100.0, 250.0])
         grid = FrancoisGarrison(**self.FG).table(self.F, depths=z).data
         for j, f in enumerate(self.F):                     # column <- method
-            col = FrancoisGarrison(**self.FG).alpha_dB_per_m(f, z) * 1000.0
+            col = FrancoisGarrison(**self.FG)._alpha_dB_per_m_at_frequency(f, z) * 1000.0
             np.testing.assert_allclose(grid[:, j], col, rtol=1e-12)
         for i, zz in enumerate(z):                         # row <- formula
             row = absorption_francois_garrison(
@@ -784,7 +786,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
         at_surface = FrancoisGarrison(**self.FG).table(self.F, depths=[0.0])
         at_depth = FrancoisGarrison(**self.FG).table(self.F, depths=[1000.0])
         assert not flat.is_depth_dependent
-        assert flat.depth_m == 0.0
+        assert flat.depth == 0.0
         np.testing.assert_array_equal(flat.data, at_surface.data[0])
         assert np.all(flat.data != at_depth.data[0])
 
@@ -804,7 +806,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
         law = Biological(layers=layers)
         got = law.table(self.F, depths=z, units='dB/wavelength',
                         sound_speed=1480.0)
-        want = np.stack([law.alpha_dB_per_m(f, z) * 1480.0 / f
+        want = np.stack([law._alpha_dB_per_m_at_frequency(f, z) * 1480.0 / f
                          for f in self.F], axis=1)
         np.testing.assert_allclose(got.data, want, rtol=1e-12)
         assert got.model == 'biological'
@@ -815,7 +817,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
         """The per-wavelength value, the units and the sound speed that
         converts it reach ``ConstantAbsorption.table``."""
         from uacpy.core.constants import DEFAULT_SOUND_SPEED
-        law = ConstantAbsorption(value_dB_per_wavelength=0.25)
+        law = ConstantAbsorption(value=0.25)
         got = law.table(self.F, units='dB/m', sound_speed=1480.0)
         np.testing.assert_allclose(got.data, 0.25 * self.F / 1480.0,
                                    rtol=1e-12)
@@ -832,7 +834,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
         per-wavelength value on the way in, so asking for dB/wavelength
         back returns the value itself — at 1480 m/s as at the 1500 m/s
         default (REL-NEW-ABS: it read 0.24667 at 1480)."""
-        got = ConstantAbsorption(value_dB_per_wavelength=0.25).table(
+        got = ConstantAbsorption(value=0.25).table(
             [1e3], units='dB/wavelength', sound_speed=sound_speed)
         np.testing.assert_allclose(got.data, [0.25], rtol=1e-12)
 
@@ -872,7 +874,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
         a = FrancoisGarrison().table(self.F)
         assert a.parameters == {'temperature': 10.0, 'salinity': 35.0,
                                 'pH': 8.0, 'ph_scale': 'nbs'}
-        assert a.depth_m == 0.0
+        assert a.depth == 0.0
         np.testing.assert_allclose(a.data, absorption_francois_garrison(self.F),
                                    rtol=1e-12)
 
@@ -894,7 +896,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
             a = law.table(self.F, depths=depth)
             assert FrancoisGarrison(**a.parameters) == law
         assert a.parameters == {**ocean, 'ph_scale': 'nbs'}
-        assert a.depth_m == depth
+        assert a.depth == depth
         np.testing.assert_allclose(
             a.data, absorption_francois_garrison(self.F, **ocean, depth=depth),
             rtol=1e-12)
@@ -933,14 +935,14 @@ def test_every_absorption_model_is_one_object():
                         'absorption_biological'}
     for n in formulas:
         out = getattr(uacpy.acoustics, n)(
-            np.array([1e3, 1e4]), **({'f0_hz': 1e3, 'Q': 4.0, 'a0': 0.1}
+            np.array([1e3, 1e4]), **({'f0': 1e3, 'Q': 4.0, 'a0': 0.1}
                                      if n == 'absorption_biological' else {}))
         assert isinstance(out, np.ndarray) and out.shape == (2,), n
 
 
 #: Minimal constructor arguments for the models the one-object test builds.
 _SAMPLE = {'layers': [(20.0, 80.0, 1500.0, 4.0, 0.02)],
-           'value_dB_per_wavelength': 1e-4}
+           'value': 1e-4}
 
 
 def test_the_two_formula_families_are_reached_the_same_way():
@@ -1007,20 +1009,20 @@ class TestBiologicalLayerValidation:
     def test_valid_biological_layer(self):
         from uacpy.core.absorption import BiologicalLayer
         layer = BiologicalLayer(
-            z_top_m=10.0, z_bottom_m=50.0, f0_hz=200.0, Q=20.0, a0=0.5,
+            z_top=10.0, z_bottom=50.0, f0=200.0, Q=20.0, a0=0.5,
         )
-        assert layer.f0_hz == 200.0
+        assert layer.f0 == 200.0
 
     @pytest.mark.parametrize("kwargs,match", [
-        (dict(z_top_m=50.0, z_bottom_m=10.0, f0_hz=200.0, Q=20.0, a0=0.5),
-         "z_bottom_m"),
-        (dict(z_top_m=10.0, z_bottom_m=10.0, f0_hz=200.0, Q=20.0, a0=0.5),
-         "z_bottom_m"),
-        (dict(z_top_m=10.0, z_bottom_m=50.0, f0_hz=-1.0, Q=20.0, a0=0.5),
-         "f0_hz"),
-        (dict(z_top_m=10.0, z_bottom_m=50.0, f0_hz=200.0, Q=0.0, a0=0.5),
+        (dict(z_top=50.0, z_bottom=10.0, f0=200.0, Q=20.0, a0=0.5),
+         "z_bottom"),
+        (dict(z_top=10.0, z_bottom=10.0, f0=200.0, Q=20.0, a0=0.5),
+         "z_bottom"),
+        (dict(z_top=10.0, z_bottom=50.0, f0=-1.0, Q=20.0, a0=0.5),
+         "f0"),
+        (dict(z_top=10.0, z_bottom=50.0, f0=200.0, Q=0.0, a0=0.5),
          "Q"),
-        (dict(z_top_m=10.0, z_bottom_m=50.0, f0_hz=200.0, Q=20.0, a0=-0.1),
+        (dict(z_top=10.0, z_bottom=50.0, f0=200.0, Q=20.0, a0=-0.1),
          "a0"),
     ])
     def test_biological_layer_rejects_invalid(self, kwargs, match):
@@ -1044,7 +1046,7 @@ class TestABiologicalLayerTupleNeedsItsFiveValues:
 
     def test_five_values_build_the_layer(self):
         (layer,) = Biological([(0, 50, 1000, 5, 0.5)]).layers
-        assert (layer.z_top_m, layer.z_bottom_m, layer.f0_hz, layer.Q,
+        assert (layer.z_top, layer.z_bottom, layer.f0, layer.Q,
                 layer.a0) == (0.0, 50.0, 1000.0, 5.0, 0.5)
 
 
@@ -1063,7 +1065,7 @@ class TestBiologicalBoundaryContributions:
                                   (10.0, 20.0, 100.0, 5.0, 10.0)])
 
     def test_shared_boundary_sums_both_layers(self):
-        a = self._stack().alpha_dB_per_m(100.0, [5.0, 10.0, 15.0])
+        a = self._stack()._alpha_dB_per_m_at_frequency(100.0, [5.0, 10.0, 15.0])
         assert a[1] == pytest.approx(a[0] + a[2])
         # At f = f0 each layer peaks at a0·Q² = 10·25 = 250 dB/km, so the
         # shared depth carries 500 dB/km (the AttenMod.f90 sum).
@@ -1071,7 +1073,7 @@ class TestBiologicalBoundaryContributions:
         assert a[1] * 1000.0 == pytest.approx(500.0)
 
     def test_outer_edges_are_inclusive(self):
-        a = self._stack().alpha_dB_per_m(100.0, [0.0, 20.0, 25.0])
+        a = self._stack()._alpha_dB_per_m_at_frequency(100.0, [0.0, 20.0, 25.0])
         assert a[0] == pytest.approx(a[1])
         assert a[0] > 0.0
         assert a[2] == 0.0
@@ -1161,7 +1163,8 @@ class TestConvertAttenuationUnitsToQ:
 
 class TestAbsorptionFrequencyGuardIsShared:
     """``α(f, z)`` has no value at or below zero for any of the four models,
-    so the guard sits on the public ``alpha_dB_per_m`` ahead of the dispatch
+    so the guard sits on the base class's one-frequency evaluation
+    (``_alpha_dB_per_m_at_frequency``) ahead of the dispatch
     rather than in each subclass. Thorp and Francois-Garrison are polynomials
     that had no guard and kept evaluating: both returned a *positive*
     attenuation at f = 0 and for a negative frequency."""
@@ -1173,7 +1176,7 @@ class TestAbsorptionFrequencyGuardIsShared:
             Thorp(),
             FrancoisGarrison(temperature=15.0, salinity=35.0, pH=8.1),
             Biological(layers=[(0.0, 100.0, 100.0, 10.0, 1.0)]),
-            ConstantAbsorption(value_dB_per_wavelength=0.5),
+            ConstantAbsorption(value=0.5),
         ]
 
     @pytest.mark.parametrize('freq', [0.0, -100.0, float('nan')])
@@ -1182,45 +1185,57 @@ class TestAbsorptionFrequencyGuardIsShared:
         for model in self._models():
             with pytest.raises(ConfigurationError,
                                match='frequency must be > 0'):
-                model.alpha_dB_per_m(freq, z)
+                model._alpha_dB_per_m_at_frequency(freq, z)
 
     def test_the_message_names_the_model(self):
         from uacpy.core.absorption import Thorp
-        with pytest.raises(ConfigurationError, match='Thorp.alpha_dB_per_m'):
-            Thorp().alpha_dB_per_m(0.0, np.array([0.0]))
+        with pytest.raises(ConfigurationError, match='Thorp: frequency must be'):
+            Thorp()._alpha_dB_per_m_at_frequency(0.0, np.array([0.0]))
 
     def test_a_positive_frequency_evaluates(self):
         z = np.array([0.0, 50.0])
         for model in self._models():
-            a = np.asarray(model.alpha_dB_per_m(1000.0, z))
+            a = np.asarray(model._alpha_dB_per_m_at_frequency(1000.0, z))
             assert a.shape == z.shape
             assert np.isfinite(a).all() and (a >= 0).all()
 
     def test_sub_hertz_is_legal(self):
         """Only f <= 0 has no wavelength; infrasonic frequencies convert."""
         from uacpy.core.absorption import ConstantAbsorption
-        out = ConstantAbsorption(value_dB_per_wavelength=0.5).alpha_dB_per_m(
+        out = ConstantAbsorption(value=0.5)._alpha_dB_per_m_at_frequency(
             0.5, np.array([10.0]))
         assert np.isfinite(out).all()
 
 
 class TestConstantAbsorptionCeiling:
-    """ConstantAbsorption enforces the same attenuation ceiling as the seabed
-    carriers (above it every AT solver aborts in AttenMod.f90's CRCI)."""
+    """ConstantAbsorption meets the same attenuation ceiling as the seabed
+    carriers (above it every AT solver aborts in AttenMod.f90's CRCI): the
+    law keeps the value with a warning, and an AT deck refuses it."""
 
-    def test_above_ceiling_raises(self):
+    def test_above_ceiling_warns_and_an_at_deck_refuses(self, tmp_path):
+        import uacpy
         from uacpy.core.absorption import ConstantAbsorption
         from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
-        with pytest.raises(ConfigurationError, match="dB/wavelength exceeds"):
-            ConstantAbsorption(
-                value_dB_per_wavelength=MAX_ATTENUATION_DB_PER_WAVELENGTH + 1.0)
+        from uacpy.io.oalib_writer import write_scooter_env_file
+        value = MAX_ATTENUATION_DB_PER_WAVELENGTH + 1.0
+        with pytest.warns(ValidityWarning, match="dB/wavelength exceeds"):
+            law = ConstantAbsorption(value=value)
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, absorption=law)
+        with pytest.raises(ConfigurationError,
+                           match="ConstantAbsorption.value"):
+            write_scooter_env_file(
+                tmp_path / 's.env', env,
+                uacpy.Source(depths=50.0, frequencies=100.0),
+                uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+                interp_ssp='linear', n_mesh=0, rmax=5000.0, c_low=1400.0,
+                c_high=2000.0)
 
     def test_at_ceiling_constructs(self):
         from uacpy.core.absorption import ConstantAbsorption
         from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
         c = ConstantAbsorption(
-            value_dB_per_wavelength=MAX_ATTENUATION_DB_PER_WAVELENGTH)
-        assert c.value_dB_per_wavelength == pytest.approx(
+            value=MAX_ATTENUATION_DB_PER_WAVELENGTH)
+        assert c.value == pytest.approx(
             MAX_ATTENUATION_DB_PER_WAVELENGTH)
 
 
@@ -1419,12 +1434,12 @@ class TestThorpReferenceValues:
             _thorp_dB_per_km_published(f_hz), rel=1e-12)
 
     def test_class_converts_dB_per_km_to_dB_per_m(self):
-        """Thorp.alpha_dB_per_m is the bare formula divided by 1000, flat in
+        """Thorp's dB/m evaluation is the bare formula divided by 1000, flat in
         depth."""
         from uacpy.core.absorption import Thorp
         from uacpy.core.acoustics.attenuation import absorption_thorp
         z = np.array([0.0, 500.0, 5000.0])
-        a = Thorp().alpha_dB_per_m(1e4, z)
+        a = Thorp()._alpha_dB_per_m_at_frequency(1e4, z)
         assert a.shape == z.shape
         np.testing.assert_allclose(
             a, float(absorption_thorp(1e4)) / 1000.0, rtol=1e-12)
@@ -1531,7 +1546,7 @@ class TestFrancoisGarrisonReferenceValues:
         assert a_deep / a_surf == pytest.approx(0.54917617566523, rel=1e-10)
 
     def test_the_class_evaluates_the_formula_at_each_depth_asked(self):
-        """FrancoisGarrison.alpha_dB_per_m evaluates the formula at each
+        """FrancoisGarrison's dB/m evaluation takes the formula at each
         depth asked (dB/m = dB/km / 1000)."""
         from uacpy.core.absorption import FrancoisGarrison
         from uacpy.core.acoustics.attenuation import (
@@ -1539,7 +1554,7 @@ class TestFrancoisGarrisonReferenceValues:
         )
         fg = FrancoisGarrison(temperature=10.0, salinity=35.0, pH=8.0)
         z = np.array([0.0, 2000.0])
-        got = fg.alpha_dB_per_m(1e4, z)
+        got = fg._alpha_dB_per_m_at_frequency(1e4, z)
         want = absorption_francois_garrison(
             1e4, temperature=10.0, salinity=35.0, pH=8.0, depth=z) / 1000.0
         np.testing.assert_allclose(got, want, rtol=1e-12)
@@ -1633,18 +1648,18 @@ class TestBiologicalLorentzian:
         return Biological(layers=[(10.0, 60.0, 1000.0, 5.0, 10.0)])
 
     def test_peak_is_a0_q_squared(self):
-        a = self._bio().alpha_dB_per_m(1000.0, np.array([30.0]))
+        a = self._bio()._alpha_dB_per_m_at_frequency(1000.0, np.array([30.0]))
         assert float(a[0]) == pytest.approx(10.0 * 25.0 / 1000.0, rel=1e-12)
 
     def test_off_resonance_denominator(self):
-        a = self._bio().alpha_dB_per_m(500.0, np.array([30.0]))
+        a = self._bio()._alpha_dB_per_m_at_frequency(500.0, np.array([30.0]))
         want = 10.0 / (9.0 + 1.0 / 25.0) / 1000.0
         assert float(a[0]) == pytest.approx(want, rel=1e-12)
 
     def test_zero_frequency_raises_typed_error(self):
         """f = 0 must raise ConfigurationError, not divide by zero."""
         with pytest.raises(ConfigurationError, match="frequency must be > 0"):
-            self._bio().alpha_dB_per_m(0.0, np.array([30.0]))
+            self._bio()._alpha_dB_per_m_at_frequency(0.0, np.array([30.0]))
 
     def test_the_formula_at_zero_hertz_returns_its_limit_without_a_warning(
             self):
@@ -1661,8 +1676,8 @@ class TestBiologicalLorentzian:
 
     def test_zero_resonance_frequency_rejected(self):
         from uacpy.core.absorption import BiologicalLayer
-        with pytest.raises(ConfigurationError, match="f0_hz must be positive"):
-            BiologicalLayer(z_top_m=0.0, z_bottom_m=10.0, f0_hz=0.0,
+        with pytest.raises(ConfigurationError, match="f0 must be positive"):
+            BiologicalLayer(z_top=0.0, z_bottom=10.0, f0=0.0,
                             Q=5.0, a0=1.0)
 
 
@@ -1672,15 +1687,15 @@ class TestConstantAbsorptionContract:
 
     def test_zero_value_is_a_valid_lossless_baseline(self):
         from uacpy.core.absorption import ConstantAbsorption
-        c = ConstantAbsorption(value_dB_per_wavelength=0.0)
+        c = ConstantAbsorption(value=0.0)
         np.testing.assert_allclose(
-            c.alpha_dB_per_m(100.0, np.array([0.0, 50.0])), 0.0)
+            c._alpha_dB_per_m_at_frequency(100.0, np.array([0.0, 50.0])), 0.0)
 
     def test_zero_frequency_raises_typed_error(self):
         from uacpy.core.absorption import ConstantAbsorption
-        c = ConstantAbsorption(value_dB_per_wavelength=0.5)
+        c = ConstantAbsorption(value=0.5)
         with pytest.raises(ConfigurationError, match="frequency must be > 0"):
-            c.alpha_dB_per_m(0.0, np.array([10.0]))
+            c._alpha_dB_per_m_at_frequency(0.0, np.array([10.0]))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1715,26 +1730,26 @@ class TestBiologicalLayerValidatorBoundaries:
         from uacpy.core.absorption import BiologicalLayer
         with pytest.raises(
                 ConfigurationError,
-                match='z_bottom_m must be strictly greater than z_top_m'):
-            BiologicalLayer(z_top_m=10.0, z_bottom_m=10.0, f0_hz=100.0,
+                match='z_bottom must be strictly greater than z_top'):
+            BiologicalLayer(z_top=10.0, z_bottom=10.0, f0=100.0,
                             Q=5.0, a0=1.0)
 
     def test_zero_q_raises(self):
         from uacpy.core.absorption import BiologicalLayer
         with pytest.raises(ConfigurationError, match='Q must be positive'):
-            BiologicalLayer(z_top_m=0.0, z_bottom_m=10.0, f0_hz=100.0,
+            BiologicalLayer(z_top=0.0, z_bottom=10.0, f0=100.0,
                             Q=0.0, a0=1.0)
 
     def test_zero_a0_raises(self):
         from uacpy.core.absorption import BiologicalLayer
         with pytest.raises(ConfigurationError, match='a0 must be positive'):
-            BiologicalLayer(z_top_m=0.0, z_bottom_m=10.0, f0_hz=100.0,
+            BiologicalLayer(z_top=0.0, z_bottom=10.0, f0=100.0,
                             Q=5.0, a0=0.0)
 
     def test_sub_unity_parameters_are_legal(self):
         from uacpy.core.absorption import Biological
         b = Biological(layers=[(0.0, 10.0, 0.5, 0.5, 0.5)])
-        a = b.alpha_dB_per_m(0.5, np.array([5.0]))
+        a = b._alpha_dB_per_m_at_frequency(0.5, np.array([5.0]))
         assert np.isfinite(a).all()
 
 
@@ -1743,8 +1758,8 @@ class TestSubHertzFrequenciesAreLegal:
 
     def test_constant_absorption_at_half_a_hertz(self):
         from uacpy.core.absorption import ConstantAbsorption
-        c = ConstantAbsorption(value_dB_per_wavelength=0.5)
-        assert np.isfinite(c.alpha_dB_per_m(0.5, np.array([10.0]))).all()
+        c = ConstantAbsorption(value=0.5)
+        assert np.isfinite(c._alpha_dB_per_m_at_frequency(0.5, np.array([10.0]))).all()
 
 
 class TestArrivalAbsorptionExponent:
@@ -1770,15 +1785,18 @@ class TestArrivalAbsorptionExponent:
         assert got[0, 0] / (2.0 * np.pi * 20000.0 * self.IMAG[0]) < 0.7
 
     @pytest.mark.parametrize('law', ['none', 'constant', 'biological',
-                                     'no_trace_frequency'])
+                                     'table', 'no_trace_frequency'])
     def test_other_laws_scale_linearly_bit_for_bit(self, law):
         from uacpy.core.absorption import (
             Biological, ConstantAbsorption, Thorp, arrival_absorption_exponent)
+        # 'table': a measured table as an environment (and Arrivals) holds
+        # it, taken as the tabulated law.
         absorption, f_t = {
             'none': (None, 40000.0),
             'constant': (ConstantAbsorption(0.1), 40000.0),
             'biological': (Biological(layers=[(0.0, 50.0, 3e4, 4.0, 0.1)]),
                            40000.0),
+            'table': (measured_absorption_table(), 40000.0),
             'no_trace_frequency': (Thorp(), None),
         }[law]
         got = arrival_absorption_exponent(
@@ -1789,7 +1807,7 @@ class TestArrivalAbsorptionExponent:
     def test_one_francois_garrison_row_scales_by_its_surface_ratio(self):
         """The law has no depth of its own, so the ratio is the one at the
         surface (``table`` with no depths); its bend with depth is measured
-        by ``band_absorption_error_dB_per_km(..., by_ratio=True)``."""
+        by ``_band_absorption_error_dB_per_km(..., by_ratio=True)``."""
         from uacpy.core.absorption import arrival_absorption_exponent
         from uacpy.core.acoustics.attenuation import (
             absorption_francois_garrison,
@@ -1847,33 +1865,33 @@ class TestBandAbsorptionError:
     def test_by_ratio_is_zero_for_thorp(self):
         """Thorp has no depth term: its surface ratio is its ratio at every
         depth, so the Bellhop band check reads zero and stays silent."""
-        from uacpy.core.absorption import band_absorption_error_dB_per_km
-        assert band_absorption_error_dB_per_km(
+        from uacpy.core.absorption import _band_absorption_error_dB_per_km
+        assert _band_absorption_error_dB_per_km(
             Thorp(), self.F, 1e4, depths=self.Z, by_ratio=True) < 1e-12
 
     def test_by_ratio_measures_the_pressure_bend_of_francois_garrison(self):
         """One Francois-Garrison row over a 5 km column, 5-15 kHz: the
         surface ratio misses the deep water by 0.058 dB/km, the linear line
         by 0.54 dB/km, and at the surface the ratio is exact."""
-        from uacpy.core.absorption import band_absorption_error_dB_per_km
+        from uacpy.core.absorption import _band_absorption_error_dB_per_km
         fg = FrancoisGarrison()
-        assert band_absorption_error_dB_per_km(
+        assert _band_absorption_error_dB_per_km(
             fg, self.F, 1e4, depths=self.Z, by_ratio=True) == pytest.approx(
                 0.05835, abs=1e-5)
-        assert band_absorption_error_dB_per_km(
+        assert _band_absorption_error_dB_per_km(
             fg, self.F, 1e4, depths=self.Z) == pytest.approx(0.54154,
                                                              abs=1e-5)
-        assert band_absorption_error_dB_per_km(
+        assert _band_absorption_error_dB_per_km(
             fg, self.F, 1e4, depths=[0.0], by_ratio=True) == 0.0
 
     def test_a_thorp_band_edge_error_is_the_gap_to_the_line(self):
         from uacpy.core.absorption import (
-            Thorp, band_absorption_error_dB_per_km,
+            Thorp, _band_absorption_error_dB_per_km,
         )
         from uacpy.core.acoustics.attenuation import absorption_thorp
         f = np.array([20000.0, 60000.0])
-        got = band_absorption_error_dB_per_km(Thorp(), f, 40000.0,
-                                              depths=[0.0])
+        got = _band_absorption_error_dB_per_km(Thorp(), f, 40000.0,
+                                               depths=[0.0])
         line = absorption_thorp(40000.0) * f / 40000.0
         assert got == pytest.approx(np.max(np.abs(absorption_thorp(f) - line)),
                                     rel=1e-12)
@@ -1881,23 +1899,23 @@ class TestBandAbsorptionError:
 
     def test_the_square_law_is_measured_from_the_same_anchor(self):
         from uacpy.core.absorption import (
-            Thorp, band_absorption_error_dB_per_km,
+            Thorp, _band_absorption_error_dB_per_km,
         )
         from uacpy.core.acoustics.attenuation import absorption_thorp
         f = np.array([20000.0, 60000.0])
-        got = band_absorption_error_dB_per_km(Thorp(), f, 40000.0,
-                                              depths=[0.0], power=2.0)
+        got = _band_absorption_error_dB_per_km(Thorp(), f, 40000.0,
+                                               depths=[0.0], power=2.0)
         square = absorption_thorp(40000.0) * (f / 40000.0) ** 2
         assert got == pytest.approx(
             np.max(np.abs(absorption_thorp(f) - square)), rel=1e-12)
 
     def test_a_resonance_inside_the_band_and_below_the_surface_is_seen(self):
-        from uacpy.core.absorption import band_absorption_error_dB_per_km
+        from uacpy.core.absorption import _band_absorption_error_dB_per_km
         bio = Biological(layers=[(1000.0, 2000.0, 2500.0, 3.0, 0.1)])
         f = np.linspace(1000.0, 4000.0, 13)
-        at_surface = band_absorption_error_dB_per_km(bio, f, 1000.0,
-                                                     depths=[0.0])
-        in_column = band_absorption_error_dB_per_km(
+        at_surface = _band_absorption_error_dB_per_km(bio, f, 1000.0,
+                                                      depths=[0.0])
+        in_column = _band_absorption_error_dB_per_km(
             bio, f, 1000.0, depths=np.linspace(0.0, 3000.0, 65))
         assert at_surface == 0.0
         # The 0.9 dB/km peak at 2500 Hz, against a line through 1000 Hz.
@@ -1912,9 +1930,9 @@ class TestMinimaxAnchorFrequency:
     BAND = np.linspace(1000.0, 4000.0, 2001)
 
     def _error(self, law, anchor):
-        from uacpy.core.absorption import band_absorption_error_dB_per_km
-        return band_absorption_error_dB_per_km(law, self.BAND, anchor,
-                                               depths=[0.0])
+        from uacpy.core.absorption import _band_absorption_error_dB_per_km
+        return _band_absorption_error_dB_per_km(law, self.BAND, anchor,
+                                                depths=[0.0])
 
     def test_thorp_over_1_to_4_khz_misses_by_less_than_from_the_centre(self):
         from uacpy.core.absorption import Thorp, minimax_anchor_frequency
@@ -1952,6 +1970,29 @@ class TestMinimaxAnchorFrequency:
         assert 100.0 < anchor < 600.0
         assert not [w for w in caught if 'fitted over' in str(w.message)]
 
+    def test_a_measured_table_is_taken_as_an_environment_holds_it(self):
+        # The band functions take env.absorption as it is: a measured table
+        # is evaluated as the tabulated law over it.
+        from uacpy.core.absorption import (
+            _band_absorption_error_dB_per_km, minimax_anchor_frequency,
+            _warn_if_band_absorption_frozen)
+        table = measured_absorption_table()
+        law = _absorption_law(table)
+        freqs = [2000.0, 5000.0, 9000.0]
+        error = _band_absorption_error_dB_per_km(table, freqs, 5000.0,
+                                                 depths=[0.0, 50.0])
+        assert error == _band_absorption_error_dB_per_km(
+            law, freqs, 5000.0, depths=[0.0, 50.0]) > 0.0
+        assert minimax_anchor_frequency(
+            table, 2000.0, 9000.0, depths=[0.0, 50.0]) == \
+            minimax_anchor_frequency(law, 2000.0, 9000.0, depths=[0.0, 50.0])
+        with recorded_warnings():
+            assert _warn_if_band_absorption_frozen(
+                't', table, freqs, 5000.0, water_depth=100.0, mechanism='m.',
+                remediation='r.') == _warn_if_band_absorption_frozen(
+                't', law, freqs, 5000.0, water_depth=100.0, mechanism='m.',
+                remediation='r.')
+
     def test_no_law_and_a_single_frequency_anchor_at_the_band_centre(self):
         from uacpy.core.absorption import Thorp, minimax_anchor_frequency
         assert minimax_anchor_frequency(None, 1000.0, 4000.0,
@@ -1969,7 +2010,7 @@ class TestTheModelsAreWrittenOnTheArrayFormulas:
         import uacpy.core.absorption as absorption
         monkeypatch.setattr(absorption, 'absorption_thorp',
                             lambda f, depth: np.full(np.shape(depth), 7.0))
-        assert absorption.Thorp().alpha_dB_per_m(1000.0, [0.0, 50.0]) == \
+        assert absorption.Thorp()._alpha_dB_per_m_at_frequency(1000.0, [0.0, 50.0]) == \
             pytest.approx([7.0e-3, 7.0e-3])
 
     def test_francois_garrison_evaluates_its_array_formula(self, monkeypatch):
@@ -1979,18 +2020,18 @@ class TestTheModelsAreWrittenOnTheArrayFormulas:
             lambda **kw: np.full(np.shape(kw['depth']), 5.0))
         fg = absorption.FrancoisGarrison(temperature=10.0, salinity=35.0,
                                          pH=8.0)
-        assert fg.alpha_dB_per_m(1000.0, [0.0, 50.0]) == \
+        assert fg._alpha_dB_per_m_at_frequency(1000.0, [0.0, 50.0]) == \
             pytest.approx([5.0e-3, 5.0e-3])
 
     def test_biological_sums_biological_dB_per_km_over_its_layers(
             self, monkeypatch):
         import uacpy.core.absorption as absorption
         monkeypatch.setattr(absorption, 'absorption_biological',
-                            lambda f, f0_hz, Q, a0: a0)
+                            lambda f, f0, Q, a0: a0)
         bio = absorption.Biological(layers=[(0.0, 100.0, 1000.0, 4.0, 2.0),
                                             (50.0, 200.0, 800.0, 3.0, 3.0)])
         # 25 m is in the first layer only, 75 m in both, 150 m in the second.
-        assert bio.alpha_dB_per_m(1000.0, [25.0, 75.0, 150.0]) == \
+        assert bio._alpha_dB_per_m_at_frequency(1000.0, [25.0, 75.0, 150.0]) == \
             pytest.approx([2.0e-3, 5.0e-3, 3.0e-3])
 
 
@@ -2043,7 +2084,7 @@ _CAPTURED = [
      [[0.0, 0.0, 0.0], [0.11061946902654868, 25.0, 1.6597510373443982],
       [0.0, 0.0, 0.0]]),
     ('constant', lambda: ConstantAbsorption(
-        value_dB_per_wavelength=0.02).table([1000.0, 10000.0], units='dB/m'),
+        value=0.02).table([1000.0, 10000.0], units='dB/m'),
      'dB/m', [0.013333333333333334, 0.13333333333333333]),
 ]
 
@@ -2100,26 +2141,50 @@ class TestTheLawIsTheOneObject:
 class TestAMeasuredTable:
     """A table with no law behind it is used as tabulated."""
 
+    def test_the_environment_holds_the_table_it_was_given(self):
+        # env.absorption is the user's table (the environment's own copy),
+        # with its plot and data, not a law built from it.
+        import matplotlib.pyplot as plt
+        table = measured_absorption_table()
+        env = Environment(bathymetry=100.0, absorption=table)
+        held = env.absorption
+        assert type(held) is AbsorptionCoefficient
+        assert held is not table
+        for name in ('frequencies', 'data', 'depths'):
+            np.testing.assert_array_equal(getattr(held, name),
+                                          getattr(table, name))
+        assert (held.units, held.model) == (table.units, None)
+        assert repr(held) == repr(table)
+        fig, ax = held.plot()
+        try:
+            np.testing.assert_array_equal(
+                np.asarray(ax.collections[0].get_array()).reshape(2, 2),
+                table.data)
+        finally:
+            plt.close(fig)
+        # Editing the caller's arrays afterwards leaves the environment's.
+        table.data[0, 0] = 9.0
+        assert env.absorption.data[0, 0] == 0.06
+
     def test_it_is_linear_in_depth_and_in_log_frequency(self):
         env = Environment(bathymetry=100.0,
                           absorption=measured_absorption_table())
         mid_f = float(np.sqrt(1000.0 * 10000.0))
-        a = env.absorption.table([1000.0, mid_f, 10000.0],
-                                 depths=[0.0, 50.0, 100.0]).data
+        a = _absorption_law(env.absorption).table(
+            [1000.0, mid_f, 10000.0], depths=[0.0, 50.0, 100.0]).data
         np.testing.assert_allclose(a[:, 0], [0.06, 0.05, 0.04], rtol=1e-13)
         np.testing.assert_allclose(a[:, 2], [0.90, 0.70, 0.50], rtol=1e-13)
         np.testing.assert_allclose(a[1, 1], 0.25 * (0.06 + 0.9 + 0.04 + 0.5),
                                    rtol=1e-13)
 
     def test_it_refuses_a_frequency_outside_it(self):
-        env = Environment(bathymetry=100.0,
-                          absorption=measured_absorption_table())
+        law = _absorption_law(measured_absorption_table())
         with pytest.raises(ConfigurationError, match='outside the table'):
-            env.absorption.table([20000.0])
+            law.table([20000.0])
         with pytest.raises(ConfigurationError, match='outside the table'):
-            env.absorption.table([999.0])
+            law.table([999.0])
         # Both ends are inside.
-        env.absorption.table([1000.0, 10000.0])
+        law.table([1000.0, 10000.0])
 
     def test_a_short_table_is_held_and_announced(self):
         with recorded_warnings() as rec:
@@ -2145,6 +2210,10 @@ def test_a_profile_prints_its_ocean():
         'frequency 1000 Hz, dB/km)')
     env = Environment(bathymetry=100.0, absorption=measured_absorption_table())
     assert 'absorption=tabulated' in repr(env)
+    # env.absorption is the table itself, and prints as it.
+    assert repr(env.absorption) == (
+        'AbsorptionCoefficient(tabulated, depths [0, 100] m, '
+        'frequencies [1000, 10000] Hz, dB/km)')
 
 
 class TestReferenceWaterReplacingTheEnvironmentsOwn:
@@ -2159,7 +2228,7 @@ class TestReferenceWaterReplacingTheEnvironmentsOwn:
         with recorded_warnings() as rec:
             env.absorption = FrancoisGarrison(10.0, 35.0, 8.0)
         return [str(w.message) for w in rec
-                if issubclass(w.category, ProvenanceWarning)]
+                if issubclass(w.category, ValidityWarning)]
 
     def test_it_warns_past_two_degrees(self):
         assert self._replace(12.0, 35.0) == []
@@ -2176,7 +2245,24 @@ class TestReferenceWaterReplacingTheEnvironmentsOwn:
         with recorded_warnings() as rec:
             env.absorption = FrancoisGarrison(10.0, 35.0, 8.0)
         assert not [w for w in rec
-                    if issubclass(w.category, ProvenanceWarning)]
+                    if issubclass(w.category, ValidityWarning)]
+
+
+@pytest.mark.parametrize('depths, warns', [([0.0, 5000.0], False),
+                                            ([0.0, 5000.5], True),
+                                            (11000.0, True)])
+def test_francois_garrison_announces_depths_past_its_stated_5000_m(depths,
+                                                                   warns):
+    # Part II §IV states the equation "to depths of 5000 m"; deeper is
+    # evaluated as given and said once, on both evaluation doors.
+    law = FrancoisGarrison(4.0, 35.0, 8.0)
+    for call in (lambda: law.table([1000.0], depths=depths),
+                 lambda: law._alpha_dB_per_m_at_frequency(1000.0, depths)):
+        with recorded_warnings() as rec:
+            call()
+        said = [w for w in rec if issubclass(w.category, ValidityWarning)
+                and 'stated for' in str(w.message)]
+        assert len(said) == (1 if warns else 0)
 
 
 class TestAProfileOutsideTheEnvelopeWarnsOnce:
@@ -2253,7 +2339,9 @@ class TestAbsorptionCoefficientFromPairs:
         table = AbsorptionCoefficient.from_pairs([(1e3, 0.06), (1e4, 0.95)])
         from uacpy import Environment
         env = Environment(bathymetry=100.0, ssp=1500.0, absorption=table)
-        alpha = env.absorption.alpha_dB_per_m(1e3, np.array([0.0, 50.0]))
+        assert type(env.absorption) is AbsorptionCoefficient
+        alpha = _absorption_law(env.absorption)._alpha_dB_per_m_at_frequency(
+            1e3, np.array([0.0, 50.0]))
         np.testing.assert_allclose(alpha, 0.06e-3)
 
     @pytest.mark.parametrize('pairs, match', [

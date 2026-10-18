@@ -98,6 +98,22 @@ def test_citations_and_the_table_read_a_fetchers_record():
     assert table['data_date'].tolist() == ['GEBCO_2025']
 
 
+def test_the_table_gives_the_time_offset_beside_the_distance():
+    """A fetch reports its distance and its time offset: the table carries
+    ``offset_days`` (requested minus data date) beside ``offset_km``, and no
+    day count for a climatology period."""
+    pandas = pytest.importorskip('pandas')
+    cast = sources.DataProvenance(source=sources.SOURCES['argo'],
+                                  data_date='2024-06-04',
+                                  requested_date='2024-06-13')
+    climatology = sources.DataProvenance(source=sources.SOURCES['woa23'],
+                                         data_date='month 06 (climatology)',
+                                         requested_date='2024-06-13')
+    table = sources.provenance_table(cast, climatology)
+    assert table['offset_days'][0] == 9
+    assert pandas.isna(table['offset_days'][1])
+
+
 def test_a_record_of_user_supplied_data_cites_nothing():
     assert sources.citations(_bathy_grid(None)) == ''
 
@@ -209,7 +225,7 @@ class TestBathymetryProvenanceNamesBackendAndVintage:
         from uacpy.core.exceptions import ConfigurationError, DataFetchError
         try:
             name = gebco_local.grid_name()
-        except (ConfigurationError, DataFetchError, FileNotFoundError):
+        except (ConfigurationError, DataFetchError):
             pytest.skip("no local GEBCO grid cached")
         assert name.startswith('GEBCO_')
 
@@ -262,7 +278,7 @@ class TestEveryPublicHelperOfTheDataLayerIsReachableFromThePackage:
         import uacpy.data as data
 
         for name in ('extend_ssp_below_data', 'extend_column_to_seafloor',
-                     'hs_to_pm_wind', 'fetch_emodnet_substrate_local'):
+                     'hs_to_pm_wind', 'fetch_emodnet_substrate'):
             assert name in data.__all__, name
             assert callable(getattr(data, name)), name
 
@@ -371,7 +387,7 @@ def _transect_environment():
     78.3, 25.9, 56.9 and 0.0 km (the first a wet-cell hop), over a two-column
     seabed from two grain-size samples."""
     from uacpy.core.bottom import Bottom, SeabedColumn
-    from uacpy.data.sound_speed import assemble_range_dependent
+    from uacpy.data.sound_speed import _assemble_range_dependent
     cells = [((43.2, 4.6), (42.5, 4.5), True),
              ((42.6383, 5.2448), (42.5, 5.5), False),
              ((42.0730, 5.8808), (42.5, 5.5), False),
@@ -381,7 +397,7 @@ def _transect_environment():
                                  data_sources=(_woa_column_record(*c),))
                for i, c in enumerate(cells)]
     ranges = [0.0, 81720.96, 163441.92, 245162.88]
-    ssp = assemble_range_dependent(columns, ranges)
+    ssp = _assemble_range_dependent(columns, ranges)
     samples = [sources.DataProvenance(
         source=sources.SOURCES['grainsize'], data_point=sample,
         requested_point=req, point_kind='sample')
@@ -399,9 +415,9 @@ def test_every_column_keeps_its_record_at_its_range():
     env = _transect_environment()
     woa = [p for p in env.data_sources if p.source.id == 'woa23']
     assert [round(p.offset_km, 1) for p in woa] == [78.3, 25.9, 56.9, 0.0]
-    assert [p.range_m for p in woa] == list(env.ssp.ranges)
+    assert [p.range for p in woa] == list(env.ssp.ranges)
     seabed = [p for p in env.data_sources if p.source.id == 'grainsize']
-    assert [p.range_m for p in seabed] == [0.0, 245162.88]
+    assert [p.range for p in seabed] == [0.0, 245162.88]
 
 
 def test_a_source_read_at_several_points_is_cited_once_with_a_summary():
@@ -460,9 +476,9 @@ def test_the_data_point_is_said_in_words(fields, words, line):
 
 
 def test_the_southern_and_western_hemispheres_are_lettered():
-    from uacpy.core.provenance import point_in_words
-    assert point_in_words(-33.25, -70.5) == '33.25 S, 70.50 W'
-    assert point_in_words(0.0, 0.0) == '0.00 N, 0.00 E'
+    from uacpy.core.provenance import _point_in_words
+    assert _point_in_words(-33.25, -70.5) == '33.25 S, 70.50 W'
+    assert _point_in_words(0.0, 0.0) == '0.00 N, 0.00 E'
 
 
 def test_a_point_kind_outside_the_list_is_refused():

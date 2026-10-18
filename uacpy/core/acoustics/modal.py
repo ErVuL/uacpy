@@ -16,13 +16,13 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.boundary import BoundaryProperties, BoundaryType
 from uacpy.core.bottom import Bottom
 from uacpy.core.constants import (
-    DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3, NEPER_TO_DB,
+    DEFAULT_WATER_DENSITY_G_CM3, NEPER_TO_DB,
 )
 
 __all__ = [
     'SAMPLES_PER_VERTICAL_WAVELENGTH', 'modal_attenuation', 'mode_shapes_at',
     'modal_field', 'modal_phase_speeds', 'modal_grazing_angles',
-    'modal_excitation',
+    'modal_excitation', 'medium_density_at',
 ]
 
 
@@ -81,6 +81,48 @@ def _modal_grazing_angles(k, frequency: float, sound_speed: float, *,
     # ``arccos`` of that is already nan, which is the right answer.
     with np.errstate(invalid='ignore'):
         return np.degrees(np.arccos(c / speeds))
+
+
+def medium_density_at(depth: float, tops, densities, bottom_depth: float,
+                      halfspace_density: float) -> float:
+    """``ρ(z)`` (g/cm³) of the medium holding ``depth`` (m) in a stack of
+    media.
+
+    Medium ``i`` spans ``tops[i]`` to the next top (to ``bottom_depth`` for
+    the last) at ``densities[i]``, and ``halfspace_density`` holds below the
+    stack. A depth on an interface belongs to the upper medium (the
+    convention of :meth:`~uacpy.core.bottom.SeabedColumn.at`). It is the
+    ``ρ(z_s)`` of the point-source modal sum (Jensen et al., *Computational
+    Ocean Acoustics*, eq. 5.14): a model run builds the stack from its
+    environment, and a mode set from the medium table its ``.mod`` recorded
+    (:meth:`~uacpy.core.results.MediaTable.density_at`).
+
+    Parameters
+    ----------
+    depth : float
+        Depth (m) whose medium is wanted.
+    tops : sequence of float
+        Top depth (m) of each medium, increasing.
+    densities : sequence of float
+        Density (g/cm³) of each medium, one per top.
+    bottom_depth : float
+        Depth (m) of the bottom of the last medium.
+    halfspace_density : float
+        Density (g/cm³) below ``bottom_depth``.
+
+    Returns
+    -------
+    float
+        The density (g/cm³) of the medium holding ``depth``.
+    """
+    z = float(depth)
+    tops = [float(t) for t in tops]
+    for i in range(len(tops)):
+        bottom = (tops[i + 1] if i + 1 < len(tops)
+                  else float(bottom_depth))
+        if z <= bottom:
+            return float(densities[i])
+    return float(halfspace_density)
 
 
 def modal_excitation(phi_at_sources, weights, directivity=None) -> np.ndarray:
@@ -325,14 +367,13 @@ def _geoacoustic_halfspace(bottom, who):
     # A vacuum / rigid / file / precalc boundary carries no seabed
     # geoacoustics: its cp, rho and attenuation are the placeholders
     # __post_init__ resolved (1600 m/s, 1.5 g/cm3, 0.5 dB/lambda), and
-    # reading them as a half-space fabricates an attenuation the seabed
-    # does
-    # not have. `Bottom.all_sound_speeds` states the same rule for the same
-    # data. Measured on an ideal 100 m guide at 50 Hz with a RIGID seabed,
-    # passing bottom=BoundaryProperties('rigid') added 0.40 / 0.51 dB of
-    # loss at 1 km and 7.99 / 10.22 dB at 20 km on modes 1 / 2, and warned
-    # that two modes were "leaky" against a 1600 m/s half-space that does
-    # not exist. Runs BEFORE the bottom block so a dropped boundary takes
+    # reading them as a half-space would fabricate an attenuation the
+    # seabed does not have. `Bottom.all_sound_speeds` states the same rule
+    # for the same data. Measured on an ideal 100 m guide at 50 Hz with a
+    # RIGID seabed, reading bottom=BoundaryProperties('rigid') as a
+    # half-space would add 0.40 / 0.51 dB of loss at 1 km and 7.99 /
+    # 10.22 dB at 20 km on modes 1 / 2, and name two modes "leaky" against a
+    # 1600 m/s half-space that does not exist. Runs BEFORE the bottom block so a dropped boundary takes
     # the water-only path rather than falling into it with bottom = None.
     if not isinstance(bottom, BoundaryProperties):
         raise ConfigurationError(
@@ -434,64 +475,19 @@ def _halfspace_tail_term(bottom, phi_re, depths, seafloor_depth, kr,
     # side, so its normalisation is the water column alone.
     tail_norm = np.where(
         trapped, psi_D ** 2 / (2.0 * gamma_safe * rho_b), 0.0)
-    water_norm = norm
     norm = norm + tail_norm
-    # A leaky mode gets no term, as the comment above already says.
-    # Substituting gamma = 1 put a bare number carrying units of 1/m
-    # into the denominator, so the invented loss scaled with the
-    # library's length unit — the same physics expressed in km came
-    # back 1000x different. There is no finite first-order bottom-
-    # attenuation perturbation for a radiating mode: the tail integral
-    # diverges, so the closed form this line specialises does not exist.
+    # A leaky mode gets no term, as the comment above already says:
+    # there is no finite first-order bottom-attenuation perturbation for
+    # a radiating mode — the tail integral diverges, so the closed form
+    # this line specialises does not exist. gamma_safe = 1 only keeps the
+    # masked lanes finite; used as a value, a bare 1 carrying units of 1/m
+    # would make the loss scale with the length unit.
     bottom_term = np.where(
         trapped,
         psi_D ** 2 * ab_neper_per_m * omega
         / (2.0 * kr_safe * gamma_safe * cb * rho_b),
         0.0,
     )
-    # gamma at which the seabed tail carries exactly as much of the
-    # normalisation as the whole water column — psi(D)²/(2 gamma rho_b)
-    # == int psi²/rho dz — so the comparison below is a ratio of two
-    # tabulated integrals and carries no absolute epsilon and no unit.
-    # Below it the mode is bound so weakly that its bottom term rests
-    # on the part of kr the mode solver resolves least well. Sweeping
-    # a 100 m Pekeris guide across a modal cutoff with kraken.exe and
-    # differencing the default mesh against a converged one: the
-    # frequencies under this line moved the total modal TL by
-    # 0.67-1.98 dB at 200-500 m (TL 43-52 dB there) and by 7.07 dB at
-    # 10 km, and the smallest gamma of them changed side of the
-    # branch point entirely — leaky on the default mesh, trapped on
-    # the converged one. Just above the line the movement is 0.41 dB
-    # and it falls under 0.04 dB within 0.7 Hz.
-    gamma_equal = np.where(
-        water_norm > 0,
-        psi_D ** 2 / (2.0 * rho_b * np.where(water_norm > 0,
-                                             water_norm, 1.0)),
-        0.0)
-    barely_trapped = trapped & (gamma_m < gamma_equal)
-    if barely_trapped.any():
-        j = int(np.argmin(np.where(barely_trapped, gamma_m, np.inf)))
-        warnings.warn(
-            f"{who}: {int(barely_trapped.sum())} of "
-            f"{gamma_m.size} mode(s) are barely trapped — their "
-            f"evanescent tail into the seabed carries more of the "
-            f"∫psi²/rho dz normalisation than the whole water column "
-            f"does ({100.0 * tail_norm[j] / norm[j]:.0f} % of it for "
-            f"mode {j + 1}, whose gamma = sqrt(kr²-kb²) = "
-            f"{gamma_m[j]:.3g} 1/m spreads the tail over "
-            f"{0.5 / gamma_m[j]:.4g} m of seabed against a "
-            f"{float(depths[-1]):g} m water column). The bottom "
-            f"term is then set by the part of kr the mode solver "
-            f"resolves least well, and near a modal cutoff the mesh "
-            f"decides which side of kb = {kb:g} 1/m the mode lands "
-            f"on: on a 100 m Pekeris guide a converged mesh moved the "
-            f"total modal TL by 1.7 dB at 200 m and 7 dB at 10 km, "
-            f"and put the same mode on the leaky side, where it gets "
-            f"no bottom term at all. "
-            f"Re-run with a finer mesh (Kraken(n_mesh=...)) and "
-            f"compare before reading a level off this frequency.",
-            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
     if not trapped.all():
         warnings.warn(
             f"{who}: {int((~trapped).sum())} of "
@@ -508,7 +504,7 @@ def _halfspace_tail_term(bottom, phi_re, depths, seafloor_depth, kr,
 
 
 def modal_attenuation(k, phi, depths, alpha_dB_per_m, *, frequency,
-                      sound_speed_z=DEFAULT_SOUND_SPEED,
+                      sound_speed_z=None,
                       density_z=DEFAULT_WATER_DENSITY_G_CM3, bottom=None,
                       seafloor_depth=None):
     """First-order modal attenuation ``alpha_m`` (Np/m), one per mode.
@@ -538,9 +534,16 @@ def modal_attenuation(k, phi, depths, alpha_dB_per_m, *, frequency,
         Volume attenuation, a scalar or one value per depth.
     frequency : float
         Frequency (Hz). Required — the perturbation is ``omega``-scaled.
-    sound_speed_z, density_z : float or array_like
-        Sound speed (m/s) and density (g/cm3), scalar or per depth.
-        Defaults: the nominal ``DEFAULT_SOUND_SPEED`` and the package's one
+    sound_speed_z : float or array_like
+        Sound speed (m/s) the modes were computed in, a scalar or one value
+        per depth. Required: the perturbation term is ``2iα(z)ω/c(z)``
+        (Jensen et al., *Computational Ocean Acoustics*, sect. 5.9.1), so at
+        a fixed ``α(z)`` every ``α_m`` scales as ``1/c`` (a 1480 m/s column
+        read at 1500 m/s is 1.3 % under-attenuated), and an unset speed is
+        refused rather than guessed. ``env.ssp.sound_speed_at(depths)`` gives
+        the profile on the tabulation.
+    density_z : float or array_like
+        Density (g/cm3), scalar or per depth. Default: the package's one
         water density ``DEFAULT_WATER_DENSITY_G_CM3``.
     bottom, seafloor_depth
         A penetrable half-space (a ``BoundaryProperties``, or a
@@ -575,13 +578,22 @@ def _modal_attenuation(
     alpha_dB_per_m,
     *,
     frequency,
-    sound_speed_z=DEFAULT_SOUND_SPEED,
+    sound_speed_z=None,
     density_z=DEFAULT_WATER_DENSITY_G_CM3,
     bottom=None,
     seafloor_depth=None,
     who: str = "modal_attenuation",
 ):
     """:func:`modal_attenuation` reporting its refusals as ``who``."""
+    if sound_speed_z is None:
+        raise ConfigurationError(
+            f"{who}: sound_speed_z is required. Every alpha_m scales as "
+            f"1/c(z) (the perturbation term 2i*alpha*omega/c, Jensen et al. "
+            f"sect. 5.9.1), so the speed is not guessed.",
+            remediation="Pass sound_speed_z= the water sound speed (m/s) "
+                        "the modes were computed in, on the mode depths: a "
+                        "scalar for an isovelocity column, or one value per "
+                        "depth, e.g. env.ssp.sound_speed_at(depths).")
     bottom = _halfspace_of(bottom, who)
     omega = 2.0 * np.pi * float(frequency or 0.0)
     # A negative frequency returns a negative, amplifying attenuation, and a
@@ -616,9 +628,8 @@ def _modal_attenuation(
             f"{who}: {int(np.count_nonzero(norm <= 0))} "
             f"mode(s) have a non-positive shape normalisation "
             f"∫psi²/rho dz, which the perturbation divides by; their "
-            f"attenuation is returned as NaN. Clamping it produced a "
-            f"LOSSLESS mode, which a range-marched sum propagates "
-            f"undamped and which can dominate the far field.",
+            f"attenuation is returned as NaN: a non-positive "
+            f"normalisation has no first-order perturbation.",
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     unsolvable = unsolvable | (norm <= 0)
     norm = np.where(norm > 0, norm, 1.0)
@@ -712,10 +723,11 @@ def modal_field(k, phi_zs, phi_zr, ranges, *,
     the far-field form of the normal-mode solution (Jensen, Kuperman,
     Porter & Schmidt, *Computational Ocean Acoustics*, sect. 5.3), which
     ``form='asymptotic'`` (the default, the engines' form) evaluates.
-    ``form='hankel'`` evaluates the exact sum it approximates,
-    ``(i pi / rho_s) sum psi_m(z_s) psi_m(z_r) H0^(1)(k_m r)`` conjugated into
-    the same ``e^(i(omega t - k r))`` convention, whose large-``k r`` limit is
-    the asymptotic form term by term; it is what the closed-form reference
+    ``form='hankel'`` evaluates the exact sum it approximates (JKPS
+    sect. 5.2.1), written in the same ``e^(i(omega t - k r))`` convention:
+    ``(-i pi / rho_s) sum psi_m(z_s) psi_m(z_r) H0^(2)(k_m r)``, whose
+    large-``k r`` limit is the asymptotic form term by term, for real and
+    complex (krakenc) mode shapes alike; it is what the closed-form reference
     fields of :mod:`uacpy.analytic` sum, and it holds near the source. Give it
     the mode shapes **already evaluated at the source and receiver
     depths**: choosing how to get there from a tabulation — interpolating,
@@ -740,8 +752,13 @@ def modal_field(k, phi_zs, phi_zr, ranges, *,
         Density at the source (**g/cm3** — the unit KRAKEN normalises its
         modes with, and the unit the ``.env`` file carries). The default is
         the package's one water density (1.027), the water every deck
-        writes; pass 1.0 to reproduce ``field.exe``'s own output, which
-        omits the factor.
+        writes; pass 1.0 to leave the factor out, as ``field.exe`` does.
+        ``field.exe``'s prefactor ``i*sqrt(2*pi)*exp(i*pi/4)``
+        (``EvaluateMod.f90:34``) is the negative of this sum's
+        ``exp(-i*pi/4)*sqrt(2*pi)``, the conjugate of JKPS sect. 5.2.1's;
+        :class:`~uacpy.models.Kraken`'s reader removes both the sign and the
+        missing ``1/rho_s``, so a Kraken pressure Field equals this sum at
+        ``source_density=rho(z_s)``.
     form : {'asymptotic', 'hankel'}
         The far-field form, or the exact Hankel-function sum.
 
@@ -801,10 +818,11 @@ def modal_field(k, phi_zs, phi_zr, ranges, *,
 
 
 def _hankel_mode_sum(k, phi_zs, phi_zr, rho_s, r):
-    """``form='hankel'`` of :func:`modal_field`: ``(i pi / rho_s) sum
-    psi(z_s) psi(z) H0^(1)(k r)``, conjugated to the travelling-wave form;
-    NaN at ``r <= 0``. ``k`` takes either sign of ``Im k``: ``H0^(1)``
-    decays for ``Im k >= 0``, which is the branch used."""
+    """``form='hankel'`` of :func:`modal_field`: ``(-i pi / rho_s) sum
+    psi(z_s) psi(z) H0^(2)(k r)``, the travelling-wave form of JKPS
+    sect. 5.2.1's ``(i / 4 rho_s) sum psi psi H0^(1)(k r)`` times the 1 m
+    reference ``4 pi``; NaN at ``r <= 0``. ``k`` takes either sign of
+    ``Im k``: the decaying branch is used."""
     # scipy loads on first use: ``import uacpy`` reaches this module and
     # pays for numpy only.
     from scipy.special import hankel1
@@ -812,8 +830,11 @@ def _hankel_mode_sum(k, phi_zs, phi_zr, rho_s, r):
     p = np.full((phi_zr.shape[0], r.size), np.nan, dtype=complex)
     on = r > 0.0
     if kr.size and on.any():
-        h = hankel1(0, np.outer(kr, r[on]))          # (n_modes, n_range)
-        p[:, on] = (1j * np.pi / rho_s) * (phi_zr * phi_zs) @ h
+        # H0^(2)(conj z) = conj(H0^(1)(z)): the Hankel factor alone changes
+        # convention. The mode shapes enter as given, unconjugated, as they
+        # do in the asymptotic branch and in EvaluateMod.f90:47.
+        h2 = np.conj(hankel1(0, np.outer(kr, r[on])))   # (n_modes, n_range)
+        p[:, on] = (-1j * np.pi / rho_s) * (phi_zr * phi_zs) @ h2
     elif on.any():
         p[:, on] = 0.0
-    return np.conj(p)
+    return p

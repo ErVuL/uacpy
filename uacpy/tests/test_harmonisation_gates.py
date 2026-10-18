@@ -232,6 +232,21 @@ _RETIRED_SPELLINGS = {
     'center_frequency': 'fc', 'centre': 'fc', 'centres': 'centers',
     'n_freqs': 'n_frequencies', 'nfreq': 'n_frequencies', 'seed': 'rng',
     'who': 'the private _name form',
+    # "speed" for the scalar, as phase_speeds; every model's phase-speed
+    # window; latitude keeps its plain name (degrees, stated); the ram.in
+    # output strides, as the RAM model spells its own knob.
+    'group_velocity': 'group_speeds', 'cmin': 'c_low', 'cmax': 'c_high',
+    'latitude_deg': 'latitude', 'ndr': 'range_decimation',
+    'ndz': 'depth_decimation',
+    # An angle in degrees says so; radians, the SI unit, go unsaid.
+    'angles': 'angles_deg', 'launch_angles': 'launch_angles_deg',
+    'source_angles': 'source_angles_deg',
+    'receiver_angles': 'receiver_angles_deg',
+    'grazing_angles': 'grazing_angles_deg',
+    'pattern_angles': 'pattern_angles_deg',
+    'critical_angle': 'critical_angle_deg', 'best_angle': 'best_angle_deg',
+    'bearings': 'bearings_deg', 'dip_angle': 'dip_angle_deg',
+    'rams_rotation_angle': 'rams_rotation_angle_deg',
 }
 
 
@@ -392,7 +407,11 @@ def test_one_spelling_per_idea():
     """A public parameter, a result or record field and a documented
     metadata key spell an idea one way: ``fc`` for a centre or carrier
     frequency, ``centers``, ``n_frequencies``, ``rng`` for a random
-    generator; and no public signature takes the ``who`` label."""
+    generator, ``group_speeds``, ``c_low`` / ``c_high`` for a phase-speed
+    window, ``latitude``, ``range_decimation`` / ``depth_decimation``, and
+    an angle in degrees with its ``_deg`` (``angles_deg``,
+    ``launch_angles_deg``, ``bearings_deg`` …); and no public signature
+    takes the ``who`` label."""
     found = sorted(_retired_spellings())
     assert not found, '\n'.join(found)
 
@@ -632,7 +651,7 @@ def test_sample_rate_follows_its_record():
 
 #: A family's core arguments, in the order every member takes them.
 _FAMILIES = {
-    'beamforming': ('positions_m', 'angles_deg', 'frequency', 'sound_speed'),
+    'beamforming': ('positions', 'angles_deg', 'frequency', 'sound_speed'),
 }
 
 #: Members out of their family's order, still open.

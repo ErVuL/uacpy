@@ -15,16 +15,16 @@ from typing import NamedTuple, Optional, Tuple
 import numpy as np
 
 from uacpy.core.boundary import BoundaryType
-from uacpy.core.engine_defaults import C_LOW_FACTOR
+from uacpy.core.engine_defaults import default_c_low
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.core.run_settings import Notice
 from uacpy.models._knobs import positive_finite
 
-# ``C_LOW_FACTOR`` is the wavenumber-integration default every engine shares
-# (:data:`uacpy.core.engine_defaults.C_LOW_FACTOR`, with its sources): Scooter /
-# SPARC pin ``k_max = omega/c_low``, so a positive floor is required (c_low=0
-# blows up the integral).
+# The unpinned ``c_low`` is the wavenumber-integration default every engine
+# shares (:func:`uacpy.core.engine_defaults.default_c_low`, with its sources):
+# Scooter / SPARC pin ``k_max = omega/c_low``, so a positive floor is required
+# (c_low=0 blows up the integral).
 #
 # ``C_HIGH_FACTOR`` pads the upper bound of the mode search over a half-space:
 # :func:`resolve_phase_speed_bounds` takes ``c_high = 1.05 · max(c_max, bottom
@@ -37,8 +37,9 @@ from uacpy.models._knobs import positive_finite
 # Kraken only searches [c_low, c_high] for roots, so
 # there the pad means a default run returns a few modes with a phase speed
 # above the bottom speed: on kraken.exe roots of a rigid seabed
-# (``Kraken/BCImpedanceMod.f90:83-88``), which the run's notice states
-# (``models/kraken/_checks.py``, ``kraken_exe_above_seabed_notice``), on krakenc
+# (``Kraken/BCImpedanceMod.f90:83-88``), which a run that chose kraken.exe or
+# a c_high above the seabed speed says (``models/kraken/_checks.py``,
+# ``kraken_exe_above_seabed_notice``; a default run says nothing), on krakenc
 # leaky modes. ``models/kraken/_modes.py`` logs the count, and a field run whose
 # every mode is one of them warns (``models/kraken/_model.py``, ``_warn_leaky``).
 # (KRAKEN's modal-solver c_low default is the literal 0.0 written at its use
@@ -66,7 +67,8 @@ def resolve_phase_speed_bounds(
 
     Precedence:
       1. Explicit caller values win.
-      2. Otherwise: ``c_low = c_min · C_LOW_FACTOR`` and
+      2. Otherwise: ``c_low`` from
+         :func:`~uacpy.core.engine_defaults.default_c_low` and
          ``c_high = max(c_max, env.bottom.halfspace_at(range=0).sound_speed) · C_HIGH_FACTOR``.
 
     A **non-geoacoustic** bottom (vacuum, rigid, or a reflection table —
@@ -79,11 +81,20 @@ def resolve_phase_speed_bounds(
     placeholder capped cHigh at 1680 m/s), so those boundaries resolve to
     :data:`DEFAULT_C_MAX_UNBOUNDED` instead — the AT idiom for "no upper
     limit".
+
+    The derived ``c_low`` is the documented rule: the slowest speed of
+    every medium, shear speeds and half-spaces included, × 0.85 over an
+    elastic half-space and × 0.90 otherwise (``scooter.f90:193-259``;
+    Jensen et al., *Computational Ocean Acoustics*, ch. 4 App. 1 step 1,
+    "the lowest wave speed in the problem"). Over an elastic seabed it
+    reaches below the shear speed, so the seabed interface wave is in the
+    window, at the cost of wavenumbers: about 14× on elastic sand (``Nk``
+    grows as ``1/c_low``, 1341/93.5 m/s; docs/models/scooter.md, "Layered
+    and elastic seabeds", measures the run 14× slower).
     """
     if c_low is not None and c_high is not None:
         return float(c_low), float(c_high)
     ssp_pairs = env.ssp.to_pairs()
-    c_min = float(ssp_pairs[:, 1].min())
     halfspace = env.bottom.halfspace_at(range=0.0)
     if not BoundaryType.from_string(halfspace.acoustic_type).is_geoacoustic:
         c_high_auto = DEFAULT_C_MAX_UNBOUNDED
@@ -92,7 +103,7 @@ def resolve_phase_speed_bounds(
                     float(halfspace.sound_speed))
         c_high_auto = c_max * C_HIGH_FACTOR
     return (
-        float(c_low) if c_low is not None else c_min * C_LOW_FACTOR,
+        float(c_low) if c_low is not None else default_c_low(env)[0],
         float(c_high) if c_high is not None else c_high_auto,
     )
 
@@ -151,7 +162,9 @@ def resolve_window(env, *, c_low, c_high, c_high_unbounded: float,
                    model_name: str) -> PhaseSpeedWindow:
     """The window of a wavenumber integral (Scooter, SPARC): the pinned
     bounds; an unpinned ``c_low`` from :func:`resolve_phase_speed_bounds`
-    on the projected ``env`` (``0.9 × min(SSP)``); an unpinned ``c_high``
+    on the projected ``env`` (the slowest speed of every medium × 0.85 over
+    an elastic half-space, × 0.90 otherwise,
+    :func:`~uacpy.core.engine_defaults.default_c_low`); an unpinned ``c_high``
     of ``c_high_unbounded`` over every seabed — the engine's own "no upper
     limit", which puts ``k_min = omega/c_high`` at 0 to every grazing angle
     short of 90° — as Jensen et al. (*Computational Ocean Acoustics*, ch. 4
@@ -178,7 +191,7 @@ def resolve_window(env, *, c_low, c_high, c_high_unbounded: float,
     return PhaseSpeedWindow(
         c_low=cl, c_high=ch,
         c_low_origin=(f"{model_name}(c_low=…)" if c_low is not None
-                      else f"{C_LOW_FACTOR:g} × min(env.ssp)"),
+                      else default_c_low(env)[1]),
         c_high_origin=high_origin)
 
 
@@ -282,13 +295,19 @@ def interface_wave_notice(env, source, receiver, c_low: float, frequency: float,
     (Scholte) wave that the geometry can see, else ``None``.
 
     The wave travels at about :data:`SCHOLTE_SPEED_FRACTION` × the slowest
-    shear speed of the medium touching the water, below the
-    ``0.9 × min(SSP)`` floor a derived ``c_low`` takes, and it is confined to
+    shear speed of the medium touching the water. A derived ``c_low``
+    (:func:`~uacpy.core.engine_defaults.default_c_low`) is below it over an
+    elastic half-space (0.85 × a speed no faster than that shear speed);
+    over elastic layers on a fluid half-space it is 0.90 × the slowest
+    speed, which can sit above the wave. The wave is confined to
     the seafloor: it counts only when the source or a receiver lies within
     one of its wavelengths, ``0.85·c_s / f`` at the lowest frequency
-    ``frequency``, of the seafloor (``env.depth``). Far from the bed leaving
-    it out costs nothing measurable (docs/models/scooter.md: 0.01 dB for a
-    source 75 m above a sand seabed); 1 m above it, up to 4 dB.
+    ``frequency``, of the seafloor (``env.depth``) — the one-wavelength
+    reach is uacpy guidance, set by the measurement it rests on. Far from
+    the bed leaving the wave out costs nothing measurable
+    (docs/models/scooter.md, "Layered and elastic seabeds": 0.004 dB median
+    for a source 75 m above an elastic sand seabed); 1 m above it, up to
+    2.4 dB.
     """
     shear = []
     for column in env.bottom.columns:
@@ -318,6 +337,6 @@ def interface_wave_notice(env, source, receiver, c_low: float, frequency: float,
         f"JKPS §5.10.5), so the integral leaves it out; the geometry reaches "
         f"within {nearest:.3g} m of the seafloor, inside the wave's "
         f"{wavelength:.3g} m wavelength at {float(frequency):g} Hz, where it "
-        f"carries energy (up to 4 dB measured 1 m above a sand seabed). Pass "
-        f"c_low below {speed:.0f} m/s to include it, at the cost of more "
-        f"wavenumbers.", NumericsWarning)
+        f"carries energy (up to 2.4 dB measured 1 m above an elastic sand "
+        f"seabed). Pass c_low below {speed:.0f} m/s to include it, at the "
+        f"cost of more wavenumbers.", NumericsWarning)

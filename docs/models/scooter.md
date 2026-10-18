@@ -154,6 +154,17 @@ mode rejects a multi-frequency `Source`: it raises a `ConfigurationError`
 naming the two modes that do take a band. Only Kraken switches its default, and
 only on a multi-element `frequencies=` run argument, never on the `Source`.
 
+**A line source is normalised per frequency.** With
+`Source(source_type='line')` each bin of `H(f)` is scaled to unit amplitude at
+1 m in free space by its own `√k0`, `k0 = 2πf/c(z_s)` (JKPS §5.2.2's
+`p/p0(r = 1)`; the `'X'` branch, `fields.f90:278`, is a Fourier transform), so
+a `TIME_SERIES` pulse is the one whose 1 m free-field spectrum is the
+`source_waveform`'s — the convention Kraken and Bellhop follow too. JKPS warns
+that this "scale factor is frequency dependent and if it is not removed during
+the frequency synthesis, the pulse will be distorted": compared with a pulse
+synthesised from the un-normalised line field, it is tilted by `√k0`, 3.01 dB
+per octave on pressure.
+
 ---
 
 ## 5. Constructor knobs
@@ -164,7 +175,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `c_low` | `None` | Lower phase-speed bound. `None` ⇒ `0.90 × min(SSP)`. Sets `k_max = ω/c_low`. The factor `scooter.f90:258` computes (it does not apply it): "phase speed must be some 10% below slowest acoustic speed"; Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1) call `k_max ≈ 1.1 ω/c_min` "in general, conservative". |
+| `c_low` | `None` | Lower phase-speed bound. Sets `k_max = ω/c_low`. `None` ⇒ the slowest speed of every medium — the water, each sediment layer's `cP`, every shear speed, the half-spaces — × 0.85 when a half-space is elastic, × 0.90 otherwise: the `cMin` `scooter.f90:193-259` computes (it does not apply it), "phase speed must be some 10% below slowest acoustic speed" (:258), "a bit less than Scholte/Stoneley wave speed" (:256). Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1) tie `k_max ≈ 1.1 ω/c_min` to "the lowest wave speed in the problem". Over an elastic seabed it costs wavenumbers (*Layered and elastic seabeds* below). |
 | `c_high` | `None` | Upper phase-speed bound. Sets `k_min = ω/c_high`. `None` ⇒ the toolbox's unbounded value `1e9` (`doc/bounce.htm`: "CMax to 1.0E9") over every bottom, so the integral runs from `k_min ≈ 0`: Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1 step 1), "it is recommended to initially include these components by choosing k min = 0. If k min is chosen larger, as will often be done by experienced modelers to reduce computation time, one must be careful to avoid numerical artifacts". It costs wavenumbers: `Nk ∝ 1/c_low − 1/c_high`, 4.4× a window capped at `1.05 ×` the fastest speed in the channel of §6 ("The phase-speed window"), and the run time 5-6.6× (measured: 5× on a near-field Lloyd case, 6.6× — 0.24 to 1.58 s — on a 50 Hz Munk run to 50 km), with the Green's-function memory growing as `Nk` too. A set value is written as given; one that drops a direct or surface-reflected path the receivers see warns. |
 | `rmax_factor` | `None` | Spectral `RMax = receiver.ranges.max() × this`. `None` ⇒ `2.0` in every run mode, the ratio of the toolbox's own Scooter decks, narrowband and broadband (`tests/Munk/MunkS.env`, `tests/BroadBand/MunkS.env`: RMax 200 km for receivers to 100 km); `doc/scooter.htm` asks only that RMax reach the farthest receiver — "You can get increased accuracy by making Rmax larger than the largest receiver range; however, run time will increase in direct proportion". |
 | `wavenumber_spectrum` | `'positive'` | Which wavenumber branch the transform integrates: `'positive'`, `'negative'`, `'both'`. `'positive'` is the manual's recommendation (`doc/fields.htm`: "'P' Positive (recommended)"). |
@@ -175,7 +186,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `n_mesh` | `0` | Finite-element points **per medium** (a total count, not a density). `0` ⇒ Scooter picks from frequency: the manual's automatic mesh (`doc/EnvironmentalFile.htm`: "If you type 0 for the number of mesh points, the code will calculate NMESH automatically"), which `scooter.f90:106-110` scales with frequency and floors at 100 points. |
+| `n_mesh` | `None` | Finite-element points **per medium** (a total count, not a density), written as given. `None` ⇒ `0`, Scooter picks from frequency: the manual's automatic mesh (`doc/EnvironmentalFile.htm`: "If you type 0 for the number of mesh points, the code will calculate NMESH automatically"), which `scooter.f90:106-110` scales with frequency and floors at 100 points. |
 | `interp_ssp` | `None` | SSP connection scheme; `'isovelocity'` shape forces `'C'` regardless. Unset → `'linear'` (AT `'C'`), the manual's choice when unsure (`doc/EnvironmentalFile.htm`: "If your not sure which option to take, I'd suggest you use 'C'."). |
 
 **Execution**
@@ -299,7 +310,8 @@ Cutting at `c_high = 1600 m/s` removes the near-cutoff poles and the leaky
 continuum — energy that is heavily attenuated anyway, so the TL barely moves
 past 1 km. Cutting at `c_low = 1520 m/s` removes the best-trapped, lowest-order
 poles, which are the ones that survive to long range: that curve is visibly
-wrong everywhere. The default runs from `0.9 × min SSP` to an unbounded
+wrong everywhere. The default runs from 0.9 × the slowest speed (this fluid
+channel's water) to an unbounded
 `c_high` — `k_min ≈ 0`, which COA Ch. 4 Appendix 1 (step 1) recommends: include
 the steep-angle continuum, and leave raising `k_min` to save time to
 experienced modellers, who must then watch for the artifacts of COA §4.5.2. A
@@ -371,20 +383,22 @@ water for its shear branch to matter mostly at the steep angles. In a thin
 sediment over rock, or with a shear speed close to the water speed, the gap is
 much larger — which is the point of being able to model it exactly.
 
-One thing the defaults hide. `c_low` resolves to `0.90 × min(water SSP)` and
-never looks at shear, so the seismic interface waves an elastic seabed supports
-— which travel *below* the shear speed, 110 m/s in this sand — fall outside the
-integration window entirely. For a source and receiver in the water column that
-costs little: `c_low=90` here multiplies the wavenumber count by 15 and moves
-TL by a median 0.004 dB (0.1 dB at the 99th percentile), because a source 75 m
-above the seabed does not excite an interface wave. Move the source down to
-1 m above the seabed and the same change is worth up to **2.4 dB** at a
-receiver near the interface. A run with the
-derived `c_low` says so (a `NumericsWarning`) when the source or a receiver lies
-within one interface wavelength, `0.85·c_s/f`, of the seafloor. If that is the
-physics you are after, set `c_low` below the slowest shear speed and expect the
-cost. For a seabed whose shear physics is the whole question, [OASES](oases.md)
-goes further; [Bounce](bounce.md) gives you the reflection coefficient alone.
+What the elastic default costs. The derived `c_low` takes the slowest speed of
+every medium, so over this seabed it is 0.85 × the sand's 110 m/s shear speed,
+93.5 m/s (granite, an elastic half-space, sets the 0.85): the seismic interface
+waves an elastic seabed supports travel *below* the shear speed, and the window
+reaches them. A water-only window (`c_low=1341`, 0.90 × the slowest water
+speed) runs 14× faster here (0.11 s against 1.5 s) and moves TL by a median
+0.004 dB (0.1 dB at the 99th percentile), because a source 75 m above the seabed does not excite
+an interface wave; move the source down to 1 m above the seabed and the
+water-only window is off by up to **2.4 dB** at a receiver near the interface.
+Pin `c_low` above the shear speed when the geometry stays far from the bed and
+run time matters. Over elastic layers on a *fluid* half-space the factor is
+0.90, which can sit above the interface wave; a run then says so (a
+`NumericsWarning`) when the source or a receiver lies within one interface
+wavelength, `0.85·c_s/f`, of the seafloor. For a seabed whose shear physics is
+the whole question, [OASES](oases.md) goes further; [Bounce](bounce.md) gives
+you the reflection coefficient alone.
 
 ### Benchmarking another model against it
 
@@ -462,7 +476,7 @@ warns, and solves that:
 ```
 FallbackWarning: Scooter does not support range-dependent bathymetry;
 collapsed to 400.0 m (method='max', range 100.0–400.0 m). Override via
-`collapse={'bathymetry': 'max'|'median'|'mean'|'min'|'initial'}`.
+`collapse={'bathymetry': 'max'|'median'|'mean'|'min'|'r0'|'rmax'}`.
 ```
 
 The top panel answers a different question than the one asked: a flat 400 m

@@ -1,16 +1,19 @@
-"""Waveguide dispersion: :func:`modal_group_velocity` reads it from the
+"""Waveguide dispersion: :func:`modal_group_speeds` reads it from the
 modal wavenumbers, and :func:`warp_signal` / :func:`unwarp_signal` undo it
 in the time domain.
 """
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 from typing import Optional
+from uacpy.acoustic_signal._results import ResultTuple
 from uacpy.core._validate import (
-    require_increasing_axis, require_positive_finite_scalar,
-    require_real_signal,
+    require_positive_finite_scalar, require_real_signal,
+    require_strictly_increasing,
 )
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core._finite_difference import warn_if_storage_under_resolves
@@ -23,7 +26,7 @@ from uacpy.core._finite_difference import warn_if_storage_under_resolves
 # that straightens a dispersed mode.
 # ──────────────────────────────────────────────────────────────────────
 
-def modal_group_velocity(frequencies, *, k_horizontal):
+def modal_group_speeds(frequencies, *, k_horizontal):
     """Group velocity ``v_g = d(omega)/d(k_r)`` per mode from the dispersion.
 
     Parameters
@@ -88,21 +91,21 @@ def modal_group_velocity(frequencies, *, k_horizontal):
         detail = (f" with {int(np.count_nonzero(np.diff(f) <= 0))} "
                   "non-increasing step(s)") if f.ndim == 1 else ""
         raise ConfigurationError(
-            "modal_group_velocity: frequencies must be 1-D increasing; got "
+            "modal_group_speeds: frequencies must be 1-D increasing; got "
             f"shape {f.shape}{detail}.")
-    require_increasing_axis(f, "modal_group_velocity: frequencies")
+    require_strictly_increasing(f, "modal_group_speeds: frequencies")
     if f.size < 2:
         # np.gradient below needs two samples per axis; one reached it as
         # "Shape of array too small to calculate a numerical gradient",
         # naming no input the caller supplied.
         raise ConfigurationError(
-            f"modal_group_velocity: frequencies needs at least 2 samples — "
-            f"the group velocity is a numerical derivative d(omega)/d(kr) "
+            f"modal_group_speeds: frequencies needs at least 2 samples — "
+            f"the group speed is a numerical derivative d(omega)/d(kr) "
             f"over the axis; got {f.size}.")
     omega = 2.0 * np.pi * f
     if kr.shape[0] != f.size:
         raise ConfigurationError(
-            "modal_group_velocity: k_horizontal axis 0 must match freqs; got "
+            "modal_group_speeds: k_horizontal axis 0 must match freqs; got "
             f"k_horizontal shape {kr.shape} and {f.size} frequencies.")
     # Both gradients are taken in index space (unit spacing). Their ratio is
     # (domega/di)/(dkr/di) = domega/dkr, so no frequency spacing is needed and
@@ -118,7 +121,7 @@ def modal_group_velocity(frequencies, *, k_horizontal):
         by_frequency = np.any(flat.reshape(flat.shape[0], -1), axis=1)
         first = int(np.flatnonzero(by_frequency)[0])
         raise ConfigurationError(
-            f"modal_group_velocity: k_horizontal is flat in frequency at "
+            f"modal_group_speeds: k_horizontal is flat in frequency at "
             f"{int(np.count_nonzero(by_frequency))} of {f.size} frequency "
             f"sample(s), first at index {first} ({f[first]:g} Hz). The group "
             f"velocity is d(omega)/d(kr), so a flat step divides by zero and "
@@ -147,10 +150,10 @@ def modal_group_velocity(frequencies, *, k_horizontal):
         col = columns[:, int(np.flatnonzero(turning)[0])]
         turn = int(np.flatnonzero(np.sign(col[1:]) != np.sign(col[:-1]))[0]) + 1
         raise ConfigurationError(
-            f"modal_group_velocity: k_horizontal doubles back in frequency in "
+            f"modal_group_speeds: k_horizontal doubles back in frequency in "
             f"{int(np.count_nonzero(turning))} of {columns.shape[1]} mode "
             f"column(s), first turning at index {turn} ({f[turn]:g} Hz). The "
-            f"group velocity is d(omega)/d(kr), the speed energy travels at, "
+            f"group speed is d(omega)/d(kr), the speed energy travels at, "
             f"so a step that reverses sign hands back a negative speed there "
             f"while the rest of the curve looks ordinary. A propagating mode's "
             f"horizontal wavenumber rises strictly with frequency — its phase "
@@ -165,13 +168,13 @@ def modal_group_velocity(frequencies, *, k_horizontal):
     # the caller to reverse an axis that is not the problem.
     if np.any(falling):
         raise ConfigurationError(
-            f"modal_group_velocity: k_horizontal falls with frequency "
+            f"modal_group_speeds: k_horizontal falls with frequency "
             f"throughout {int(np.count_nonzero(falling))} of "
             f"{columns.shape[1]} mode column(s) — over "
             f"{f[0]:g}-{f[-1]:g} Hz. A propagating mode's horizontal "
             f"wavenumber rises strictly with frequency, because the group "
-            f"velocity d(omega)/d(kr) is the speed energy travels at and is "
-            f"positive; a falling curve makes every group velocity in the "
+            f"speed d(omega)/d(kr) is the speed energy travels at and is "
+            f"positive; a falling curve makes every group speed in the "
             f"column negative. The usual cause is a mode set stored against a "
             f"descending frequency axis: reverse k_horizontal (and "
             f"frequencies with it) so both run low to high.")
@@ -179,7 +182,7 @@ def modal_group_velocity(frequencies, *, k_horizontal):
     v_g = domega / dkr if kr.ndim == 1 else domega[:, None] / dkr
     # The floor is measured on the step between neighbouring frequencies, not
     # on np.gradient's centred half-step, so the same expression covers both
-    # this function and Modes.group_velocity_between, which differences one
+    # this function and Modes.group_speeds_between, which differences one
     # step directly. dkr is aligned with the FIRST of each pair.
     step = np.diff(kr, axis=0)
     # `grid=` lets the notice prescribe a MEASURED step, which needs a grid
@@ -188,7 +191,7 @@ def modal_group_velocity(frequencies, *, k_horizontal):
     # as giving the test instead of the step — so the grid is withheld and
     # the notice falls back to the advice that does not need one.
     warn_if_storage_under_resolves(
-        kr[:-1], step, v_g[:-1], "modal_group_velocity",
+        kr[:-1], step, v_g[:-1], "modal_group_speeds",
         grid=(omega, kr) if omega.size >= 3 else None)
     return v_g
 
@@ -258,7 +261,37 @@ def _prescribed_warped_length(n: int, sample_rate: float, t_r: float) -> int:
     return max(2, int(np.ceil(span * fs_h)))
 
 
-def warp_signal(data, sample_rate: float, range_m: float,
+class Warped(ResultTuple, namedtuple("Warped", "times data")):
+    """A trace :func:`warp_signal` warped: ``times``, the warped time axis
+    (s), and ``data``, the Jacobian-weighted resampled trace on it.
+
+    The tuple unpacks axis-first, ``times, data = warp_signal(...)``, as the
+    package's other time series do. What the warp was made with rides on
+    attributes, which :func:`unwarp_signal` reads back so the result goes
+    back whole: ``sample_rate`` (Hz) of the original record, ``range`` and
+    ``sound_speed`` (the trial ``t_r = range/sound_speed``) and
+    ``interpolation``. A trace filtered in the warped domain keeps them
+    through ``warped._replace(data=filtered)``.
+    """
+
+    _attrs = ("sample_rate", "range", "sound_speed", "interpolation")
+
+    def __new__(cls, times, data, *, sample_rate, range, sound_speed,
+                interpolation="linear"):
+        self = super().__new__(cls, times, data)
+        self.sample_rate = float(sample_rate)
+        self.range = float(range)
+        self.sound_speed = float(sound_speed)
+        self.interpolation = str(interpolation)
+        return self
+
+    def _field_units(self):
+        # The trace carries the input record's samples, resampled and
+        # weighted by a dimensionless Jacobian.
+        return {"times": "s", "data": None}
+
+
+def warp_signal(data, sample_rate: float, range: float,
                 sound_speed: float = DEFAULT_SOUND_SPEED, *,
                 oversample: Optional[float] = None,
                 interpolation: str = 'linear'):
@@ -291,9 +324,9 @@ def warp_signal(data, sample_rate: float, range_m: float,
         (see Notes).
     sample_rate : float
         Sample rate (Hz).
-    range_m, sound_speed : float
+    range, sound_speed : float
         **Trial** parameters, not measurements. They enter only through
-        ``t_r = range_m/sound_speed``, and warping is "only weakly sensitive to the
+        ``t_r = range/sound_speed``, and warping is "only weakly sensitive to the
         choice of ``t_r``": the paper states that "it is not required to know
         the range nor the water sound speed to apply warping", and warps every
         data in the tutorial — experimental ones included — at r = 10 km,
@@ -345,18 +378,19 @@ def warp_signal(data, sample_rate: float, range_m: float,
         ms for ``n=2048``, ``K=7227`` over two runs. Paired with the default
         grid it makes the round trip essentially exact — 0.0036-0.0067 % on
         the same white-noise grid, and numerically exact on the band-limited
-        transient — and it must be passed to :func:`unwarp_signal` as well to
-        get that.
+        transient — and :func:`unwarp_signal` reads it off the result, so
+        both directions use it.
 
     Returns
     -------
-    warped : ndarray
-        The resampled data on the warped time grid, Jacobian-weighted so the
-        warp is energy-preserving.
-    t_warp : ndarray
-        The warped time axis (s) ``warped`` lives on, spanning
+    Warped
+        ``(times, data)``: the warped time axis (s), spanning
         ``[0, sqrt(t_end**2 - t_r**2)]`` — ``n * oversample`` samples, or the
-        ``K`` of Eq. (14) when ``oversample`` is ``None``.
+        ``K`` of Eq. (14) when ``oversample`` is ``None`` — and the data
+        resampled onto it, Jacobian-weighted so the warp is
+        energy-preserving; with the forward call's ``sample_rate``,
+        ``range``, ``sound_speed`` and ``interpolation`` as attributes, for
+        :func:`unwarp_signal`.
 
     Notes
     -----
@@ -373,19 +407,9 @@ def warp_signal(data, sample_rate: float, range_m: float,
     waveguide energy also arrives *before* ``r/c_w``, through the seabed, and
     ``c_w`` is not uniquely defined unless the water column is isovelocity.
 
-
-    **Signal first, axis second — deliberately, and against the package's
-    usual axis-first convention** (stated at
-    :func:`simulate_arrival_reception` and in DOCUMENTATION.md §10, and
-    followed by every other ``acoustic_signal`` function that returns a time
-    axis with its data). This pair
-    is ordered to feed :func:`unwarp_signal`, whose first two parameters are
-    ``(warped, t_warp)`` in exactly this order, so the round trip is
-    ``unwarp_signal(*warp_signal(x, fs, r, oversample=8), fs, r)``. Swapping
-    this tuple to match the convention would silently invert that call:
-    ``t_warp`` and ``warped``
-    have the same length, so the argument-shape checks downstream cannot tell
-    them apart and the error surfaces only as a wrong answer.
+    The round trip is ``unwarp_signal(warp_signal(x, fs, r))``: the
+    :class:`Warped` result goes back whole, so its two equal-length arrays
+    cannot be passed in the wrong order.
     """
     x = require_real_signal(
         data, "warp_signal", shape_hint=" (n_samples,)",
@@ -393,11 +417,11 @@ def warp_signal(data, sample_rate: float, range_m: float,
     fs = require_positive_finite_scalar(sample_rate, "warp_signal",
                                         "sample_rate", " Hz")
     n = x.size
-    range_m = require_positive_finite_scalar(range_m, "warp_signal",
-                                             "range_m", " m")
+    range = require_positive_finite_scalar(range, "warp_signal",
+                                           "range", " m")
     sound_speed = require_positive_finite_scalar(sound_speed, "warp_signal",
                                                  "sound_speed", " m/s")
-    t_r = range_m / sound_speed
+    t_r = range / sound_speed
     # The record is taken to start at the direct arrival: t_min = [t_r]+, the
     # convention of App. C 1, under which the warped domain is Eq. (C1)'s
     # [0, sqrt(t_max^2 - t_r^2)] — the axis returned below.
@@ -438,55 +462,55 @@ def warp_signal(data, sample_rate: float, range_m: float,
     # at 20 km and grows with range). t_w = 0 at the direct arrival t = t_r, so
     # the numerator is floored at one sample.
     warped = warped * np.sqrt(np.maximum(tw_axis, 1.0 / fs) / t_orig)
-    return warped, tw_axis
+    return Warped(tw_axis, warped, sample_rate=fs, range=range,
+                  sound_speed=sound_speed, interpolation=interpolation)
 
 
-def unwarp_signal(warped, t_warp, sample_rate: float, range_m: float,
-                  sound_speed: float = DEFAULT_SOUND_SPEED, *,
-                  interpolation: str = 'linear'):
+def unwarp_signal(warped):
     """Inverse of :func:`warp_signal`; returns ``(t, signal)`` on the original grid.
 
-    ``(warped, t_warp)`` are taken in the order :func:`warp_signal` returns
-    them, so ``unwarp_signal(*warp_signal(x, fs, r), fs, r)`` round-trips. The
-    **return** here is axis-first ``(t, signal)``, the package convention,
-    because nothing consumes it positionally.
+    ``warped`` is the :class:`Warped` result :func:`warp_signal` returned —
+    or that result with its data changed, ``warped._replace(data=filtered)``
+    — so ``unwarp_signal(warp_signal(x, fs, r))`` round-trips, with the
+    forward call's sample rate, trial range and sound speed, and
+    interpolation read off it.
 
     Bonnel et al. (2020) Eq. (16), ``y_u[n] = sqrt(t_n/h^-1(t_n)) y_w[h^-1(t_n)]``,
     with the output rate and sample count "already known: they are the same as
     for the original signal" — which is what the grid below reconstructs from
     the warped axis' own extent.
 
-    ``interpolation`` is :func:`warp_signal`'s, and must match the forward
-    call for the round trip to be exact: ``'sinc'`` (Eq. C12) buys its
-    accuracy only when both directions use it.
+    The interpolation is the forward call's, so ``'sinc'`` (Eq. C12) is
+    used in both directions, where it buys its accuracy.
 
     Parameters
     ----------
-    warped : array_like
-        The warped signal.
-    t_warp : array_like
-        Its warped time axis.
-    sample_rate : float
-        Sample rate (Hz).
-    range_m, sound_speed : float
-        The trial range (m) and sound speed (m/s) of the forward call.
-    interpolation : str, optional
-        The forward call's interpolation. Default ``'linear'``.
+    warped : Warped
+        What :func:`warp_signal` returned.
     """
-    w = np.asarray(warped, dtype=float)
-    tw = np.asarray(t_warp, dtype=float)
-    fs = require_positive_finite_scalar(sample_rate, "unwarp_signal",
+    if not isinstance(warped, Warped):
+        raise ConfigurationError(
+            f"unwarp_signal: warped must be the Warped result warp_signal "
+            f"returns, which carries the forward call's sample rate, trial "
+            f"range and sound speed; got {type(warped).__name__}.",
+            remediation="Pass warp_signal's result (or "
+                        "result._replace(data=filtered)); for a warped trace "
+                        "of your own, build Warped(times, data, "
+                        "sample_rate=, range=, sound_speed=).")
+    w = np.asarray(warped.data, dtype=float)
+    tw = np.asarray(warped.times, dtype=float)
+    interpolation = warped.interpolation
+    fs = require_positive_finite_scalar(warped.sample_rate, "unwarp_signal",
                                         "sample_rate", " Hz")
-    range_m = require_positive_finite_scalar(range_m, "unwarp_signal",
-                                             "range_m", " m")
-    sound_speed = require_positive_finite_scalar(sound_speed, "unwarp_signal",
-                                                 "sound_speed", " m/s")
+    range = require_positive_finite_scalar(warped.range, "unwarp_signal",
+                                           "range", " m")
+    sound_speed = require_positive_finite_scalar(
+        warped.sound_speed, "unwarp_signal", "sound_speed", " m/s")
     if w.ndim != 1 or tw.shape != w.shape or w.size < 2:
         raise ConfigurationError(
-            f"unwarp_signal: warped and t_warp must be 1-D arrays of one "
-            f"length (at least 2), in the order warp_signal returns them; "
-            f"got shapes {w.shape} and {tw.shape}.")
-    t_r = range_m / sound_speed
+            f"unwarp_signal: the Warped times and data must be 1-D arrays of "
+            f"one length (at least 2); got shapes {tw.shape} and {w.shape}.")
+    t_r = range / sound_speed
     # The output grid follows the warped axis' own extent, not ``w.size``:
     # ``warp_signal(oversample=k)`` returns k times as many samples over the
     # same warped span, and reading the length off the array would unwarp onto

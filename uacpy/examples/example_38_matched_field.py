@@ -21,9 +21,7 @@ plot.shared_colorbar
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -74,12 +72,12 @@ bank = replica_bank(modes,
                     array_depths=array_depths,
                     candidate_depths=candidate_depths,
                     candidate_ranges=candidate_ranges)
-# Diagonal loading as a fraction of the average eigenvalue (the mvdr default,
-# named here because it sets the trade-off): smaller sharpens the Capon peak
-# but makes it brittle to environmental mismatch, larger relaxes the surface
-# back toward Bartlett.
+# MVDR's diagonal_loading (a fraction of the average eigenvalue, 0.01 by
+# default) sets the trade-off: smaller sharpens the Capon peak but makes it
+# brittle to environmental mismatch, larger relaxes the surface back toward
+# Bartlett.
 surfaces = {'Bartlett': bartlett(covariance, bank),
-            'MVDR': mvdr(covariance, bank, diagonal_loading=1e-2)}
+            'MVDR': mvdr(covariance, bank)}
 
 print(f"  hidden source at {true_depth:.0f} m, {true_range / 1e3:.1f} km")
 for name, surface in surfaces.items():

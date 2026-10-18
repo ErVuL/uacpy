@@ -10,29 +10,27 @@ a pure function returning arrays; pass ``rng=`` for a reproducible draw.
 
 from typing import Optional, Tuple, Literal
 import numpy as np
-from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, NumericsWarning,
-)
+from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core._validate import (
     require_below_nyquist, require_generator,
     require_positive_finite_scalar,
 )
 import math
+import numbers
 import warnings
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.acoustic_signal.windows import _taper
 
 #: s — the silent lead-in :func:`make_mseq_probe` puts before the
-#: first m-sequence period.
+#: first m-sequence period: ``lead_time = 0.2`` in the Acoustics Toolbox's
+#: ``Matlab/waveforms/makemseq.m`` (vendored), which it is translated from.
 MSEQ_PROBE_LEAD_TIME_S = 0.2
 
-#: :func:`synthesize_noise_from_psd`'s IFFT chunk: its default and
-#: the bounds a requested ``nfft`` is reset or clamped to.
+#: :func:`synthesize_noise_from_psd`'s default IFFT chunk (uacpy guidance):
+#: 2**16 samples, 1.4 s at 48 kHz.
 NOISE_SYNTH_DEFAULT_NFFT = 2 ** 16
-NOISE_SYNTH_MIN_NFFT = 16
-NOISE_SYNTH_MAX_NFFT = 2 ** 18
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -456,10 +454,10 @@ def tone_burst(
         Number of cycles
     sample_rate : float
         Sample rate in Hz
-    window : str or None, optional
-        The window across the burst (default ``'hann'``); ``None`` gates it
-        rectangularly. Any name :func:`~uacpy.acoustic_signal.windows._taper`
-        takes.
+    window : str, optional
+        The window across the burst: ``'hann'`` (the default, which ``None``
+        also selects), ``'hamming'``, ``'blackman'``, ``'tukey'``, or
+        ``'boxcar'`` for a rectangular gate.
 
     Returns
     -------
@@ -481,7 +479,7 @@ def tone_burst(
     >>> t, s = tone_burst(1000.0, 5, sample_rate=48000)
 
     >>> # Without windowing
-    >>> t, s_rect = tone_burst(1000.0, 5, sample_rate=48000, window=None)
+    >>> t, s_rect = tone_burst(1000.0, 5, sample_rate=48000, window='boxcar')
     """
 
     # ``T`` is the requested burst duration in seconds; the sample count
@@ -507,7 +505,7 @@ def tone_burst(
 
     s = np.sin(2 * np.pi * frequency * time)
 
-    s = s * _taper(window, N, who='tone_burst')
+    s = s * _taper('hann' if window is None else window, N, who='tone_burst')
 
     return time, s
 
@@ -661,23 +659,23 @@ def nwave(times: np.ndarray, frequency: float) -> np.ndarray:
 # m-sequence channel probe.
 # ──────────────────────────────────────────────────────────────────────
 
-#: Relative tolerance within which ``sample_rate / chips_per_sec`` counts as
+#: Relative tolerance within which ``sample_rate / chip_rate`` counts as
 #: a whole number of samples per chip: a chip rate computed as
 #: ``sample_rate / m`` divides back to within a few ULP of ``m``, not onto it.
 _WHOLE_CHIP_RTOL = 1e-9
 
 
-def _samples_per_chip(sample_rate: float, chips_per_sec: float):
+def _samples_per_chip(sample_rate: float, chip_rate: float):
     """The whole number of samples in one chip, ``round(sample_rate /
-    chips_per_sec)``, or ``None`` when the ratio is not within
+    chip_rate)``, or ``None`` when the ratio is not within
     ``_WHOLE_CHIP_RTOL`` of a whole number."""
-    ratio = sample_rate / chips_per_sec
+    ratio = sample_rate / chip_rate
     m = round(ratio)
     return m if m >= 1 and abs(ratio - m) <= _WHOLE_CHIP_RTOL * m else None
 
 
 def bpsk_modulate(
-    chips: np.ndarray, fc: float, *, sample_rate: float, chips_per_sec: float
+    chips: np.ndarray, fc: float, *, sample_rate: float, chip_rate: float
 ) -> np.ndarray:
     """
     Encode binary sequence as Binary Phase Shift Keying (BPSK) signal.
@@ -690,7 +688,7 @@ def bpsk_modulate(
         Carrier frequency in Hz
     sample_rate : float
         Sample frequency in Hz
-    chips_per_sec : float
+    chip_rate : float
         Chip rate (symbols per second)
 
     Returns
@@ -706,7 +704,7 @@ def bpsk_modulate(
     One chip-length carrier is built once and replicated, so the carrier phase
     **restarts at zero in every chip** (as in the ``bpsk.m`` original). The
     result is phase-continuous across chip boundaries only when ``fc`` is an
-    integer multiple of ``chips_per_sec``; otherwise each boundary carries a
+    integer multiple of ``chip_rate``; otherwise each boundary carries a
     phase step that widens the transmitted spectrum.
 
     Chip values outside {-1, +1} (a 0-valued chip emits silence — on-off
@@ -721,9 +719,9 @@ def bpsk_modulate(
     >>> # BPSK modulation
     >>> fc = 12000  # 12 kHz carrier
     >>> sample_rate = 48000  # 48 kHz sample rate
-    >>> chips_per_sec = 3000  # 3k chips/sec
+    >>> chip_rate = 3000  # 3k chips/sec
     >>> s = bpsk_modulate(bits, fc, sample_rate=sample_rate,
-    ...                   chips_per_sec=chips_per_sec)
+    ...                   chip_rate=chip_rate)
 
     References
     ----------
@@ -731,15 +729,15 @@ def bpsk_modulate(
     """
     sample_rate = require_positive_finite_scalar(
         sample_rate, "bpsk_modulate", "sample_rate", " Hz")
-    chips_per_sec = require_positive_finite_scalar(
-        chips_per_sec, "bpsk_modulate", "chips_per_sec", " chips/s")
-    samples_per_chip = _samples_per_chip(sample_rate, chips_per_sec)
+    chip_rate = require_positive_finite_scalar(
+        chip_rate, "bpsk_modulate", "chip_rate", " chips/s")
+    samples_per_chip = _samples_per_chip(sample_rate, chip_rate)
 
     if samples_per_chip is None:
         raise ConfigurationError(
             "bpsk_modulate: samples_per_chip must be an integer; got "
-            f"sample_rate/chips_per_sec = {sample_rate:g}/{chips_per_sec:g} "
-            f"= {sample_rate / chips_per_sec:g}.")
+            f"sample_rate/chip_rate = {sample_rate:g}/{chip_rate:g} "
+            f"= {sample_rate / chip_rate:g}.")
 
     require_below_nyquist(fc, sample_rate, "bpsk_modulate", "fc",
                           "the sampled carrier aliases")
@@ -891,9 +889,9 @@ def m_sequence(n_register: int, taps=None) -> np.ndarray:
             f"not the maximal {length} — the feedback polynomial is not "
             f"primitive, so the output is not an m-sequence and its off-peak "
             f"autocorrelation is far above 1.",
-            remediation=f"Pass taps=None for the preset primitive polynomial "
-                        f"(n_register <= 15), or a known primitive tap set "
-                        f"(e.g. [5,2], [5,3], [6,1], [6,5], [7,6]).")
+            remediation="Pass taps=None for the preset primitive polynomial "
+                        "(n_register <= 15), or a known primitive tap set "
+                        "(e.g. [5,2], [5,3], [6,1], [6,5], [7,6]).")
     # Standard BPSK mapping: bit 0 -> +1, bit 1 -> -1.
     return 1.0 - 2.0 * bits[1:].astype(float)
 
@@ -941,7 +939,8 @@ def make_mseq_probe(freq_min: float, freq_max: float, *, sample_rate: float, dur
     period would lose the two-valued autocorrelation the probe exists for, so
     increase ``duration`` or widen ``freq_max - freq_min`` to raise the chip rate.
 
-    Translated from OALIB makemseq.m by mbp.
+    Translated from OALIB makemseq.m by mbp (vendored as
+    ``third_party/Acoustics-Toolbox/Matlab/waveforms/makemseq.m``).
 
     Examples
     --------
@@ -962,28 +961,28 @@ def make_mseq_probe(freq_min: float, freq_max: float, *, sample_rate: float, dur
 
     # M-sequence parameters
     fc = 0.5 * (freq_min + freq_max)  # center frequency
-    chips_per_sec = 0.5 * (freq_max - freq_min)
+    chip_rate = 0.5 * (freq_max - freq_min)
 
-    # The BPSK main lobe spans fc +/- chips_per_sec, i.e. exactly
-    # [freq_min, freq_max], so its upper edge fc + chips_per_sec = freq_max must sit
+    # The BPSK main lobe spans fc +/- chip_rate, i.e. exactly
+    # [freq_min, freq_max], so its upper edge fc + chip_rate = freq_max must sit
     # below Nyquist.
-    if fc + chips_per_sec >= sample_rate / 2:
+    if fc + chip_rate >= sample_rate / 2:
         raise ConfigurationError(
             f"make_mseq_probe: the carrier (freq_min + freq_max)/2 = {fc:g} Hz plus "
-            f"the chip-rate bandwidth (freq_max - freq_min)/2 = {chips_per_sec:g} Hz "
-            f"reaches {fc + chips_per_sec:g} Hz (= freq_max), at or above the "
+            f"the chip-rate bandwidth (freq_max - freq_min)/2 = {chip_rate:g} Hz "
+            f"reaches {fc + chip_rate:g} Hz (= freq_max), at or above the "
             f"Nyquist frequency sample_rate/2 = {sample_rate / 2:g} Hz, so "
             f"the sampled probe aliases.")
     # A chip is a whole number of samples (as in bpsk.m), so the band width
-    # 2*chips_per_sec has to be 2*sample_rate/m for a whole m.
-    m = _samples_per_chip(sample_rate, chips_per_sec)
+    # 2*chip_rate has to be 2*sample_rate/m for a whole m.
+    m = _samples_per_chip(sample_rate, chip_rate)
     if m is None:
-        samples_per_chip = sample_rate / chips_per_sec
+        samples_per_chip = sample_rate / chip_rate
         narrower = 2 * sample_rate / math.ceil(samples_per_chip)
         wider = 2 * sample_rate / math.floor(samples_per_chip)
         raise ConfigurationError(
             f"make_mseq_probe: the band width freq_max - freq_min = "
-            f"{freq_max - freq_min:g} Hz sets a chip rate of {chips_per_sec:g} "
+            f"{freq_max - freq_min:g} Hz sets a chip rate of {chip_rate:g} "
             f"chips/s, which is {samples_per_chip:g} samples per chip at "
             f"sample_rate = {sample_rate:g} Hz; a chip must be a whole number "
             f"of samples.",
@@ -992,11 +991,11 @@ def make_mseq_probe(freq_min: float, freq_max: float, *, sample_rate: float, dur
                         f"and {wider:g} Hz.")
     # The chip rate of that whole m, which a width given as 2*sample_rate/m
     # reaches only to within rounding.
-    chips_per_sec = sample_rate / m
+    chip_rate = sample_rate / m
 
     # Generate base m-sequence (order 10 → length 1023)
     s_m = m_sequence(10)
-    s = bpsk_modulate(s_m, fc, sample_rate=sample_rate, chips_per_sec=chips_per_sec)
+    s = bpsk_modulate(s_m, fc, sample_rate=sample_rate, chip_rate=chip_rate)
 
     # Whole m-sequence periods that fit after the leader, counted in samples so
     # the probe lands at exactly target_n. Counting the leader is what keeps the
@@ -1009,7 +1008,7 @@ def make_mseq_probe(freq_min: float, freq_max: float, *, sample_rate: float, dur
         raise ConfigurationError(
             f"make_mseq_probe: duration={duration:g} s is too short for the "
             f"{lead_time:g} s leader plus one m-sequence period "
-            f"({len(s) / sample_rate:.3f} s at chip rate {chips_per_sec:g} chips/s). "
+            f"({len(s) / sample_rate:.3f} s at chip rate {chip_rate:g} chips/s). "
             f"Increase duration, or widen (freq_max - freq_min) to raise the chip rate."
         )
     probe = np.tile(s, Nreps)
@@ -1032,7 +1031,7 @@ def make_mseq_probe(freq_min: float, freq_max: float, *, sample_rate: float, dur
 # A realisation matching a target spectrum, and band-limited noise.
 # ──────────────────────────────────────────────────────────────────────
 
-def synthesize_noise_from_psd(psd, frequencies, duration=1, amplitude_factor=1, *,
+def synthesize_noise_from_psd(psd, frequencies, duration=1, *,
                               nfft=NOISE_SYNTH_DEFAULT_NFFT, sample_rate=None, interp='linear',
                               rng=None):
     """
@@ -1046,19 +1045,18 @@ def synthesize_noise_from_psd(psd, frequencies, duration=1, amplitude_factor=1, 
     Parameters
     ----------
     psd : array_like
-        One-sided power spectral density in (U/amplitude_factor)**2/Hz. Length ≥ 2.
+        One-sided power spectral density in U²/Hz, ``U`` the unit of the
+        output signal (Pa²/Hz for a pressure). Length ≥ 2.
     frequencies : array_like
         Frequency array in Hz, strictly increasing. Need not be uniform.
     duration : float
         Duration of the generated signal in seconds.
-    amplitude_factor : float
-        Scale factor applied to the output signal.
     nfft : int, optional
-        IFFT chunk size. Defaults to 65536; must be a power of two in
-        [16, 262144] — values below 16 are reset to 65536, values above
-        262144 are clamped, and non-powers of two are rounded to the
-        geometrically closest power of two (nearest in log2), each with a
-        warning.
+        IFFT chunk size, used as given: any even integer of at least 4
+        (the frequency resolution of the synthesis is ``sample_rate/nfft``).
+        Default 65536 (uacpy guidance). An odd length is refused: the
+        synthesis holds the last one-sided bin real as the Nyquist bin,
+        which only an even length has.
     sample_rate : float, optional
         Output sample rate in Hz. Defaults to 2*frequencies[-1]. Target power above
         ``sample_rate/2`` cannot be synthesised: it is dropped with a warning
@@ -1076,21 +1074,19 @@ def synthesize_noise_from_psd(psd, frequencies, duration=1, amplitude_factor=1, 
     Returns
     -------
     t : ndarray
-        Time array in seconds.
+        Time array in seconds, ``arange(n) / sample_rate`` — with the default
+        rate, ``sample_rate = 2*frequencies[-1]``.
     x : ndarray
-        Generated signal array of ``round(duration*sample_rate)`` samples.
-    sample_rate : float
-        Sampling frequency in Hz — the rate the time axis is built from
-        (equal to the ``sample_rate`` argument, or ``2*frequencies[-1]`` when that
-        was omitted).
+        Generated signal array of ``n = round(duration*sample_rate)``
+        samples.
 
     Examples
     --------
     >>> import numpy as np
     >>> f = np.logspace(0, 4, 64)
     >>> psd = 1e-6 / (1 + (f / 100) ** 2)
-    >>> t, x, sample_rate = synthesize_noise_from_psd(psd, f, duration=10,
-    ...                 nfft=2**16, sample_rate=40_000, interp='log')
+    >>> t, x = synthesize_noise_from_psd(psd, f, duration=10,
+    ...                                  sample_rate=40_000, interp='log')
     """
     psd = np.asarray(psd, dtype=float)
     frequencies = np.asarray(frequencies, dtype=float)
@@ -1141,29 +1137,14 @@ def synthesize_noise_from_psd(psd, frequencies, duration=1, amplitude_factor=1, 
 
     if nfft is None:
         nfft = NOISE_SYNTH_DEFAULT_NFFT
-    elif nfft < NOISE_SYNTH_MIN_NFFT:
-        warnings.warn(
-            f"synthesize_noise_from_psd: nfft={nfft} is below the minimum "
-            f"{NOISE_SYNTH_MIN_NFFT}; using the default "
-            f"{NOISE_SYNTH_DEFAULT_NFFT} instead.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-        nfft = NOISE_SYNTH_DEFAULT_NFFT
-    elif nfft > NOISE_SYNTH_MAX_NFFT:
-        warnings.warn(
-            f"synthesize_noise_from_psd: nfft={nfft} above the maximum "
-            f"{NOISE_SYNTH_MAX_NFFT}; clamping to {NOISE_SYNTH_MAX_NFFT}.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-        nfft = NOISE_SYNTH_MAX_NFFT
-    if not _is_power_of_two(nfft):
-        rounded = _closest_power_of_two(nfft)
-        warnings.warn(
-            f"synthesize_noise_from_psd: nfft={nfft} is not a power of two; "
-            f"rounding to {rounded}.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-        nfft = rounded
+    if (isinstance(nfft, bool) or not isinstance(nfft, numbers.Integral)
+            or nfft < 4 or nfft % 2):
+        raise ConfigurationError(
+            f"synthesize_noise_from_psd: nfft must be an even integer of at "
+            f"least 4; got {nfft!r}. The synthesis holds the last one-sided "
+            f"bin real as the Nyquist bin, which only an even length has, "
+            f"and needs one interior bin.")
+    nfft = int(nfft)
 
     # Interior bins of the one-sided grid: an even nfft has nfft//2 + 1 rfft
     # bins, of which DC and Nyquist must be real for a real signal. Drawing a
@@ -1222,9 +1203,9 @@ def synthesize_noise_from_psd(psd, frequencies, duration=1, amplitude_factor=1, 
             chunk = chunk[: samples_needed - start_idx]
             end_idx = samples_needed
 
-        x_total[start_idx:end_idx] += chunk[: end_idx - start_idx] * amplitude_factor
+        x_total[start_idx:end_idx] += chunk[: end_idx - start_idx]
 
-    return t_total, x_total, float(sample_rate)
+    return t_total, x_total
 
 
 def _resample_psd(Pxx, Fxx, f_target, method):
@@ -1266,21 +1247,6 @@ def _resample_psd(Pxx, Fxx, f_target, method):
         f"synthesize_noise_from_psd: unknown interp={method!r}; "
         "valid: 'linear', 'log', 'pchip', 'nearest'."
     )
-
-
-def _is_power_of_two(x):
-    return x > 0 and x.is_integer() and ((int(x) & (int(x) - 1)) == 0)
-
-
-def _closest_power_of_two(x):
-    """Power of two nearest to ``x`` in log2 (geometric) distance.
-
-    ``round(log2(x))`` splits at the geometric midpoint ``sqrt(2)*2**n``, not
-    the arithmetic one ``1.5*2**n``, so values between the two (e.g. 183)
-    round *up* even though the lower power is arithmetically closer.
-    """
-    n = round(math.log2(x))
-    return 2 ** n
 
 
 def _bandpass_design(fc: float, bandwidth: float, sample_rate: float, *,
@@ -1338,8 +1304,9 @@ def _noise_equivalent_bandwidth(sos, sample_rate: float, fc: float,
     to land between grid points) +3.65 dB at 5 Hz for ``fc=12002.9`` Hz where
     the same band at ``fc=12000`` Hz reads +1.16 dB. Ten bandwidths out the
     double-pass 4th-order Butterworth is below 1e-18 of its peak, so nothing
-    outside the focused window contributes; bands already wide enough for the
-    old grid move by < 1e-13 relative.
+    outside the focused window contributes; a band wide enough for the
+    whole-band grid gets the same value from both grids to < 1e-13
+    relative.
     """
     from scipy.signal import sosfreqz
     nyquist = float(sample_rate) / 2.0

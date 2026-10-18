@@ -11,7 +11,7 @@ from uacpy.core.run_settings import RunMode
 from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.io.bellhop_writer import (
-    BELLHOP_RAY_BOX_FACTOR, bellhop_ray_box,
+    BELLHOP_RAY_BOX_FACTOR, bellhop_ray_box, cerveny_knobs,
 )
 from uacpy.core.deck_limits import NO_RECEIVER_RANGE_FALLBACK_M
 from uacpy.io.oalib_writer import resolve_ssp_interp
@@ -28,15 +28,6 @@ from uacpy.models.bellhop._tables import (
 )
 from uacpy.core.exceptions import NumericsWarning, ValidityWarning
 from uacpy.models._notices import message_notice
-
-#: Water depths per wavelength below which uacpy's own model-validity table
-#: (``docs/models/README.md``, ``docs/models/bellhop.md``) marks ray theory ✗ —
-#: use a modal or wavenumber-integral solver. The number is uacpy's guidance:
-#: JKPS §3.4.2 gives no a-priori criterion, only the rule that the wavelength
-#: be substantially smaller than the water depth and every other physical
-#: scale. The same table calls 5-20 a cross-check band and >= 20 comfortable,
-#: so only the ✗ side warns: a cross-check is a suggestion, not a defect.
-_RAY_VALIDITY_D_OVER_LAMBDA = 5.0
 
 
 def _fan_miss_count_and_worst(zs, zr, rr, fan_lo, fan_hi):
@@ -262,21 +253,42 @@ def resolve_ray_box(env, receiver, *, z_box,
     return float(box_z), z_origin, float(box_r), r_origin
 
 
-def resolve_interp_ssp(env, *, interp_ssp, log) -> Optional[str]:
-    """The SSP interpolation the deck writer gets: the caller's as given,
-    logging what ``None`` resolves to. A pinned ``'quad'`` on a
-    range-independent SSP is written as its one profile held over the ray
-    box (:func:`~uacpy.io.bellhop_writer.write_bellhop_env_file`).
+def resolve_interp_ssp(env, *, interp_ssp, log) -> str:
+    """The SSP interpolation the deck carries: the caller's as given, or
+    for ``None`` the writer's automatic choice
+    (:func:`~uacpy.io.oalib_writer.resolve_ssp_interp`: ``'quad'`` for a
+    range-dependent SSP, ``'linear'`` otherwise), logged. A pinned
+    ``'quad'`` on a range-independent SSP is written as its one profile
+    held over the ray box
+    (:func:`~uacpy.io.bellhop_writer.write_bellhop_env_file`).
     On a pinned non-quad scheme the RD-SSP capability flag is False and
     ``_project_environment`` has already collapsed the SSP to 1-D; on the
     'quad' / automatic path the 2-D profile is written verbatim."""
+    resolved = resolve_ssp_interp(env, interp_ssp)
     if interp_ssp is None:
         log(
-            f"interp_ssp auto-picked = "
-            f"{resolve_ssp_interp(env, interp_ssp)!r} "
+            f"interp_ssp auto-picked = {resolved!r} "
             f"(env.ssp.is_range_dependent={env.ssp.is_range_dependent})"
         )
-    return interp_ssp
+    return resolved
+
+
+#: The Cerveny knobs the deck's two extra beam lines carry.
+CERVENY_KNOBS = ('beam_width_type', 'beam_curvature', 'eps_multiplier',
+                 'r_loop', 'n_image', 'ib_win')
+
+
+def resolve_cerveny_knobs(*, beam_type, **given) -> dict:
+    """The value of each Cerveny knob the deck carries: for a Cerveny beam
+    (``beam_type`` 'C' or 'R', the only ones whose two extra lines
+    ReadEnvironmentBell.f90 reads) each given value, and
+    :data:`~uacpy.io.bellhop_writer.CERVENY_DEFAULTS` for every one given as
+    ``None``; for any other beam type ``None`` throughout, since the deck
+    carries none of them."""
+    if beam_type.upper() not in ('C', 'R'):
+        return {name: None for name in CERVENY_KNOBS}
+    knobs = cerveny_knobs(**given)
+    return {name: knobs[name] for name in CERVENY_KNOBS}
 
 
 def pad_receiver_ranges(receiver, run_type, *, beam_type, grid_type,
@@ -436,70 +448,12 @@ def eigenray_size_notice(env, source, receiver, *, n_beams, grid_type,
         f"to read back. Use fewer receivers or a small explicit n_beams.")
 
 
-def ray_validity_notice(env, source, *, model_name) -> Optional[str]:
-    """The stage-3 notice of a water column that spans too few
-    wavelengths for ray theory, or ``None``.
-
-    uacpy's model-validity table (``docs/models/README.md``,
-    ``docs/models/bellhop.md``) marks ``D/lambda < 5`` ✗ — rays are the
-    wrong tool, take a modal or wavenumber-integral solver — and this
-    check is where the code says so. The threshold is uacpy's guidance, not
-    a published bound: Jensen et al. (JKPS §3.4.2) state that whether a ray
-    solution meets an accuracy requirement cannot be predicted a priori and
-    give the often-quoted rule that the wavelength be substantially smaller
-    than the water depth and every other physical scale. As an illustration,
-    on an 80 m isovelocity guide at 20 Hz (``D/lambda = 1.07``) Bellhop read
-    10.1 to 17.6 dB below Kraken over 1-10 km.
-
-    ``c`` is the sea-surface speed of the first profile, the same reference
-    speed :func:`~uacpy.models.bellhop._synthesis.synthesise` stamps as
-    ``c0``. The *lowest* frequency in the source's band binds, because the ray
-    approximation fails at the LONGEST wavelength — the opposite end from a
-    resolution criterion such as ``kraken._segments._highest_frequency``,
-    which takes the highest.
-
-    The 5-20 cross-check band stays silent: the table asks for a second
-    opinion there, not for a different model.
-    """
-    speeds = np.asarray(env.ssp.sound_speed, dtype=float)
-    freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
-    if speeds.size == 0 or freqs.size == 0:
-        return None
-    # ``ssp.sound_speed`` is (n_depths, n_ranges) in C order, so ``flat[0]`` is
-    # ``[0, 0]`` — the surface row of the first profile — for the 1-D and
-    # 2-D cases alike.
-    c = float(speeds.flat[0])
-    f = float(np.min(freqs))
-    depth = float(env.depth)
-    # A diagnostic never decides whether a run happens: an environment
-    # whose depth or speed will not reduce to a positive finite number is
-    # left to the deck-validity guards that do reject it.
-    if not (np.isfinite(depth) and depth > 0.0):
-        return None
-    if not (np.isfinite(c) and c > 0.0) or not (np.isfinite(f) and f > 0.0):
-        return None
-    d_over_lambda = depth * f / c
-    if d_over_lambda >= _RAY_VALIDITY_D_OVER_LAMBDA:
-        return None
-    return (
-        f"{model_name}: the water column spans D/lambda = "
-        f"{d_over_lambda:.2f} wavelengths ({depth:.0f} m at {f:g} Hz, "
-        f"c = {c:.0f} m/s), below the D/lambda >= "
-        f"{_RAY_VALIDITY_D_OVER_LAMBDA:g} floor uacpy's model-validity "
-        f"table sets for ray theory (docs/models/README.md). Ray theory is "
-        f"a high-frequency approximation that needs the wavelength "
-        f"substantially smaller than the water depth (Jensen et al., "
-        f"Computational Ocean Acoustics §3.4.2) and carries no error bound "
-        f"here. Use Kraken (normal modes) or Scooter / OASES (wavenumber "
-        f"integral), or cross-check this run against one.")
-
-
-def fan_miss_notice(source, receiver, *, launch_angles, grid_type,
+def fan_miss_notice(source, receiver, *, launch_angles_deg, grid_type,
                     model_name) -> Optional[str]:
     """The stage-3 notice of a receiver whose direct path lies outside
     the launch fan, or ``None``.
 
-    ``angleMod.f90:58-61`` fills the fan strictly between the two ``launch_angles``
+    ``angleMod.f90:58-61`` fills the fan strictly between the two ``launch_angles_deg``
     values, and BELLHOP's only under-resolution diagnostic
     (``bellhop.f90:252-258``) tests the beam COUNT — never whether the span
     reaches the receivers. So a geometry needing a steeper launch than the
@@ -517,7 +471,7 @@ def fan_miss_notice(source, receiver, *, launch_angles, grid_type,
     80 deg edge is 3.71 dB — so clearing this check is necessary, not
     sufficient.
     """
-    fan_lo, fan_hi = float(min(launch_angles)), float(max(launch_angles))
+    fan_lo, fan_hi = float(min(launch_angles_deg)), float(max(launch_angles_deg))
     zs = np.atleast_1d(np.asarray(source.depths, dtype=float))
     zr = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
     rr = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
@@ -561,7 +515,7 @@ def fan_miss_notice(source, receiver, *, launch_angles, grid_type,
         # extremal quantity, and the steepest angle among the MISSES is
         # a corner only when the fan spans the horizontal (measured
         # wrong in 6,369 of 99,698 random cases on fans that exclude 0,
-        # which launch_angles=(17, 74) is — _checks.check_knobs requires
+        # which launch_angles_deg=(17, 74) is — _checks.check_knobs requires
         # only alpha_lo < alpha_hi). Both come exactly off the sorted range
         # axis instead.
         n_out, worst = _fan_miss_count_and_worst(
@@ -590,7 +544,7 @@ def fan_miss_notice(source, receiver, *, launch_angles, grid_type,
         # cone shrinks with every extra tenth of a degree but never
         # closes. Only the receiver ranges close it.
         remedy = (
-            f"With launch_angles already at {limit:g} deg, {where} stay in a "
+            f"With launch_angles_deg already at {limit:g} deg, {where} stay in a "
             f"blind cone: 90 deg is a vertical ray, so widening the fan only "
             f"chases an asymptote. Start the receiver ranges beyond "
             f"{cone(limit):.2f} m if the near field matters.")
@@ -599,8 +553,8 @@ def fan_miss_notice(source, receiver, *, launch_angles, grid_type,
         # costs level too — 76 deg against an 80 deg edge is 3.71 dB, see
         # the function docstring.
         wider = min(max(needed, limit) + 5.0, 89.9)
-        remedy = (f"With this fan, {where} miss it. Widen launch_angles "
-                  f"(e.g. launch_angles=(-{wider:g}, {wider:g})) if the near "
+        remedy = (f"With this fan, {where} miss it. Widen launch_angles_deg "
+                  f"(e.g. launch_angles_deg=(-{wider:g}, {wider:g})) if the near "
                   f"field matters")
         if float(rr.min()) < cone(wider):
             remedy += (f"; that still leaves a blind cone of "
@@ -611,7 +565,7 @@ def fan_miss_notice(source, receiver, *, launch_angles, grid_type,
     return (
         f"{model_name}: {n_out} of {n_pairs} "
         f"source/receiver pairs need a direct-path launch angle outside "
-        f"launch_angles = [{fan_lo:g}, {fan_hi:g}] deg — the steepest is "
+        f"launch_angles_deg = [{fan_lo:g}, {fan_hi:g}] deg — the steepest is "
         f"{worst:.1f} deg — and Bellhop launches no ray beyond its fan, so "
         f"those receivers get no direct path, with no word from the binary. "
         f"{remedy}")
@@ -729,13 +683,13 @@ def line_source_sgb_notice(source, run_mode, *, beam_type, backend,
         f"'B', or backend='cxx', for a line source.")
 
 
-def geometry_notices(env, source, receiver, mode, *, launch_angles, grid_type,
+def geometry_notices(env, source, receiver, mode, *, launch_angles_deg, grid_type,
                      beam_type, n_beams, model_name, ray_step, memory_backed):
     """The stage-3 notices of the geometry, in the order they are
     announced: a receiver the launch fan cannot reach, a first range at
     r = 0, a water column too shallow for ray theory, an eigenray file
     that will be large."""
-    notices = [message_notice(fan_miss_notice(source, receiver, launch_angles=launch_angles,
+    notices = [message_notice(fan_miss_notice(source, receiver, launch_angles_deg=launch_angles_deg,
                                            grid_type=grid_type, model_name=model_name),
                            NumericsWarning)]
     # Bellhop evaluates no field at r = 0 unless writes_origin_column says
@@ -758,13 +712,6 @@ def geometry_notices(env, source, receiver, mode, *, launch_angles, grid_type,
                         f"(influence.f90:419, :786-787), so that column is "
                         f"NaN. Start ranges at a small positive value (e.g. "
                         f"``np.linspace(eps, R, N)``).", ValidityWarning))
-    # Ray-theory validity: the D/lambda floor is a statement about the
-    # FIELD the beam sum produces, so RAYS / EIGENRAYS / ARRIVALS —
-    # geometry, not a field — stay silent.
-    if mode in _FIELD_RUN_MODES:
-        notices.append(message_notice(ray_validity_notice(env, source,
-                                                       model_name=model_name),
-                                   ValidityWarning))
     if mode == RunMode.EIGENRAYS:
         notices.append(message_notice(eigenray_size_notice(
                         env, source, receiver, n_beams=n_beams, grid_type=grid_type,

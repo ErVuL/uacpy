@@ -203,13 +203,13 @@ class TestTheBandAverageIsTheLossABandwidthSees:
         waveform = tone_burst(1000.0, 20, sample_rate=RATE)[1]
         for low, high in ((975.0, 1025.0), (800.0, 1200.0)):
             band = field.window(frequency=(low, high))
-            assert band.broadband_loss().band_hz == (low, high)
+            assert band.broadband_loss().band == (low, high)
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 exposure = band.sound_exposure_level(source_waveform=waveform,
                                                      sample_rate=RATE)
-            assert exposure.band_hz == (low, high)
-            # and the identity really is narrowed, so band_hz is the only
+            assert exposure.band == (low, high)
+            # and the identity really is narrowed, so band is the only
             # place the span survives
             assert band.broadband_loss().n_frequencies == 1
 
@@ -294,6 +294,27 @@ class TestTheBandAverageIsTheLossABandwidthSees:
         field = two_path_field()
         with pytest.raises(ConfigurationError, match="no energy"):
             field.broadband_loss(source_spectrum=np.zeros(field.n_frequencies))
+
+    @pytest.mark.parametrize('bad,match', [
+        (lambda n: np.ones((n, 1)), 'must be 1-D'),
+        (lambda n: np.ones(n + 1), r'has \d+ samples but the frequency axis'),
+        (lambda n: np.r_[np.ones(n - 1), np.nan], 'must be finite'),
+        (lambda n: np.zeros(n), 'holds no energy'),
+    ])
+    def test_each_refusal_names_the_argument_the_caller_passed(self, bad,
+                                                               match):
+        # One set of checks (broadband_loss's) serves the method
+        # and the array function; each names source_spectrum to the Field's
+        # caller and weights to the function's.
+        from uacpy.acoustic_signal import broadband_loss
+        field = two_path_field()
+        spectrum = bad(field.n_frequencies)
+        with pytest.raises(ConfigurationError,
+                           match=rf"broadband_loss: source_spectrum {match}"):
+            field.broadband_loss(source_spectrum=spectrum)
+        with pytest.raises(ConfigurationError, match=rf"weights {match}"):
+            broadband_loss(np.asarray(field.data),
+                           np.abs(spectrum) ** 2)
 
 
 class TestAnySignalGetsItsOwnTransmissionLoss:
@@ -494,6 +515,42 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
                     **kw)
         values = np.asarray(out.data, dtype=float)
         assert np.isfinite(values[0, 0]) and np.isnan(values[0, 1])
+
+    @pytest.mark.parametrize('level', ['sel', 'weighted sel', 'peak'])
+    @pytest.mark.parametrize('domain', ['transfer function', 'traces'])
+    @pytest.mark.parametrize('ref', [1e-6, 20e-6])
+    def test_a_cell_nothing_reached_is_the_no_energy_marker(self, domain,
+                                                           level, ref):
+        # A zero H (or a trace zero throughout) received no energy: the map
+        # says so with the marker no_energy_mask finds, -600 dB whatever the
+        # reference, as at_source_level does, not a level a quiet cell
+        # could read (-180 dB re 1 µPa, -206 dB re 20 µPa).
+        from uacpy.acoustics import no_energy_mask
+        field = free_field(ranges=(100.0, 200.0))
+        data = np.array(field.data, copy=True)
+        data[0, 1, :] = 0.0
+        field = field.replace(data=data)
+        kw = {}
+        if domain == 'traces':
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                field = field.synthesize_time_series(
+                    source_waveform=self.burst(), sample_rate=RATE)
+        else:
+            kw = dict(source_waveform=self.burst(), sample_rate=RATE)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            if level == 'peak':
+                out = field.peak_sound_pressure_level(ref=ref, **kw)
+            else:
+                out = field.sound_exposure_level(
+                    weighting='LF' if level == 'weighted sel' else None,
+                    ref=ref, **kw)
+        values = np.asarray(out.data, dtype=float)
+        assert values[0, 1] == -600.0
+        np.testing.assert_array_equal(no_energy_mask(values),
+                                      [[False, True]])
+        assert -200.0 < values[0, 0] < 200.0
 
     def test_a_flat_band_reproduces_the_source_energy_over_r_squared(self):
         # The whole unit contract in one assertion: a waveform in Pa at 1 m
@@ -883,6 +940,22 @@ class TestATimeDomainFieldIntegratesTheTracesItHolds:
         with pytest.raises(ConfigurationError, match='needs the transmitted'):
             field.sound_exposure_level()
 
+    @pytest.mark.parametrize('setting', [dict(sample_rate=48000.0),
+                                         dict(window='hann'),
+                                         dict(t_start=0.3)])
+    @pytest.mark.parametrize('level', ['sound_exposure_level',
+                                       'peak_sound_pressure_level'])
+    def test_a_synthesis_setting_on_traces_is_refused(self, level, setting):
+        # The traces are integrated whole at their own rate: a rate, a band
+        # window or a record start would change nothing, so each is refused
+        # (naming the time cut) rather than ignored.
+        _, _, traces = self.pair()
+        with pytest.raises(ConfigurationError,
+                           match=rf"(?s){next(iter(setting))}= synthesise.*"
+                                 rf"window\(time="):
+            getattr(traces, level)(**setting)
+        assert np.all(np.isfinite(getattr(traces, level)().data))
+
 
 class TestATrackMapSumsTheSingleEventMap:
     @staticmethod
@@ -916,6 +989,18 @@ class TestATrackMapSumsTheSingleEventMap:
         middle = sel.track_exposure(x, closest_approach=[100.0, 500.0])
         np.testing.assert_allclose(plan.data[:, 1, :], middle.data,
                                    atol=1e-12)
+
+    def test_the_along_axis_exports_in_metres(self):
+        # The plan view's along-track axis is a distance, and its export
+        # says so as every other spatial axis does.
+        pytest.importorskip('xarray')
+        sel = self.single_event_map()
+        plan = sel.track_exposure(np.arange(-1e3, 1e3 + 1, 50.0),
+                                  closest_approach=[100.0, 500.0],
+                                  along=[-500.0, 0.0, 500.0])
+        coords = plan.to_xarray().coords
+        assert coords['along'].attrs['units'] == 'm'
+        assert coords['range'].attrs['units'] == 'm'
 
     def test_a_map_that_is_not_a_single_event_exposure_is_refused(self):
         sel = self.single_event_map()
@@ -1056,7 +1141,7 @@ class TestThePeakIsTheOtherHalfOfTheDualMetric:
                       coords={'depth': [10.0], 'range': r, 'frequency': f},
                       frequencies=f)
         out = self.quiet(field, tone_burst(1000.0, 20, sample_rate=RATE)[1])
-        assert out.band_hz == (800.0, 1200.0)
+        assert out.band == (800.0, 1200.0)
 
     def test_a_field_that_lost_its_phase_is_refused(self):
         field = free_field(ranges=(100.0,))

@@ -43,8 +43,8 @@ PH_MAX = 14.0
 DEFAULT_SOUND_SPEED = 1500.0
 
 # g/cm³ — the reference sea water's density: IES-80 (Fofonoff 1985,
-# ``core.acoustics.density``) gives 1026.95 kg/m³ at 10 °C, 35 psu, one
-# atmosphere. The ONE water density of the package: what every deck writes
+# ``core.acoustics.density``) gives 1.02695 g/cm³ (1026.95 kg/m³) at
+# 10 °C, 35 psu, one atmosphere. The ONE water density of the package: what every deck writes
 # for the water column unless ``Environment(water_density=...)`` says
 # otherwise, what every standalone default reads, and the water a published
 # seabed density RATIO (Jensen et al. Table 1.3, Hamilton, APL-UW) is

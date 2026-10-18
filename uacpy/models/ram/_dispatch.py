@@ -63,16 +63,18 @@ def validate_forced_backend(backend: str, env: Environment) -> None:
             "'ramgeo', or backend=None for automatic dispatch."
         )
     if backend == 'rams' and not elastic:
-        # rams0.5 is the elastic (RAMS) PE. Run on a fluid bottom its
-        # shear machinery degenerates and it returns a null field —
-        # TL saturated at 200 dB at every range — rather than failing.
-        # Mirrors the ramsurf rule above: a backend whose defining
-        # feature is absent from the env is a configuration error.
+        # rams0.5 is the elastic (RAMS) PE. On a fluid bottom every
+        # sediment node has cs = 0, so mub = rhob·cs² is 0 (rams0.5.f:204)
+        # and the fluid–solid interface rows divide by it (:593-600) —
+        # the mechanism check_rams_top_layer_carries_shear refuses for a
+        # zero-shear top layer. Mirrors the ramsurf rule above: a backend
+        # whose defining feature is absent from the env is refused.
         raise ConfigurationError(
             "RAM(backend='rams') is the elastic PE and needs a bottom "
-            "with shear (shear_speed > 0); on a fluid bottom it returns "
-            "a null field. Use backend='mpirams' / 'ramgeo', or "
-            "backend=None for automatic dispatch."
+            "with shear (shear_speed > 0): on a fluid bottom its "
+            "fluid-solid interface rows divide by a zero shear modulus "
+            "(rams0.5.f:204, :593-600). Use backend='mpirams' / 'ramgeo', "
+            "or backend=None for automatic dispatch."
         )
     if backend == 'rams':
         check_rams_top_layer_carries_shear(env)

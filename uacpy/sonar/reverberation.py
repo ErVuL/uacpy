@@ -20,6 +20,9 @@ one-way TL array (e.g. from a uacpy Field) to use a real propagation field.
 * ``Phi`` — equivalent two-way horizontal beamwidth (rad) of the array.
 * ``Psi`` — equivalent two-way solid-angle beamwidth (sr) of the array.
 
+Surface, bottom and volume components add incoherently:
+:func:`uacpy.acoustics.sum_levels_dB` ``(RL_bottom, RL_surface, RL_volume)``.
+
 References
 ----------
 Urick, R.J. (1983). *Principles of Underwater Sound*, 3rd ed., Ch. 8.
@@ -34,12 +37,11 @@ import numpy as np
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
-from uacpy.core.acoustics import sum_levels_dB
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import require_positive_finite_scalar
 
 
-def _check_ranges(who: str, ranges_m) -> np.ndarray:
+def _check_ranges(who: str, ranges) -> np.ndarray:
     """Slant ranges as a float array, refusing negatives.
 
     A negative slant range has no meaning, and the formulas do not report one:
@@ -49,7 +51,7 @@ def _check_ranges(who: str, ranges_m) -> np.ndarray:
     package's no-data convention and the cell there genuinely has zero area —
     but it is produced deliberately below instead of falling out of inf - inf.
     """
-    r = np.asarray(ranges_m, dtype=float)
+    r = np.asarray(ranges, dtype=float)
     # ``~(r >= 0)`` rather than ``r < 0``: it keeps admitting r == 0 (the
     # zero-area cell handled below) while also refusing NaN and -inf, which
     # pass every ``<`` comparison and would produce a NaN level indistinguishable
@@ -62,7 +64,7 @@ def _check_ranges(who: str, ranges_m) -> np.ndarray:
     if np.any(invalid):
         bad = r[invalid]
         raise ConfigurationError(
-            f"{who}: ranges_m must be >= 0 and finite; got {bad.size} "
+            f"{who}: ranges must be >= 0 and finite; got {bad.size} "
             f"invalid value(s), e.g. {float(bad.flat[0]):g} m.",
             remediation="Pass slant ranges as positive distances in metres.",
         )
@@ -71,7 +73,7 @@ def _check_ranges(who: str, ranges_m) -> np.ndarray:
 
 def _warn_if_cell_is_not_short(who: str, r: np.ndarray,
                                sound_speed: float,
-                               pulse_length_s: float,
+                               pulse_length: float,
                                cell_power: int) -> None:
     """Warn where the cell-scattering approximation has left its domain.
 
@@ -92,10 +94,10 @@ def _warn_if_cell_is_not_short(who: str, r: np.ndarray,
     volume form reads 3.68 dB there). That last case is the natural place to
     stop: the cell's inner edge has reached the source, so the geometry the
     formula describes no longer exists. Short ranges with a long pulse
-    otherwise returned a confident number — 178.75 dB at r = 1 m with a 75 m
-    cell — with nothing to say it was meaningless.
+    would otherwise give a confident number — 178.75 dB at r = 1 m with a
+    75 m cell — with nothing to say it is meaningless.
     """
-    extent = float(sound_speed) * float(pulse_length_s) / 2.0
+    extent = float(sound_speed) * float(pulse_length) / 2.0
     near = r[(r > 0.0) & (r < extent)]
     if near.size:
         r_min = float(near.min())
@@ -112,9 +114,9 @@ def _warn_if_cell_is_not_short(who: str, r: np.ndarray,
         )
 
 
-def _resolve_tl(ranges_m: np.ndarray, tl_dB) -> np.ndarray:
+def _resolve_tl(ranges: np.ndarray, tl_dB) -> np.ndarray:
     """One-way TL (dB) at each range. ``None`` -> spherical ``20*log10(r)``."""
-    r = np.asarray(ranges_m, dtype=float)
+    r = np.asarray(ranges, dtype=float)
     if tl_dB is None:
         with np.errstate(divide="ignore"):
             return 20.0 * np.log10(r)
@@ -135,23 +137,23 @@ _BEAM_CEILING = {1: (2.0 * np.pi, "2π rad, the whole circle"),
                  2: (4.0 * np.pi, "4π sr, the whole sphere")}
 
 
-def _reverberation(who, beam_name, beam_value, cell_power, ranges_m,
-                   source_level_dB, scattering_strength_dB, pulse_length_s,
+def _reverberation(who, beam_name, beam_value, cell_power, ranges,
+                   source_level_dB, scattering_strength_dB, pulse_length,
                    sound_speed, tl_dB):
     """``SL - 2*TL + S + 10*log10(beam_value * r**cell_power * c*tau/2)``
     (``cell_power`` 1 for a boundary annulus, 2 for a volume shell); the guards
     run pulse/beam, sound speed, ranges, short-cell warning, TL, so several
     bad arguments report the first (``beam_name`` names the caller's)."""
     # Negated admissible condition so NaN is refused: a NaN pulse length or
-    # beamwidth otherwise returned an all-NaN reverberation level silently.
+    # beamwidth would otherwise give an all-NaN reverberation level silently.
     # ``isfinite`` is the other half of the message's "and finite": the sign
-    # test admits ``+inf``, and an infinite pulse length or beamwidth made the
-    # cell infinite and returned an infinite level just as silently.
-    if (not np.isfinite(pulse_length_s) or not (pulse_length_s > 0.0)
+    # test admits ``+inf``, and an infinite pulse length or beamwidth would
+    # make the cell infinite and the level infinite just as silently.
+    if (not np.isfinite(pulse_length) or not (pulse_length > 0.0)
             or not np.isfinite(beam_value) or not (beam_value > 0.0)):
         raise ConfigurationError(
-            f"{who}: pulse_length_s and {beam_name}"
-            f" must be > 0 and finite; got pulse_length_s={pulse_length_s!r}, "
+            f"{who}: pulse_length and {beam_name}"
+            f" must be > 0 and finite; got pulse_length={pulse_length!r}, "
             f"{beam_name}={beam_value!r}."
         )
     ceiling, whole = _BEAM_CEILING[cell_power]
@@ -168,12 +170,12 @@ def _reverberation(who, beam_name, beam_value, cell_power, ranges_m,
     # ``target_strength`` does for the same argument.
     sound_speed = require_positive_finite_scalar(sound_speed, who,
                                                  "sound_speed", " m/s")
-    r = _check_ranges(who, ranges_m)
-    _warn_if_cell_is_not_short(who, r, sound_speed, pulse_length_s,
+    r = _check_ranges(who, ranges)
+    _warn_if_cell_is_not_short(who, r, sound_speed, pulse_length,
                                cell_power)
     tl = _resolve_tl(r, tl_dB)
     s = np.asarray(scattering_strength_dB, dtype=float)
-    cell = beam_value * r ** cell_power * (sound_speed * pulse_length_s / 2.0)
+    cell = beam_value * r ** cell_power * (sound_speed * pulse_length / 2.0)
     zero_range = r == 0.0
     with np.errstate(divide="ignore", invalid="ignore"):
         out = source_level_dB - 2.0 * tl + s + 10.0 * np.log10(cell)
@@ -181,20 +183,30 @@ def _reverberation(who, beam_name, beam_value, cell_power, ranges_m,
 
 
 def boundary_reverberation(
-    ranges_m,
+    ranges,
     source_level_dB: float,
     scattering_strength_dB,
     *,
-    pulse_length_s: float,
-    horizontal_beamwidth_rad: float,
+    pulse_length: float,
+    horizontal_beamwidth: float,
     sound_speed: float = DEFAULT_SOUND_SPEED,
     tl_dB=None,
 ):
     """Boundary (surface or bottom) reverberation level vs range (dB).
 
+    The cell-scattering form assumes the waves incident on the boundary
+    arrive at a single grazing angle (Abraham, *Underwater Acoustic Signal
+    Processing*, 2019, §3.5.3, Eq. 3.237) and ignores propagation in a
+    waveguide (§3.5.4): Zhou and Harrison show that under Lambert's rule the
+    echo and the reverberation both decay at 30·log10(r) at ranges large
+    compared with the water depth, so the signal-to-reverberation ratio
+    becomes constant there. ``tl_dB`` carries a modelled propagation loss,
+    not the angle: ``scattering_strength_dB`` is still read at the one angle
+    passed.
+
     Parameters
     ----------
-    ranges_m : array
+    ranges : array
         SLANT ranges from the sonar to the scattering cell (m) — see the
         module docstring for why, and for the horizontal-range conversion.
     source_level_dB : float
@@ -202,9 +214,9 @@ def boundary_reverberation(
     scattering_strength_dB : float or array
         Boundary scattering strength ``S_b`` (dB); scalar or per-range (e.g.
         Lambert's law evaluated at the grazing angle of each range).
-    pulse_length_s : float
+    pulse_length : float
         Transmit pulse length ``tau`` (s).
-    horizontal_beamwidth_rad : float
+    horizontal_beamwidth : float
         Equivalent two-way horizontal beamwidth ``Phi`` (rad).
     sound_speed : float
         Sound speed (m/s).
@@ -217,18 +229,18 @@ def boundary_reverberation(
         Reverberation level (dB) at each range.
     """
     return _reverberation(
-        "boundary_reverberation", "horizontal_beamwidth_rad", horizontal_beamwidth_rad,
-        1, ranges_m, source_level_dB,
-        scattering_strength_dB, pulse_length_s, sound_speed, tl_dB)
+        "boundary_reverberation", "horizontal_beamwidth", horizontal_beamwidth,
+        1, ranges, source_level_dB,
+        scattering_strength_dB, pulse_length, sound_speed, tl_dB)
 
 
 def volume_reverberation(
-    ranges_m,
+    ranges,
     source_level_dB: float,
     scattering_strength_dB,
     *,
-    pulse_length_s: float,
-    solid_angle_beamwidth_sr: float,
+    pulse_length: float,
+    solid_angle_beamwidth: float,
     sound_speed: float = DEFAULT_SOUND_SPEED,
     tl_dB=None,
 ):
@@ -236,20 +248,20 @@ def volume_reverberation(
 
     Same arguments as :func:`boundary_reverberation`, except
     ``scattering_strength_dB`` is the volume scattering strength ``S_v``
-    (dB re 1/m) and ``solid_angle_beamwidth_sr`` is the equivalent two-way
+    (dB re 1/m) and ``solid_angle_beamwidth`` is the equivalent two-way
     solid-angle beamwidth ``Psi`` (sr). The cell volume grows as ``r^2``.
 
     Parameters
     ----------
-    ranges_m : array_like
+    ranges : array_like
         Slant ranges to the scattering cell (m).
     source_level_dB : float
         Source level (dB re 1 µPa²·m²).
     scattering_strength_dB : float or array_like
         Volume scattering strength ``S_v`` (dB re 1/m).
-    pulse_length_s : float
+    pulse_length : float
         Transmit pulse length (s).
-    solid_angle_beamwidth_sr : float
+    solid_angle_beamwidth : float
         Equivalent two-way solid-angle beamwidth (sr).
     sound_speed : float, optional
         Sound speed (m/s). Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
@@ -257,24 +269,7 @@ def volume_reverberation(
         One-way transmission loss (dB); ``None`` is spherical spreading.
     """
     return _reverberation(
-        "volume_reverberation", "solid_angle_beamwidth_sr", solid_angle_beamwidth_sr,
-        2, ranges_m, source_level_dB,
-        scattering_strength_dB, pulse_length_s, sound_speed, tl_dB)
+        "volume_reverberation", "solid_angle_beamwidth", solid_angle_beamwidth,
+        2, ranges, source_level_dB,
+        scattering_strength_dB, pulse_length, sound_speed, tl_dB)
 
-
-def total_reverberation(*levels_dB):
-    """Incoherent (power) sum of reverberation components (dB).
-
-    ``RL = 10*log10(sum_i 10^(RL_i/10))`` over surface, bottom, volume, ...
-    Each argument is a scalar or an array of matching shape.
-    """
-    if not levels_dB:
-        raise ConfigurationError("total_reverberation: need at least one level.")
-    arrs = [np.asarray(x, dtype=float) for x in levels_dB]
-    if any(a.size == 0 for a in arrs):
-        raise ConfigurationError(
-            "total_reverberation: received a zero-length level array; "
-            "every component must carry at least one sample. Got sizes "
-            f"{[a.size for a in arrs]}."
-        )
-    return sum_levels_dB(*arrs)

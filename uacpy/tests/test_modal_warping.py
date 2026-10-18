@@ -6,12 +6,9 @@ Three properties matter and each is pinned here:
 
 * **Invertibility.** ``unwarp_signal(warp_signal(x))`` returns ``x``, so the
   transform loses nothing it was not asked to lose.
-* **Return order.** ``warp_signal`` is the one function on the
-  ``acoustic_signal`` public surface that returns ``(signal, axis)`` rather
-  than ``(axis, signal)``, and the order is deliberate: its tuple is exactly
-  the argument list :func:`unwarp_signal` takes, so the two compose by
-  unpacking. Flipping it would keep every call running and quietly return a
-  different signal.
+* **One result, back whole.** ``warp_signal`` returns a ``Warped(times,
+  data)`` carrying the forward call's parameters, and :func:`unwarp_signal`
+  takes it whole, so its two equal-length arrays cannot be swapped.
 * **The accuracy knob works.** ``oversample`` is honoured as a fraction rather
   than truncated to an integer, which had made every setting below 2 a no-op.
 * **The warped grid clears its own Nyquist bound.** The default follows
@@ -26,7 +23,8 @@ import numpy as np
 import pytest
 
 from uacpy.acoustic_signal import (
-    modal_group_velocity,
+    modal_group_speeds,
+    Warped,
     unwarp_signal,
     warp_signal,
 )
@@ -36,14 +34,14 @@ FS = 10000.0
 
 
 class TestModal:
-    def test_group_velocity_of_nondispersive_guide(self):
+    def test_group_speed_of_nondispersive_guide(self):
         f = np.linspace(50, 500, 50)
         c = 1500.0
         kr = 2 * np.pi * f / c  # omega = c*kr -> vg = c
-        vg = modal_group_velocity(f, k_horizontal=kr)
+        vg = modal_group_speeds(f, k_horizontal=kr)
         assert np.allclose(vg, c, rtol=1e-6)
 
-    def test_group_velocity_of_lossy_modes_uses_re_kr(self):
+    def test_group_speed_of_lossy_modes_uses_re_kr(self):
         """Complex wavenumbers (KRAKENC lossy modes) are handled via the
         Re(k_r) convention: same answer as the real part alone, with no
         ComplexWarning."""
@@ -51,8 +49,8 @@ class TestModal:
         kr = 2 * np.pi * f / 1500.0
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            vg = modal_group_velocity(f, k_horizontal=kr + 2.5e-4j)
-        np.testing.assert_array_equal(vg, modal_group_velocity(f, k_horizontal=kr))
+            vg = modal_group_speeds(f, k_horizontal=kr + 2.5e-4j)
+        np.testing.assert_array_equal(vg, modal_group_speeds(f, k_horizontal=kr))
         assert np.allclose(vg, 1500.0, rtol=1e-6)
 
     def test_warp_unwarp_roundtrip(self):
@@ -61,8 +59,7 @@ class TestModal:
         t = np.arange(n) / FS
         x = (np.sin(2 * np.pi * 40 * t) + 0.5 * np.sin(2 * np.pi * 120 * t)) \
             * np.hanning(n)
-        w, tw = warp_signal(x, FS, 500.0)
-        _, x2 = unwarp_signal(w, tw, FS, 500.0)
+        _, x2 = unwarp_signal(warp_signal(x, FS, 500.0))
         # Both directions resample by linear interpolation onto a nonlinear
         # time axis, so the round trip is lossy by construction; the loss is
         # worst near t_w = 0, where the Jacobian is floored at one sample. The
@@ -112,7 +109,7 @@ class TestWarpIsUnitary:
         x = self._signal()
         ratios = []
         for range_m in (200.0, 1000.0, 5000.0, 20_000.0):
-            w, tw = warp_signal(x, self.FS, range_m, sound_speed=1500.0)
+            tw, w = warp_signal(x, self.FS, range_m, sound_speed=1500.0)
             t = range_m / 1500.0 + np.arange(self.N) / self.FS
             ratios.append(float(np.trapezoid(w ** 2, tw)
                                 / np.trapezoid(x ** 2, t)))
@@ -122,9 +119,10 @@ class TestWarpIsUnitary:
         """The output length follows the warped axis' extent, not ``w.size``."""
         x = self._signal()
         for k in (1, 2, 4, 8):
-            w, tw = warp_signal(x, self.FS, 1000.0, sound_speed=1500.0, oversample=k)
-            assert w.size == self.N * k
-            _t, back = unwarp_signal(w, tw, self.FS, 1000.0, sound_speed=1500.0)
+            warped = warp_signal(x, self.FS, 1000.0, sound_speed=1500.0,
+                                 oversample=k)
+            assert warped.data.size == self.N * k
+            _t, back = unwarp_signal(warped)
             assert back.size == self.N
 
     def test_oversampling_tightens_the_round_trip(self):
@@ -133,8 +131,9 @@ class TestWarpIsUnitary:
         x = self._signal()
         errs = []
         for k in (1, 2, 4, 8):
-            w, tw = warp_signal(x, self.FS, 1000.0, sound_speed=1500.0, oversample=k)
-            _t, back = unwarp_signal(w, tw, self.FS, 1000.0, sound_speed=1500.0)
+            _t, back = unwarp_signal(warp_signal(x, self.FS, 1000.0,
+                                                 sound_speed=1500.0,
+                                                 oversample=k))
             errs.append(float(np.linalg.norm(back - x) / np.linalg.norm(x)))
         assert all(b < a for a, b in zip(errs, errs[1:])), errs
         assert errs[-1] < errs[0] / 4.0
@@ -154,8 +153,8 @@ class TestWarpSignalOversampleHonoursFractions:
         # the accuracy knob did nothing below 2. The 1.253 case is the only
         # one whose product (250.5999...) is not already a whole number in
         # float, so it is what separates round() from a bare int().
-        w, _tw = warp_signal(self._signal(), self.FS, 1000.0, oversample=factor)
-        assert w.size == expected
+        warped = warp_signal(self._signal(), self.FS, 1000.0, oversample=factor)
+        assert warped.data.size == warped.times.size == expected
 
     @pytest.mark.parametrize("factor", [0, -2, 0.5])
     def test_a_factor_below_one_raises_instead_of_clamping_silently(self, factor):
@@ -167,12 +166,10 @@ class TestWarpSignalOversampleHonoursFractions:
             warp_signal(self._signal(), self.FS, 1000.0, oversample='a')
 
 
-class TestWarpSignalReturnsSignalFirstToFeedUnwarp:
-    """``warp_signal`` is the one function on the ``acoustic_signal`` public
-    surface that returns signal-first rather than axis-first. That is
-    deliberate: its tuple is the argument list :func:`unwarp_signal` takes.
-    Both arrays are the same length, so a swap cannot be caught by shape and
-    would surface only as a wrong answer — this pins the coupling."""
+class TestWarpSignalReturnsOneResultUnwarpTakesWhole:
+    """``warp_signal`` returns ``Warped(times, data)``, axis-first like the
+    package's other time series, with the forward call's parameters on it;
+    :func:`unwarp_signal` takes that result whole."""
 
     FS = 4000.0
     RANGE = 5000.0
@@ -182,52 +179,44 @@ class TestWarpSignalReturnsSignalFirstToFeedUnwarp:
         t = np.arange(n) / fs
         return np.sin(2 * np.pi * (50.0 + 120.0 * t) * t) * np.exp(-3.0 * t)
 
-    def test_the_first_element_is_the_signal_and_the_second_the_axis(self):
+    def test_the_first_field_is_the_axis_and_the_second_the_data(self):
         x = self._chirp(1024, self.FS)
-        warped, t_warp = warp_signal(x, self.FS, self.RANGE)
+        warped = warp_signal(x, self.FS, self.RANGE, sound_speed=1490.0,
+                             interpolation='linear')
+        times, data = warped
+        assert isinstance(warped, Warped)
         # The axis starts at 0 (the direct arrival maps to t_w = 0) and
-        # increases; the signal does neither.
-        assert t_warp[0] == pytest.approx(0.0)
-        assert np.all(np.diff(t_warp) > 0)
-        assert np.any(warped < 0)
+        # increases; the data does neither.
+        assert times[0] == pytest.approx(0.0)
+        assert np.all(np.diff(times) > 0)
+        assert np.any(data < 0)
+        assert (warped.sample_rate, warped.range, warped.sound_speed,
+                warped.interpolation) == (self.FS, self.RANGE, 1490.0,
+                                          'linear')
 
-    def test_the_tuple_unpacks_straight_into_unwarp_signal(self):
+    def test_the_result_round_trips_whole(self):
         x = self._chirp(1024, self.FS)
-        t, back = unwarp_signal(
-            *warp_signal(x, self.FS, self.RANGE, oversample=8),
-            self.FS, self.RANGE)
+        t, back = unwarp_signal(warp_signal(x, self.FS, self.RANGE,
+                                            oversample=8))
         n = min(back.size, x.size)
         err = (np.linalg.norm(back[:n] - x[:n]) / np.linalg.norm(x[:n]))
         assert err < 0.05, f"round trip relative error {err:.4%}"
         assert t[0] == pytest.approx(self.RANGE / 1500.0)
 
-    def test_swapping_the_pair_destroys_the_round_trip(self):
-        """What flipping ``warp_signal``'s return order would have cost."""
+    def test_a_filtered_trace_keeps_the_forward_parameters(self):
         x = self._chirp(1024, self.FS)
-        warped, t_warp = warp_signal(x, self.FS, self.RANGE, oversample=8)
-        _, good = unwarp_signal(warped, t_warp, self.FS, self.RANGE)
-        _, swapped = unwarp_signal(t_warp, warped, self.FS, self.RANGE)
-        n = min(good.size, swapped.size, x.size)
-        ref = np.linalg.norm(x[:n])
-        assert np.linalg.norm(good[:n] - x[:n]) / ref < 0.05
-        assert np.linalg.norm(swapped[:n] - x[:n]) / ref > 0.5
+        warped = warp_signal(x, self.FS, self.RANGE, oversample=8)
+        _, half = unwarp_signal(warped._replace(data=0.5 * warped.data))
+        _, whole = unwarp_signal(warped)
+        np.testing.assert_allclose(half, 0.5 * whole, rtol=1e-12)
 
-    def test_the_documented_order_is_the_one_unwarp_declares(self):
-        assert list(inspect.signature(unwarp_signal).parameters)[:2] == [
-            'warped', 't_warp']
-        lines = inspect.cleandoc(warp_signal.__doc__).splitlines()
-        # A real numpydoc section header, not a substring: the underline has to
-        # be on the next line and as long as the word.
-        heads = [i for i, ln in enumerate(lines[:-1])
-                 if ln.strip() == 'Returns'
-                 and set(lines[i + 1].strip()) == {'-'}
-                 and len(lines[i + 1].strip()) >= len('Returns')]
-        assert len(heads) == 1, "warp_signal has no numpydoc Returns section"
-        body = '\n'.join(lines[heads[0]:])
-        # Named in the order they are returned, and the reason recorded with
-        # them: prose elsewhere in the file does not survive an edit here.
-        assert body.index('warped') < body.index('t_warp')
-        assert 'unwarp_signal' in body
+    def test_a_bare_pair_of_arrays_is_refused(self):
+        warped = warp_signal(self._chirp(256, self.FS), self.FS, self.RANGE)
+        with pytest.raises(ConfigurationError,
+                           match='must be the Warped result'):
+            unwarp_signal(warped.data)
+        assert list(inspect.signature(unwarp_signal).parameters) == [
+            'warped']
 
 
 class TestWarpRoundTripErrorMatchesTheDocumentedFigures:
@@ -243,8 +232,8 @@ class TestWarpRoundTripErrorMatchesTheDocumentedFigures:
 
     @staticmethod
     def _roundtrip(x, fs, r, oversample, c=1500.0):
-        w, tw = warp_signal(x, fs, r, oversample=oversample, sound_speed=c)
-        _, back = unwarp_signal(w, tw, fs, r, sound_speed=c)
+        _, back = unwarp_signal(warp_signal(x, fs, r, oversample=oversample,
+                                            sound_speed=c))
         n = min(back.size, x.size)
         return float(np.linalg.norm(back[:n] - x[:n])
                      / np.linalg.norm(x[:n]))
@@ -305,7 +294,7 @@ class TestTheWarpedGridClearsItsNyquistBound:
         t_r = r / self.C
         t_max = t_r + (self.N - 1) / fs
         span = np.sqrt(t_max ** 2 - t_r ** 2)
-        _w, tw = warp_signal(np.zeros(self.N), fs, r, sound_speed=self.C,
+        tw, _w = warp_signal(np.zeros(self.N), fs, r, sound_speed=self.C,
                              oversample=oversample)
         achieved = (tw.size - 1) / (tw[-1] - tw[0])
         return achieved, (span / t_max) * fs
@@ -331,14 +320,14 @@ class TestTheWarpedGridClearsItsNyquistBound:
         docstring states, checked as a relation rather than as a number."""
         t_r = r / self.C
         t_max = t_r + (self.N - 1) / fs
-        _w, tw = warp_signal(np.zeros(self.N), fs, r, sound_speed=self.C)
+        tw, _w = warp_signal(np.zeros(self.N), fs, r, sound_speed=self.C)
         factor = tw.size / self.N
         assert 2.0 < factor < 4.0, factor
         assert factor == pytest.approx(2.0 * (1.0 + t_r / t_max), rel=0.02)
 
     def test_a_number_overrides_the_prescription(self):
         """The change is to the default, not to the contract."""
-        w, _tw = warp_signal(np.zeros(self.N), 10000.0, 1000.0, oversample=3)
+        _tw, w = warp_signal(np.zeros(self.N), 10000.0, 1000.0, oversample=3)
         assert w.size == self.N * 3
 
 
@@ -348,7 +337,7 @@ class TestSincInterpolationNeedsThePrescribedGrid:
     prescribed grid it makes the round trip essentially exact; on a fixed
     ``oversample=1`` grid, which is below the bound, it is *worse* than
     linear, because an exact reconstruction faithfully reproduces the aliased
-    content linear interpolation was accidentally smoothing away.
+    content linear interpolation smooths away.
 
     Both halves are asserted. Adopting the kernel without the grid is the
     trap, and a test of the good case alone would not name it.
@@ -358,10 +347,9 @@ class TestSincInterpolationNeedsThePrescribedGrid:
 
     @staticmethod
     def _roundtrip(x, fs, r, oversample, interpolation, c=1500.0):
-        w, tw = warp_signal(x, fs, r, sound_speed=c, oversample=oversample,
-                            interpolation=interpolation)
-        _, back = unwarp_signal(w, tw, fs, r, sound_speed=c,
-                                interpolation=interpolation)
+        _, back = unwarp_signal(warp_signal(x, fs, r, sound_speed=c,
+                                            oversample=oversample,
+                                            interpolation=interpolation))
         n = min(back.size, x.size)
         return 100.0 * float(np.linalg.norm(back[:n] - x[:n])
                              / np.linalg.norm(x[:n]))
@@ -381,24 +369,23 @@ class TestSincInterpolationNeedsThePrescribedGrid:
         with pytest.raises(ConfigurationError, match="interpolation must be"):
             warp_signal(self.NOISE, FS, 1000.0, interpolation='cubic')
         with pytest.raises(ConfigurationError, match="interpolation must be"):
-            w, tw = warp_signal(self.NOISE, FS, 1000.0)
-            unwarp_signal(w, tw, FS, 1000.0, interpolation='cubic')
+            warped = warp_signal(self.NOISE, FS, 1000.0)
+            unwarp_signal(warped._replace(interpolation='cubic'))
 
     @pytest.mark.parametrize('bad, match', [
         (dict(sample_rate=0.0), 'sample_rate must be > 0'),
-        (dict(range_m=-1.0), 'range_m must be > 0'),
+        (dict(range=-1.0), 'range must be > 0'),
         (dict(sound_speed=np.nan), 'sound_speed must be'),
         (dict(swap_lengths=True), 'one length'),
     ])
     def test_unwarp_refuses_the_inputs_warp_refuses(self, bad, match):
-        w, tw = warp_signal(self.NOISE, FS, 1000.0)
-        kw = dict(sample_rate=FS, range_m=1000.0, sound_speed=1500.0)
+        warped = warp_signal(self.NOISE, FS, 1000.0)
         if bad.pop('swap_lengths', False):
-            tw = tw[:-1]
-        kw.update(bad)
+            warped = warped._replace(times=warped.times[:-1])
+        warped = warped._replace(**bad)
         with pytest.raises(ConfigurationError,
                            match=f"unwarp_signal: .*{match}"):
-            unwarp_signal(w, tw, **kw)
+            unwarp_signal(warped)
 
 
 class TestModalGroupVelocityRefusesAFlatWavenumberAxis:
@@ -422,9 +409,9 @@ class TestModalGroupVelocityRefusesAFlatWavenumberAxis:
     def test_a_constant_axis_is_refused_and_names_the_samples(self):
         with pytest.raises(ConfigurationError,
                            match='k_horizontal is flat in frequency') as exc:
-            modal_group_velocity(self.FREQ, k_horizontal=np.full(64, 64.0))
+            modal_group_speeds(self.FREQ, k_horizontal=np.full(64, 64.0))
         message = str(exc.value)
-        assert 'modal_group_velocity' in message
+        assert 'modal_group_speeds' in message
         assert 'k_horizontal is flat in frequency' in message
         assert '64 of 64 frequency sample(s)' in message
         assert 'first at index 0' in message
@@ -433,7 +420,7 @@ class TestModalGroupVelocityRefusesAFlatWavenumberAxis:
         kr = np.concatenate([np.linspace(0.5, 6.0, 32), np.full(32, 6.0)])
         with pytest.raises(ConfigurationError,
                            match='k_horizontal is flat in frequency') as exc:
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
         message = str(exc.value)
         assert '32 of 64 frequency sample(s)' in message
         assert 'first at index 32' in message
@@ -441,7 +428,7 @@ class TestModalGroupVelocityRefusesAFlatWavenumberAxis:
     def test_a_flat_column_of_a_two_dimensional_set_is_refused(self):
         kr = np.stack([np.linspace(0.5, 12.0, 64), np.full(64, 3.0)], axis=1)
         with pytest.raises(ConfigurationError, match='flat in frequency'):
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
 
     @pytest.mark.parametrize('kr', [np.linspace(0.5, 12.0, 64),
                                     np.linspace(1200.0, 1210.0, 64)])
@@ -452,7 +439,7 @@ class TestModalGroupVelocityRefusesAFlatWavenumberAxis:
         than pass silently."""
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            vg = modal_group_velocity(self.FREQ, k_horizontal=kr)
+            vg = modal_group_speeds(self.FREQ, k_horizontal=kr)
         assert np.all(np.isfinite(vg))
         assert vg.shape == self.FREQ.shape
 
@@ -466,20 +453,20 @@ class TestModalGroupVelocityRefusesAFlatWavenumberAxis:
             # finite-difference resolution diagnostic reports; the filter is
             # narrowed to it so a bare numpy RuntimeWarning still fails here.
             warnings.filterwarnings(
-                'ignore', message='modal_group_velocity: the wavenumber '
+                'ignore', message='modal_group_speeds: the wavenumber '
                                   'difference spans')
-            vg = modal_group_velocity(self.FREQ, k_horizontal=kr)
+            vg = modal_group_speeds(self.FREQ, k_horizontal=kr)
         assert np.all(np.isfinite(vg))
         with pytest.raises(ConfigurationError,
                            match='k_horizontal is flat in frequency'):
-            modal_group_velocity(self.FREQ, k_horizontal=np.linspace(1.0, 1.0, 64))
+            modal_group_speeds(self.FREQ, k_horizontal=np.linspace(1.0, 1.0, 64))
 
     def test_a_well_formed_two_dimensional_set_is_accepted(self):
         kr = np.stack([np.linspace(0.5, 12.0, 64),
                        np.linspace(0.4, 10.0, 64)], axis=1)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            vg = modal_group_velocity(self.FREQ, k_horizontal=kr)
+            vg = modal_group_speeds(self.FREQ, k_horizontal=kr)
         assert vg.shape == (64, 2)
         assert np.all(np.isfinite(vg))
 
@@ -529,9 +516,9 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         with pytest.raises(
                 ConfigurationError,
                 match='k_horizontal doubles back in frequency') as exc:
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
         message = str(exc.value)
-        assert 'modal_group_velocity' in message
+        assert 'modal_group_speeds' in message
         assert 'k_horizontal doubles back in frequency' in message
         assert '1 of 1 mode column(s)' in message
         # Index 31 is the sample whose gradient turns negative, i.e. the
@@ -544,7 +531,7 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         kr = self._dipped(self.TWICE_STEP + self.TINY)
         assert np.gradient(kr)[31] == pytest.approx(-self.TINY / 2, rel=1e-12)
         with pytest.raises(ConfigurationError, match='doubles back'):
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
 
     def test_a_dip_just_short_of_the_boundary_is_accepted(self):
         """The other side: the gradient at index 31 is +2**-31 — a barely
@@ -555,7 +542,7 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         assert np.gradient(kr)[31] == pytest.approx(self.TINY / 2, rel=1e-12)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            vg = modal_group_velocity(self.FREQ, k_horizontal=kr)
+            vg = modal_group_speeds(self.FREQ, k_horizontal=kr)
         assert np.all(np.isfinite(vg))
         assert vg[31] > 0.0
 
@@ -565,7 +552,7 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         kr = self._dipped(self.TWICE_STEP)
         assert np.gradient(kr)[31] == 0.0
         with pytest.raises(ConfigurationError, match='flat in frequency'):
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
 
     def test_a_turning_column_of_a_two_dimensional_set_is_refused(self):
         kr = np.stack([self.RAMP, self._dipped(self.TWICE_STEP + self.TINY)],
@@ -573,7 +560,7 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         with pytest.raises(
                 ConfigurationError,
                 match='k_horizontal doubles back in frequency') as exc:
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
         assert '1 of 2 mode column(s)' in str(exc.value)
 
     def test_two_modes_stacked_on_the_frequency_axis_are_refused(self):
@@ -584,9 +571,9 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         kr = np.concatenate([np.linspace(4.0, 8.0, 32),
                              np.linspace(2.0, 6.0, 32)])
         with pytest.raises(ConfigurationError, match='doubles back'):
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
 
-    def test_a_group_velocity_minimum_is_accepted(self):
+    def test_a_group_speed_minimum_is_accepted(self):
         """The Airy phase: ``v_g`` falls to an interior minimum and climbs
         again, while ``k_r`` rises throughout. Built by integrating
         ``d(k_r)/d(omega) = 1/v_g`` over a dipped ``v_g``, so the curve is a
@@ -598,7 +585,7 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         kr = np.concatenate(
             [[0.0], np.cumsum(np.diff(omega) / target[1:])]) + omega[0] / 1500.0
         assert np.all(np.diff(kr) > 0)                    # k_r never turns
-        vg = modal_group_velocity(f, k_horizontal=kr)
+        vg = modal_group_speeds(f, k_horizontal=kr)
         assert np.all(vg > 0)
         # v_g is NOT monotonic: it dips and recovers.
         assert vg.argmin() not in (0, vg.size - 1)
@@ -615,7 +602,7 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         with pytest.raises(
                 ConfigurationError,
                 match='k_horizontal falls with frequency throughout') as exc:
-            modal_group_velocity(self.FREQ, k_horizontal=self.RAMP[::-1].copy())
+            modal_group_speeds(self.FREQ, k_horizontal=self.RAMP[::-1].copy())
         message = str(exc.value)
         assert 'k_horizontal falls with frequency throughout' in message
         assert '1 of 1 mode column(s)' in message
@@ -630,7 +617,7 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         kr = 1000.0 - self.TINY * np.arange(64.0)
         assert np.all(np.gradient(kr) < 0)
         with pytest.raises(ConfigurationError, match='falls with frequency'):
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
 
     def test_the_smallest_rising_slope_is_accepted(self):
         """The other side, at the same magnitude: +2**-30 per sample is a
@@ -643,9 +630,9 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
             # the finite-difference resolution diagnostic reports; the filter
             # is narrowed to it so a bare numpy RuntimeWarning still fails.
             warnings.filterwarnings(
-                'ignore', message='modal_group_velocity: the wavenumber '
+                'ignore', message='modal_group_speeds: the wavenumber '
                                   'difference spans')
-            vg = modal_group_velocity(self.FREQ, k_horizontal=kr)
+            vg = modal_group_speeds(self.FREQ, k_horizontal=kr)
         assert np.all(np.isfinite(vg)) and np.all(vg > 0)
 
     def test_a_falling_axis_with_one_rising_step_is_named_as_doubling_back(
@@ -659,7 +646,7 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         with pytest.raises(
                 ConfigurationError,
                 match='k_horizontal doubles back in frequency') as exc:
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
         assert 'doubles back in frequency' in str(exc.value)
         assert 'falls with frequency throughout' not in str(exc.value)
 
@@ -668,7 +655,7 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         with pytest.raises(
                 ConfigurationError,
                 match='k_horizontal falls with frequency throughout') as exc:
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
         message = str(exc.value)
         assert 'falls with frequency throughout 1 of 2 mode column(s)' in message
 
@@ -678,15 +665,15 @@ class TestModalGroupVelocityRefusesAWavenumberAxisThatFalls:
         one that produces ``inf`` rather than a finite wrong number."""
         kr = np.stack([np.full(64, 3.0), self.RAMP[::-1].copy()], axis=1)
         with pytest.raises(ConfigurationError, match='flat in frequency'):
-            modal_group_velocity(self.FREQ, k_horizontal=kr)
+            modal_group_speeds(self.FREQ, k_horizontal=kr)
 
     def test_a_well_formed_rising_curve_is_accepted(self):
         """The negative control for this guard: an ordinary rising curve, 1-D
         and 2-D, under ``simplefilter('error')``."""
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            one_d = modal_group_velocity(self.FREQ, k_horizontal=self.RAMP + 1.0)
-            two_d = modal_group_velocity(
+            one_d = modal_group_speeds(self.FREQ, k_horizontal=self.RAMP + 1.0)
+            two_d = modal_group_speeds(
                 self.FREQ, k_horizontal=np.stack([self.RAMP + 1.0, self.RAMP * 0.9 + 1.0],
                                     axis=1))
         assert np.all(np.isfinite(one_d)) and one_d.shape == (64,)
@@ -724,13 +711,13 @@ class TestModalGroupVelocityReportsWhatTheFrequencyGridResolves:
         f, kr = self._sweep(40, quantize=True)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            v_g = modal_group_velocity(f, k_horizontal=kr)
+            v_g = modal_group_speeds(f, k_horizontal=kr)
         assert np.all(v_g > 0) and np.all(v_g < self.SPEED)
 
     def test_a_ten_times_finer_sweep_of_the_same_band_is_named(self):
         f, kr = self._sweep(400, quantize=True)
         with pytest.warns(UserWarning, match="wavenumber difference spans"):
-            modal_group_velocity(f, k_horizontal=kr)
+            modal_group_speeds(f, k_horizontal=kr)
 
     def test_the_finer_sweep_is_silent_when_the_wavenumbers_carry_float64_bits(self):
         """The trigger is the resolution of the data, not the size of the
@@ -738,7 +725,7 @@ class TestModalGroupVelocityReportsWhatTheFrequencyGridResolves:
         f, kr = self._sweep(400, quantize=False)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            modal_group_velocity(f, k_horizontal=kr)
+            modal_group_speeds(f, k_horizontal=kr)
 
     def test_the_finer_sweep_really_is_less_accurate_than_the_coarser_one(self):
         """The observable behind the warning, on the exact reference: refining
@@ -750,7 +737,7 @@ class TestModalGroupVelocityReportsWhatTheFrequencyGridResolves:
             exact = self.SPEED ** 2 * kr / omega[:, None]
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                v_g = modal_group_velocity(f, k_horizontal=kr)
+                v_g = modal_group_speeds(f, k_horizontal=kr)
             return float(np.max(np.abs(v_g[1:-1] - exact[1:-1])
                                 / exact[1:-1]))
 
@@ -800,7 +787,7 @@ class TestModalGroupVelocityRemedyIsMeasuredNotPrescribed:
         f, kr, exact = self._sweep(guide, df)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            v_g = modal_group_velocity(f, k_horizontal=kr)
+            v_g = modal_group_speeds(f, k_horizontal=kr)
         interior = slice(1, -1)
         return float(np.max(np.abs(v_g[interior] - exact[interior])
                             / exact[interior]))
@@ -809,7 +796,7 @@ class TestModalGroupVelocityRemedyIsMeasuredNotPrescribed:
         f, kr, _ = self._sweep(guide, df)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            modal_group_velocity(f, k_horizontal=kr)
+            modal_group_speeds(f, k_horizontal=kr)
         return next((str(w.message) for w in caught
                      if 'wavenumber difference spans' in str(w.message)), None)
 
@@ -880,7 +867,7 @@ class TestStorageSpacingReadsTheBitsNotTheContainer:
         f = np.linspace(30.0, 70.0, kr.size)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            modal_group_velocity(f, k_horizontal=kr)
+            modal_group_speeds(f, k_horizontal=kr)
 
 
 @pytest.mark.parametrize('data, match', [

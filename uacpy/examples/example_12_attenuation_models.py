@@ -21,10 +21,8 @@ a depth-resolved AbsorptionCoefficient
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -97,41 +95,30 @@ fig.savefig(OUT / 'example_12a_model_comparison.png', dpi=150,
 plt.close(fig)
 
 # ── One parameter at a time, at 10 kHz ──────────────────────────────────────
+# The plain-array form of the law takes one water value per point, so each
+# sweep is one call. Each crosses the fitted envelope on purpose (salinity
+# down to fresh water, pH past 7.7-8.3).
 PROBE_HZ = 10000
-
-
-def alpha_fg(depth=DEPTH, **varied):
-    """Francois-Garrison at PROBE_HZ and ``depth`` in dB/km, varying one
-    parameter."""
-    water = dict(temperature=TEMPERATURE, salinity=SALINITY, pH=PH)
-    water.update(varied)
-    return float(np.ravel(uacpy.FrancoisGarrison(**water).table(
-        PROBE_HZ, depths=depth).data)[0])
-
-
+WATER = dict(temperature=TEMPERATURE, salinity=SALINITY, pH=PH)
+temperatures = np.linspace(0, 30, 31)
+salinities = np.linspace(0, 40, 41)
+ph_values = np.linspace(7.5, 8.5, 21)
+depths_m = np.linspace(0, 6000, 61)
 sweeps = [
-    ('Temperature (°C)', np.linspace(0, 30, 31), TEMPERATURE, 'r',
-     lambda v: alpha_fg(temperature=v)),
-    ('Salinity (ppt)', np.linspace(0, 40, 41), SALINITY, 'b',
-     lambda v: alpha_fg(salinity=v)),
-    ('pH', np.linspace(7.5, 8.5, 21), PH, 'g',
-     lambda v: alpha_fg(pH=v)),
-    ('Depth (m)', np.linspace(0, 6000, 61), DEPTH, 'm',
-     lambda v: alpha_fg(depth=v)),
+    ('Temperature (°C)', temperatures, TEMPERATURE, 'r',
+     dict(temperature=temperatures, depth=np.full(temperatures.shape, DEPTH))),
+    ('Salinity (ppt)', salinities, SALINITY, 'b',
+     dict(salinity=salinities, depth=np.full(salinities.shape, DEPTH))),
+    ('pH', ph_values, PH, 'g',
+     dict(pH=ph_values, depth=np.full(ph_values.shape, DEPTH))),
+    ('Depth (m)', depths_m, DEPTH, 'm', dict(depth=depths_m)),
 ]
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 print(f"  sensitivity at {PROBE_HZ / 1000:.0f} kHz:")
-for ax, (label, values, baseline, colour, evaluate) in zip(axes.flat, sweeps):
-    # Each sweep crosses the fitted envelope on purpose (salinity down to
-    # fresh water, pH past 7.7-8.3), and every value outside it warns; the
-    # count is printed instead of one notice per value.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always', uacpy.ValidityWarning)
-        alpha = np.array([float(evaluate(v)) for v in values])
-    if caught:
-        print(f"    {label}: {len(caught)} of {values.size} values outside "
-              f"the fitted envelope, evaluated as given")
+for ax, (label, values, baseline, colour, varied) in zip(axes.flat, sweeps):
+    alpha = uacpy.acoustics.absorption_francois_garrison(
+        PROBE_HZ, **{**WATER, **varied})
     ax.plot(values, alpha, f'{colour}-', linewidth=2.5)
     ax.axvline(baseline, color='k', ls='--', alpha=0.5,
                label=f'baseline ({baseline:g})')
@@ -150,8 +137,10 @@ plt.close(fig)
 
 # The sign is the thing people get wrong, so it is measured rather than
 # asserted: at 10 kHz the MgSO4 term dominates and warming REDUCES attenuation.
-warm = alpha_fg(temperature=20.0)
-cool = alpha_fg(temperature=10.0)
+warm = uacpy.acoustics.absorption_francois_garrison(
+    PROBE_HZ, **{**WATER, 'temperature': 20.0}, depth=DEPTH)
+cool = uacpy.acoustics.absorption_francois_garrison(
+    PROBE_HZ, **WATER, depth=DEPTH)
 print(f"  warming 10 → 20 °C at 10 kHz: {cool:.3f} → {warm:.3f} dB/km "
       f"({100 * (warm / cool - 1):+.0f}%, a decrease)")
 

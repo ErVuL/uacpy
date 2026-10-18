@@ -5,17 +5,17 @@ import pytest
 
 from uacpy.core.environment import BoundaryProperties, Bottom
 from uacpy.data import fetch_bottom_transect, pelagic
-from uacpy.data.sediment import bottom_from_grain_size, transect_fetcher
+from uacpy.data.sediment import transect_fetcher
 
 
-@pytest.mark.parametrize('depth_m, lat, litho', [
+@pytest.mark.parametrize('depth, lat, litho', [
     (5500.0, 0.0, 'pelagic clay'),      # abyssal below the CCD, low latitude
     (3000.0, 10.0, 'calcareous ooze'),  # above the CCD, low–mid latitude
     (2000.0, 65.0, 'diatom ooze'),      # high-latitude siliceous belt
     (6000.0, -60.0, 'diatom ooze'),     # Southern Ocean wins over depth
 ])
-def test_lithology_zones(depth_m, lat, litho):
-    assert pelagic.pelagic_lithology(depth_m, lat) == litho
+def test_lithology_zones(depth, lat, litho):
+    assert pelagic.pelagic_lithology(depth, lat) == litho
 
 
 def test_grain_size_matches_lithology():
@@ -79,7 +79,7 @@ def test_transect_classifies_each_waypoint_from_its_own_cell():
     # Each column carries its own waypoint's lithology → ϕ → Hamilton c_p. The
     # expectation is computed from that same conversion, so what it pins is the
     # routing rather than a remembered speed.
-    expected = [bottom_from_grain_size(phi).sound_speed
+    expected = [BoundaryProperties.from_grain_size(phi).sound_speed
                 for phi in (9.0, 7.5, 9.0)]
     assert rdb.halfspace_sound_speed.tolist() == pytest.approx(expected)
     # The two ϕ 9.0 ends agree and the ϕ 7.5 middle stands apart from them,

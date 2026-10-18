@@ -210,7 +210,9 @@ export OMP_NUM_THREADS=1
    every knob and every value the run derived, and it travels with
    `to_dict` / `to_netcdf`; `Model.from_run_settings(result.run_settings)` builds
    the engine that repeats the run with all of them pinned
-   (`RAM.from_run_settings(Field.from_netcdf(path).run_settings)`).
+   (`RAM.from_run_settings(Field.from_netcdf(path).run_settings)`), and
+   `uacpy.PropagationModel.from_run_settings(rs)` builds whichever engine
+   wrote the record `rs`, so you need not know the class.
 
 ---
 

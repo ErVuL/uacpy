@@ -6,20 +6,22 @@ feed is a rolling recent window, so arbitrary historical dates are not covered â
 :func:`uacpy.data.fetch_waves` prefers the Copernicus WAVERYS reanalysis for
 history and falls back here.
 
-Returns significant wave height (m); WaveWatch III output is **public domain**.
+The backend of ``fetch_waves(source='ww3')``, which returns the significant
+wave height (m) with its provenance; WaveWatch III output is **public
+domain**.
 """
 
 import numpy as np
 
 from uacpy.core.exceptions import DataFetchError
 from uacpy.core.geo import as_coordinate
-from uacpy.data._geo import checked_max_distance, checked_offset
+from uacpy.data._geo import checked_offset
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.data._http import (erddap_griddap_url, erddap_point,
                               http_get)
 from uacpy.core.geo import parse_date
 
-__all__ = ['fetch_hs', 'ERDDAP_URL', 'DATASET']
+__all__ = ['ERDDAP_URL', 'DATASET']
 
 ERDDAP_URL = 'https://pae-paha.pacioos.hawaii.edu/erddap/griddap'
 DATASET = 'ww3_global'
@@ -34,29 +36,19 @@ def _griddap_url(var, when, lat, lon):
                               level=0.0)
 
 
-def fetch_hs(point, *, date, timeout=60.0, verbose=False, max_distance_km=None):
-    """Significant wave height (m) at a ``(lat, lon)`` point and date from WW3.
-
-    The field is read at 00:00 UTC of ``date`` (a time of day is ignored);
-    the record :func:`uacpy.data.fetch_waves` returns names the step read in
-    its ``data_date``. The host is the module constant :data:`ERDDAP_URL`
-    (a third-party PacIOOS mirror); reassign it to read another. Raises ``DataFetchError`` where WW3 has no value (land, or a date outside the
-    served window), naming what each variable request answered, so a network
-    failure reads differently from a miss. ``max_distance_km`` refuses a grid
-    node standing farther than that (km) from ``point`` (the offset rule).
-    """
-    return hs_at(point, date=date, timeout=timeout, verbose=verbose,
-                 max_distance_km=checked_max_distance(max_distance_km,
-                                                      'fetch_hs'))[0]
-
-
 def hs_at(point, *, date, timeout=60.0, verbose=False, max_distance_km=None,
-          who='fetch_hs'):
+          who='fetch_waves'):
     """``(Hs in m, the 'ww3' DataProvenance of the grid node read)``.
 
-    The griddap selectors snap to the node nearest the query, so the node is
-    the point's own cell by construction and only ``max_distance_km`` can
-    refuse it; a land node answers no value and raises instead.
+    The field is read at 00:00 UTC of ``date`` (a time of day is ignored);
+    the provenance names the step read in its ``data_date``. The host is the
+    module constant :data:`ERDDAP_URL` (a third-party PacIOOS mirror);
+    reassign it to read another. The griddap selectors snap to the node
+    nearest the query, so the node is the point's own cell by construction
+    and only ``max_distance_km`` (checked by the caller) can refuse it.
+    Raises ``DataFetchError`` where WW3 has no value (land, or a date outside
+    the served window), naming what each variable request answered, so a
+    network failure reads differently from a miss.
     """
     lat, lon = as_coordinate(point)
     outcomes = []

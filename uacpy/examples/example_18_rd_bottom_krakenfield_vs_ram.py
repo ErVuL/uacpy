@@ -32,13 +32,11 @@ Two settings the comparison rests on:
 
 Uses: Bottom.from_columns · SoundSpeedProfile.from_2d ·
 Kraken(n_segments=, mode_coupling=) · RAM · plot_field ·
-plot.plot_field_difference · plot.shared_colorbar
+metrics.tl_difference · plot.shared_colorbar
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -55,7 +53,7 @@ BATHYMETRY = np.column_stack([[0, 5000, 10000, 15000, 20000.0],
 def two_column_bottom(near_layers, near_halfspace, far_layer, far_halfspace):
     """A layered seabed with one column at 0 km and another at 20 km.
 
-    Each layer is ``(thickness_m, cp, rho, alpha)`` and each half-space
+    Each layer is ``(thickness, cp, rho, alpha)`` and each half-space
     ``(cp, rho, alpha)``; the near column carries two layers, the far one.
     """
     def column(layers, halfspace):
@@ -120,11 +118,12 @@ mid_depth = float(receiver.depths[receiver.depths.size // 2])
 print(f"Against the RAM reference at {mid_depth:.0f} m:")
 rms = {}
 for case, per_model in fields.items():
-    ram_cut = per_model['RAM'].at(depth=mid_depth).dB
+    ram_cut = per_model['RAM'].at(depth=mid_depth)
     for name in ('Kraken adiabatic', 'Kraken coupled'):
-        residual = ram_cut - per_model[name].at(depth=mid_depth).dB
-        rms[(case, name)] = float(np.sqrt(np.nanmean(residual ** 2)))
-        print(f"  {case:13s} {name:17s} mean {np.nanmean(residual):+.1f} dB, "
+        cut = per_model[name].at(depth=mid_depth)
+        rms[(case, name)] = uacpy.metrics.tl_rmse(ram_cut, cut)
+        print(f"  {case:13s} {name:17s} mean "
+              f"{uacpy.metrics.tl_bias(ram_cut, cut):+.1f} dB, "
               f"RMS {rms[(case, name)]:.1f} dB")
 for case in fields:
     adiabatic, coupled = rms[(case, 'Kraken adiabatic')], rms[(case, 'Kraken coupled')]
@@ -149,21 +148,16 @@ for row, (case, per_model) in enumerate(fields.items()):
         uacpy.plot.plot_field(per_model[name], axes[row, col], env=cases[case],
                          show_colorbar=False, vmin=vmin, vmax=vmax,
                          title=f'{case} — {name}')
-    for name in models:                       # the same three as one cut
-        axes[row, 3].plot(receiver.ranges / 1000,
-                          per_model[name].at(depth=mid_depth).dB, label=name)
-    axes[row, 3].set_xlabel('Range (km)')
-    axes[row, 3].set_ylabel('TL (dB)')
-    axes[row, 3].invert_yaxis()
-    axes[row, 3].legend(fontsize='small')
-    axes[row, 3].grid(True, alpha=0.3)
-    axes[row, 3].set_title(f'{case} — TL at {mid_depth:.0f} m')
+    # The same three as one cut
+    uacpy.plot.compare([per_model[name].at(depth=mid_depth) for name in models],
+                       labels=list(models), ax=axes[row, 3],
+                       title=f'{case} — TL at {mid_depth:.0f} m')
 
 for col, (case, name) in enumerate([(c, n) for c in fields
                                     for n in ('Kraken adiabatic',
                                               'Kraken coupled')]):
-    uacpy.plot.plot_field_difference(
-        fields[case]['RAM'], fields[case][name], axes[2, col], env=cases[case],
+    uacpy.metrics.tl_difference(fields[case]['RAM'], fields[case][name]).plot(
+        ax=axes[2, col], env=cases[case],
         show_colorbar=False, diff_vmax=diff_vmax,
         title=f'{case} — RAM − {name.split()[1]}')
 

@@ -25,12 +25,12 @@ import pytest
 
 from uacpy.acoustic_signal import (
     arrival_transfer_function,
-    modal_group_velocity,
-    broadband_propagation_loss,
+    modal_group_speeds,
+    broadband_loss,
     channel_regime,
     coherence_bandwidth,
     energy_support,
-    gate_transfer_function,
+    truncate_response,
     rms_delay_spread,
     tone_phasor,
 )
@@ -53,7 +53,7 @@ def _arrivals(delays, amps, *, imag=None, phases=None):
             "amplitudes": np.asarray(amps, float),
             "phases": np.zeros(n) if phases is None else np.asarray(phases, float),
             "n_top_bounces": np.zeros(n, int), "n_bot_bounces": np.zeros(n, int),
-            "source_angles": np.zeros(n), "receiver_angles": np.zeros(n)}
+            "source_angles_deg": np.zeros(n), "receiver_angles_deg": np.zeros(n)}
     return Arrivals(by_receiver=[[[cell]]], receiver_depths=np.array([50.0]),
                     receiver_ranges=np.array([1000.0]), model='Test',
                     frequencies=100.0)
@@ -126,7 +126,7 @@ class TestThePowerDelayProfileStatisticsAreReachableWithoutArrivals:
             self, rate, selective):
         r = channel_regime(self.DELAYS, self.POWERS, rate)
         assert r.frequency_selective is selective
-        assert (r.signal_bandwidth_hz > r.coherence_bandwidth_hz) is selective
+        assert (r.signal_bandwidth > r.coherence_bandwidth) is selective
 
     @pytest.mark.parametrize('name', ['rms_delay_spread', 'energy_support',
                                       'coherence_bandwidth', 'channel_regime'])
@@ -172,7 +172,7 @@ class TestTheArrivalSumHasOneImplementation:
     def test_the_sum_matches_its_closed_form(self):
         H = arrival_transfer_function(
             self.F, [1.0, 0.6], [0.010, 0.030],
-            delays_imag_s=[-1e-6, -3e-6], phases_rad=[0.0, np.pi])
+            delays_imag=[-1e-6, -3e-6], phases=[0.0, np.pi])
         omega = 2 * np.pi * self.F
         closed = sum(A * np.exp(1j * ph) * np.exp(omega * ti)
                      * np.exp(-1j * omega * tr)
@@ -185,7 +185,7 @@ class TestTheArrivalSumHasOneImplementation:
         a band shows no absorption slope unless Im(tau) is applied."""
         flat = arrival_transfer_function(self.F, [1.0], [0.01])
         lossy = arrival_transfer_function(self.F, [1.0], [0.01],
-                                          delays_imag_s=[-2e-5])
+                                          delays_imag=[-2e-5])
         assert np.ptp(np.abs(flat)) < 1e-12
         assert np.abs(lossy)[0] > np.abs(lossy)[-1]
 
@@ -195,7 +195,7 @@ class TestTheArrivalSumHasOneImplementation:
         H = a.transfer_function(self.F)
         ref = arrival_transfer_function(
             self.F, [1.0, 0.6], [0.010, 0.030],
-            delays_imag_s=[-1e-6, -3e-6], phases_rad=[0.0, np.pi])
+            delays_imag=[-1e-6, -3e-6], phases=[0.0, np.pi])
         assert np.array_equal(np.asarray(H.data).ravel(), ref)
 
     def test_a_negative_amplitude_is_refused_rather_than_silently_halved(self):
@@ -211,7 +211,7 @@ class TestTheArrivalSumHasOneImplementation:
     def test_a_law_scaled_sum_takes_the_rfft_grid_and_its_0_hz_bin(self):
         from uacpy.core.absorption import Thorp
         f = np.fft.rfftfreq(1000, 1.0 / 1000.0)
-        kw = dict(delays_imag_s=[-1e-6], trace_frequency=200.0,
+        kw = dict(delays_imag=[-1e-6], trace_frequency=200.0,
                   absorption=Thorp())
         H = arrival_transfer_function(f, [1.0], [0.1], **kw)
         assert H[0] == 1.0
@@ -244,7 +244,7 @@ class TestTheArrivalSumHasOneImplementation:
         """The refusal has to leave the caller a way through, so this pins
         that abs(A) with pi of phase is the same signal."""
         signed = arrival_transfer_function(self.F, [0.6], [0.03],
-                                           phases_rad=[np.pi])
+                                           phases=[np.pi])
         assert np.abs(signed + arrival_transfer_function(
             self.F, [0.6], [0.03])).max() < 1e-15
 
@@ -256,19 +256,19 @@ class TestTheBroadbandLossIsReachableWithoutAField:
 
     def test_a_flat_unit_channel_loses_nothing(self):
         H = np.ones(self.F.size, dtype=complex)
-        assert broadband_propagation_loss(H) == pytest.approx(0.0, abs=1e-12)
+        assert broadband_loss(H) == pytest.approx(0.0, abs=1e-12)
 
     def test_it_is_the_weighted_average_of_the_coherent_power(self):
         H = (np.linspace(0.2, 1.0, self.F.size)).astype(complex)
         w = np.linspace(1.0, 3.0, self.F.size)
         expected = 10 * np.log10(w.sum() / np.sum(w * np.abs(H) ** 2))
-        assert broadband_propagation_loss(H, w) == pytest.approx(
+        assert broadband_loss(H, w) == pytest.approx(
             expected, rel=1e-13)
 
     def test_a_no_data_bin_is_carried_forward_not_averaged_away(self):
         H = np.ones(self.F.size, dtype=complex)
         H[3] = np.nan
-        assert np.isnan(broadband_propagation_loss(H))
+        assert np.isnan(broadband_loss(H))
 
     def test_a_zero_weight_bin_carries_its_no_data_cell(self):
         """The subtle half of the line above: a bin weighted zero
@@ -278,7 +278,7 @@ class TestTheBroadbandLossIsReachableWithoutAField:
         H[3] = np.nan
         w = np.ones(self.F.size)
         w[3] = 0.0
-        assert np.isnan(broadband_propagation_loss(H, w))
+        assert np.isnan(broadband_loss(H, w))
 
     def test_a_cell_with_no_energy_is_the_no_energy_marker(self):
         """An all-zero H (an empty arrival list) reports the 600 dB that
@@ -286,11 +286,11 @@ class TestTheBroadbandLossIsReachableWithoutAField:
         above the floor is its own loss."""
         from uacpy.core.constants import NO_ENERGY_DB
         w = np.linspace(1.0, 3.0, self.F.size)
-        assert broadband_propagation_loss(
+        assert broadband_loss(
             np.zeros(self.F.size, dtype=complex), w) == NO_ENERGY_DB
-        assert broadband_propagation_loss(
+        assert broadband_loss(
             np.full(self.F.size, 1e-31, dtype=complex)) == NO_ENERGY_DB
-        assert broadband_propagation_loss(
+        assert broadband_loss(
             np.full(self.F.size, 1e-29, dtype=complex)) == pytest.approx(
                 580.0, rel=1e-12)
 
@@ -298,16 +298,16 @@ class TestTheBroadbandLossIsReachableWithoutAField:
         rng = np.random.default_rng(3)
         block = (rng.normal(size=(2, 3, self.F.size))
                  + 1j * rng.normal(size=(2, 3, self.F.size)))
-        out = broadband_propagation_loss(block)
+        out = broadband_loss(block)
         assert out.shape == (2, 3)
         for i in range(2):
             for j in range(3):
                 assert out[i, j] == pytest.approx(
-                    broadband_propagation_loss(block[i, j]), rel=1e-13)
+                    broadband_loss(block[i, j]), rel=1e-13)
 
     def test_the_field_method_carries_no_arithmetic_of_its_own(self):
         body = _body(Field.broadband_loss)
-        assert 'broadband_propagation_loss(' in body
+        assert 'broadband_loss(' in body
         assert 'np.log10' not in body
 
 
@@ -323,14 +323,14 @@ class TestTheResponseGateIsReachableWithoutAField:
 
     def test_a_gate_narrower_than_the_separation_keeps_one_path(self):
         H = self._two_paths()
-        kept = gate_transfer_function(H, frequencies=self.F, duration=0.020)
+        kept = truncate_response(H, frequencies=self.F, duration=0.020)
         # One path left: a flat modulus, where two interfere into a ripple.
         assert np.ptp(np.abs(kept)) < 1e-9 < np.ptp(np.abs(H))
 
     def test_a_gate_wider_than_the_separation_keeps_both(self):
         H = self._two_paths()
         # The paths are 50 ms apart and the gate is centred on the louder.
-        kept = gate_transfer_function(H, frequencies=self.F, duration=0.060)
+        kept = truncate_response(H, frequencies=self.F, duration=0.060)
         assert np.abs(kept - H).max() < 1e-9
 
     def test_the_window_reaches_round_the_end_of_the_record(self):
@@ -340,7 +340,7 @@ class TestTheResponseGateIsReachableWithoutAField:
         record = 1.0 / float(self.F[1] - self.F[0])
         H = (np.exp(-2j * np.pi * self.F * 0.002)
              + np.exp(-2j * np.pi * self.F * (record - 0.002)))
-        kept = gate_transfer_function(H, frequencies=self.F, duration=0.006, origin=0.0)
+        kept = truncate_response(H, frequencies=self.F, duration=0.006, origin=0.0)
         assert np.abs(kept - H).max() < 1e-9
 
     def test_the_peak_is_the_stronger_path_even_between_samples(self):
@@ -353,7 +353,7 @@ class TestTheResponseGateIsReachableWithoutAField:
         paths = np.stack([np.exp(-2j * np.pi * f * 0.1),
                           np.exp(-2j * np.pi * f * 0.115)], axis=1)
         H = paths @ np.array([1.0, 0.7])
-        kept = gate_transfer_function(H, frequencies=f, duration=0.02, window='hann')
+        kept = truncate_response(H, frequencies=f, duration=0.02, window='hann')
         amplitudes = np.linalg.lstsq(paths, kept, rcond=None)[0]
         assert abs(amplitudes[0]) > 0.95
         assert abs(amplitudes[1]) < 0.2
@@ -361,17 +361,17 @@ class TestTheResponseGateIsReachableWithoutAField:
     def test_an_on_grid_peak_gates_as_the_fixed_origin_at_its_time(self):
         H = self._two_paths()
         np.testing.assert_allclose(
-            gate_transfer_function(H, frequencies=self.F, duration=0.020, window='hann'),
-            gate_transfer_function(H, frequencies=self.F, duration=0.020, window='hann',
-                                   origin=0.010), rtol=0, atol=1e-12)
+            truncate_response(H, frequencies=self.F, duration=0.020, window='hann'),
+            truncate_response(H, frequencies=self.F, duration=0.020, window='hann',
+                              origin=0.010), rtol=0, atol=1e-12)
 
     def test_a_gate_that_would_keep_everything_is_refused(self):
         with pytest.raises(ConfigurationError, match='no-op'):
-            gate_transfer_function(self._two_paths(), frequencies=self.F, duration=0.5)
+            truncate_response(self._two_paths(), frequencies=self.F, duration=0.5)
 
     def test_the_field_method_carries_no_arithmetic_of_its_own(self):
         body = _body(Field.truncate_response)
-        assert 'gate_transfer_function(' in body
+        assert 'truncate_response(' in body
         assert 'np.fft.ifft' not in body and 'np.fft.fft' not in body
 
 
@@ -382,10 +382,10 @@ class TestTheLevelsAreReachableWithoutAField:
         assert peak_level(x) > spl(x)
 
     def test_a_silent_record_floors_instead_of_reaching_minus_infinity(self):
-        """Both level functions floor at the same constant, so a silent cell
-        in a map does not poison a mean taken over it."""
-        assert peak_level(np.zeros(8)) == pytest.approx(-180.0)
-        assert sound_exposure_level(np.zeros(8), 1e3) == pytest.approx(-180.0)
+        """Both level functions floor at the no-energy marker, so a silent
+        cell in a map does not poison a mean taken over it."""
+        assert peak_level(np.zeros(8)) == pytest.approx(-600.0)
+        assert sound_exposure_level(np.zeros(8), 1e3) == pytest.approx(-600.0)
         assert np.isfinite(np.mean([peak_level(np.zeros(4)), 100.0]))
 
     def test_the_exposure_is_the_energy_not_the_mean_square(self):
@@ -438,8 +438,10 @@ class TestTheModalComputationsAreReachableWithoutAModes:
 
     def test_the_attenuation_matches_the_method(self):
         k = np.array([0.42, 0.40, 0.36, 0.30], dtype=complex)
-        got = modal_attenuation(k, self._psi(), self.Z, 0.01, frequency=100.0)
-        perturbed = self._modes(k).with_attenuation(alpha_dB_per_m=0.01)
+        got = modal_attenuation(k, self._psi(), self.Z, 0.01, frequency=100.0,
+                                sound_speed_z=1500.0)
+        perturbed = self._modes(k).with_attenuation(alpha_dB_per_m=0.01,
+                                                    sound_speed_z=1500.0)
         assert np.array_equal(np.asarray(perturbed.k).imag, -got)
         # and it actually moved: an all-zero Im(k) would match a broken
         # integral just as well.
@@ -450,19 +452,22 @@ class TestTheModalComputationsAreReachableWithoutAModes:
         thing a wrong integral would not reproduce."""
         k = np.array([0.42, 0.40], dtype=complex)
         psi = self._psi(2)
-        a1 = modal_attenuation(k, psi, self.Z, 0.01, frequency=100.0)
-        a2 = modal_attenuation(k, psi, self.Z, 0.02, frequency=100.0)
+        a1 = modal_attenuation(k, psi, self.Z, 0.01, frequency=100.0,
+                               sound_speed_z=1500.0)
+        a2 = modal_attenuation(k, psi, self.Z, 0.02, frequency=100.0,
+                               sound_speed_z=1500.0)
         assert np.allclose(a2, 2.0 * a1, rtol=1e-12)
 
     def test_a_mode_the_perturbation_cannot_solve_is_no_data(self):
         k = np.array([0.42, -0.1], dtype=complex)
-        got = modal_attenuation(k, self._psi(2), self.Z, 0.01, frequency=100.0)
+        got = modal_attenuation(k, self._psi(2), self.Z, 0.01, frequency=100.0,
+                                sound_speed_z=1500.0)
         assert np.isfinite(got[0]) and np.isnan(got[1])
 
     def test_a_missing_frequency_is_refused(self):
         with pytest.raises(ConfigurationError, match='frequency'):
             modal_attenuation(np.array([0.42 + 0j]), self._psi(1), self.Z,
-                              0.01, frequency=0.0)
+                              0.01, frequency=0.0, sound_speed_z=1500.0)
 
     def test_the_modal_sum_matches_the_method(self):
         k = np.array([0.42 - 0.001j, 0.40 + 0.002j, 0.36 - 5e-4j, 0.30 + 0j])
@@ -509,7 +514,7 @@ class TestThePulseShapedTapsAreReachableWithoutArrivals:
     def test_a_single_arrival_on_a_symbol_instant_is_the_pulse_itself(self):
         shaped = pulse_shaped_taps([1.0], [0.0], 1000.0, pulse='rc',
                                    rolloff=0.25, span=8)
-        times, taps = shaped.delays_s, shaped.taps
+        times, taps = shaped.delays, shaped.taps
         # A raised cosine is normalised to unit peak and samples to zero at
         # every other symbol instant, which is what Nyquist means here.
         assert np.abs(taps).max() == pytest.approx(1.0, rel=1e-9)
@@ -526,16 +531,16 @@ class TestThePulseShapedTapsAreReachableWithoutArrivals:
         (dict(pulse='boxcar'), 'rc'),
         (dict(span=0), 'span'),
         (dict(symbol_rate=-1.0), 'symbol_rate'),
-        (dict(gains=[1.0, 1.0], delays_s=[-0.010, 0.0]), 'before 0'),
-        (dict(delays_s=[-1e-12]), 'before 0'),
-        (dict(delays_s=[np.nan]), 'finite'),
-        (dict(gains=[], delays_s=[]), 'no arrivals'),
+        (dict(gains=[1.0, 1.0], delays=[-0.010, 0.0]), 'before 0'),
+        (dict(delays=[-1e-12]), 'before 0'),
+        (dict(delays=[np.nan]), 'finite'),
+        (dict(gains=[], delays=[]), 'no arrivals'),
     ])
     def test_a_shape_it_cannot_place_is_refused(self, bad, match):
-        kw = dict(gains=[1.0], delays_s=[0.0], symbol_rate=1000.0)
+        kw = dict(gains=[1.0], delays=[0.0], symbol_rate=1000.0)
         kw.update(bad)
         with pytest.raises(ConfigurationError, match=match):
-            pulse_shaped_taps(kw.pop('gains'), kw.pop('delays_s'),
+            pulse_shaped_taps(kw.pop('gains'), kw.pop('delays'),
                               kw.pop('symbol_rate'), **kw)
 
     def test_the_arrivals_branch_carries_no_placement_of_its_own(self):
@@ -594,8 +599,8 @@ class TestTheArrayFactorIsTheSteeringVectorSeenFromTheSource:
 
 
 class TestTheGroupVelocityHasOneDifferenceQuotient:
-    """``Modes.group_velocity_between`` spelled out the same two-line
-    difference as ``modal_group_velocity``, which its own docstring already
+    """``Modes.group_speeds_between`` spelled out the same two-line
+    difference as ``modal_group_speeds``, which its own docstring already
     named. The copies agreed numerically; their **guards** did not."""
 
     Z = np.linspace(0.0, 100.0, 21)
@@ -611,17 +616,17 @@ class TestTheGroupVelocityHasOneDifferenceQuotient:
     def test_the_method_returns_what_the_function_does(self):
         lo, hi = self._pair([0.40, 0.39, 0.37], [0.40210, 0.39230, 0.37280])
         assert np.array_equal(
-            lo.group_velocity_between(hi),
-            modal_group_velocity(np.array([50.0, 51.0]),
-                                 k_horizontal=np.stack([np.asarray(lo.k),
-                                           np.asarray(hi.k)]))[0])
+            lo.group_speeds_between(hi),
+            modal_group_speeds(np.array([50.0, 51.0]),
+                               k_horizontal=np.stack([np.asarray(lo.k),
+                                         np.asarray(hi.k)]))[0])
 
     def test_the_pair_may_be_given_in_either_order(self):
         """The method takes two Modes, not an ordered grid, so it has to
         sort them before handing the function an increasing axis."""
         lo, hi = self._pair([0.40, 0.39, 0.37], [0.40210, 0.39230, 0.37280])
-        assert np.allclose(lo.group_velocity_between(hi),
-                           hi.group_velocity_between(lo), rtol=0, atol=0)
+        assert np.allclose(lo.group_speeds_between(hi),
+                           hi.group_speeds_between(lo), rtol=0, atol=0)
 
     def test_a_wavenumber_that_does_not_rise_is_refused_not_returned(self):
         """The behaviour delegation tightened. k_r rises with frequency
@@ -631,13 +636,13 @@ class TestTheGroupVelocityHasOneDifferenceQuotient:
         lo, hi = self._pair([0.40, 0.39], [0.39, 0.38])       # falling
         with pytest.raises(ConfigurationError,
                            match='k_horizontal falls with frequency'):
-            lo.group_velocity_between(hi)
+            lo.group_speeds_between(hi)
         flat, same = self._pair([0.40, 0.39], [0.40, 0.39])
         same = Modes(k=np.array([0.40, 0.39], dtype=complex), phi=flat.phi,
                      depths=self.Z, model='Kraken', frequencies=51.0)
         with pytest.raises(ConfigurationError,
                            match='k_horizontal is flat in frequency'):
-            flat.group_velocity_between(same)
+            flat.group_speeds_between(same)
 
     def test_two_frequencies_get_the_test_to_run_not_a_step_to_use(self):
         """A prescribed step is measured by decimating the grid, and a
@@ -649,15 +654,15 @@ class TestTheGroupVelocityHasOneDifferenceQuotient:
         kr = np.array([[k0], [k0 + np.float32(5e4) * np.spacing(k0)]],
                       dtype=np.float32).astype(float)
         with pytest.warns(UserWarning) as record:
-            modal_group_velocity(np.array([100.0, 101.0]), k_horizontal=kr)
+            modal_group_speeds(np.array([100.0, 101.0]), k_horizontal=kr)
         text = str(record[0].message)
         assert 'recompute at twice this frequency separation' in text
         # and NOT the prescribed-step form, which needs a grid to decimate
         assert 'decimat' not in text
 
     def test_the_method_carries_no_difference_quotient_of_its_own(self):
-        body = _body(Modes.group_velocity_between)
-        assert 'modal_group_velocity(' in body
+        body = _body(Modes.group_speeds_between)
+        assert 'modal_group_speeds(' in body
         assert 'np.errstate' not in body and 'domega' not in body
 
 
@@ -702,14 +707,11 @@ class TestTheTwoPublicTonesRoutesAgree:
         amplitude with its phase 90 deg out. The estimator must return the
         tone it was given."""
         got, _ = self._both(0.5)
-        # 1.7e-7 relative is the estimator's own floor, not slack: the
-        # 2*X/sum(w) form assumes the negative-frequency image is clear of
-        # the tone, and what is left of it through a Hann window is this.
-        # Measured identical at amplitude 1 and 3, so it is relative.
-        assert abs(got) == pytest.approx(3.0, rel=1e-6)
-        assert abs(abs(got) / 3.0 - 1.0) < 1e-6
+        # The fit solves for the negative-frequency image, so a clean tone
+        # comes back to round-off.
+        assert abs(got) == pytest.approx(3.0, rel=1e-9)
         assert np.degrees(np.angle(got)) == pytest.approx(
-            np.degrees(0.4), abs=1e-4)
+            np.degrees(0.4), abs=1e-7)
 
     def test_the_nearest_bin_answer_is_the_one_that_was_wrong(self):
         """The discriminator, not just an agreement check: this pins that
@@ -734,19 +736,23 @@ class TestTheTwoPublicTonesRoutesAgree:
         dt, t, f0, sig = self._setup(0.3)
         a = 0.7 * np.exp(0.4j)
         assert tone_phasor(a * np.exp(2j * np.pi * f0 * t), t, f0,
-                           window=None) == pytest.approx(a, abs=1e-12)
+                           window='boxcar') == pytest.approx(a, abs=1e-12)
         assert tone_phasor(a * np.exp(-2j * np.pi * f0 * t), t, -f0,
-                           window=None) == pytest.approx(a, abs=1e-12)
+                           window='boxcar') == pytest.approx(a, abs=1e-12)
         ratio = tone_phasor(hilbert(sig), t, f0) / tone_phasor(sig, t, f0)
         assert abs(ratio - 1.0) < 0.02
 
-    def test_on_a_bin_it_reproduces_the_transform_it_replaces(self):
+    def test_on_a_bin_its_transform_is_the_bin_it_replaces(self):
+        """The windowed transform at the frequency, before the image is
+        solved for, is the rfft bin when the tone sits on one."""
+        from uacpy.acoustic_signal.spectrum_at import _tone_phasor
         dt, t, f0, sig = self._setup(0.0)
         win = np.hanning(self.NT)
         freqs = np.fft.rfftfreq(self.NT, dt)
         k = int(np.argmin(np.abs(freqs - f0)))
         nearest = 2.0 * np.fft.rfft(sig * win)[k] / np.sum(win)
-        assert abs(tone_phasor(sig, t, f0) - nearest) < 1e-12
+        assert abs(_tone_phasor(sig, t, f0, steady_tone=False)
+                   - nearest) < 1e-12
 
     def test_the_deconvolution_branch_is_exact_off_bin_too(self):
         """The ratio nearly cancels the bin error, which is why taking the
@@ -802,8 +808,10 @@ class TestTheTwoPublicTonesRoutesAgree:
         p = np.fft.irfft(S * channel(freqs), n=nt)
         k = int(np.argmin(np.abs(freqs - f0)))
         bin_ratio = (np.fft.rfft(p)[k] / S[k]) / channel(f0)
-        at_ratio = (tone_phasor(p, t, f0, window=None)
-                    / tone_phasor(s_t, t, f0, window=None)) / channel(f0)
+        from uacpy.acoustic_signal.spectrum_at import _tone_phasor
+        at_ratio = (_tone_phasor(p, t, f0, window='boxcar', steady_tone=False)
+                    / _tone_phasor(s_t, t, f0, window='boxcar',
+                                   steady_tone=False)) / channel(f0)
         assert np.degrees(np.angle(bin_ratio)) == pytest.approx(6.0, abs=0.5)
         assert abs(np.degrees(np.angle(at_ratio))) < 1e-9
         # and on a CONSTANT channel the two are indistinguishable
@@ -819,6 +827,97 @@ class TestTheTwoPublicTonesRoutesAgree:
                     inspect.getsource(rts_to_pressure)):
             assert 'tone_phasor(' in src
         assert 'np.sum(win)' not in _body(Field.extract_tone)
+
+
+class TestTheTonePhasorSolvesForItsImage:
+    """A real tone ``Re(A·e^{2πift})`` puts ``A*/2`` at ``-f``; near 0 Hz and
+    Nyquist its weight ``ρ = Σ w e^{-4πift}/Σw`` is not negligible, and the
+    phasor is the window-weighted least-squares fit of ``α₁cos + α₂sin`` at
+    the known frequency (Kay Vol. III, Algorithm 9.2), not ``2·X/Σw``."""
+
+    FS, NT = 1000.0, 1000
+
+    def _t(self):
+        return np.arange(self.NT) / self.FS
+
+    @staticmethod
+    def _weighted_fit(x, t, f, win):
+        """The fit built independently: ``np.linalg.lstsq`` on the
+        sqrt(w)-scaled cos/sin design, ``A = α₁ − iα₂``."""
+        h = np.column_stack([np.cos(2 * np.pi * f * t),
+                             np.sin(2 * np.pi * f * t)])
+        r = np.sqrt(win)
+        (a1, a2), *_ = np.linalg.lstsq(h * r[:, None], x * r, rcond=None)
+        return a1 - 1j * a2
+
+    @staticmethod
+    def _coincident(record):
+        return [w for w in record if "coincides with it" in str(w.message)]
+
+    @pytest.mark.parametrize('window', ['hann', 'boxcar'])
+    def test_near_0_hz_and_nyquist_it_is_the_weighted_least_squares_fit(
+            self, window):
+        import warnings as _w
+        t = self._t()
+        win = np.hanning(self.NT) if window == 'hann' else np.ones(self.NT)
+        rng = np.random.default_rng(0)
+        for f in (0.25, 0.5, 0.75, 1.25, 3.0, 497.0, 499.25, 499.5):
+            x = (np.cos(2 * np.pi * f * t + 0.7)
+                 + 0.3 * rng.standard_normal(self.NT))
+            with _w.catch_warnings():
+                _w.simplefilter('error')
+                got = tone_phasor(x, t, f, window=window)
+            want = self._weighted_fit(x, t, f, win)
+            assert got == pytest.approx(want, rel=1e-6, abs=1e-9), f
+
+    def test_a_tone_half_a_bin_from_0_hz_reads_its_own_amplitude(self):
+        """``2·X/Σw`` reads between 1 - |ρ| and 1 + |ρ| over the tone's
+        phase (0.499-1.501 here, measured); the fit reads 1 at every
+        phase.""" 
+        t, f = self._t(), 0.5
+        for phi in np.linspace(0, np.pi, 13):
+            got = tone_phasor(np.cos(2 * np.pi * f * t + phi), t, f)
+            assert abs(got) == pytest.approx(1.0, abs=1e-9)
+            assert np.angle(got) == pytest.approx(
+                np.angle(np.exp(1j * phi)), abs=1e-9)
+
+    def test_a_dc_level_is_its_in_phase_part_with_a_notice(self):
+        import warnings as _w
+        from uacpy.core.exceptions import NumericsWarning
+        t = self._t()
+        with _w.catch_warnings(record=True) as rec:
+            _w.simplefilter('always')
+            assert tone_phasor(0.8 * np.ones(self.NT), t, 0.0) == \
+                pytest.approx(0.8, abs=1e-12)
+            nyquist = tone_phasor(np.cos(np.pi * self.FS * t + 0.4), t,
+                                  self.FS / 2)
+        assert nyquist == pytest.approx(np.cos(0.4), abs=1e-9)
+        hits = self._coincident(rec)
+        assert len(hits) == 2 and hits[0].category is NumericsWarning
+        assert "only its in-phase part is observable" in str(hits[0].message)
+
+    def test_a_complex_record_or_a_transient_ratio_solves_for_no_image(self):
+        import warnings as _w
+        from uacpy.acoustic_signal.spectrum_at import _tone_phasor
+        t = self._t()
+        x = np.cos(np.pi * t)
+        with _w.catch_warnings(record=True) as rec:
+            _w.simplefilter('always')
+            z = np.exp(2j * np.pi * 0.5 * t)
+            assert tone_phasor(z, t, 0.5) == pytest.approx(
+                np.sum(np.hanning(self.NT) * z * np.exp(-1j * np.pi * t))
+                / np.sum(np.hanning(self.NT)), abs=1e-12)
+            plain = _tone_phasor(x, t, 0.5, window='boxcar',
+                                 steady_tone=False)
+        assert plain == pytest.approx(
+            2 * np.mean(x * np.exp(-1j * np.pi * t)), abs=1e-12)
+        assert not self._coincident(rec)
+
+    def test_window_none_is_the_documented_hann(self):
+        t = self._t()
+        x = np.cos(2 * np.pi * 3.3 * t)
+        assert tone_phasor(x, t, 3.3, window=None) == \
+            tone_phasor(x, t, 3.3, window='hann')
 
 
 class TestTheCrossGridAgreementNumberIsObtainable:
@@ -881,12 +980,17 @@ class TestTheCrossGridAgreementNumberIsObtainable:
         b = self._field(np.linspace(8000.0, 9000.0, 5), 1e-3)
         assert np.isnan(tl_rmse_on_shared_ranges(a, b, depth=50.0))
 
-    def test_the_plotter_carries_no_arithmetic_of_its_own(self):
+    def test_the_table_is_the_metric_and_the_plotter_draws_it(self):
         import inspect
+        from uacpy.core import metrics as M
         from uacpy.visualization.plots import fields as F
-        body = inspect.getsource(F._rms_between).split('"""')[2]
+        body = inspect.getsource(M.field_statistics).split('"""')[2]
         assert 'tl_rmse_on_shared_ranges(' in body
         assert 'np.interp' not in body and 'np.sqrt' not in body
+        drawn = inspect.getsource(F.plot_field_statistics).split('"""')[2]
+        for computation in ('tl_rmse', '.at(depth', 'np.mean', 'np.std',
+                            'np.interp'):
+            assert computation not in drawn, computation
 
 
 class TestTheWavenumberTransformIsReachable:
@@ -924,7 +1028,7 @@ class TestTheWavenumberTransformIsReachable:
         flat = wavenumber_taper(k, 100.0, None, None)
         band = wavenumber_taper(k, 100.0, 1450.0, 1650.0)
         assert np.all(flat == 1.0)
-        # ones across [w/cmax, w/cmin] and a Hanning roll-off to zero at
+        # ones across [w/c_high, w/c_low] and a Hanning roll-off to zero at
         # both ends of the grid — the window that decides which phase
         # speeds a spectral run keeps.
         omega = 2 * np.pi * 100.0
@@ -1052,20 +1156,20 @@ class TestTheCapabilitiesThatWereReachableOnlyThroughAModel:
                                               source_waveform=src,
                                               sample_rate=fs,
                                               trace_frequency=fc,
-                                              delays_imag_s=[0.0, -5e-5])
+                                              delays_imag=[0.0, -5e-5])
         # the absorbed second arrival is quieter; the first is untouched
         assert np.abs(lossy).max() == pytest.approx(np.abs(lossless).max(),
                                                     rel=1e-8)
         assert np.sum(lossy ** 2) < 0.95 * np.sum(lossless ** 2)
 
     @pytest.mark.parametrize('bad,match', [
-        (dict(amplitudes=[1.0, 0.5], delays_s=[0.01]), 'same length'),
-        (dict(amplitudes=[1.0], delays_s=[0.01], phases_rad=[0.0, 1.0]),
-         'phases_rad'),
+        (dict(amplitudes=[1.0, 0.5], delays=[0.01]), 'same length'),
+        (dict(amplitudes=[1.0], delays=[0.01], phases=[0.0, 1.0]),
+         'phases'),
     ])
     def test_a_mismatched_arrival_list_is_refused(self, bad, match):
         from uacpy.acoustic_signal import simulate_arrival_reception
-        kw = dict(amplitudes=[1.0], delays_s=[0.01])
+        kw = dict(amplitudes=[1.0], delays=[0.01])
         kw.update(bad)
         with pytest.raises(ConfigurationError, match=match):
             simulate_arrival_reception(source_waveform=np.ones(32),
@@ -1078,12 +1182,12 @@ class TestTheCapabilitiesThatWereReachableOnlyThroughAModel:
         (dict(source_waveform=np.array([])), 'empty'),
         (dict(source_waveform=np.ones(32) + 0j), 'real 1-D waveform'),
         (dict(amplitudes=[1j]), 'real magnitudes'),
-        (dict(delays_s=[np.inf]), 'must be finite'),
+        (dict(delays=[np.inf]), 'must be finite'),
     ])
     def test_a_direct_call_is_refused_under_its_own_name(self, bad, match):
         from uacpy.acoustic_signal import simulate_arrival_reception
         kw = dict(source_waveform=np.ones(32), amplitudes=[1.0],
-                  delays_s=[0.01], sample_rate=8000.0,
+                  delays=[0.01], sample_rate=8000.0,
                   trace_frequency=1000.0)
         kw.update(bad)
         with pytest.raises(ConfigurationError,
@@ -1146,17 +1250,18 @@ class TestTheTwoFunctionLevelDuplicates:
     """Neither was an instance of the method-wrapping rule; both were two
     spellings of one formula, and in one case the guards differed."""
 
-    def test_the_sonar_background_sum_is_the_exported_one(self):
-        from uacpy.sonar import total_reverberation
-        a, b = np.array([60., 65., 70.]), np.array([62., 58., 71.])
-        expected = 10 * np.log10(10 ** (a / 10) + 10 ** (b / 10))
-        assert np.abs(total_reverberation(a, b) - expected).max() < 1e-12
+    def test_the_sonar_package_exports_no_second_level_sum(self):
+        """Reverberation components add through ``sum_levels_dB``; sonar
+        carries no second name for that sum."""
+        from uacpy import sonar
+        assert not hasattr(sonar, 'total_reverberation')
+        assert not hasattr(sonar.reverberation, 'total_reverberation')
 
     def test_the_signal_excess_carries_no_dB_sum_of_its_own(self):
         import inspect
         from uacpy.sonar import sonar_equation as SE
         body = inspect.getsource(SE.active_signal_excess)
-        assert 'total_reverberation(' in body
+        assert 'sum_levels_dB(' in body
         assert '10.0 ** (b / 10.0)' not in body
 
     def test_hamiltons_attenuation_is_the_regression_past_9_5_phi(self):
@@ -1204,17 +1309,18 @@ class TestTheAxisComesFirst:
             assert np.isrealobj(first), name
             assert np.all(np.diff(first) > 0), f"{name}: first is not an axis"
 
-    def test_the_bellhop_wrapper_keeps_its_own_historical_order(self):
-        """``delayandsum`` predates the rule and returns (signal, time);
-        it swaps on the way out rather than changing under its callers."""
+    def test_the_bellhop_wrapper_returns_the_axis_first_too(self):
+        """``delayandsum`` returns ``(time, signal)`` like every sibling:
+        both are real arrays of one length, so a second order would be a
+        silent swap."""
         from uacpy.acoustic_signal import delayandsum
         fs = 20000.0
         rec = {'n_arrivals': 1, 'amplitudes': np.array([1.0]),
                'delays': np.array([0.01]), 'delays_imag': np.array([0.0]),
                'phases': np.array([0.0])}
-        sig, t = delayandsum(rec, source_waveform=np.ones(64), sample_rate=fs,
+        t, sig = delayandsum(rec, source_waveform=np.ones(64), sample_rate=fs,
                              trace_frequency=3000.0)
-        assert np.all(np.diff(t) > 0)          # the SECOND one is the axis
+        assert np.all(np.diff(t) > 0)          # the axis comes first
         assert not np.all(np.diff(sig) > 0)
 
 
@@ -1249,7 +1355,7 @@ class TestTheP47ComputationsAreReachableWithoutACarrier:
         return depths, ranges, np.ones((3, 2) + trailing)
 
     def test_the_seafloor_mask_matches_the_field_method(self):
-        from uacpy.core.bathymetry import mask_below_seafloor
+        from uacpy.acoustics import mask_below_seafloor
         depths, ranges, data = self._grid((4,))
         f = Field(data=data, coords={'depth': depths, 'range': ranges,
                                      'frequency': np.arange(4) + 100.0})
@@ -1263,7 +1369,7 @@ class TestTheP47ComputationsAreReachableWithoutACarrier:
         assert 'np.interp' not in _body(Field.mask_below_seafloor)
 
     def test_the_seafloor_mask_keeps_an_inexact_dtype_and_widens_an_int(self):
-        from uacpy.core.bathymetry import mask_below_seafloor
+        from uacpy.acoustics import mask_below_seafloor
         depths, ranges, data = self._grid()
         assert mask_below_seafloor(data.astype(np.float32), depths, ranges,
                                    self.BATHY).dtype == np.float32
@@ -1271,7 +1377,7 @@ class TestTheP47ComputationsAreReachableWithoutACarrier:
                                    self.BATHY).dtype == np.float64
 
     def test_a_paired_grid_masks_each_receiver_at_its_own_range(self):
-        from uacpy.core.bathymetry import mask_below_seafloor
+        from uacpy.acoustics import mask_below_seafloor
         got = mask_below_seafloor(np.ones((3, 2)), [120.0, 120.0, 100.0],
                                   [0.0, 1000.0, 0.0], self.BATHY, paired=True)
         assert np.isnan(got[0]).all() and np.isfinite(got[1:]).all()
@@ -1280,7 +1386,7 @@ class TestTheP47ComputationsAreReachableWithoutACarrier:
                                               (True, (2, 2))])
     def test_a_grid_that_does_not_match_its_axes_is_refused(self, paired,
                                                             shape):
-        from uacpy.core.bathymetry import mask_below_seafloor
+        from uacpy.acoustics import mask_below_seafloor
         with pytest.raises(ConfigurationError, match='mask_below_seafloor'):
             mask_below_seafloor(np.ones(shape), [50.0, 120.0, 150.0],
                                 [0.0, 1000.0, 500.0][:3 if paired else 2],
@@ -1306,6 +1412,28 @@ class TestTheP47ComputationsAreReachableWithoutACarrier:
         from uacpy.acoustic_signal import spectral_centroid
         assert spectral_centroid([100.0, 300.0], [3.0, 1.0]) == 150.0
         assert spectral_centroid([100.0, 300.0], [0.0, 0.0]) == 200.0
+
+    @pytest.mark.parametrize('weights', [[1.0, 2.0], 1.0])
+    def test_the_spectral_centroid_refuses_weights_off_the_axis(self, weights):
+        """One weight per frequency along ``axis`` is the contract: a scalar
+        weight would return the axis SUM."""
+        from uacpy.acoustic_signal import spectral_centroid
+        with pytest.raises(ConfigurationError,
+                           match=r'^spectral_centroid: weights must hold one '
+                                 r'value per frequency'):
+            spectral_centroid([100.0, 200.0, 300.0], weights)
+
+    def test_the_spectral_centroid_takes_one_channel_per_row(self):
+        """Two channels' weights give each its own centroid (100 and 300 Hz),
+        never one pooled 200 Hz; ``axis=0`` reads a column layout."""
+        from uacpy.acoustic_signal import spectral_centroid
+        w = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]])
+        f = [100.0, 200.0, 300.0]
+        np.testing.assert_array_equal(spectral_centroid(f, w),
+                                      [100.0, 300.0, 200.0])
+        np.testing.assert_array_equal(spectral_centroid(f, w.T, axis=0),
+                                      [100.0, 300.0, 200.0])
+        assert isinstance(spectral_centroid(f, w[0]), float)
 
     def test_the_received_amplitudes_match_the_arrivals_property(self):
         from uacpy.acoustic_signal import received_amplitudes
@@ -1367,7 +1495,7 @@ class TestTheP47ComputationsAreReachableWithoutACarrier:
             modal_phase_speeds(k, 0.0)
 
     def test_the_medium_density_matches_the_media_table(self):
-        from uacpy.core.bottom import medium_density_at
+        from uacpy.acoustics import medium_density_at
         from uacpy.core.results import MediaTable
         table = MediaTable(water_density=1.0, tops=[0.0, 100.0],
                            densities=[1.0, 1.8], bottom_depth=120.0,
@@ -1388,3 +1516,38 @@ class TestTheP47ComputationsAreReachableWithoutACarrier:
             coarse.check_sampling('phase')
         with pytest.raises(ConfigurationError, match="view='range'"):
             coarse.check_sampling('range')
+        # The warning names the call made; no caller label in the signature.
+        with pytest.warns(UserWarning,
+                          match=r"Field\.check_sampling\(view='phase'\)"):
+            coarse.check_sampling('phase')
+        assert list(inspect.signature(Field.check_sampling).parameters) == [
+            'self', 'view']
+
+
+def test_the_gate_spells_no_taper_boxcar_and_none_selects_it():
+    """``truncate_response``'s default is the rectangular gate, spelled
+    ``'boxcar'``; ``None`` derives that documented default."""
+    import inspect
+    from uacpy.acoustic_signal import truncate_response
+    from uacpy.core.exceptions import ConfigurationError
+    f = np.arange(100.0, 1100.0, 1.0)
+    H = (np.exp(-2j * np.pi * f * 0.10)
+         + 0.5 * np.exp(-2j * np.pi * f * 0.13))
+    assert inspect.signature(truncate_response).parameters[
+        'window'].default == 'boxcar'
+    plain = truncate_response(H, frequencies=f, duration=0.02)
+    np.testing.assert_array_equal(
+        truncate_response(H, frequencies=f, duration=0.02, window=None),
+        plain)
+    np.testing.assert_array_equal(
+        truncate_response(H, frequencies=f, duration=0.02,
+                          window='boxcar'), plain)
+    # The second path sits 30 ms off: inside a 50 ms gate, where the Hann
+    # taper weighs it and the rectangle does not.
+    assert not np.allclose(
+        truncate_response(H, frequencies=f, duration=0.05,
+                          window='hann'),
+        truncate_response(H, frequencies=f, duration=0.05))
+    with pytest.raises(ConfigurationError, match="window must be 'boxcar'"):
+        truncate_response(H, frequencies=f, duration=0.02,
+                          window='hamming')

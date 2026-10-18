@@ -19,6 +19,12 @@ under ``tests/data/benchmarks/`` holds the TL it printed, with a header naming
 the problem, the run settings and the source. COUPLE carries no licence, so
 only those generated tables are shipped — never its source or its figures.
 
+Every reference here was computed with water of density 1.0 g/cm^3 (COUPLE's
+RHOW, the OASES Bucker deck), so every environment below is built with
+``water_density=RHO_WATER`` (1.0) rather than uacpy's default sea water
+(1.027): the engines then solve the problem the reference solved, and the
+bottom density contrasts are the published ones.
+
 Tolerances
 ----------
 Every engine test states the measured agreement and sets its bound from that
@@ -42,14 +48,14 @@ pytestmark = [pytest.mark.benchmark]
 from uacpy import (Environment, SoundSpeedProfile, BoundaryProperties, Bathymetry,
                    Bottom, SeabedColumn, SedimentLayer,
                    Source, Receiver, RAM, Bellhop, Kraken, Scooter, OAST)
-from uacpy.tests.test_benchmarks_analytic import ideal_wedge_tl, RHO_WATER
+from uacpy.tests.test_benchmarks_analytic import RHO_WATER
 
 _DATA = Path(__file__).parent / 'data' / 'benchmarks'
 
 
 def _load_tl_table(name):
-    """``(ranges_m, tl)`` of a reference table: ``tl[i]`` is the TL (dB) at
-    the table's ``i``-th receiver depth over ``ranges_m``."""
+    """``(ranges, tl)`` of a reference table: ``tl[i]`` is the TL (dB) at
+    the table's ``i``-th receiver depth over ``ranges``."""
     table = np.loadtxt(_DATA / name)
     return table[:, 0] * 1000.0, table[:, 1:].T
 
@@ -103,6 +109,7 @@ def _wedge_env(slope=True):
                                 density=1.5, attenuation=0.5)
     end_depth = WEDGE_APEX_DEPTH if slope else WEDGE_D0
     return Environment(
+        water_density=RHO_WATER,
         bathymetry=Bathymetry(ranges=np.array([0.0, WEDGE_APEX_R]),
                               depths=np.array([WEDGE_D0, end_depth])),
         ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (WEDGE_D0, 1500.0)]),
@@ -145,27 +152,26 @@ def test_the_asa_wedge_reference_table_places_the_published_nulls():
 def test_ram_matches_the_coupled_mode_reference_in_the_asa_wedge(backend):
     """RAM's two range-dependent fluid PEs reproduce COUPLE07's wedge.
 
-    Measured on the pinned grid below: RMS 0.230 dB at 30 m and 0.213 dB at
-    150 m (mpirams), 0.225 and 0.215 dB (ramgeo), with both nulls of the 30 m
+    Measured on the pinned grid below: RMS 0.110 dB at 30 m and 0.133 dB at
+    150 m (mpirams), 0.106 and 0.134 dB (ramgeo), with both nulls of the 30 m
     curve on the reference sample. Refining to dr 2 m, dz 0.1 m, Pade 8 moves
-    the mpirams figures to 0.229 and 0.181 dB, so they are the PE's agreement
-    and not its discretisation. The bound is 0.5 dB, 2.2x the worst
+    the mpirams figures to 0.109 and 0.099 dB, so they are the PE's agreement
+    and not its discretisation. The bound is 0.3 dB, 2.2x the worst
     measurement; a null may move one 10 m sample either way.
 
     The grid is pinned because the automatic one is slower and looser here:
-    44 s against 1.5 s, at 0.37 and 0.66 dB, the excess sitting inside 500 m
-    of the source where a narrower PE aperture misses the steep paths. COA
-    Sect. 6.7 shows one-way PEs of 1990 losing about 2 dB on this wedge
-    through their stair-step treatment of the slope; neither backend does.
+    8.9 s against 2.6 s, at 0.298 and 0.674 dB. COA Sect. 6.7 shows one-way
+    PEs of 1990 losing about 2 dB on this wedge through their stair-step
+    treatment of the slope; neither backend does.
 
     NULL CONTROL, asserted below: the same engine with the slope removed sits
-    at 6.16 and 5.83 dB RMS, 11x outside the bound.
+    at 6.114 and 5.765 dB RMS, 19x outside the bound.
     """
     ram = RAM(backend=backend, dr=5.0, dz=0.25, n_pade=6, timeout=900)
 
     rms, nulls, _ = _wedge_agreement(ram)
-    assert rms[0] < 0.5, f"30 m RMS {rms[0]:.3f} dB"
-    assert rms[1] < 0.5, f"150 m RMS {rms[1]:.3f} dB"
+    assert rms[0] < 0.3, f"30 m RMS {rms[0]:.3f} dB"
+    assert rms[1] < 0.3, f"150 m RMS {rms[1]:.3f} dB"
     assert nulls == pytest.approx(WEDGE_REF_NULLS_M, abs=20.0)
 
     null_rms, _, _ = _wedge_agreement(ram, slope=False)
@@ -176,8 +182,8 @@ def test_ram_matches_the_coupled_mode_reference_in_the_asa_wedge(backend):
 
 @pytest.mark.requires_binary
 @pytest.mark.parametrize('mode_coupling, measured, bound', [
-    ('coupled', (2.747, 2.422), 3.5),
-    ('adiabatic', (2.215, 2.517), 3.3),
+    ('coupled', (2.756, 2.392), 3.5),
+    ('adiabatic', (2.221, 2.502), 3.3),
 ])
 def test_kraken_mode_sums_follow_the_asa_wedge_within_their_method_error(
         mode_coupling, measured, bound):
@@ -185,26 +191,26 @@ def test_kraken_mode_sums_follow_the_asa_wedge_within_their_method_error(
     2-3 dB RMS off COUPLE07's level, and that gap is the method's, not a
     transcription error.
 
-    Measured with the automatic 15-profile decomposition: coupled 2.747 dB
-    at 30 m and 2.422 dB at 150 m, adiabatic 2.215 and 2.517 dB; the 30 m
-    nulls land at 1.18 / 1.87 km (coupled) and 1.16 / 1.89 km (adiabatic)
-    against 1.16 / 1.87. The bounds sit 0.8-1.1 dB above the measurement, a
-    null may move 40 m, and the null control below is 5.8 dB RMS.
+    Measured with the automatic 15-profile decomposition: coupled 2.756 dB
+    at 30 m and 2.392 dB at 150 m, adiabatic 2.221 and 2.502 dB; the 30 m
+    nulls land at 1.18 / 1.88 km (coupled) and 1.16 / 1.89 km (adiabatic)
+    against 1.16 / 1.87. The bounds sit 0.7-0.8 dB above the measurement, a
+    null may move 40 m, and the null control below is 5.742 dB RMS or more.
 
     Two things separate Kraken from COUPLE here.
 
     * The mode set. Kraken sums the trapped modes; COUPLE carries 45 modes
       of a guide closed by an absorbing false bottom, which include the
       steep, leaky part of the spectrum. On the flat 200 m start of this
-      wedge, over 250 m - 2 km, Kraken's trapped sum sits 1.09 / 2.10 dB RMS
+      wedge, over 250 m - 2 km, Kraken's trapped sum sits 1.125 / 2.088 dB RMS
       (30 / 150 m) from its ``leaky_modes=True`` sum, and the leaky sum sits
-      0.10 / 0.20 dB from RAM. That remedy does not reach the apex: with
+      0.102 / 0.185 dB from RAM. That remedy does not reach the apex: with
       ``leaky_modes=True`` the krakenc search finds no mode in the profiles
       of 28 m and less at 25 Hz, and Kraken refuses the run there (a wedge
       ending at 50 m solves).
     * The coupling. ``field.exe``'s coupled option projects the pressure
       only onto each new segment's modes, so its answer moves with the
-      segment count rather than converging: 2.747 / 2.908 / 3.496 dB at
+      segment count rather than converging: 2.756 / 2.914 / 3.52 dB at
       30 m for 15 / 51 / 200 profiles. The bound is set at the automatic
       decomposition the default run uses.
     """
@@ -227,21 +233,23 @@ def test_bellhop_follows_the_asa_wedge_within_a_ray_models_error_at_25_hz():
     both nulls, at the accuracy a ray model has at 25 Hz in a 200 m guide
     (3.3 wavelengths of water).
 
-    Measured: 2.023 dB RMS at 30 m and 2.322 dB at 150 m with the default
-    fan, 1.947 and 2.286 dB with 2000 beams and 1.95 / 2.27 dB with 8000,
-    so beam count is not what limits it. The nulls land at 1.14 and
-    1.86 km against 1.16 and 1.87, and the 30 m curve carries an extra
-    10 dB null at 1.56 km that the reference does not have. The bound is
-    2.8 dB, 0.5 dB above the worst measurement; it is the ray method's error
-    at this frequency, so it is not loosened to suit the PE and mode bounds
-    and not tightened toward them either.
+    Measured with the default (geometric hat) beams: 1.834 dB RMS at 30 m
+    and 2.141 dB at 150 m with the default fan, 1.907 and 2.146 dB with 2000
+    beams and 1.801 / 2.146 dB with 8000, so beam count is not what limits
+    it; ``beam_type='B'`` gives 2.011 / 2.195 dB. The nulls land at 1.14 and
+    1.86 km against 1.16 and 1.87, and the 30 m curve carries an extra null
+    at 1.56 km that the reference does not have (63.65 dB against the
+    reference's 57.06 there). The bound is 2.6 dB, 0.45 dB above the worst
+    measurement; it is the ray method's error at this frequency, so it is
+    not loosened to suit the PE and mode bounds and not tightened toward
+    them either.
 
-    NULL CONTROL, asserted below: slope removed, 5.65 dB RMS at both depths.
+    NULL CONTROL, asserted below: slope removed, 5.473 and 5.726 dB RMS.
     """
     bellhop = Bellhop(timeout=900)
 
     rms, nulls, _ = _wedge_agreement(bellhop)
-    assert max(rms) < 2.8, f"RMS {rms[0]:.3f} / {rms[1]:.3f} dB at 30 / 150 m"
+    assert max(rms) < 2.6, f"RMS {rms[0]:.3f} / {rms[1]:.3f} dB at 30 / 150 m"
     assert nulls == pytest.approx(WEDGE_REF_NULLS_M, abs=40.0)
 
     null_rms, _, _ = _wedge_agreement(bellhop, slope=False)
@@ -271,6 +279,7 @@ def _pe3b_env(attenuation=0.5):
     """Test Case 3b; ``attenuation=0`` makes the bottom lossless and is the
     null control."""
     return Environment(
+        water_density=RHO_WATER,
         bathymetry=100.0,
         ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
         bottom=BoundaryProperties(acoustic_type='half-space', sound_speed=1590.0,
@@ -311,33 +320,31 @@ def test_the_pe_workshop_3b_reference_table_places_its_nulls():
 
 @pytest.mark.requires_binary
 @pytest.mark.parametrize('engine, measured, bounds, null_bound', [
-    ('ram', (0.211, 1.09), (0.4, 1.6), 30.0),
-    ('kraken', (0.273, 1.07), (0.45, 1.6), 30.0),
-    ('scooter', (0.432, 2.06), (0.7, 3.3), 60.0),
+    ('ram', (0.160, 0.763), (0.35, 1.3), 20.0),
+    ('kraken', (0.067, 0.555), (0.2, 1.1), 20.0),
+    ('scooter', (0.192, 1.12), (0.4, 1.8), 60.0),
 ])
 def test_wave_engines_match_the_pe_workshop_3b_reference(engine, measured,
                                                           bounds, null_bound):
     """RAM, Kraken and Scooter at their defaults reproduce COUPLE07's
     Test Case 3b, source and receiver half a metre above a lossy bottom.
 
-    Measured median / p90 |dTL| over 4.9-10.1 km: RAM 0.211 / 1.09 dB,
-    Kraken 0.273 / 1.07 dB, Scooter 0.432 / 2.06 dB; every null deeper
-    than 10 dB lands 0-20 m short of the reference's, the same 10 m in all
-    three, so the shift is the reference's rather than any engine's — but
-    Scooter's 6.95 km null, which lands 50 m short. The bounds sit
-    1.5-1.9x above the medians and 0.5-1.2 dB above the p90s; a null may
-    move 30 m, Scooter's 60. RAM pinned to dr 5 m, dz 0.1 m, Pade 8 lands at
-    0.084 / 0.58 dB and Kraken at ``n_mesh=2000`` at 0.266 / 1.08 dB, so the
-    defaults are what is measured, not a loose setting of them. Scooter's
-    p90 is the widest because its interference fringes are the least
-    stable: it adds three shallow nulls near 6.9 km that the others lack,
-    and the 6.95 km null moves with the edges of its wavenumber window —
-    10 m short with c_low 0.95 × min SSP and c_high 1.05 × the seabed
-    speed, 30 m at c_low 0.9, 40 m at an unbounded c_high, 50 m with both
-    (the defaults), 10 m again with ``taper=0.05``.
+    Measured median / p90 |dTL| over 4.9-10.1 km: RAM 0.160 / 0.763 dB,
+    Kraken 0.067 / 0.555 dB, Scooter 0.192 / 1.12 dB. RAM and Kraken put six
+    of the seven nulls deeper than 10 dB on the reference sample and the
+    6.95 km one 10 m short; Scooter puts three on it, three 10 m short and
+    the 6.95 km one 50 m short. The bounds sit 2-3x above the medians and
+    0.5-0.7 dB above the p90s; a null may move 20 m, Scooter's 60. RAM
+    pinned to dr 5 m, dz 0.1 m, Pade 8 lands at 0.223 / 0.866 dB and Kraken
+    at ``n_mesh=2000`` at 0.065 / 0.53 dB, so the defaults are what is
+    measured, not a loose setting of them. Scooter's 6.95 km null moves with
+    the edges of its wavenumber window: 10 m short with c_low 0.95 × min
+    SSP and c_high 1.05 × the seabed speed, 30 m at c_low 0.9, 40 m at an
+    unbounded c_high, 50 m with both (the defaults), 20 m with
+    ``taper=0.05``.
 
     NULL CONTROL, asserted below: the same engine over a lossless bottom
-    sits 11 dB median from the reference.
+    sits 11.46-11.54 dB median from the reference.
     """
     model = {'ram': RAM, 'kraken': Kraken, 'scooter': Scooter}[engine](timeout=900)
 
@@ -357,13 +364,17 @@ def test_wave_engines_match_the_pe_workshop_3b_reference(engine, measured,
 def test_bellhop_loses_the_near_bed_field_of_pe_workshop_3b():
     """Bellhop does not reproduce Test Case 3b, and the error is the
     geometry the case was chosen for, half a metre (0.08 wavelength) above
-    the seafloor: it predicts 4 dB too much loss on average.
+    the seafloor.
 
-    Measured against the reference: 5.37 dB median |dTL|, +4.08 dB mean,
-    and between 4.5 and 5.5 dB median across beam types B, C, G and 5000
-    beams over +-89 deg, so no beam setting rescues it. Against Kraken, with
-    source and receiver moved together, the gap closes as they leave the bed:
-    5.22 dB median at 99.5 m, 4.72 at 97 m, 3.07 at 90 m, 0.44 at 50 m.
+    Measured against the reference with the default (geometric hat) beams:
+    4.41 dB median |dTL| and a -0.77 dB mean, so the error is in the
+    interference pattern rather than in the mean level. Across beam types
+    the median stays between 4.21 and 5.24 dB (5000 beams over +-89 deg
+    4.21, ``'C'`` 4.97, ``'B'`` 5.24), so no beam setting rescues it; the
+    mean depends on the beam type (``'B'`` +3.91 dB, ``'C'`` +4.58 dB), so it
+    is not a correction to apply. Against Kraken, with source and receiver
+    moved together, the gap closes as they leave the bed: 4.37 dB median at
+    99.5 m, 1.64 at 97 m, 0.39 at 90 m, 0.48 at 50 m.
 
     Both sides are pinned. The upper bound catches a Bellhop that gets
     worse; the lower one catches a fix, which should move Bellhop into the
@@ -375,11 +386,11 @@ def test_bellhop_loses_the_near_bed_field_of_pe_workshop_3b():
     bellhop = Bellhop(timeout=900)
 
     near_bed = np.median(np.abs(_pe3b_tl(bellhop) - ref[0]))
-    assert 3.0 < near_bed < 7.0, f"near-bed median |dTL| {near_bed:.2f} dB; measured 5.37"
+    assert 3.0 < near_bed < 7.0, f"near-bed median |dTL| {near_bed:.2f} dB; measured 4.41"
 
     mid_column = np.median(np.abs(_pe3b_tl(bellhop, depth=50.0)
                                   - _pe3b_tl(Kraken(timeout=900), depth=50.0)))
-    assert mid_column < 1.0, f"mid-column median |Bellhop - Kraken| {mid_column:.2f} dB; measured 0.44"
+    assert mid_column < 1.0, f"mid-column median |Bellhop - Kraken| {mid_column:.2f} dB; measured 0.48"
 
 
 # ── Square-wave corrugated seafloor, 25 Hz (Evans & Gilbert 1985) ───────────
@@ -412,6 +423,7 @@ def _corrugated_env(corrugated=True, ramp=0.5, density=2.5):
     ranges.append(20000.0)
     depths.append(100.0)
     return Environment(
+        water_density=RHO_WATER,
         bathymetry=Bathymetry(ranges=np.array(ranges), depths=np.array(depths)),
         ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
         bottom=BoundaryProperties(acoustic_type='half-space', sound_speed=1704.5,
@@ -444,25 +456,28 @@ def test_the_corrugated_seafloor_reference_table_is_the_published_run():
 
 @pytest.mark.requires_binary
 @pytest.mark.parametrize('engine, measured, bounds', [
-    ('mpirams', 4.35, (3.0, 5.7)),
-    ('ramgeo', 5.42, (4.0, 7.0)),
-    ('kraken_coupled', 1.20, (0.3, 2.5)),
+    ('mpirams', 4.70, (3.4, 6.0)),
+    ('ramgeo', 5.82, (4.4, 7.4)),
+    ('kraken_coupled', 2.83, (1.7, 4.0)),
 ])
 def test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference(
         engine, measured, bounds):
     """Beyond the corrugation every forward-marching engine in uacpy puts
     the field below COUPLE07's two-way solution: the mean TL offset over
-    10-18.09 km is +4.35 dB for RAM's mpirams, +5.42 dB for ramgeo and
-    +1.20 dB for Kraken's coupled modes. The offsets are pinned on both
+    10-18.09 km is +4.70 dB for RAM's mpirams, +5.82 dB for ramgeo and
+    +2.83 dB for Kraken's coupled modes. The offsets are pinned on both
     sides rather than bounded from above: a change in either direction is
     news.
 
     The cause is the one-way codes' condition at the vertical faces of the
-    steps. Kraken's +1.20 dB is its method's own answer: COUPLE07's
-    one-way pressure-matching run of this input (IOUT = 1) lands at
-    +1.13 dB. The PE offset follows the density contrast: with nothing
-    changed but the bottom density, mpirams sits at +4.35 dB at 2.5, +0.50
-    at 1.5 and -0.11 at 1.0 against COUPLE's two-way run of each
+    steps. Kraken's coupled answer moves with the segment count, as on the
+    ASA wedge: +2.83 dB at its automatic decomposition (thinned to 200
+    profiles) and +4.02 dB with the 209 profiles the quarter-wavelength
+    criterion asks for, where COUPLE07's own one-way pressure-matching run
+    of this input (IOUT = 1) lands at +1.13 dB. The PE offset follows the
+    density contrast: with nothing changed but the bottom density, mpirams
+    sits at +4.70 dB at 2.5, +0.69 at 1.5 and -0.03 at 1.0 against COUPLE's
+    two-way run of each (density 1.0: COUPLE07 rerun, not shipped)
     (test_the_pe_offset_beyond_the_corrugation_grows_with_the_bottom_density).
     Collins & Siegmann, Parabolic Wave Equations with Applications, Sect. 2.6,
     describe exactly this: conserving the dependent variable across stair-step
@@ -472,29 +487,31 @@ def test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference
 
     What is known. Over the flat guide the engines agree with COUPLE
     (COUPLE07 run on this input with the corrugation removed: mpirams
-    +0.01 dB mean beyond 10 km, Kraken -0.01 dB), and COUPLE's two-way
+    +0.02 dB mean beyond 10 km, Kraken -0.00 dB), and COUPLE's two-way
     answer is converged in mode count (120 to 200 modes moves it 0.11 dB),
-    so the gap is the corrugation's. The PE figure is converged too: dr 1,
-    2, 5 and 10 m, dz 0.1-0.5 m, Pade 4-8 and 1 m or 5 m wide step faces
-    all land at +4.26 to +4.48 dB, and RAMS, the elastic PE with its own
-    energy-flux correction, run over a 50 m/s shear bottom lands at
-    +5.41 dB. Three PE codes agree within 1.1 dB and sit 4.4-5.5 dB from
-    the two-way field, where COA Sect. 6.7 places the one-way models'
+    so the gap is the corrugation's. Grid and Pade order move the PE figure
+    by under a decibel: over 36 grids, dr 1, 2, 5 and 10 m x dz 0.1, 0.25
+    and 0.5 m x Pade 4, 6 and 8 with 1 m step faces, mpirams lands at +4.41
+    to +5.31 dB; and RAMS, the elastic PE with its own
+    energy-flux correction, run on its automatic grid over a 50 m/s shear
+    bottom lands at +5.81 dB. Three PE codes agree within 1.4 dB and sit
+    4.4-5.9 dB from the two-way field, where COA Sect. 6.7 places the one-way models'
     treatment of vertical interfaces as their known weakness on stepped
     bathymetry; COUPLE's own single-scatter run of this input
     (IOUT = -1) disagrees with its two-way run by 2.3 dB in the other
     direction, so the case is not a one-way benchmark in either code.
 
     NULL CONTROL, asserted below: the same engine on the flat guide sits
-    near -2 dB (mpirams -1.95, Kraken -1.97), the corrugation's own loss
-    in the two-way reference, outside every bound.
+    near -2 dB (mpirams and ramgeo -1.94, Kraken -1.96; COUPLE's own flat
+    run -1.96), the corrugation's own loss in the two-way reference,
+    outside every bound.
     """
     model = {
         'mpirams': lambda: RAM(backend='mpirams', dr=5.0, dz=0.25, n_pade=6, timeout=900),
         # ramgeo takes one bathymetry node per step and the manual bounds dr by
         # the smallest region (ram.pdf p.8): the 1 m faces need dr <= 1 m.
-        # Measured over dr: 0.25 m +5.11, 0.5 m +5.42, 0.9999 m +5.47 dB, and
-        # +4.38 at exactly 1 m, where every step lands on a face's ends.
+        # Measured over dr: 0.25 m +5.49, 0.5 m +5.82, 0.9999 m +5.88 dB, and
+        # +4.72 at exactly 1 m, where every step lands on a face's ends.
         'ramgeo': lambda: RAM(backend='ramgeo', dr=0.5, dz=0.25, n_pade=6, timeout=900),
         'kraken_coupled': lambda: Kraken(mode_coupling='coupled', timeout=900),
     }[engine]()
@@ -525,22 +542,23 @@ def test_the_density_1p5_corrugation_table_is_the_published_run_with_one_change(
 @pytest.mark.slow
 @pytest.mark.requires_binary
 @pytest.mark.parametrize('density, measured, bounds', [
-    (1.5, 0.50, (-0.3, 1.3)),
-    (2.5, 4.35, (3.0, 5.7)),
+    (1.5, 0.69, (-0.1, 1.5)),
+    (2.5, 4.70, (3.4, 6.0)),
 ])
 def test_the_pe_offset_beyond_the_corrugation_grows_with_the_bottom_density(
         density, measured, bounds):
     """mpirams (dr 5 m, dz 0.25 m, Pade 6) against COUPLE07's two-way run of
     the same corrugation with only the bottom density changed: the mean TL
-    offset over 10-18.09 km is +0.50 dB at density 1.5 and +4.35 dB at 2.5
-    (lead's sweep: -0.11 dB at 1.0). The PE keeps p across the step faces,
-    whose error grows with the density contrast (Collins & Siegmann
-    Sect. 2.6). ramgeo measured +0.71 / +5.47 dB, rams over a 50 m/s shear
-    bottom +0.42 / +5.03 dB: its approximate energy-flux correction does not
-    remove it.
+    offset over 10-18.09 km is +0.69 dB at density 1.5 and +4.70 dB at 2.5
+    (-0.03 dB at 1.0, against a COUPLE07 rerun at that density that is not
+    shipped). The PE keeps p across the step faces, whose error grows with
+    the density contrast (Collins & Siegmann Sect. 2.6). ramgeo (dr 0.5 m)
+    measured +0.94 / +5.82 dB, rams on its automatic grid over a 50 m/s
+    shear bottom +0.81 / +5.81 dB: its approximate energy-flux correction
+    does not remove it.
 
-    NULL CONTROL, asserted below: the flat guide sits at -1.03 dB at
-    density 1.5 (-1.95 at 2.5), 0.73 dB below the density-1.5 bound, which
+    NULL CONTROL, asserted below: the flat guide sits at -0.99 dB at
+    density 1.5 (-1.94 at 2.5), 0.89 dB below the density-1.5 bound, which
     sits 0.8 dB either side of the measurement.
     """
     model = RAM(backend='mpirams', dr=5.0, dz=0.25, n_pade=6, timeout=900)
@@ -569,6 +587,7 @@ def _bucker_env(bottom_density=2.1):
     """Bucker's waveguide; ``bottom_density=1.0`` removes the density
     contrast the case is built on and is the null control."""
     return Environment(
+        water_density=RHO_WATER,
         bathymetry=240.0,
         ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (120.0, 1498.0), (240.0, 1500.0)]),
         bottom=BoundaryProperties(acoustic_type='half-space', sound_speed=1505.0,
@@ -599,15 +618,15 @@ def test_the_bucker_reference_table_spans_the_published_ranges():
 @pytest.mark.requires_binary
 @pytest.mark.requires_oases
 def test_two_wavenumber_integration_codes_agree_on_the_bucker_waveguide():
-    """OASES OAST at its defaults lands on the Scooter reference: 0.006 dB
-    median and 0.03 dB p90 |dTL| over 2-20 km. Two independent
+    """OASES OAST at its defaults lands on the Scooter reference: 0.0145 dB
+    median and 0.048 dB p90 |dTL| over 2-20 km. Two independent
     wavenumber-integration codes agreeing to hundredths of a dB is what
     makes the table a reference rather than one engine's answer. The bounds
-    are 0.05 and 0.25 dB; the density-1.0 null control sits at 2.59 dB.
+    are 0.05 and 0.25 dB; the density-1.0 null control sits at 2.58 dB.
     """
     median, p90 = _bucker_agreement(OAST(timeout=900))
-    assert median < 0.05, f"median |dTL| {median:.3f} dB; measured 0.006"
-    assert p90 < 0.25, f"p90 |dTL| {p90:.3f} dB; measured 0.03"
+    assert median < 0.05, f"median |dTL| {median:.4f} dB; measured 0.0145"
+    assert p90 < 0.25, f"p90 |dTL| {p90:.3f} dB; measured 0.048"
 
     null_median, _ = _bucker_agreement(OAST(timeout=900), bottom_density=1.0)
     assert null_median > 1.0, f"density-1.0 run only {null_median:.2f} dB median away"
@@ -615,32 +634,32 @@ def test_two_wavenumber_integration_codes_agree_on_the_bucker_waveguide():
 
 @pytest.mark.requires_binary
 @pytest.mark.parametrize('engine, measured, bounds', [
-    ('kraken_leaky', (0.013, 0.06), (0.05, 0.3)),
-    ('kraken', (0.128, 1.71), (0.3, 2.3)),
-    ('scooter', (0.102, 0.64), (0.3, 1.2)),
-    ('ram_deep_grid', (0.085, 0.62), (0.3, 1.2)),
+    ('kraken_leaky', (0.0198, 0.07), (0.05, 0.3)),
+    ('kraken', (0.1235, 1.755), (0.3, 2.3)),
+    ('ram_deep_grid', (0.0776, 0.594), (0.3, 1.2)),
 ])
 def test_engines_reproduce_the_bucker_waveguide(engine, measured, bounds):
-    """Kraken, Scooter and RAM reproduce the wavenumber-integration field of
+    """Kraken and RAM reproduce the wavenumber-integration field of
     Bucker's waveguide over 2-20 km.
 
     Measured median / p90 |dTL|: Kraken with ``leaky_modes=True``
-    0.013 / 0.06 dB; Kraken at its defaults 0.128 / 1.71 dB, because its
+    0.0198 / 0.07 dB; Kraken at its defaults 0.1235 / 1.755 dB, because its
     automatic c_high (1.05 x the 1505 m/s half-space) keeps some modes past
     the bottom speed but not all the continuous spectrum the density
-    contrast feeds; Scooter at its defaults 0.102 / 0.64 dB (its automatic
-    c_high truncates the integral the same way); RAM with ``zmax=2000``
-    0.085 / 0.62 dB. RAM's automatic grid does not reach this case — see
+    contrast feeds; RAM with ``zmax=2000`` 0.0776 / 0.594 dB. RAM's
+    automatic grid is pinned by
     ``test_ram_default_domain_reaches_the_bucker_continuous_spectrum``. The
-    bounds sit 1.9-3.8x above the medians and 0.3-0.6 dB above the p90s.
+    bounds sit 2.4-3.9x above the medians and 0.2-0.6 dB above the p90s.
+    Scooter is not scored here: at its defaults (an unbounded c_high) it is
+    the run that generated the table.
 
     NULL CONTROL, asserted below: the same engine over a density-1.0
-    half-space sits 2.4-2.7 dB median from the reference.
+    half-space, the water's own density, sits 2.44-2.60 dB median from the
+    reference.
     """
     model = {
         'kraken_leaky': lambda: Kraken(leaky_modes=True, timeout=900),
         'kraken': lambda: Kraken(timeout=900),
-        'scooter': lambda: Scooter(timeout=900),
         'ram_deep_grid': lambda: RAM(zmax=2000.0, timeout=900),
     }[engine]()
 
@@ -660,15 +679,15 @@ def test_a_trapped_mode_sum_misses_the_bucker_continuous_spectrum():
     wavenumbers alone (Kraken with c_high at the 1505 m/s half-space speed)
     misses the continuous spectrum and is wrong out to 20 km.
 
-    Measured: 1.542 dB median and 8.43 dB p90 |dTL| over 2-20 km, against
-    0.013 / 0.06 dB once ``leaky_modes=True`` lets Kraken solve past the
+    Measured: 1.574 dB median and 8.667 dB p90 |dTL| over 2-20 km, against
+    0.0198 / 0.07 dB once ``leaky_modes=True`` lets Kraken solve past the
     bottom speed. Pinned on both sides: below 0.8 dB median the
     trapped-mode run would no longer show the published effect, which
     would mean the reference or the window had lost it.
     """
     median, p90 = _bucker_agreement(Kraken(c_high=1505.0, timeout=900))
-    assert 0.8 < median < 2.5, f"median |dTL| {median:.3f} dB; measured 1.542"
-    assert p90 > 4.0, f"p90 |dTL| {p90:.2f} dB; measured 8.43"
+    assert 0.8 < median < 2.5, f"median |dTL| {median:.3f} dB; measured 1.574"
+    assert p90 > 4.0, f"p90 |dTL| {p90:.2f} dB; measured 8.667"
 
 
 @pytest.mark.requires_binary
@@ -676,10 +695,10 @@ def test_ram_default_domain_reaches_the_bucker_continuous_spectrum():
     """RAM at its defaults matches the reference as well as on a pinned deep
     grid: the automatic pad holds the depth the continuous spectrum's bottom
     field reaches over the track (``_domain.leaky_field_depth``; the first
-    leaky mode leaves at 3.6° and loses 1.24 dB/km), here zmax 1659 m.
-    Measured over 2-20 km: 0.121 dB median (0.07 / 0.26 over 2-10 / 10-20
-    km), against 2.41 dB with a pad of two seabed wavelengths (zmax 588 m)
-    and 0.085 dB at zmax 2000 m.
+    leaky mode leaves at 3.6° and loses 1.21 dB/km), here zmax 1688.9 m.
+    Measured over 2-20 km: 0.1188 dB median (0.069 / 0.252 over 2-10 / 10-20
+    km), against 2.449 dB with a pad of two seabed wavelengths (zmax 588 m)
+    and 0.0776 dB at zmax 2000 m.
     """
     median, _ = _bucker_agreement(RAM(timeout=900))
     assert median < 0.3, f"median |dTL| {median:.3f} dB at the automatic grid"
@@ -763,7 +782,8 @@ def _pe4c_env(slope=True):
     columns = [_pe4c_seabed(float(np.interp(r, ranges, depths))) for r in column_ranges]
     bottom = (Bottom(columns=columns, ranges=column_ranges) if len(columns) > 1
               else Bottom(columns=columns))
-    return Environment(bathymetry=Bathymetry(ranges=ranges, depths=depths),
+    return Environment(water_density=RHO_WATER,
+                       bathymetry=Bathymetry(ranges=ranges, depths=depths),
                        ssp=_pe4c_water_profile(), bottom=bottom)
 
 
@@ -807,25 +827,27 @@ def test_the_pe_workshop_4c_reference_table_spans_the_published_ranges():
 @pytest.mark.requires_binary
 @pytest.mark.parametrize('engine, bounds', [
     # (flat median, flat p90, slope rms, shelf rms)
-    ('ram', (1.0, 3.6, 1.0, 1.3)),
-    ('kraken_adiabatic', (0.6, 2.0, 2.0, 2.2)),
+    ('ram', (0.7, 2.5, 0.9, 1.0)),
+    ('kraken_adiabatic', (0.4, 1.0, 1.8, 2.0)),
 ])
 def test_engines_follow_pe_workshop_4c_up_the_slope_and_onto_the_shelf(engine, bounds):
     """RAM and Kraken's adiabatic modes follow COUPLE07 through Test Case 4c.
 
     Measured over the flat 5-150 km, median / p90 |dTL| at 150 and 700 m:
-    RAM 0.64 / 2.41 and 0.83 / 3.03 dB, Kraken 0.35 / 1.44 and 0.36 /
-    1.27 dB. Over the slope and the shelf, RMS of the 5 km intensity
-    averages at 150 m: RAM 0.44 and 0.74 dB, Kraken 1.27 and 1.44 dB.
-    RAM's p90 over the flat part is the widest figure because its automatic
-    grid shifts the fine deep-water fringes; pinned to dr 10 m, dz 0.5 m,
-    Pade 8 (53 s instead of 10 s) it is 0.31 / 1.30 dB. Kraken's adiabatic
-    sum is the looser one on the slope, where a 3 km descent over 50 km
-    couples modes the adiabatic approximation keeps apart. The bounds sit
+    RAM 0.279 / 1.172 and 0.413 / 1.832 dB, Kraken 0.101 / 0.425 and
+    0.153 / 0.584 dB. Over the slope and the shelf, RMS of the 5 km
+    intensity averages at 150 m: RAM 0.457 and 0.547 dB, Kraken 1.253 and
+    1.409 dB. RAM's p90 over the flat part is the widest figure; its
+    automatic grid here is ramgeo's (dr 37.95 m, dz raised to 1.051 m to fit
+    the binary's arrays, 19.7 s), and mpirams pinned to dr 10 m, dz 0.5 m,
+    Pade 8 (227 s) is 0.165 / 0.615 dB at 150 m. Kraken's adiabatic sum is
+    the looser one on the slope, where a 3 km descent over 50 km couples
+    modes the adiabatic approximation keeps apart. The bounds sit
     0.2-0.7 dB above the measurements.
 
     NULL CONTROL, asserted below: the same engine with the slope removed
-    sits at 4.5 dB RMS over the slope and 3.2 dB over the shelf.
+    sits at 4.422-4.456 dB RMS over the slope and 3.154-3.172 dB over the
+    shelf.
     """
     model = {'ram': lambda: RAM(timeout=1800),
              'kraken_adiabatic': lambda: Kraken(timeout=1800)}[engine]()
@@ -847,21 +869,21 @@ def test_engines_follow_pe_workshop_4c_up_the_slope_and_onto_the_shelf(engine, b
 @pytest.mark.requires_binary
 @pytest.mark.xfail(strict=True, reason=(
     "Kraken(mode_coupling='coupled') at its automatic decomposition puts the "
-    "4c shelf 21.7 dB too loud (5 km averages); uniform n_segments=60-400 "
-    "put the shelf mean at 98-106 dB against the reference's 99. The automatic decomposition here is the thinned one "
+    "4c shelf 21.8 dB too loud (5 km averages); uniform n_segments=60-400 "
+    "put the shelf 2.0-4.4 dB quieter than the reference on mean. The automatic decomposition here is the thinned one "
     "(326 asked, 200 kept, unevenly spaced). field.exe's coupled projection is not "
     "unitary on modes at and above the half-space speed (docs/models/kraken.md 6.6). "
     "Remove this marker when fixed."))
 def test_kraken_coupled_modes_keep_the_pe_workshop_4c_shelf_level():
     """Kraken's coupled modes at their defaults should keep the shelf level
     COUPLE07 gives. They do not: over 202.5-247.5 km the 5 km intensity
-    averages at 150 m sit 21.98 dB RMS from the reference, mean -21.67 dB,
+    averages at 150 m sit 22.069 dB RMS from the reference, mean -21.761 dB,
     i.e. the field gains energy. The 700 m receiver, in the sediment there,
-    is 56 dB too loud. The same engine with ``n_segments`` 60, 100, 150,
-    200, 250, 326 or 400 (uniform) puts the shelf at 98-106 dB against the
-    reference's 99 dB, and adiabatic modes at 99.5 dB. The automatic
-    decomposition warns that it was thinned from 326 to 200 profiles and
-    "may not be converged"; it does not warn of a 20 dB gain.
+    is 59.0 dB too loud. The same engine with ``n_segments`` 60, 200 or 400
+    (uniform) puts the shelf TL 2.954 / 4.394 / 1.994 dB above the
+    reference's 95.5 dB on mean (quieter), and adiabatic modes 1.22 dB above.
+    The automatic decomposition warns that it was thinned from 326 to 200
+    profiles and "may not be converged"; it does not warn of a 20 dB gain.
     """
     got = _pe4c_agreement(Kraken(mode_coupling='coupled', timeout=1800))
     assert got['shelf'][0] < 6.0, f"shelf RMS {got['shelf'][0]:.2f} dB"
@@ -872,11 +894,19 @@ def test_kraken_coupled_modes_keep_the_pe_workshop_4c_shelf_level():
 # Jensen & Ferla 1990, Problem I: the wedge of Problem II (200 m at the
 # source, 2.86 deg up to the apex 4 km away, source 100 m, receivers 30 m and
 # 150 m) with perfectly reflecting boundaries. Buckingham & Tolstoy, JASA 87,
-# 1511-1513 (1990) solve it analytically for a pressure-release bottom:
-# ``ideal_wedge_tl`` in ``test_benchmarks_analytic``. The rigid-bottom
-# wedge (Luo, Yang, Qin & Zhang, Chin. Phys. Lett. 29, 104303, 2012) has the
-# same series with the angular eigenvalues moved to ``(m + 1/2) pi / theta_w``,
-# Dirichlet at the surface and Neumann at the bottom: ``_rigid_wedge_tl``.
+# 1511-1513 (1990) solve it analytically for a pressure-release bottom; the
+# rigid-bottom wedge (Luo, Yang, Qin & Zhang, Chin. Phys. Lett. 29, 104303,
+# 2012) has the same series with the angular eigenvalues moved to
+# ``(m + 1/2) pi / theta_w``, Dirichlet at the surface and Neumann at the
+# bottom. The series is the field of a LINE source parallel to the apex, so
+# Bellhop runs ``source_type='line'`` (its plane geometry) and is scored
+# against the series itself: ``_ideal_wedge_line_tl``. No 2-D to 3-D
+# conversion enters the comparison, which is why the far-field point-source
+# form of ``test_benchmarks_analytic.ideal_wedge_tl`` is not used here. Etter, Underwater Acoustic
+# Modeling and Simulation, Sect. 12.3, Fig. 12.1 reproduces the problem
+# statements with both a line-source ("parallel to the apex, i.e., 2D
+# geometry") and a point-source instruction; its parsed text does not show
+# which binds to which case, so the choice rests on what the series is.
 #
 # Only Bellhop is measured. RAM has no spelling for a vacuum or rigid
 # seabed, Kraken refuses a range-dependent deck over one (the profiles must
@@ -887,17 +917,33 @@ def test_kraken_coupled_modes_keep_the_pe_workshop_4c_shelf_level():
 IDEAL_WEDGE_RANGES = np.arange(50.0, 3801.0, 10.0)
 
 
-def _rigid_wedge_tl(r_from_source, z_r, z_s, R_s_apex, f, c, slope):
-    """Analytic TL of the ideal wedge with a pressure-release surface and a
-    rigid bottom: ``ideal_wedge_tl``'s series and 2-D to 3-D conversion with
-    the angular eigenvalues ``nu_m = (m + 1/2) pi / theta_w``, m = 0, 1, ...
-    that ``sin(nu theta)`` vanishes at the surface and has zero slope at the
-    bottom with."""
+def _ideal_wedge_line_tl(r_from_source, z_r, bottom, z_s=100.0, R_s_apex=4000.0,
+                         f=25.0, c=1500.0, slope=0.05):
+    """Analytic TL of the ideal wedge for a line source parallel to the apex,
+    at ``r_from_source`` (m, horizontal, toward the apex) and depth ``z_r``.
+
+    The exact 2-D series in apex-centred polar coordinates (r, theta),
+    theta measured down from the surface::
+
+        p(r, theta) = (i pi / theta_w) sum_m sin(nu_m theta) sin(nu_m theta_s)
+                      J_nu(k r_<) H1_nu(k r_>)
+
+    with ``nu_m = m pi / theta_w`` (m = 1, 2, ...) under a ``'vacuum'``
+    bottom and ``nu_m = (m + 1/2) pi / theta_w`` (m = 0, 1, ...) under a
+    ``'rigid'`` one, so that ``sin(nu theta)`` vanishes at the surface and,
+    at the bottom, vanishes or has zero slope. The coefficient is the one
+    of the free-space line source ``(i/4) H0(kR)`` (the radial jump with
+    ``W[J, H1] = 2i/(pi r)`` and the angular normalisation ``2/theta_w``), so
+    TL is ``-20 log10 |sqrt(8 pi k) p|``, unit amplitude at 1 m — the
+    convention ``test_bellhop_line_source_level_is_unit_amplitude_at_one_metre``
+    pins on Bellhop's line source. Modes with ``nu > 1.2 k r_>`` are deeply
+    evanescent and dropped."""
     from scipy.special import jv, hankel1
     k = 2 * np.pi * f / c
     theta_w = np.arctan(slope)
     theta_s = np.arctan(z_s / R_s_apex)
     r_s = np.hypot(R_s_apex, z_s)
+    m0, shift = {'vacuum': (1, 0.0), 'rigid': (0, 0.5)}[bottom]
     out = []
     for rs in np.atleast_1d(r_from_source).astype(float):
         R_apex = R_s_apex - rs
@@ -905,14 +951,14 @@ def _rigid_wedge_tl(r_from_source, z_r, z_s, R_s_apex, f, c, slope):
         r = np.hypot(R_apex, z_r)
         r_lo, r_hi = min(r, r_s), max(r, r_s)
         p = 0j
-        m = 0
-        while (m + 0.5) * np.pi / theta_w <= 1.2 * k * r_hi:
-            nu = (m + 0.5) * np.pi / theta_w
+        m = m0
+        while (m + shift) * np.pi / theta_w <= 1.2 * k * r_hi:
+            nu = (m + shift) * np.pi / theta_w
             p += (np.sin(nu * theta) * np.sin(nu * theta_s)
                   * jv(nu, k * r_lo) * hankel1(nu, k * r_hi))
             m += 1
-        p3d = (1j * np.pi / theta_w) * p * np.sqrt(k / (2 * np.pi * rs))
-        out.append(-20.0 * np.log10(np.abs(p3d * 4 * np.pi)))
+        p *= 1j * np.pi / theta_w
+        out.append(-20.0 * np.log10(np.abs(np.sqrt(8 * np.pi * k) * p)))
     return np.array(out)
 
 
@@ -927,52 +973,50 @@ def _ideal_wedge_env(bottom, slope=0.05):
         bottom=BoundaryProperties(acoustic_type=bottom))
 
 
-def _ideal_wedge_agreement(bottom, slope=0.05):
-    """``[(median, p90)]`` of |Bellhop - analytic| at 30 and 150 m, each
-    over the ranges where the receiver is at least 5 m above the
-    seafloor."""
-    analytic = {'vacuum': ideal_wedge_tl, 'rigid': _rigid_wedge_tl}[bottom]
+def _ideal_wedge_agreement(bottom, slope=0.05, n_beams=4000):
+    """``[(median, p90)]`` of |Bellhop - analytic| at 30 and 150 m, Bellhop
+    and the series both for a line source, each over the ranges where the
+    receiver is at least 5 m above the seafloor."""
     r = IDEAL_WEDGE_RANGES
-    tl = Bellhop(n_beams=4000, timeout=900).compute_field(
-        _ideal_wedge_env(bottom, slope), Source(depths=100.0, frequencies=25.0),
+    tl = Bellhop(n_beams=n_beams, timeout=900).compute_field(
+        _ideal_wedge_env(bottom, slope),
+        Source(depths=100.0, frequencies=25.0, source_type='line'),
         Receiver(depths=[30.0, 150.0], ranges=r)).dB
     tl = np.asarray(tl, dtype=float).reshape(2, -1)
     out = []
     for i, z_r in enumerate((30.0, 150.0)):
         in_water = (200.0 - 0.05 * r) > z_r + 5.0
-        diff = np.abs(tl[i, in_water]
-                      - analytic(r[in_water], z_r, 100.0, 4000.0, 25.0, 1500.0, 0.05))
+        diff = np.abs(tl[i, in_water] - _ideal_wedge_line_tl(r[in_water], z_r, bottom))
         out.append((float(np.median(diff)), float(np.percentile(diff, 90))))
     return out
 
 
 @pytest.mark.requires_binary
 @pytest.mark.parametrize('bottom, measured, bounds', [
-    ('vacuum', ((0.63, 1.72), (1.18, 2.67)), ((1.0, 2.5), (1.7, 3.5))),
-    ('rigid', ((0.72, 1.82), (1.85, 4.94)), ((1.1, 2.6), (2.5, 6.0))),
+    ('vacuum', ((0.47, 1.683), (0.384, 1.62)), ((0.9, 2.5), (0.8, 2.4))),
+    ('rigid', ((0.504, 1.648), (1.119, 3.143)), ((0.9, 2.5), (1.6, 4.0))),
 ])
 def test_bellhop_follows_the_ideal_wedge_at_both_published_receivers(bottom, measured, bounds):
-    """Bellhop's coherent beam sum follows the analytic ideal wedge over
-    the published 0-3.8 km at both receivers, for the pressure-release
-    bottom of Problem I and for a rigid bottom.
+    """Bellhop's coherent beam sum for a line source follows the analytic
+    ideal wedge over the published 0-3.8 km at both receivers, for the
+    pressure-release bottom of Problem I and for a rigid bottom.
 
-    Measured median / p90 |dTL| with 4000 beams: pressure-release 0.63 /
-    1.72 dB at 30 m and 1.18 / 2.67 dB at 150 m; rigid 0.72 / 1.82 and
-    1.85 / 4.94 dB. 16000 beams move them by at most 0.3 dB (0.53 / 1.53,
-    1.14 / 2.38; 0.68 / 1.73, 1.56 / 4.62); the default fan is looser
-    (0.97 / 3.27 at 30 m, pressure-release), hence the pinned count. The
-    150 m receiver is the harder one: it is in the water only out to
-    0.9 km, closer to the source, where the beams' near-field is least
-    accurate. The bounds sit 0.3-0.7 dB above the medians and 0.8-1.1 dB
-    above the p90s.
+    Measured median / p90 |dTL| with 4000 beams: pressure-release 0.47 /
+    1.683 dB at 30 m and 0.384 / 1.62 dB at 150 m; rigid 0.504 / 1.648 and
+    1.119 / 3.143 dB. The mean of Bellhop minus the series is +0.01 dB at
+    30 m and -0.10 / -0.19 dB at 150 m (pressure-release / rigid): no level
+    offset. 16000 beams move the medians by at most 0.3 dB (0.334 / 1.228,
+    0.112 / 1.05; 0.421 / 1.478, 1.059 / 2.953); the default fan is looser
+    (1.036 / 3.686 at 30 m, pressure-release), hence the pinned count. The
+    bounds sit 0.4-0.5 dB above the medians and 0.8-0.9 dB above the p90s.
 
     The rigid series is written here, so it is checked here too: at 30 m it
     sits 3.85 dB median from the pressure-release series, and Bellhop over a
-    rigid bottom lands 0.72 dB from it against 4.10 dB from the
+    rigid bottom lands 0.504 dB from it against 4.0 dB from the
     pressure-release one, an independent method picking out the right series.
 
     NULL CONTROL, asserted below: Bellhop over the flat 200 m guide sits
-    5.2-7.5 dB median from the wedge solution.
+    4.43-6.95 dB median from the wedge solution.
     """
     got = _ideal_wedge_agreement(bottom)
     for (median, p90), (b_med, b_p90), m, depth in zip(got, bounds, measured, (30, 150)):
@@ -981,3 +1025,17 @@ def test_bellhop_follows_the_ideal_wedge_at_both_published_receivers(bottom, mea
 
     null = _ideal_wedge_agreement(bottom, slope=0.0)
     assert min(n[0] for n in null) > 3.0, f"flat-guide medians {null}"
+
+
+@pytest.mark.parametrize('build', [
+    _wedge_env, _pe3b_env, _corrugated_env, _bucker_env, _pe4c_env,
+    lambda: _ideal_wedge_env('vacuum'),
+], ids=['asa_wedge', 'pe_workshop_3b', 'corrugation', 'bucker',
+        'pe_workshop_4c', 'ideal_wedge'])
+def test_every_benchmark_environment_holds_the_references_water(build):
+    """Every reference on this page was computed with water of density
+    1.0 g/cm^3 (module docstring), so every builder sets it. The engine
+    bounds alone do not hold the ASA wedge to it: at uacpy's default 1.027
+    its RAM and Bellhop agreements (0.225 dB, 2.265 dB) still pass their
+    0.3 dB and 2.6 dB bounds."""
+    assert build().water_density == RHO_WATER == 1.0

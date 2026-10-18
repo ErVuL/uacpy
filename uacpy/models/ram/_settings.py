@@ -30,7 +30,7 @@ class RamGrid(FrozenRecord):
         Depth points the binary marches over ``zmax``: mpiramS's
         ``icount = floor(zmax/dz - 0.5) + 2`` (``peramx.f90:391``), the
         Collins codes' ``nz = zmax/dz - 0.5`` (``ramgeo1.5.f:130``).
-    theta : float or None
+    theta_deg : float or None
         Padé rotation angle (degrees) a Collins deck carries: rams0.5 reads
         it on row 5, where the fluid codes read their stability terms
         instead. ``None`` on mpiramS.
@@ -51,14 +51,14 @@ class RamGrid(FrozenRecord):
     dz: float
     zmax: float
     n_depth_points: int
-    theta: Optional[float] = None
+    theta_deg: Optional[float] = None
     ndr: Optional[int] = None
     rmax_march: Optional[float] = None
     zmplt: Optional[float] = None
     zr_line: Optional[float] = None
 
     _REPR_UNITS = {'frequency': 'Hz', 'dr': 'm', 'dz': 'm', 'zmax': 'm',
-                   'theta': '°', 'rmax_march': 'm', 'zmplt': 'm'}
+                   'theta_deg': '°', 'rmax_march': 'm', 'zmplt': 'm'}
 
     @classmethod
     def from_dict(cls, d) -> 'RamGrid':
@@ -68,8 +68,8 @@ class RamGrid(FrozenRecord):
         text = (f"{self.frequency:g} Hz: dr {self.dr:.4g} m, dz {self.dz:.4g} "
                 f"m, zmax {self.zmax:.5g} m, {self.n_depth_points} depth "
                 f"points")
-        if self.theta is not None:
-            text += f", theta {self.theta:g} deg"
+        if self.theta_deg is not None:
+            text += f", theta {self.theta_deg:g} deg"
         if self.ndr is not None:
             text += f", ndr {self.ndr}"
         return text
@@ -99,8 +99,8 @@ class RamSettings(EngineSettings):
         on an mpiramS TL run, whose sweep is the one bin at fc. ``None`` on a
         Collins TL run, and ``q_factor`` / ``record_duration`` ``None`` for a non-uniform Collins
         band, which no sweep describes.
-    bandwidth_hz, df_hz : float or None
-        Width (Hz) of the marched band and its bin spacing; ``df_hz`` is
+    bandwidth, df : float or None
+        Width (Hz) of the marched band and its bin spacing; ``df`` is
         ``None`` for a non-uniform band. ``None`` on a TL run.
     marched_frequencies : ndarray
         Every frequency (Hz) a binary marches.
@@ -112,7 +112,7 @@ class RamSettings(EngineSettings):
         The frequency (Hz) the domain depth and the absorbing layer are
         sized at: the band's lowest (the longest wavelength), or the TL
         frequency.
-    stability_range_m : float or None
+    stability_range : float or None
         The stability range the deck carries (mpiramS: the pinned value or
         the farthest receiver range; the Collins fluid codes: the pinned
         value or 0, which they expand to ``2 × rmax``). ``None`` on rams0.5,
@@ -138,12 +138,12 @@ class RamSettings(EngineSettings):
     fc: Optional[float]
     q_factor: Optional[float]
     record_duration: Optional[float]
-    bandwidth_hz: Optional[float]
-    df_hz: Optional[float]
+    bandwidth: Optional[float]
+    df: Optional[float]
     marched_frequencies: np.ndarray
     requested_frequencies: Optional[np.ndarray]
     zmax_frequency: float
-    stability_range_m: Optional[float]
+    stability_range: Optional[float]
     grids: Tuple[RamGrid, ...]
 
     _ARRAY_FIELDS = FREQUENCY_ARRAY_FIELDS
@@ -187,15 +187,16 @@ class RamKnobs:
     """The knobs of a :class:`RAM` its resolution reads, as one record
     (``RAM._knob_record``, read afresh per call: the attributes can be
     reassigned between runs). Each field is the model attribute of the
-    same name, except ``accuracy`` (the resolved Lytaev accuracy) and
-    ``accuracy_pinned`` (whether the caller set it)."""
+    same name, except ``accuracy`` (the resolved Lytaev accuracy),
+    ``accuracy_pinned`` (whether the caller set it) and ``rams_rotation``
+    (resolved: ``DEFAULT_RAMS_ROTATION`` when the attribute is ``None``)."""
     model_name: str
     backend: Optional[str]
     q_factor: Optional[float]
     record_duration: Optional[float]
     accuracy: float
     accuracy_pinned: bool
-    absorber_attenuation: float
+    absorber_attenuation: Optional[float]
     absorber_width_wavelengths: float
     depth_decimation: int
     earth_curvature: bool
@@ -204,9 +205,9 @@ class RamKnobs:
     n_stability: Optional[int]
     rams_dr_factor: Optional[float]
     rams_rotation: bool
-    rams_rotation_angle: Optional[float]
-    stability_range_m: Optional[float]
-    angle_max: Optional[float]
+    rams_rotation_angle_deg: Optional[float]
+    stability_range: Optional[float]
+    angle_max_deg: Optional[float]
     dz: Optional[float]
     dr: Optional[float]
     zmax: Optional[float]

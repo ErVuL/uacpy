@@ -672,8 +672,9 @@ class TestTheWindScaleConversions:
             assert f'{low:g} – {high:g}' in doc, (force, low, high)
 
     def test_sea_state_six_resolves_to_force_eight(self):
-        """Sea state 6 spans forces 7 and 8. Dahl et al. (2007) state the
-        WMO correspondence as force 8, which is the branch taken."""
+        """Sea state 6 spans forces 7 and 8. The WMO sea-state code puts sea
+        state 6 at 37.5 kn (APL-UW TR 9407 Table 2), inside force 8's band,
+        which is the branch taken."""
         from uacpy.core.units import (sea_state_to_wind_speed,
                                       beaufort_to_wind_speed)
         assert (sea_state_to_wind_speed(6)
@@ -835,12 +836,9 @@ class TestTheKnotHasOneValueAndOneHome:
 
 
 class TestTheForeignCarrierRefusalSaysWhatToDoInstead:
-    """The refusal's remedy has to be true for every carrier it can name.
-
-    It used to end "Use that result's own .plot()" — which three public
-    carriers (`BeamformResult`, `NoiseComponents`, `Snapshots`) do not have,
-    so the advice was wrong for exactly the results least likely to be
-    recognised.
+    """The refusal's remedy has to be true for every carrier it can name,
+    including the public carriers with no ``.plot()`` (`NoiseComponents`,
+    `Snapshots`): "use that result's own .plot()" would be wrong for them.
     """
 
     def test_it_does_not_promise_a_plot_that_may_not_exist(self):

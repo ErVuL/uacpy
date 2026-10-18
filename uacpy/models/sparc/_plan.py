@@ -30,7 +30,7 @@ from uacpy.models.sparc._pulse import _validate_pulse_type
 #: warns.
 SPARC_WINDOW_TRAVEL_TIMES = 2.5
 #: The margin on the record in SPARC's unpinned ``RMax``,
-#: ``r + SPARC_RMAX_TIME_MARGIN · c_fast · time_max`` (:func:`resolve_rmax_m`):
+#: ``r + SPARC_RMAX_TIME_MARGIN · c_fast · time_max`` (:func:`resolve_rmax`):
 #: uacpy's measured margin on Jensen et al.'s criterion (*Computational Ocean
 #: Acoustics*, Sect. 8.3.2) that no replica energy reach the record. Against
 #: the exact image sum of a rigid guide, 1.0 left the replica's tails in the
@@ -113,10 +113,6 @@ _LOOPED_TIME_SERIES_MODES = {
     'R': dict(
         loop_attr='depths', held_attr='ranges',
         loop_coord='depth', other_coord='range',
-        # Spelled out, not built from loop_coord: a metadata key composed
-        # by an f-string is invisible to grep and to the registry gate
-        # that checks every documented key is actually written.
-        runs_key='n_depth_runs',
         run_tag='d', stack_axis=0,
         scale=1.0 / np.sqrt(np.pi),
         loop_axis_label='depths',
@@ -129,7 +125,6 @@ _LOOPED_TIME_SERIES_MODES = {
     'D': dict(
         loop_attr='ranges', held_attr='depths',
         loop_coord='range', other_coord='depth',
-        runs_key='n_range_runs',
         run_tag='r', stack_axis=1,
         scale=1.0,
         loop_axis_label='ranges',
@@ -368,9 +363,9 @@ def reject_oversized_snapshot(receiver, nk: int, n_time_samples: int, *,
             "instead of holding the whole cube."))
 
 
-def resolve_rmax_m(r_ref: float, c_fast: float, time_max: float, *,
-                   rmax_factor) -> Tuple[float, float, str]:
-    """``(rmax_m, rmax_factor, origin)``: the deck's ``RMax`` (m), its ratio
+def resolve_rmax(r_ref: float, c_fast: float, time_max: float, *,
+                 rmax_factor) -> Tuple[float, float, str]:
+    """``(rmax, rmax_factor, origin)``: the deck's ``RMax`` (m), its ratio
     to the farthest receiver range ``r_ref`` and where it came from — the
     pinned ``rmax_factor × r_ref``, else
     ``r_ref + SPARC_RMAX_TIME_MARGIN · c_fast · time_max``.
@@ -416,8 +411,8 @@ def resolve_rmax_m(r_ref: float, c_fast: float, time_max: float, *,
     if rmax_factor is not None:
         return (float(rmax_factor) * r_ref, float(rmax_factor),
                 'SPARC(rmax_factor=…)')
-    rmax_m = r_ref + SPARC_RMAX_TIME_MARGIN * c_fast * time_max
-    return (rmax_m, rmax_m / r_ref,
+    rmax = r_ref + SPARC_RMAX_TIME_MARGIN * c_fast * time_max
+    return (rmax, rmax / r_ref,
             f"r + {SPARC_RMAX_TIME_MARGIN:g} × c_fast × time_max: no range "
             f"replica inside the record (Jensen et al., Sect. 8.3.2, on "
             f"sparc.f90's mirrored fold; uacpy's measured margin)")
@@ -499,27 +494,27 @@ def lossless_march_notice(env):
         f"solution).", FallbackWarning)
 
 
-def range_alias_notice(rmax_m: float, r_ref: float, c_fast: float,
+def range_alias_notice(rmax: float, r_ref: float, c_fast: float,
                        time_max: float):
     """``(note, warning)`` when the ``Δk`` sum's range replica falls
     inside ``[0, time_max]``, else ``None``.
 
     The farthest receiver (``r_ref``) sees the fold from ``RMax - r_ref``
-    (see :func:`resolve_rmax_m`); the earliest it can arrive
+    (see :func:`resolve_rmax`); the earliest it can arrive
     is that distance over the fastest speed in the profile. Inside the
     output window it is indistinguishable from a real late arrival, so
     name the ``rmax_factor`` that pushes it clear.
     """
     if not (r_ref > 0.0 and c_fast > 0.0 and time_max > 0.0):
         return None
-    t_alias = (rmax_m - r_ref) / c_fast
+    t_alias = (rmax - r_ref) / c_fast
     if t_alias > time_max:
         return None
     margin_needed = 1.0 + time_max * c_fast / r_ref
     return Notice(
         f"range alias at t = {t_alias:.4g} s inside the {time_max:.4g} s "
         f"window",
-        f"SPARC range alias: RMax = {rmax_m:.6g} m puts the "
+        f"SPARC range alias: RMax = {rmax:.6g} m puts the "
         f"wavenumber sum's range replica at t = {t_alias:.4g} s at the "
         f"farthest receiver ({r_ref:.6g} m), inside the "
         f"{time_max:.4g} s output window — it will read as a real late "
@@ -659,7 +654,7 @@ def refuse_band_pass_overflow(pulse: str, *, freq_max: float, c_low: float,
     )
 
 
-def refuse_too_few_wavenumbers(nk: int, rmax_m: float, freq_min: float,
+def refuse_too_few_wavenumbers(nk: int, rmax: float, freq_min: float,
                                freq_max: float, c_low_res: float,
                                c_high_res: float) -> None:
     """Refuse a wavenumber count the binary cannot march: ``Nk <= 0``
@@ -669,7 +664,7 @@ def refuse_too_few_wavenumbers(nk: int, rmax_m: float, freq_min: float,
         return
     raise ConfigurationError(
         f"SPARC would march Nk = {nk} wavenumber(s) (sparc.f90:116 "
-        f"with rmax = {rmax_m:.6g} m, band {freq_min:.6g}–{freq_max:.6g} Hz, "
+        f"with rmax = {rmax:.6g} m, band {freq_min:.6g}–{freq_max:.6g} Hz, "
         f"c_low = {c_low_res:.6g} m/s, c_high = {c_high_res:.6g} m/s): "
         f"the wavenumber loop would run empty and the field would come "
         f"back all-zero at exit 0.",
@@ -702,7 +697,7 @@ def checked_n_mesh(env, freq_max: float, *,
         f"medium/media from {origin}, but the binary stores at most "
         f"{_MAX_MESH_POINTS} (Scooter/sparc.f90:31 MaxN).",
         remediation=("Lower freq_max (default: the source waveform's band, "
-                     "or 2x the source frequency for a canned pulse), "
+                     "or 2-3x the source frequency for a canned pulse), "
                      "reduce the modelled depth, or pin a smaller "
                      "n_mesh."),
     )
@@ -724,8 +719,10 @@ def resolve_n_mesh(env, freq_max: float, *, n_mesh) -> Union[int, List[int]]:
     ``freq0`` and be done. ``sparc.f90`` has no such rescaling anywhere: it
     takes ``N`` as written and sets ``h = (Depth(2) - Depth(1)) / N``
     (``:54``, ``:85``). But the pulse band this wrapper writes reaches
-    above ``freq0`` (to ``2*freq`` for a canned pulse), so an automatic
-    mesh ran the top of that band at 10 points per wavelength.
+    above ``freq0`` (to 2-3 times ``freq`` for a canned pulse, by pulse
+    type: :data:`~uacpy.models.sparc._pulse._CANNED_SUPPORT`), so an
+    automatic mesh would run the top of that band at 7 to 10 points per
+    wavelength.
 
     Measured on a 100 m isovelocity guide, vacuum surface / rigid bottom,
     source and receiver at 50 m, TIME_SERIES, against a converged mesh:

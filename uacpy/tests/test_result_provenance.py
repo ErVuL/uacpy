@@ -89,7 +89,8 @@ def test_arrivals_filter_keeps_model_source():
 
 
 def test_ifft_trace_keeps_model_source():
-    assert _broadband().to_time_trace().model_source is _SRC
+    assert _broadband().to_time_trace(
+        sample_rate=4000.0).model_source is _SRC
 
 
 def test_synthesized_time_series_keeps_model_source():
@@ -102,7 +103,7 @@ def test_synthesized_time_series_keeps_model_source():
 def test_modes_derivations_keep_model_source():
     m = _modes()
     assert m.first_n(2).model_source is _SRC
-    assert m.with_attenuation(0.1).model_source is _SRC
+    assert m.with_attenuation(0.1, sound_speed_z=1500.0).model_source is _SRC
     field = m.modal_pressure_field(
         source_depth=25.0, receiver_depths=np.linspace(5, 95, 6),
         ranges=np.linspace(100, 2000, 8))
@@ -187,7 +188,7 @@ def test_derived_fields_keep_the_run_mode_of_their_run():
     H = _broadband()
     wf = np.zeros(64)
     wf[0] = 1.0
-    for derived in (H.at(depth=25.0), H.to_time_trace(),
+    for derived in (H.at(depth=25.0), H.to_time_trace(sample_rate=4000.0),
                     H.synthesize_time_series(source_waveform=wf,
                                              sample_rate=4000.0)):
         assert derived.run_mode == RunMode.BROADBAND
@@ -220,7 +221,8 @@ def test_synthesize_time_series_stamps_source_model():
     wf[0] = 1.0
     ts = H.synthesize_time_series(source_waveform=wf, sample_rate=4000.0)
     assert ts.metadata['source_model'] == H.model
-    assert H.to_time_trace().metadata['source_model'] == H.model
+    assert H.to_time_trace(
+        sample_rate=4000.0).metadata['source_model'] == H.model
 
 
 class TestModelProvenanceLookup:

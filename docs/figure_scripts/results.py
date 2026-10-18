@@ -45,7 +45,7 @@ def field_kinds():
     pressure = Bellhop(n_beams=3000).run(env, source, receiver)
     H = _broadband_point()
     spectrum = H.isel(depth=0, range=0)
-    trace = H.to_time_trace()
+    trace = H.to_time_trace(sample_rate=4000.0)
 
     fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.4))
     pressure.to_dB().plot(
@@ -57,8 +57,8 @@ def field_kinds():
     spectrum.plot(
         ax=axes[1][0], value='level',
         title="complex + {frequency}  →  H(f), unit='Pa'")
-    # No source spectrum or waveform, so the trace is the band-limited
-    # impulse response; the title reads kind and unit off the Field itself.
+    # No source waveform, so the trace is the band-limited impulse
+    # response; the title reads kind and unit off the Field itself.
     trace.plot(
         ax=axes[1][1],
         title=f"real + {{time}}  →  h(t), .kind='{trace.kind}', "
@@ -118,7 +118,6 @@ def source_depth_panels():
     fig, _ = field.plot(
         env=env, figsize=(12.5, 3.8),
         title='One Field over source_depth — one panel per source depth')
-    fig.tight_layout()   # re-fit: the panel plotter sets its suptitle last
     return fig
 
 
@@ -169,7 +168,7 @@ def rays_and_arrivals():
     """The two sparse result types: the geometry, and what it delivers."""
     env, source, _ = shallow_water()
     point = uacpy.Receiver(depths=CUT_DEPTH, ranges=CUT_RANGE)
-    model = Bellhop(n_beams=4000, launch_angles=(-45.0, 45.0))
+    model = Bellhop(n_beams=4000, launch_angles_deg=(-45.0, 45.0))
     eig = model.run(env, source, point, run_mode=RunMode.EIGENRAYS)
     arr = model.run(env, source, point, run_mode=RunMode.ARRIVALS)
 

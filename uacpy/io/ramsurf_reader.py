@@ -126,8 +126,10 @@ def read_tl_line(filepath: Union[str, Path]) -> PeGrid:
 
     Raises
     ------
+    ~uacpy.core.exceptions.MissingFileError
+        The file is absent.
     ~uacpy.core.exceptions.FileFormatError
-        The file is absent, holds no rows, or does not carry two columns.
+        The file holds no rows, or does not carry two columns.
         An empty ``tl.line`` is what a run that died before its first output
         range leaves behind, so it is named rather than indexed into.
 
@@ -282,13 +284,14 @@ def _read_grid(filepath, reader, dtype, dr, ndr, dz, ndz, depth_index_offset):
     return ranges, depths, field
 
 
+@typed_format_error
 def read_tl_grid(
     filepath: Union[str, Path],
     *,
     dr: float,
-    ndr: int,
+    range_decimation: int,
     dz: float,
-    ndz: int,
+    depth_decimation: int,
     depth_index_offset: int = 0,
 ) -> PeGrid:
     """
@@ -298,20 +301,20 @@ def read_tl_grid(
     ----------
     filepath : str or Path
         Path to the file.
-    dr, ndr : float, int
+    dr, range_decimation : float, int
         Range step (m) and output stride from ``ram.in``. Output ranges
-        are at ``r = k * dr * ndr`` for ``k = 1, 2, ...``.
-    dz, ndz : float, int
+        are at ``r = k * dr * range_decimation`` for ``k = 1, 2, ...``.
+    dz, depth_decimation : float, int
         Depth step (m) and output stride from ``ram.in``. The PE grid maps
         grid index ``i`` to depth ``(i - 1) * dz`` (from ``ri = 1 + zr/dz``
         in the Collins binaries), so the ``k``-th stored sample sits at
-        ``z = (depth_index_offset + k * ndz - 1) * dz`` for ``k = 1..lz``.
+        ``z = (depth_index_offset + k * depth_decimation - 1) * dz`` for ``k = 1..lz``.
     depth_index_offset : int
         Grid-index marker of the first stored depth sample. ``ramsurf1.5``
-        and ``ramgeo1.5`` write from grid index ``ndz`` (offset 0, first
-        sample at ``z = (ndz-1)·dz``, i.e. the ``z = 0`` surface node only
-        when ``ndz = 1``); ``rams0.5`` writes from ``1 + ndz`` (offset 1,
-        first sample at ``z = ndz·dz`` — it never stores ``z = 0``). See
+        and ``ramgeo1.5`` write from grid index ``depth_decimation`` (offset 0, first
+        sample at ``z = (depth_decimation-1)·dz``, i.e. the ``z = 0`` surface node only
+        when ``depth_decimation = 1``); ``rams0.5`` writes from ``1 + depth_decimation`` (offset 1,
+        first sample at ``z = depth_decimation·dz`` — it never stores ``z = 0``). See
         the ``outpt`` loops in ``third_party/ramsurf/{rams0.5,ramsurf1.5}.f``
         and ``third_party/ramgeo/ramgeo1.5.f``.
 
@@ -322,19 +325,20 @@ def read_tl_grid(
         the depth axis (m), and ``data`` of shape
         ``(n_depths, n_ranges)``.
     """
-    ranges, depths, tl = _read_grid(filepath, 'read_tl_grid', 'f8', dr, ndr,
-                                    dz, ndz, depth_index_offset)
+    ranges, depths, tl = _read_grid(filepath, 'read_tl_grid', 'f8', dr, range_decimation,
+                                    dz, depth_decimation, depth_index_offset)
     return PeGrid(quantity='transmission_loss', unit='dB', ranges=ranges,
                   depths=depths, data=tl)
 
 
+@typed_format_error
 def read_pcomplex_grid(
     filepath: Union[str, Path],
     *,
     dr: float,
-    ndr: int,
+    range_decimation: int,
     dz: float,
-    ndz: int,
+    depth_decimation: int,
     depth_index_offset: int = 0,
 ) -> PeGrid:
     """
@@ -363,7 +367,7 @@ def read_pcomplex_grid(
     ----------
     filepath : str or Path
         Path to ``pcomplex.bin``.
-    dr, ndr, dz, ndz, depth_index_offset : as in :func:`read_tl_grid`.
+    dr, range_decimation, dz, depth_decimation, depth_index_offset : as in :func:`read_tl_grid`.
 
     Returns
     -------
@@ -375,6 +379,6 @@ def read_pcomplex_grid(
         pressure.
     """
     ranges, depths, p = _read_grid(filepath, 'read_pcomplex_grid', 'c16', dr,
-                                   ndr, dz, ndz, depth_index_offset)
+                                   range_decimation, dz, depth_decimation, depth_index_offset)
     return PeGrid(quantity='pe_envelope', unit='', ranges=ranges,
                   depths=depths, data=p)

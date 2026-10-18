@@ -21,12 +21,12 @@ from uacpy.plot import shared_colorbar
 
 # One angular grid for every figure. ``c_high=1e9`` zeroes BOUNCE's minimum
 # wavenumber, which is what buys coverage all the way down to 0° grazing; a
-# pinned ``rmax_m`` makes the sample count independent of the receiver.
-GRID = dict(c_low=1400.0, c_high=1e9, rmax_m=10_000.0)
+# pinned ``rmax`` makes the sample count independent of the receiver.
+GRID = dict(c_low=1400.0, c_high=1e9, rmax=10_000.0)
 
 # BOUNCE reads no source or receiver geometry. A Receiver is still required by
 # the uniform ``run()`` signature — it is consulted only for ``range_max``,
-# which ``rmax_m`` above has already pinned.
+# which ``rmax`` above has already pinned.
 PROBE = uacpy.Receiver(depths=50.0, ranges=10_000.0)
 
 WATER_SPEED = 1500.0
@@ -74,8 +74,7 @@ def attenuation_ladder():
             acoustic_type='half-space',
             sound_speed=1650.0, density=1.9, attenuation=alpha,
         ))
-        ax.plot(rc.angles, rc.magnitude, style, lw=1.6,
-                label=f'α = {alpha:g} dB/λ')
+        rc.plot(ax=ax, label=f'α = {alpha:g} dB/λ', linestyle=style, lw=1.6)
     theta_c = uacpy.acoustics.critical_angle(1650.0, WATER_SPEED)
     ax.axvline(theta_c, color='0.35', lw=1.0,
                label=f'critical angle {theta_c:.1f}°')
@@ -103,11 +102,11 @@ def material_presets():
         bottom = uacpy.BoundaryProperties.from_preset(name)
         rc = reflection(bottom)
         colour = f'C{i}'
-        ax.plot(rc.angles, rc.magnitude, color=colour, lw=1.6,
-                label=f'{name} ({bottom.sound_speed:.0f} m/s)')
+        rc.plot(ax=ax, label=f'{name} ({bottom.sound_speed:.0f} m/s)',
+                color=colour, lw=1.6)
         if bottom.sound_speed > WATER_SPEED:
             theta_c = uacpy.acoustics.critical_angle(bottom.sound_speed, WATER_SPEED)
-            ax.plot([theta_c], [np.interp(theta_c, rc.angles, rc.magnitude)],
+            ax.plot([theta_c], [np.interp(theta_c, rc.angles_deg, rc.magnitude)],
                     'o', color=colour, ms=5.0)
     ax.set_xlim(0.0, 90.0)
     ax.set_ylim(0.0, 1.05)
@@ -135,8 +134,9 @@ def shear_loss():
     for bottom, label, style in [(fluid, 'fluid (shear dropped)', '--'),
                                  (elastic, 'elastic (c_s = 3000 m/s)', '-')]:
         rc = reflection(bottom)
-        ax_r.plot(rc.angles, rc.magnitude, style, lw=1.6, label=label)
-        ax_p.plot(rc.angles, np.degrees(rc.phase), style, lw=1.6, label=label)
+        rc.plot(ax=ax_r, label=label, linestyle=style, lw=1.6, title='')
+        rc.plot(ax=ax_p, value='phase', label=label, linestyle=style,
+                lw=1.6, title='')
 
     theta_s = uacpy.acoustics.critical_angle(elastic.shear_speed, WATER_SPEED)
     theta_p = uacpy.acoustics.critical_angle(elastic.sound_speed, WATER_SPEED)
@@ -148,8 +148,9 @@ def shear_loss():
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0.0, 90.0)
     ax_r.set_ylabel('|R|')
+    ax_r.set_xlabel('')
     ax_r.legend(loc='lower left', fontsize=9)
-    ax_p.set_ylabel('Phase (°)')
+    ax_p.set_ylabel('Phase (rad)')
     ax_p.set_xlabel('Grazing angle (°)')
     fig.suptitle('Bounce — granite half-space, with and without shear',
                  fontweight='bold', fontsize=12)
@@ -167,15 +168,17 @@ def layered_stack():
     for bottom, label, style in [(bare, 'bare granite', '--'),
                                  (stack, '8 m sand over granite', '-')]:
         rc = reflection(bottom)
-        ax_r.plot(rc.angles, rc.magnitude, style, lw=1.6, label=label)
-        ax_p.plot(rc.angles, np.degrees(rc.phase), style, lw=1.6, label=label)
+        rc.plot(ax=ax_r, label=label, linestyle=style, lw=1.6, title='')
+        rc.plot(ax=ax_p, value='phase', label=label, linestyle=style,
+                lw=1.6, title='')
     for ax in (ax_r, ax_p):
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0.0, 90.0)
     ax_r.set_ylabel('|R|')
+    ax_r.set_xlabel('')
     ax_r.set_ylim(0.0, 1.05)
     ax_r.legend(loc='lower left', fontsize=9)
-    ax_p.set_ylabel('Phase (°)')
+    ax_p.set_ylabel('Phase (rad)')
     ax_p.set_xlabel('Grazing angle (°)')
     fig.suptitle('Bounce — the imprint of one 8 m sediment layer, 200 Hz',
                  fontweight='bold', fontsize=12)
@@ -187,27 +190,19 @@ def frequency_dependence():
     """|R(θ, f)| for the layered stack, swept one frequency at a time.
 
     BOUNCE tabulates one frequency per run and picks its own angular grid
-    (denser at high frequency), so the sweep resamples each row onto a common
-    angle axis before stacking.
+    (denser at high frequency), so the stack reads every table on one angle
+    axis.
     """
     env, _, _ = layered_elastic()
     freqs = np.linspace(100.0, 2000.0, 72)
-    theta = np.linspace(0.0, 90.0, 601)
-    R = np.empty((theta.size, freqs.size))
-    for j, f in enumerate(freqs):
-        source = uacpy.Source(depths=25.0, frequencies=float(f))
-        rc = Bounce(**GRID).run(env, source, PROBE)
-        R[:, j] = np.interp(theta, rc.angles, rc.magnitude)
-
-    fig, ax = plt.subplots(figsize=TALL)
-    im = ax.pcolormesh(freqs, theta, R, shading='nearest', cmap='viridis',
-                       vmin=0.0, vmax=1.0)
-    fig.colorbar(im, ax=ax, label='|R|')
-    ax.set_xlabel('Frequency (Hz)')
-    ax.set_ylabel('Grazing angle (°)')
-    ax.set_title('Bounce — 8 m sand over granite, |R(θ, f)|',
-                 fontweight='bold', fontsize=11)
-    fig.tight_layout()
+    tables = [Bounce(**GRID).run(env, uacpy.Source(depths=25.0,
+                                                   frequencies=float(f)),
+                                 PROBE)
+              for f in freqs]
+    rc = uacpy.ReflectionCoefficient.stack(
+        tables, angles_deg=np.linspace(0.0, 90.0, 601))
+    fig, ax = rc.plot(figsize=TALL, frequency_unit='Hz', vmin=0.0, vmax=1.0,
+                      title='Bounce — 8 m sand over granite, |R(θ, f)|')
     return fig
 
 

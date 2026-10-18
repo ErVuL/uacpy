@@ -46,6 +46,8 @@ A 100 m guide at 50 Hz, absolute TL in dB re 1 m.
 | OAST TL (strong-field cells) | 0.02 dB median | median < 0.3, p90 < 1.0 dB | `test_benchmarks_analytic.py::test_oast_tl_matches_pekeris_modal_sum` |
 | OASP, broadband bin at 49.922 Hz | 0.0068 dB median, 0.023 dB p90 | median < 0.1, p90 < 0.3 dB | `test_benchmarks_oases.py::test_oasp_broadband_bin_matches_pekeris_modal_sum_at_the_bin_frequency` |
 | RAM TL | 0.55 dB median | median < 1.5 dB | `test_benchmarks_analytic.py::test_ram_tl_matches_pekeris_modal_sum` |
+| Kraken complex pressure against `Modes.modal_pressure_field` | one sign and phase: `field.exe`'s prefactor is the negative of the modal sum's, and the reader removes it | misfit < 1e-3 of the grid's peak | `test_benchmarks_analytic.py::test_a_kraken_pressure_field_equals_the_modal_sum_in_phase` |
+| RAM TL every 25 m over 1–10 km | 0.48 dB median, 1.88 dB p90; window medians 0.24 / 0.59 / 0.80 dB over 1–4 / 4–7 / 7–10 km — the error grows with range ([ram.md §6](ram.md#6-the-grid-what-drnone-actually-does)) | median < 1.0, p90 < 2.5 dB | `test_benchmarks_analytic.py::test_ram_tl_on_a_dense_range_axis_matches_pekeris_modal_sum` |
 
 RAM's level and field shape are pinned per backend in
 `test_benchmarks_ram_level.py`, against the same modal sum:
@@ -66,7 +68,7 @@ modal sum is closed-form.
 | Kraken over a `'vacuum'` bottom | 0.014 dB median, 0.091 dB max | median < 0.1, max < 0.4 dB | `test_benchmarks_analytic.py::test_kraken_vacuum_waveguide_matches_dirichlet_modal_sum` |
 | RAM (`dr=5, dz=0.25, n_pade=6`) over a near-massless bottom | 0.012 dB median, 0.043 dB p90 | median < 0.15, p90 < 0.5 dB | `test_benchmarks_analytic.py::test_ram_pressure_release_waveguide_matches_dirichlet_modal_sum` |
 | The reference at an exact mode cutoff | 1.4e-6 dB from a guide a hair shallower | < 1e-4 dB | `test_benchmarks_analytic.py::test_a_waveguide_exactly_at_a_cutoff_does_not_generate_the_cutoff_mode` |
-| The exact (Hankel) modal sum against the far-field form | meet far from the source, part near it; an unknown form is refused | relative 1e-3 far, 1e-2 near | `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_the_forms_meet_far_from_the_source`, `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_the_forms_part_near_the_source`, `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_an_unknown_form_is_refused` |
+| The exact (Hankel) modal sum against the far-field form | meet far from the source, also for complex (lossy) mode shapes, and part near it; an unknown form is refused | relative 1e-3 far, 1e-2 near | `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_the_forms_meet_far_from_the_source`, `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_the_forms_meet_for_complex_mode_shapes`, `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_the_forms_part_near_the_source`, `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_an_unknown_form_is_refused` |
 
 ### 1.3 Rigid-bottom waveguide (SPARC)
 
@@ -82,8 +84,11 @@ also elementary (`test_benchmarks_sparc.py`).
 ### 1.4 Ideal wedge (ASA benchmark Problem I)
 
 Buckingham & Tolstoy, JASA 87, 1511-1513 (1990): a 2.86° up-slope wedge with
-pressure-release surface and bottom, 25 Hz. A rigid-bottom series is written
-in the test as well. A one-way PE cannot be scored here: at a receiver
+pressure-release surface and bottom, 25 Hz. Their series is the field of a
+line source parallel to the apex, so the published test runs Bellhop with a
+line source (its plane geometry) and scores it against the series itself,
+with no 2-D to 3-D conversion. A rigid-bottom series is written in the test
+as well. A one-way PE cannot be scored here: at a receiver
 between the source and the apex the exact field is a standing wave, and RAM
 reproduces only its outgoing half (5.03 dB from the exact solution, 0.94 dB
 from the one-way series; `test_benchmarks_analytic.py::test_bellhop_ideal_wedge_matches_analytic`).
@@ -91,13 +96,13 @@ from the one-way series; `test_benchmarks_analytic.py::test_bellhop_ideal_wedge_
 | Engine | Measured | Bound | Test |
 |---|---|---|---|
 | Bellhop, 6 receivers | shape to about 0.4 dB | median < 1.5, max < 2.5 dB, std < 0.7 dB | `test_benchmarks_analytic.py::test_bellhop_ideal_wedge_matches_analytic` |
-| Bellhop, 4000 beams, pressure-release bottom | 0.63 / 1.72 dB at 30 m, 1.18 / 2.67 dB at 150 m (median / p90) | (1.0, 2.5) and (1.7, 3.5) | `test_benchmarks_published.py::test_bellhop_follows_the_ideal_wedge_at_both_published_receivers` |
-| Bellhop, 4000 beams, rigid bottom | 0.72 / 1.82 dB at 30 m, 1.85 / 4.94 dB at 150 m | (1.1, 2.6) and (2.5, 6.0) | `test_benchmarks_published.py::test_bellhop_follows_the_ideal_wedge_at_both_published_receivers` |
+| Bellhop line source, 4000 beams, pressure-release bottom | 0.47 / 1.683 dB at 30 m, 0.384 / 1.62 dB at 150 m (median / p90) | (0.9, 2.5) and (0.8, 2.4) | `test_benchmarks_published.py::test_bellhop_follows_the_ideal_wedge_at_both_published_receivers` |
+| Bellhop line source, 4000 beams, rigid bottom | 0.504 / 1.648 dB at 30 m, 1.119 / 3.143 dB at 150 m | (0.9, 2.5) and (1.6, 4.0) | `test_benchmarks_published.py::test_bellhop_follows_the_ideal_wedge_at_both_published_receivers` |
 
-Over a rigid bottom Bellhop sits 0.72 dB from the rigid series and 4.10 dB
+Over a rigid bottom Bellhop sits 0.504 dB from the rigid series and 4.0 dB
 from the pressure-release one, and the two series are 3.85 dB apart, so the
 rigid series is checked by an independent method. Null control: the flat
-200 m guide, 5.2-7.5 dB median from the wedge
+200 m guide, 4.43-6.95 dB median from the wedge
 (`test_benchmarks_published.py::test_bellhop_follows_the_ideal_wedge_at_both_published_receivers`).
 
 ### 1.5 Lloyd mirror, phase and source conventions
@@ -198,7 +203,12 @@ with a header naming the problem, the run settings and the source. COUPLE07
 stepwise coupled-mode code behind the ASA benchmark curves (Jensen & Ferla,
 JASA 87, 1499-1510, 1990); it carries no licence, so only its generated
 tables are shipped. Each table is checked on its own before an engine meets it
-(the `test_the_…_reference_table_…` tests below).
+(the `test_the_…_reference_table_…` tests below). Every reference was computed
+with water of unit density (g/cm³), so every environment of these tests is
+built with `water_density=1.0` rather than uacpy's default sea water
+(`water_density=1.027`): the engines solve the problem the reference solved.
+`test_benchmarks_published.py::test_every_benchmark_environment_holds_the_references_water`
+holds every builder to it.
 
 ### 3.1 ASA upslope wedge, 25 Hz
 
@@ -211,14 +221,14 @@ two deep nulls at 30 m sit at 1.16 and 1.87 km
 
 | Engine | RMS 30 m / 150 m | Bound | Null control | Test |
 |---|---|---|---|---|
-| RAM mpirams (dr 5 m, dz 0.25 m, Padé 6) | 0.230 / 0.213 dB, nulls on the reference sample | 0.5 dB | 6.16 / 5.83 dB | `test_benchmarks_published.py::test_ram_matches_the_coupled_mode_reference_in_the_asa_wedge` |
-| RAM ramgeo (same grid) | 0.225 / 0.215 dB | 0.5 dB | 6.16 / 5.83 dB | `test_benchmarks_published.py::test_ram_matches_the_coupled_mode_reference_in_the_asa_wedge` |
-| Kraken coupled (15 profiles) | 2.747 / 2.422 dB, nulls 1.18 / 1.87 km | 3.5 dB | about 5.8 dB | `test_benchmarks_published.py::test_kraken_mode_sums_follow_the_asa_wedge_within_their_method_error` |
-| Kraken adiabatic | 2.215 / 2.517 dB, nulls 1.16 / 1.89 km | 3.3 dB | about 5.8 dB | `test_benchmarks_published.py::test_kraken_mode_sums_follow_the_asa_wedge_within_their_method_error` |
-| Bellhop, default fan | 2.023 / 2.322 dB, nulls 1.14 / 1.86 km plus a spurious one at 1.56 km | 2.8 dB | 5.65 dB | `test_benchmarks_published.py::test_bellhop_follows_the_asa_wedge_within_a_ray_models_error_at_25_hz` |
+| RAM mpirams (dr 5 m, dz 0.25 m, Padé 6) | 0.110 / 0.133 dB, nulls on the reference sample | 0.3 dB | 6.114 / 5.765 dB | `test_benchmarks_published.py::test_ram_matches_the_coupled_mode_reference_in_the_asa_wedge` |
+| RAM ramgeo (same grid) | 0.106 / 0.134 dB | 0.3 dB | 6.114 / 5.765 dB | `test_benchmarks_published.py::test_ram_matches_the_coupled_mode_reference_in_the_asa_wedge` |
+| Kraken coupled (15 profiles) | 2.756 / 2.392 dB, nulls 1.18 / 1.88 km | 3.5 dB | 5.742 dB or more | `test_benchmarks_published.py::test_kraken_mode_sums_follow_the_asa_wedge_within_their_method_error` |
+| Kraken adiabatic | 2.221 / 2.502 dB, nulls 1.16 / 1.89 km | 3.3 dB | 5.742 dB or more | `test_benchmarks_published.py::test_kraken_mode_sums_follow_the_asa_wedge_within_their_method_error` |
+| Bellhop, default fan | 1.834 / 2.141 dB, nulls 1.14 / 1.86 km plus a spurious one at 1.56 km | 2.6 dB | 5.473 / 5.726 dB | `test_benchmarks_published.py::test_bellhop_follows_the_asa_wedge_within_a_ray_models_error_at_25_hz` |
 
-RAM on its automatic grid lands at 0.37 / 0.66 dB in 44 s instead of 1.5 s,
-the excess inside 500 m of the source, so the test pins the grid
+RAM on its automatic grid lands at 0.298 / 0.674 dB in 8.9 s instead of 2.6 s,
+so the test pins the grid
 (`test_benchmarks_published.py::test_ram_matches_the_coupled_mode_reference_in_the_asa_wedge`).
 
 ### 3.2 NORDA PE Workshop I, Test Case 3b, 250 Hz
@@ -232,16 +242,17 @@ seven deep nulls over a 63-113 dB field
 
 | Engine (defaults) | Median / p90 TL difference | Bound | Test |
 |---|---|---|---|
-| RAM | 0.211 / 1.09 dB | 0.4 / 1.6 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
-| Kraken | 0.273 / 1.07 dB | 0.45 / 1.6 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
-| Scooter | 0.432 / 2.06 dB | 0.7 / 3.3 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
-| Bellhop | 5.37 dB median, +4.08 dB mean | pinned between 3.0 and 7.0 dB; mid-column within 1.0 dB of Kraken | `test_benchmarks_published.py::test_bellhop_loses_the_near_bed_field_of_pe_workshop_3b` |
+| RAM | 0.160 / 0.763 dB | 0.35 / 1.3 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
+| Kraken | 0.067 / 0.555 dB | 0.2 / 1.1 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
+| Scooter | 0.192 / 1.12 dB | 0.4 / 1.8 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
+| Bellhop | 4.41 dB median, -0.77 dB mean | pinned between 3.0 and 7.0 dB; mid-column within 1.0 dB of Kraken | `test_benchmarks_published.py::test_bellhop_loses_the_near_bed_field_of_pe_workshop_3b` |
 
-The wave engines' nulls land 0-20 m short of the table's, the same 10 m in all
-three, so that shift is the reference's — but for Scooter's 6.95 km null,
-which lands 50 m short and moves with the edges of its wavenumber window.
+RAM and Kraken put six of the table's seven deep nulls on its sample and the
+6.95 km one 10 m short; Scooter's 6.95 km null lands 50 m short and moves with
+the edges of its wavenumber window. Bellhop's error is in the interference
+pattern rather than the mean level, and its mean moves with the beam type.
 Null control: a lossless bottom,
-11 dB median from the reference
+11.46-11.54 dB median from the reference
 (`test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference`).
 
 ### 3.3 Square-wave corrugated seafloor, 25 Hz
@@ -261,10 +272,10 @@ The measure is the mean TL offset from the two-way reference over
 
 | Engine | Mean offset | Pinned within | Null control (flat guide) | Test |
 |---|---|---|---|---|
-| RAM mpirams, density 2.5 | +4.35 dB | (3.0, 5.7) | -1.95 dB | `test_benchmarks_published.py::test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference` |
-| RAM ramgeo, density 2.5 | +5.47 dB | (4.0, 7.0) | outside | `test_benchmarks_published.py::test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference` |
-| Kraken coupled, density 2.5 | +1.20 dB | (0.3, 2.5) | -1.97 dB | `test_benchmarks_published.py::test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference` |
-| RAM mpirams, density 1.5 | +0.50 dB | (-0.3, 1.3) | -1.03 dB | `test_benchmarks_published.py::test_the_pe_offset_beyond_the_corrugation_grows_with_the_bottom_density` |
+| RAM mpirams, density 2.5 | +4.70 dB | (3.4, 6.0) | -1.94 dB | `test_benchmarks_published.py::test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference` |
+| RAM ramgeo, density 2.5 | +5.82 dB | (4.4, 7.4) | -1.94 dB | `test_benchmarks_published.py::test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference` |
+| Kraken coupled, density 2.5 | +2.83 dB | (1.7, 4.0) | -1.96 dB | `test_benchmarks_published.py::test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference` |
+| RAM mpirams, density 1.5 | +0.69 dB | (-0.1, 1.5) | -0.99 dB | `test_benchmarks_published.py::test_the_pe_offset_beyond_the_corrugation_grows_with_the_bottom_density` |
 
 Why the one-way engines differ is in §5.
 
@@ -275,21 +286,24 @@ Water 240 m deep with a weak sound-speed minimum (1500, 1498, 1500 m/s at 0,
 receiver 90 m (*Computational Ocean Acoustics*, Sect. 4.10.2,
 Figs. 4.17-4.18). The weak speed contrast traps few modes while the density
 contrast puts much of the field in the continuous spectrum. Reference:
-Scooter with `c_high=1e9` through uacpy, `benchmarks/bucker_waveguide_100hz_scooter.txt`,
-checked against OAST
+Scooter with `c_high=1e9` through uacpy on water of density 1.0,
+`benchmarks/bucker_waveguide_100hz_scooter.txt`, checked against OAST
 (`test_benchmarks_published.py::test_the_bucker_reference_table_spans_the_published_ranges`).
 
 | Engine | Median / p90 TL difference over 2-20 km | Bound | Test |
 |---|---|---|---|
-| OAST at its defaults | 0.006 / 0.03 dB | 0.05 / 0.25 dB | `test_benchmarks_published.py::test_two_wavenumber_integration_codes_agree_on_the_bucker_waveguide` |
-| Kraken `leaky_modes=True` | 0.013 / 0.06 dB | 0.05 / 0.3 dB | `test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide` |
-| Kraken at its defaults | 0.128 / 1.71 dB | 0.3 / 2.3 dB | `test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide` |
-| Scooter at its defaults | 0.102 / 0.64 dB | 0.3 / 1.2 dB | `test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide` |
-| RAM `zmax=2000` | 0.085 / 0.62 dB | 0.3 / 1.2 dB | `test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide` |
-| RAM at its defaults (automatic domain, zmax 1659 m) | 0.121 dB median | < 0.3 dB | `test_benchmarks_published.py::test_ram_default_domain_reaches_the_bucker_continuous_spectrum` |
-| Kraken trapped modes only (`c_high` at 1505 m/s) | 1.542 / 8.43 dB | pinned between 0.8 and 2.5 dB median, p90 > 4.0 | `test_benchmarks_published.py::test_a_trapped_mode_sum_misses_the_bucker_continuous_spectrum` |
+| OAST at its defaults | 0.0145 / 0.048 dB | 0.05 / 0.25 dB | `test_benchmarks_published.py::test_two_wavenumber_integration_codes_agree_on_the_bucker_waveguide` |
+| Kraken `leaky_modes=True` | 0.0198 / 0.07 dB | 0.05 / 0.3 dB | `test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide` |
+| Kraken at its defaults | 0.1235 / 1.755 dB | 0.3 / 2.3 dB | `test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide` |
+| RAM `zmax=2000` | 0.0776 / 0.594 dB | 0.3 / 1.2 dB | `test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide` |
+| RAM at its defaults (automatic domain, zmax 1688.9 m) | 0.1188 dB median | < 0.3 dB | `test_benchmarks_published.py::test_ram_default_domain_reaches_the_bucker_continuous_spectrum` |
+| Kraken trapped modes only (`c_high` at 1505 m/s) | 1.574 / 8.667 dB | pinned between 0.8 and 2.5 dB median, p90 > 4.0 | `test_benchmarks_published.py::test_a_trapped_mode_sum_misses_the_bucker_continuous_spectrum` |
 
-Null control: a density-1.0 half-space, 2.4-2.7 dB median from the reference
+Scooter at its defaults is not scored: its default `c_high` is unbounded, so
+it is the run that generated the table
+(`test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide`).
+Null control: a density-1.0 half-space, the water's own density, 2.44-2.60 dB
+median from the reference
 (`test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide`).
 
 ### 3.5 NORDA PE Workshop I, Test Case 4c, 25 Hz
@@ -300,17 +314,18 @@ shelf to 250 km, over a 454 m sediment that follows the seafloor; source
 `benchmarks/pe_workshop_4c_25hz_couple07.txt`
 (`test_benchmarks_published.py::test_the_pe_workshop_4c_reference_table_spans_the_published_ranges`).
 COUPLE makes `1/c²` linear between the listed points, and Kraken fed the same
-points `c`-linear sat 3.7 dB median off where `1/c²`-linear gives 0.35 dB
+points `c`-linear sat 3.81 / 3.72 dB median off at 150 / 700 m where
+`1/c²`-linear gives 0.101 / 0.153 dB
 (`benchmarks/pe_workshop_4c_25hz_couple07.txt`). The engine tests here are marked `slow`.
 
 | Engine | Flat 5-150 km, median / p90 at 150 m and 700 m | Slope / shelf RMS at 150 m | Bounds (flat median, flat p90, slope, shelf) | Test |
 |---|---|---|---|---|
-| RAM (automatic grid) | 0.64 / 2.41 and 0.83 / 3.03 dB | 0.44 / 0.74 dB | 1.0, 3.6, 1.0, 1.3 | `test_benchmarks_published.py::test_engines_follow_pe_workshop_4c_up_the_slope_and_onto_the_shelf` |
-| Kraken adiabatic | 0.35 / 1.44 and 0.36 / 1.27 dB | 1.27 / 1.44 dB | 0.6, 2.0, 2.0, 2.2 | `test_benchmarks_published.py::test_engines_follow_pe_workshop_4c_up_the_slope_and_onto_the_shelf` |
-| Kraken coupled (automatic decomposition) | — | shelf 21.98 dB RMS, mean -21.67 dB | expected failure (strict) | `test_benchmarks_published.py::test_kraken_coupled_modes_keep_the_pe_workshop_4c_shelf_level` |
+| RAM (automatic grid) | 0.279 / 1.172 and 0.413 / 1.832 dB | 0.457 / 0.547 dB | 0.7, 2.5, 0.9, 1.0 | `test_benchmarks_published.py::test_engines_follow_pe_workshop_4c_up_the_slope_and_onto_the_shelf` |
+| Kraken adiabatic | 0.101 / 0.425 and 0.153 / 0.584 dB | 1.253 / 1.409 dB | 0.4, 1.0, 1.8, 2.0 | `test_benchmarks_published.py::test_engines_follow_pe_workshop_4c_up_the_slope_and_onto_the_shelf` |
+| Kraken coupled (automatic decomposition) | — | shelf 22.069 dB RMS, mean -21.761 dB | expected failure (strict) | `test_benchmarks_published.py::test_kraken_coupled_modes_keep_the_pe_workshop_4c_shelf_level` |
 
-Null control: the slope removed, 4.5 dB RMS over the slope and 3.2 dB over
-the shelf
+Null control: the slope removed, 4.422-4.456 dB RMS over the slope and
+3.154-3.172 dB over the shelf
 (`test_benchmarks_published.py::test_engines_follow_pe_workshop_4c_up_the_slope_and_onto_the_shelf`).
 
 ---
@@ -334,27 +349,28 @@ shows up as a failing test rather than a silently better number.
 - **Bellhop at low `D/λ`.** A ray model needs many wavelengths of water
   ([Bellhop §2](bellhop.md#2-when-to-use-it--and-when-not-to)). On the ASA
   wedge at 25 Hz the water is 3.3 wavelengths deep and Bellhop sits at
-  2.023 dB RMS, with a null the reference does not have, whatever the beam
+  1.834 dB RMS, with a null the reference does not have, whatever the beam
   count
   (`test_benchmarks_published.py::test_bellhop_follows_the_asa_wedge_within_a_ray_models_error_at_25_hz`).
-  Half a metre above the seafloor in Test Case 3b it is 5.37 dB median off,
-  and against Kraken the gap closes to 0.44 dB as source and receiver rise to
+  Half a metre above the seafloor in Test Case 3b it is 4.41 dB median off,
+  and against Kraken the gap closes to 0.48 dB as source and receiver rise to
   50 m (`test_benchmarks_published.py::test_bellhop_loses_the_near_bed_field_of_pe_workshop_3b`).
   On the stepped waveguide at 25 Hz its 1.233 dB median is the method's error
   (`test_benchmarks_coupled_mode.py::test_bellhop_stepped_waveguide_matches_coupled_mode_reference`).
 - **The PE codes on a dense stair-step.** Over the square-wave corrugated
   seafloor above, RAM keeps the field across the vertical step faces, an amplitude error that
   grows with the density contrast (Collins & Siegmann, *Parabolic Wave
-  Equations with Applications*, Sect. 2.6): mpirams is +4.35 dB at density
-  2.5, +0.50 at 1.5 and -0.11 at 1.0; ramgeo is +5.47 at 2.5, and rams, the
-  elastic PE with its own energy-flux correction, +5.03 to +5.41 over a 50 m/s
-  shear bottom; the mpirams figure does not move with the grid (+4.26 to +4.48 dB over dr, dz and
-  Padé order)
+  Equations with Applications*, Sect. 2.6): mpirams is +4.70 dB at density
+  2.5, +0.69 at 1.5 and -0.03 at 1.0; ramgeo is +5.82 at 2.5, and rams, the
+  elastic PE with its own energy-flux correction, +5.81 over a 50 m/s
+  shear bottom; over 36 grids — dr 1, 2, 5 and 10 m × dz 0.1, 0.25 and
+  0.5 m × Padé 4, 6 and 8, 1 m step faces — mpirams lands at +4.41 to
+  +5.31 dB, under a decibel of spread
   (`test_benchmarks_published.py::test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference`,
   `test_benchmarks_published.py::test_the_pe_offset_beyond_the_corrugation_grows_with_the_bottom_density`;
   [RAM §9](ram.md#9-gotchas)).
 - **Kraken coupled modes on Test Case 4c.** At its automatic decomposition
-  `Kraken(mode_coupling='coupled')` puts the shelf 21.98 dB RMS from the
+  `Kraken(mode_coupling='coupled')` puts the shelf 22.069 dB RMS from the
   reference, the field gaining energy; the test is a strict expected failure
   (`test_benchmarks_published.py::test_kraken_coupled_modes_keep_the_pe_workshop_4c_shelf_level`).
   `field.exe`'s projection amplifies modes at and above the half-space speed;
@@ -364,17 +380,19 @@ shows up as a failing test rather than a silently better number.
 - **The coupled method's own error.** Where the projection behaves, what is
   left is pressure matching itself: COUPLE07 run with the same one-way
   pressure matching sits 4.1 dB below its single-scatter reference on the 4c
-  shelf at 150 m, and on the corrugation it is 1.13 dB above its two-way
-  solution where Kraken's coupled run is at 1.20 dB
-  ([Kraken §6.6](kraken.md#66-range-dependence-adiabatic-versus-coupled)).
+  shelf at 150 m ([Kraken §6.6](kraken.md#66-range-dependence-adiabatic-versus-coupled)),
+  and on the corrugation it is 1.13 dB above its two-way solution, where
+  Kraken's coupled run lands at +2.83 dB at its automatic decomposition and
+  +4.02 dB with the 209 profiles the quarter-wavelength criterion asks for
+  (`test_benchmarks_published.py::test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference`).
   On the ASA wedge the coupled answer moves with the segment count rather
-  than converging: 2.747, 2.908 and 3.496 dB at 30 m for 15, 51 and 200
+  than converging: 2.756, 2.914 and 3.52 dB at 30 m for 15, 51 and 200
   profiles
   (`test_benchmarks_published.py::test_kraken_mode_sums_follow_the_asa_wedge_within_their_method_error`).
 - **Kraken's trapped modes on Bucker's waveguide.** A sum over the trapped
-  modes misses the continuous spectrum a dense bottom feeds: 1.542 dB median,
-  8.43 dB p90, against 0.013 / 0.06 dB with `leaky_modes=True`; the defaults
-  sit between, at 0.128 / 1.71 dB
+  modes misses the continuous spectrum a dense bottom feeds: 1.574 dB median,
+  8.667 dB p90, against 0.0198 / 0.07 dB with `leaky_modes=True`; the defaults
+  sit between, at 0.1235 / 1.755 dB
   (`test_benchmarks_published.py::test_a_trapped_mode_sum_misses_the_bucker_continuous_spectrum`,
   `test_benchmarks_published.py::test_engines_reproduce_the_bucker_waveguide`;
   [Kraken §6.5](kraken.md#65-leaky-modes)).

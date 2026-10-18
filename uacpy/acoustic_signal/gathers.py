@@ -28,7 +28,9 @@ from uacpy.acoustic_signal.windows import (_default_noverlap, _fk_tapers,
 # separates them from the single-channel estimators.
 # ──────────────────────────────────────────────────────────────────────
 
-_RADON_KINDS = ("linear", "parabolic", "hyperbolic")
+#: The Radon moveout families. The linear one, ``t = tau + p*x``, is the
+#: slant stack :func:`taup_transform` computes (with :func:`inverse_taup`).
+_RADON_KINDS = ("parabolic", "hyperbolic")
 
 
 _RadonFields = namedtuple("RadonResult", "moveout taus panel")
@@ -40,10 +42,9 @@ class RadonResult(PlottedResult, _RadonFields):
 
     The tuple is the measurement, so ``moveout, taus, panel = ...``
     keeps working; :meth:`plot` is the one obvious way to draw it. ``kind``
-    is one of ``'linear'`` (slowness, s/m), ``'parabolic'`` (curvature,
-    s/m²) or ``'hyperbolic'`` (velocity, m/s): it says what ``moveout``
-    measures, so it is an attribute rather than a fourth tuple element, as
-    ``FKResult.scaling`` is.
+    is ``'parabolic'`` (curvature, s/m²) or ``'hyperbolic'`` (velocity,
+    m/s): it says what ``moveout`` measures, so it is an attribute rather
+    than a fourth tuple element, as ``FKResult.scaling`` is.
     """
 
     _attrs = ("kind",)
@@ -59,8 +60,7 @@ class RadonResult(PlottedResult, _RadonFields):
         return self
 
     def _field_units(self):
-        moveout = {"linear": "s/m", "parabolic": "s/m²",
-                   "hyperbolic": "m/s"}[self.kind]
+        moveout = {"parabolic": "s/m²", "hyperbolic": "m/s"}[self.kind]
         return {"moveout": moveout, "taus": "s", "panel": None}
 
 
@@ -83,10 +83,10 @@ class TauPResult(PlottedResult,
 
 #: What :attr:`FKResult.scaling` may hold: ``'density'`` for the
 #: calibrated panel of ``fk_transform(..., scaling='density')`` (x² per
-#: Hz·rad/m, two-sided in f and k, ``ΣP·Δf·Δk = ⟨x²⟩``) and ``'power'`` for
+#: Hz·rad/m, two-sided in f and k, ``ΣP·Δf·Δk = ⟨x²⟩``) and ``'raw'`` for
 #: the raw ``|FK|²`` of the windowed, zero-padded FFT, which carries no
 #: physical unit.
-FK_SCALINGS = ("density", "power")
+FK_SCALINGS = ("density", "raw")
 
 
 _FKFields = namedtuple("FKResult", "frequencies wavenumbers power spectrum")
@@ -117,7 +117,7 @@ class FKResult(PlottedResult, _FKFields):
 
     def _field_units(self):
         # 'density' is the calibrated panel of scaling='density' (x² per
-        # Hz·rad/m); 'power' is the raw |FK|², calibrated to no unit.
+        # Hz·rad/m); 'raw' is the raw |FK|², calibrated to no unit.
         power = "Pa²/(Hz·rad/m)" if self.scaling == "density" else None
         return {"frequencies": "Hz", "wavenumbers": "rad/m",
                 "power": power, "spectrum": None}
@@ -250,7 +250,7 @@ def _flip_wavenumber_axis(F):
     travelling towards +x on ``ω = -c·k``. Reversing the (unshifted) spatial
     axis re-indexes column ``ν`` to hold ``-ν``, so the wave lands on
     ``ω = +c·k`` — the package-wide ``k = ω/c`` convention that
-    :func:`taup_transform` and :func:`radon_transform` already use. The map is
+    :func:`taup_transform` already uses. The map is
     its own inverse, so :func:`inverse_fk` applies the same reversal.
     """
     return np.roll(F[:, ::-1], 1, axis=1)
@@ -258,21 +258,46 @@ def _flip_wavenumber_axis(F):
 
 def _moveout_times(kind, taus, x, m):
     """Moveout time ``t(tau, x; m)`` for the requested Radon kind."""
-    if kind == "linear":
-        return taus + m * x
     if kind == "parabolic":
         return taus + m * x ** 2
-    if kind == "hyperbolic":
-        return np.sqrt(taus ** 2 + (x / m) ** 2)
-    raise ConfigurationError(
-        f"radon: kind must be one of {_RADON_KINDS}, got {kind!r}."
-    )
+    return np.sqrt(taus ** 2 + (x / m) ** 2)
+
+
+def _require_radon_kind(kind, who):
+    """Refuse a ``kind`` that is not a Radon moveout family, sending the
+    linear one to the slant stack."""
+    if kind == "linear":
+        raise ConfigurationError(
+            f"{who}: the linear moveout t = tau + p*x is the slant stack, "
+            f"which taup_transform / inverse_taup compute.",
+            remediation="Call taup_transform(data, sample_rate, dx, "
+                        "slownesses) (inverse_taup to go back), or pass "
+                        "kind='parabolic' or 'hyperbolic'.")
+    if kind not in _RADON_KINDS:
+        raise ConfigurationError(
+            f"{who}: kind must be one of {_RADON_KINDS}; got {kind!r}.")
 
 
 #: Fewest time samples a gather may have with more traces than samples before
 #: it reads as ``(nx, nt)``: the channel-count bound ``welch`` applies to a
 #: ``(n_samples, n_channels)`` record.
 _MAX_TRANSPOSED_NT = 64
+
+
+def _gather_time_first(d, axis, who):
+    """The 2-D gather ``d`` as ``(nt, nx)``. ``axis`` is its time axis:
+    ``None`` reads axis 0 and warns when the shape looks like ``(nx, nt)``
+    (:func:`_warn_if_gather_reads_transposed`); an integer is taken as
+    given."""
+    if axis is None:
+        _warn_if_gather_reads_transposed(*d.shape, who)
+        return d
+    try:
+        return np.moveaxis(d, int(axis), 0)
+    except (np.exceptions.AxisError, TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{who}: axis={axis!r} is not an axis of the 2-D gather shaped "
+            f"{d.shape}; pass 0 for (nt, nx) or 1 for (nx, nt).") from exc
 
 
 def _warn_if_gather_reads_transposed(nt, nx, who):
@@ -287,29 +312,38 @@ def _warn_if_gather_reads_transposed(nt, nx, who):
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
-def radon_transform(data, sample_rate, dx, moveout, kind="linear", x0=0.0):
-    """Forward Radon transform (slant stack) of a ``(nt, nx)`` gather.
+def radon_transform(data, sample_rate, dx, moveout, kind, x0=0.0, *,
+                    axis=None):
+    """Forward Radon transform of a ``(nt, nx)`` gather along a curved
+    moveout family.
 
     Sums the data along moveout curves ``t = t(tau, x)``:
 
-    * ``linear``      ``t = tau + p*x``        (``moveout`` = slowness p, s/m)
     * ``parabolic``   ``t = tau + q*x**2``     (``moveout`` = curvature q, s/m^2)
     * ``hyperbolic``  ``t = sqrt(tau^2+(x/v)^2)`` (``moveout`` = velocity v, m/s)
+
+    The linear family ``t = tau + p*x`` is the slant stack
+    :func:`taup_transform` computes.
 
     Parameters
     ----------
     data : ndarray
-        Gather, shape ``(nt, nx)`` (time down columns, offset across rows).
+        Gather, shape ``(nt, nx)`` (time down columns, offset across rows),
+        or ``(nx, nt)`` with ``axis=1``.
     sample_rate : float
         Temporal sample rate (Hz).
     dx : float
         Sensor spacing (m).
     moveout : array
         Moveout parameters to scan (units per ``kind`` above).
-    kind : {'linear', 'parabolic', 'hyperbolic'}
-        Moveout family. ``'linear'`` is the tau-p slant stack.
+    kind : {'parabolic', 'hyperbolic'}
+        Moveout family.
     x0 : float
         Reference offset (m) subtracted from sensor positions.
+    axis : int, optional
+        The time axis of ``data``. ``None`` (default) is axis 0, with a
+        warning when the shape looks like ``(nx, nt)``; an integer is taken
+        as given.
 
     Returns
     -------
@@ -324,8 +358,9 @@ def radon_transform(data, sample_rate, dx, moveout, kind="linear", x0=0.0):
         remediation="Stack the real and imaginary parts separately "
                     "(the transform is linear), or use fk_transform, "
                     "which accepts complex data.")
+    _require_radon_kind(kind, "radon_transform")
+    d = _gather_time_first(d, axis, "radon_transform")
     nt, nx = d.shape
-    _warn_if_gather_reads_transposed(nt, nx, "radon_transform")
     sample_rate = require_positive_finite_scalar(
         sample_rate, "radon_transform", "sample_rate", " Hz")
     dx = require_positive_finite_scalar(dx, "radon_transform", "dx", " m")
@@ -336,12 +371,6 @@ def radon_transform(data, sample_rate, dx, moveout, kind="linear", x0=0.0):
             "radon_transform: hyperbolic moveout is a velocity (m/s) and the "
             "moveout curve sqrt(tau^2 + (x/v)^2) divides by it, so every "
             f"value must be > 0; got min {moveout.min()}.")
-    if kind == "linear":
-        # The linear Radon transform is the slant stack taup_transform
-        # computes, and it aliases in slowness the same way.
-        _warn_spatial_aliasing(np.fft.rfft(d, axis=0),
-                               np.fft.rfftfreq(nt, 1.0 / float(sample_rate)),
-                               dx, moveout, "radon_transform")
     taus = np.arange(nt) / float(sample_rate)
     R = np.zeros((moveout.size, nt))
     for i, m in enumerate(moveout):
@@ -351,7 +380,7 @@ def radon_transform(data, sample_rate, dx, moveout, kind="linear", x0=0.0):
     return RadonResult(moveout, taus, R, kind=kind)
 
 
-def inverse_radon(R, sample_rate, dx, moveout, nx, kind="linear", x0=0.0):
+def inverse_radon(R, sample_rate, dx, moveout, nx, kind, x0=0.0):
     """Adjoint (back-projection) Radon transform: ``(n_moveout, nt) -> (nt, nx)``.
 
     Spreads each Radon sample back along its moveout curve. This is the matched
@@ -376,11 +405,12 @@ def inverse_radon(R, sample_rate, dx, moveout, nx, kind="linear", x0=0.0):
         The scanned parameter axis.
     nx : int
         Traces in the output gather.
-    kind : {'linear', 'parabolic', 'hyperbolic'}, optional
-        The moveout family. Default ``'linear'``.
+    kind : {'parabolic', 'hyperbolic'}
+        The moveout family.
     x0 : float, optional
         Reference offset (m) of the forward transform. Default 0.
     """
+    _require_radon_kind(kind, "inverse_radon")
     R = np.asarray(R, dtype=float)
     if R.ndim != 2:
         raise ConfigurationError(
@@ -415,7 +445,7 @@ def inverse_radon(R, sample_rate, dx, moveout, nx, kind="linear", x0=0.0):
             # `np.interp` gives them, which is the transpose of that
             # interpolation. Gathering instead — reading the curve back with
             # `np.interp(taus, tt, ...)` — only coincides with the transpose
-            # when the moveout is a pure time shift (linear, parabolic); a
+            # when the moveout is a pure time shift (parabolic); a
             # hyperbolic curve compresses near tau=0 and the gather returns
             # early samples at a fraction of their forward weight.
             idx = _moveout_times(kind, taus, x[ix], m) * fs
@@ -431,35 +461,31 @@ def inverse_radon(R, sample_rate, dx, moveout, nx, kind="linear", x0=0.0):
 
 
 def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
-                   p_max=None, *, x0=0.0, window=None, nfft=None):
+                   p_max=None, *, x0=0.0, window="boxcar", nfft=None,
+                   axis=None):
     """Forward linear tau-p (slant stack), frequency-domain.
 
     Returns a :class:`TauPResult` namedtuple ``(slownesses, taus, panel)``:
     slowness axis (s/m), intercept-time axis (s), and the panel ``(n_slowness,
     NT)``.
 
-    ``x0`` is the reference offset (m) subtracted from the sensor positions, as
-    in :func:`radon_transform` — it walks the same moveout curve
-    ``t = tau + p*(x - x0)``.
+    ``x0`` is the reference offset (m) subtracted from the sensor positions,
+    as in :func:`radon_transform`: the moveout curve is
+    ``t = tau + p*(x - x0)``. This is the linear Radon transform (slant
+    stack); :func:`radon_transform` scans the curved families.
 
     Built from FFT products, the transform is **circular in tau**: each trace
     is read at ``(tau + p*(x - x0)) mod (NT/fs)``, ``NT`` being the time-FFT
-    length. An intercept ``t0 - p*(x - x0)`` outside the ``[0, NT/fs)`` window
-    (either sign) therefore stacks at full amplitude at that intercept
-    **modulo** ``NT/fs`` — a tau where :func:`radon_transform`
-    (``kind='linear'``, same ``x0``), which drops out-of-window samples, is
-    exactly zero.
-
-    An in-window intercept is necessary for the two to agree but not
-    sufficient: the shift here is a spectral phase ramp (band-limited) while
-    the Radon panel interpolates each trace linearly, so a moveout of a
-    non-integer number of samples per trace separates them even in-window —
-    measured 9.1% of the peak at ``p*dx*fs = 2.5``. Expect exact agreement
-    only for a whole-sample moveout.
+    length, and shifted by a spectral phase ramp (band-limited, exact for any
+    moveout, whole-sample or not). An intercept ``t0 - p*(x - x0)`` outside
+    the ``[0, NT/fs)`` window (either sign) therefore stacks at full
+    amplitude at that intercept **modulo** ``NT/fs``; ``nfft`` (below) adds a
+    guard band against it.
 
     ``window`` is a temporal :func:`scipy.signal.get_window` spec (name or
     ``(name, *params)`` tuple) applied down each trace before the time FFT to
-    curb leakage; ``None`` is rectangular. ``nfft`` zero-pads the time FFT to
+    curb leakage; the default ``'boxcar'`` (which ``None`` also selects) is
+    no taper. ``nfft`` zero-pads the time FFT to
     ``NT >= nt`` samples; ``None`` keeps ``nt``. The ``tau`` spacing is
     ``1/fs`` either way — zero-padding does not refine it, it **lengthens**
     the tau axis into a guard band: an intercept up to ``(NT - nt)/fs`` s
@@ -469,7 +495,7 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
     Parameters
     ----------
     data : ndarray
-        Gather ``(nt, nx)``.
+        Gather ``(nt, nx)``, or ``(nx, nt)`` with ``axis=1``.
     sample_rate : float
         Temporal sample rate (Hz).
     dx : float
@@ -484,9 +510,12 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
     x0 : float, optional
         Reference offset (m). Default 0.
     window : str or tuple, optional
-        Temporal taper (see below); ``None`` is rectangular.
+        Temporal taper (see above). Default ``'boxcar'``, no taper, which
+        ``None`` also selects.
     nfft : int, optional
-        Time-FFT length (see below); ``None`` keeps ``nt``.
+        Time-FFT length (see above); ``None`` keeps ``nt``.
+    axis : int, optional
+        The time axis of ``data``, as on :func:`radon_transform`.
 
     The spatial axis has no such knob, and deliberately so
     -----------------------------------------------------
@@ -517,8 +546,8 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
         remediation="Stack the real and imaginary parts separately "
                     "(the transform is linear), or use fk_transform, "
                     "which accepts complex data.")
+    d = _gather_time_first(d, axis, "taup_transform")
     nt, nx = d.shape
-    _warn_if_gather_reads_transposed(nt, nx, "taup_transform")
     fs = require_positive_finite_scalar(sample_rate, "taup_transform",
                                         "sample_rate", " Hz")
     dx = require_positive_finite_scalar(dx, "taup_transform", "dx", " m")
@@ -526,7 +555,8 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
     if NT < nt:
         raise ConfigurationError(
             f"taup_transform: nfft ({NT}) must be >= nt ({nt}) (zero-pad only)")
-    d = d * _spectral_window(window, nt)[:, None]
+    d = d * _spectral_window("boxcar" if window is None else window,
+                             nt)[:, None]
     x = np.arange(nx) * dx - float(x0)
     if slownesses is None:
         if p_max is None:
@@ -543,8 +573,7 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
     for i, p in enumerate(slownesses):
         # Sign: numpy's forward transform carries exp(-j*omega*t), so a
         # +exp(j*omega*p*x) factor advances trace x by p*x. Summing over x is
-        # then u(tau, p) = sum_x d(tau + p*x, x) — the same moveout curve
-        # `radon_transform(kind='linear')` interpolates in the time domain.
+        # then u(tau, p) = sum_x d(tau + p*x, x), the linear moveout curve.
         phase = np.exp(1j * omega[:, None] * (p * x)[None, :])
         taup[i] = np.fft.irfft(np.sum(D * phase, axis=1), n=NT)
     return TauPResult(slownesses, np.arange(NT) / fs, taup)
@@ -620,7 +649,8 @@ def inverse_fk(FK):
     The forward ``window`` taper is **not** undone: a windowed forward
     transform inverts to the *tapered* gather, and recovering the original
     data requires dividing the tapers back out (undefined where they are
-    zero). For an exact round trip run ``fk_transform`` with ``window=None``.
+    zero). For an exact round trip run ``fk_transform`` with its default
+    ``window='boxcar'``.
 
     Parameters
     ----------
@@ -646,7 +676,7 @@ def inverse_fk(FK):
 
 
 def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
-                 window=None, nfft=None, scaling='power'):
+                 window="boxcar", nfft=None, scaling='density', axis=None):
     """Frequency-wavenumber transform with optional Welch time-averaging.
 
     Returns an :class:`FKResult` namedtuple ``(frequencies, wavenumbers, power,
@@ -654,17 +684,17 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     wavenumber ``k = 2π·ν`` in **rad/m** (the package-wide ``k = ω/c``
     convention), so a wave travelling towards +x at speed ``c`` sits on the
     line ``ω = +c·k`` — the same sign as the apparent slowness ``p = +1/c``
-    that :func:`taup_transform` and :func:`radon_transform` report for it.
+    that :func:`taup_transform` reports for it.
     The spatial axis is therefore the negative of raw ``np.fft.fft2``
     indexing, whose ``exp(-i2πνx)`` kernel would place that wave on
     ``ω = -c·k``; directional f-k muting must use this sign.
-    ``power`` is the real ``|FK|^2`` panel (fftshifted); when ``scaling='density'``
-    it is a PSD density per ``Hz·rad/m`` with ``ΣP·Δf·Δk = ⟨x²⟩``, and the
-    result's ``scaling`` attribute reads ``'density'``; with ``scaling='power'``
-    (the default) it is the raw squared magnitude of the windowed, zero-padded
-    FFT, which grows with the record size and carries no physical unit, and
-    ``scaling`` reads ``'power'``. :func:`~uacpy.plot.plot_fk` labels
-    the panel from that attribute. Whenever the
+    ``power`` is the real ``|FK|^2`` panel (fftshifted); under the default
+    ``scaling='density'`` it is a PSD density per ``Hz·rad/m`` with
+    ``ΣP·Δf·Δk = ⟨x²⟩``, and the result's ``scaling`` attribute reads
+    ``'density'``; with ``scaling='raw'`` it is the raw squared magnitude of
+    the windowed, zero-padded FFT, which grows with the record size and
+    carries no physical unit, and ``scaling`` reads ``'raw'``.
+    :func:`~uacpy.plot.plot_fk` labels the panel from that attribute. Whenever the
     settings yield a single segment (``nperseg=None``, i.e. the whole record, or
     an ``nperseg``/``noverlap`` pair that fits only one block) ``spectrum`` is
     that segment's complex (fftshifted) panel for :func:`inverse_fk`. With
@@ -677,7 +707,7 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
     Parameters
     ----------
     data : ndarray
-        Gather ``(nt, nx)``.
+        Gather ``(nt, nx)``, or ``(nx, nt)`` with ``axis=1``.
     sample_rate : float
         Temporal sample rate (Hz).
     dx : float
@@ -690,8 +720,17 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
         set, to the window's own overlap, as on :func:`welch` (half a
         segment for a rectangular or Hann window, 78 % for flat-top); ``0``
         otherwise. Must satisfy ``0 <= noverlap < nperseg``.
-    window, nfft, scaling
-        As in the single-segment transform, applied per segment.
+    window : str, tuple or list, optional
+        A :func:`scipy.signal.get_window` spec applied to both axes, or a
+        ``[time_spec, space_spec]`` list. Default ``'boxcar'``, no taper,
+        which ``None`` also selects (on either axis of a list).
+    nfft : int or (int, int), optional
+        Zero-padded transform shape ``(n_time, n_space)``; ``None`` keeps
+        the segment's.
+    scaling : {'density', 'raw'}, optional
+        The panel's unit (see above). Default ``'density'``.
+    axis : int, optional
+        The time axis of ``data``, as on :func:`radon_transform`.
     """
     if scaling not in FK_SCALINGS:
         raise ConfigurationError(
@@ -704,8 +743,8 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
         raise ConfigurationError(
             "fk_transform: data must be 2-D (nt, nx)"
             f"; got shape {d.shape}.")
+    d = _gather_time_first(d, axis, "fk_transform")
     nt, nx = d.shape
-    _warn_if_gather_reads_transposed(nt, nx, "fk_transform")
     fs = require_positive_finite_scalar(
         sample_rate, "fk_transform", "sample_rate", " Hz")
     dx = require_positive_finite_scalar(dx, "fk_transform", "dx", " m")

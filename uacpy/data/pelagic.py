@@ -42,7 +42,6 @@ from uacpy.core.geo import Coordinate, as_coordinate, normalize_lon
 from uacpy.data._geo import checked_max_distance, checked_offset
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
-from uacpy.data.sediment import bottom_from_grain_size
 from uacpy.core.exceptions import ValidityWarning
 
 __all__ = ['pelagic_lithology', 'pelagic_grain_size', 'fetch_bottom_pelagic']
@@ -94,7 +93,7 @@ def _in_siliceous_belt(lat: float, lon: Optional[float]) -> bool:
     return False
 
 
-def pelagic_lithology(depth_m: float, lat: float,
+def pelagic_lithology(depth: float, lat: float,
                       lon: Optional[float] = None) -> str:
     """Dominant deep-sea surficial lithology from water depth (m) and position.
 
@@ -102,8 +101,8 @@ def pelagic_lithology(depth_m: float, lat: float,
     carbonate compensation depth are open-ocean features. Shelf sediment is
     terrigenous and this model does not describe it, so a depth above the
     conventional shelf break warns — the belt test fires first and
-    unconditionally, so without it a 80 m shelf point at 60 deg came back as
-    diatom ooze (phi 9.0), identical to a 4800 m abyssal one.
+    unconditionally, so a 80 m shelf point at 60 deg gets diatom ooze (phi
+    9.0), identical to a 4800 m abyssal one, and the warning says so.
 
     ``lon`` restricts the *northern* siliceous belt to the subarctic Pacific
     sector (see :data:`SILICEOUS_PACIFIC_LON`; the Southern Ocean belt is
@@ -116,16 +115,16 @@ def pelagic_lithology(depth_m: float, lat: float,
 
     Parameters
     ----------
-    depth_m : float
+    depth : float
         Water depth (m).
     lat : float
         Latitude (deg).
     lon : float, optional
         Longitude (deg); see below.
     """
-    if depth_m < SHELF_BREAK_DEPTH:
+    if depth < SHELF_BREAK_DEPTH:
         warnings.warn(
-            f"pelagic_lithology: {depth_m:g} m is above the {SHELF_BREAK_DEPTH:g} m "
+            f"pelagic_lithology: {depth:g} m is above the {SHELF_BREAK_DEPTH:g} m "
             f"shelf break, and this model describes deep-sea facies only "
             f"(siliceous belt / carbonate compensation depth). Shelf sediment "
             f"is terrigenous. The value returned is a first-principles "
@@ -133,12 +132,12 @@ def pelagic_lithology(depth_m: float, lat: float,
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if _in_siliceous_belt(lat, lon):
         return 'diatom ooze'               # high-latitude siliceous belt
-    if depth_m >= CCD_DEPTH:
+    if depth >= CCD_DEPTH:
         return 'pelagic clay'              # below the carbonate compensation depth
     return 'calcareous ooze'               # above the CCD, low-to-mid latitude
 
 
-def pelagic_grain_size(depth_m: float, lat: float,
+def pelagic_grain_size(depth: float, lat: float,
                        lon: Optional[float] = None) -> float:
     """Representative mean grain size ϕ for the pelagic lithology at a point.
 
@@ -147,14 +146,14 @@ def pelagic_grain_size(depth_m: float, lat: float,
 
     Parameters
     ----------
-    depth_m : float
+    depth : float
         Water depth (m).
     lat : float
         Latitude (deg).
     lon : float, optional
         Longitude (deg), for the Pacific-sector test.
     """
-    return _LITHOLOGY_PHI[pelagic_lithology(depth_m, lat, lon)]
+    return _LITHOLOGY_PHI[pelagic_lithology(depth, lat, lon)]
 
 
 def _water_depth(point, timeout, verbose, cache_only):
@@ -167,6 +166,7 @@ def _water_depth(point, timeout, verbose, cache_only):
 
 def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
                          water_sound_speed: Optional[float] = None,
+                         water_density: Optional[float] = None,
                          model: str = DEFAULT_GRAIN_SIZE_MODEL,
                          hamilton_fit: Optional[str] = None,
                          depth: Optional[float] = None, cache_only: bool = False,
@@ -186,25 +186,29 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
     The water depth is taken from ``depth`` if given, else fetched from GEBCO
     (local cache, falling back to the live API unless ``cache_only``). The
     resulting lithology maps to a mean grain size ϕ and then a half-space via
-    :func:`uacpy.data.bottom_from_grain_size`. ``water_sound_speed`` (m/s)
+    :meth:`~uacpy.core.environment.BoundaryProperties.from_grain_size`.
+    ``water_sound_speed`` (m/s)
     scales the grain-size velocity ratio to the in-situ near-seabed water;
-    ``None`` uses the Hamilton reference. ``model`` picks the grain-size
+    ``None`` uses the Hamilton reference.
+    ``water_density`` (g/cm³) is the near-seabed water the density
+    ratio is carried against; ``None`` uses the package's one water (1.027).
+    ``model`` picks the grain-size
     relations (``'hamilton'`` or ``'apl-uw'``). ``timeout`` (s) bounds each
     live GEBCO request; a stalled host raises ``DataFetchError`` instead of
     blocking indefinitely.
     """
-    from uacpy.core.sediment import canonical_grain_size_selection
-    model, hamilton_fit = canonical_grain_size_selection(
+    from uacpy.core.sediment import _canonical_grain_size_selection
+    model, hamilton_fit = _canonical_grain_size_selection(
         model, hamilton_fit, who='fetch_bottom_pelagic')
     lat, lon = as_coordinate(point)
     limit = checked_max_distance(max_distance_km, 'fetch_bottom_pelagic')
     d = depth if depth is not None else _water_depth(point, timeout, verbose,
                                                      cache_only)
     litho = pelagic_lithology(d, lat, lon)
-    bottom = bottom_from_grain_size(
+    bottom = BoundaryProperties.from_grain_size(
         _LITHOLOGY_PHI[litho], roughness=roughness, model=model,
         hamilton_fit=hamilton_fit,
-        water_sound_speed=water_sound_speed)
+        water_sound_speed=water_sound_speed, water_density=water_density)
     log_message(
         'pelagic', f"pelagic {litho} at {lat:.2f}, {lon:.2f} "
         f"(depth {d:.0f} m) → ϕ={_LITHOLOGY_PHI[litho]}", verbose=verbose)

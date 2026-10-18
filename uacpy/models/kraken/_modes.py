@@ -12,7 +12,7 @@ from uacpy.core.results import MediaTable, Modes
 from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError, ModelExecutionError,
 )
-from uacpy.io.oalib_reader import read_prt
+from uacpy.models._launch import _read_prt_if_present
 from uacpy.io.modes_reader import read_modes
 from uacpy.models._extract import result_kwargs
 
@@ -96,7 +96,7 @@ def read_group_speeds_from_prt(work_dir, base_name, n_modes, *, fills_vg):
     if n_modes < 1:
         return None
     tables = [rows for rows in printed_tables(
-        read_prt(Path(work_dir) / f'{base_name}.prt')) if rows]
+        _read_prt_if_present(Path(work_dir) / f'{base_name}.prt')) if rows]
     if not tables:
         return None
     speeds = {mode: vg for mode, _cp, vg in tables[0]
@@ -110,9 +110,8 @@ def read_group_speeds_from_prt(work_dir, base_name, n_modes, *, fills_vg):
 
 
 def build_modes_field(modes, n_modes, source, *, backend_exe=None,
-                       group_velocity=None,
-                       water_density=None, leaky_modes, model_exe, model_name,
-                       provenance):
+                       group_speeds=None,
+                       water_density=None, model_exe, model_name, provenance):
     """Restamp the :class:`Modes` :func:`~uacpy.io.read_modes` returned
     as this run's result.
 
@@ -125,7 +124,8 @@ def build_modes_field(modes, n_modes, source, *, backend_exe=None,
     ``.mod``'s media table (:attr:`Modes.media`), so
     :meth:`Modes.modal_pressure_field` divides by the ``ρ(z_s)`` the
     run's own field divides by, for a source in the water or in a
-    sediment medium.
+    sediment medium. The half-space tails the reader computed
+    (:attr:`Modes.halfspace_tails`) are kept.
     """
     exe = backend_exe or model_exe
     media = modes.media
@@ -137,14 +137,13 @@ def build_modes_field(modes, n_modes, source, *, backend_exe=None,
         k=modes.k,
         phi=modes.phi,
         depths=modes.depths,
-        group_velocity=group_velocity,
+        group_speeds=group_speeds,
         media=media,
+        halfspace_tails=modes.halfspace_tails,
         **result_kwargs(
             model_name, provenance, source,
             backend=Path(exe).stem if exe else model_name.lower(),
             frequencies=float(source.frequencies[0]),
-            n_modes_requested=n_modes,
-            leaky_modes=leaky_modes,
         ),
     )
     if n_modes is not None:
@@ -234,7 +233,7 @@ def read_mode_record(mod_base, frequency, profile=1, *, model_name):
         modes = read_modes(basename, frequency=float(frequency),
                            profile=int(profile))
     except (FileFormatError, IndexError) as e:
-        if _prt_lists_no_mode(read_prt(basename + '.prt')):
+        if _prt_lists_no_mode(_read_prt_if_present(basename + '.prt')):
             return None
         raise ModelExecutionError(
             model_name, return_code=0, stdout=None,
@@ -253,19 +252,6 @@ def halfspace_compressional_speed(env, range_m=0.0):
     if not BoundaryType.from_string(halfspace.acoustic_type).is_geoacoustic:
         return None
     return float(halfspace.sound_speed)
-
-
-def fluid_halfspace_speed(env):
-    """The compressional speed (m/s) of the fluid half-space under the
-    r = 0 column, which a trapped mode's phase speed stays below; ``None``
-    for a seabed with no such speed: vacuum, rigid, a reflection table, or
-    an elastic half-space (:func:`halfspace_compressional_speed`). The
-    ``.mod`` records the same speed for each profile
-    (:attr:`~uacpy.core.results.MediaTable.halfspace_sound_speed`)."""
-    halfspace = env.bottom.halfspace_at(range=0.0)
-    if float(halfspace.shear_speed) > 0.0:
-        return None
-    return halfspace_compressional_speed(env)
 
 
 def trapped_phase_speeds(k, freq, c_bottom) -> np.ndarray:
@@ -344,24 +330,27 @@ def non_trapped_phase_speeds(k, env, freq, *, leaky_modes):
     """``(cp, c_bottom)`` for the modes ``k`` at ``freq`` Hz, or ``None``.
 
     ``cp = omega / Re(k)`` is each mode's phase speed; ``c_bottom`` is the
-    half-space compressional speed above which a mode radiates into the
-    seabed instead of being trapped in the duct.
+    compressional speed of the half-space under the r = 0 column, fluid or
+    elastic (:func:`halfspace_compressional_speed`), above which a root lies
+    in the continuous spectrum — the rule the field route applies
+    (:func:`trapped_phase_speeds`): Computational Ocean Acoustics §2.4.5.1,
+    and over an elastic bottom "for wavenumbers up to k_r = 2πf/c_p"
+    (§4.10.1). Roots between an elastic half-space's shear and
+    compressional speeds stay below it: discrete, but leaking shear into
+    the bottom (§4.10.1). kraken.exe's own window stops at the shear speed
+    there (``kraken.f90:205-210``), so only krakenc returns roots above it.
 
     ``None`` means the comparison says nothing and no caller should act on
     it: no modes to measure; a non-geoacoustic boundary (vacuum, rigid, or
     a reflection table), which has no half-space to leak into and resolves
     to an unbounded ``c_high`` anyway (:func:`resolve_phase_speed_bounds`);
-    an elastic half-space, whose water-borne roots between its shear and
-    compressional speeds leak shear (Computational Ocean Acoustics
-    §4.10.1), and where kraken.exe's own window stops at the shear speed
-    (``kraken.f90:205-210``) and krakenc's does not; or
-    ``leaky_modes=True``, where the caller asked for exactly these
+    or ``leaky_modes=True``, where the caller asked for exactly these
     modes.
     """
     if leaky_modes:
         return None
     k = np.atleast_1d(np.asarray(k, dtype=complex))
-    c_bottom = fluid_halfspace_speed(env)
+    c_bottom = halfspace_compressional_speed(env)
     if k.size == 0 or c_bottom is None:
         return None
     kr = np.real(k)
@@ -392,26 +381,30 @@ def log_non_trapped_modes(k, env, freq, *, leaky_modes, log) -> None:
     above = cp > c_bottom
     if not above.any():
         return
+    if float(env.bottom.halfspace_at(range=0.0).shear_speed) > 0.0:
+        why = ("over an elastic half-space they lie in its continuous "
+               "spectrum (Computational Ocean Acoustics §4.10.1)")
+    else:
+        why = ("the auto c_high sits 5 % past the bottom speed and "
+               "kraken.f90:212 leaves the acoustic cHigh clamp commented "
+               "out. On kraken.exe they are a rigid-bottom solve plus a "
+               "first-order radiation-loss perturbation, not true leaky "
+               "modes; leaky_modes=True computes those on krakenc.exe")
     log(
         f"{int(above.sum())} of {above.size} modes are non-trapped "
-        f"(phase speed above the {c_bottom:.1f} m/s half-space speed, "
-        f"up to {cp.max():.2f} m/s): the auto c_high sits 5 % past the "
-        f"bottom speed and kraken.f90:212 leaves the acoustic cHigh "
-        f"clamp commented out. On kraken.exe they are a rigid-bottom "
-        f"solve plus a first-order radiation-loss perturbation, not "
-        f"true leaky modes; leaky_modes=True computes those on "
-        f"krakenc.exe."
+        f"(phase speed above the {c_bottom:.1f} m/s half-space "
+        f"compressional speed, up to {cp.max():.2f} m/s): {why}."
     )
 
 
-def profile_location(env, profile_ranges_m, profile):
+def profile_location(env, profile_ranges, profile):
     """``(range, seafloor depth)`` (m) of the deck's ``profile`` (0-based)
-    of a multi-profile deck whose profiles sit at ``profile_ranges_m``."""
-    r = float(profile_ranges_m[min(profile, len(profile_ranges_m) - 1)])
+    of a multi-profile deck whose profiles sit at ``profile_ranges``."""
+    r = float(profile_ranges[min(profile, len(profile_ranges) - 1)])
     return r, float(np.asarray(env.bathymetry.eval(range=r)).flat[0])
 
 
-def profile_without_modes_refusal(profile, env, profile_ranges_m, exe,
+def profile_without_modes_refusal(profile, env, profile_ranges, exe,
                                   frequency, reason, *, model_name
                                   ) -> ConfigurationError:
     """The typed refusal of a multi-profile deck the modes binary stopped
@@ -429,18 +422,18 @@ def profile_without_modes_refusal(profile, env, profile_ranges_m, exe,
     profile nor its depth, so they are read here
     (:func:`zero_mode_stop`, :func:`profile_location`); ``reason`` is the
     binary's own words for the stop."""
-    r, depth = profile_location(env, profile_ranges_m, profile)
+    r, depth = profile_location(env, profile_ranges, profile)
     return ConfigurationError(
         f"{model_name}: {Path(exe).name} found no mode at "
         f"{float(frequency):g} Hz in profile {profile + 1} of "
-        f"{len(profile_ranges_m)} (r = {r:g} m, seafloor {depth:g} m) and "
+        f"{len(profile_ranges)} (r = {r:g} m, seafloor {depth:g} m) and "
         f"stopped there ({reason}), leaving every later profile out of the "
         f"mode file (and, on krakenc, the first profile's header "
         f"overwritten), so field.exe cannot sum a field.",
-        remediation=end_track_or_ram(env, profile_ranges_m, profile))
+        remediation=end_track_or_ram(env, profile_ranges, profile))
 
 
-def end_track_or_ram(env, profile_ranges_m, profile) -> str:
+def end_track_or_ram(env, profile_ranges, profile) -> str:
     """The remedy of a segmented solve that stopped on its later
     ``profile`` (0-based): below a profile's first modal cut-off its
     waveguide has no mode to carry the field on (Computational Ocean
@@ -448,7 +441,7 @@ def end_track_or_ram(env, profile_ranges_m, profile) -> str:
     the last profile that solved, whose depth the deck then ends on (every
     deck carries a profile at its track's end, so a track ended past it
     reaches the stopped one again), or RAM."""
-    r, depth = profile_location(env, profile_ranges_m, max(profile - 1, 0))
+    r, depth = profile_location(env, profile_ranges, max(profile - 1, 0))
     return (f"End the track (bathymetry and receivers) at or before "
             f"r = {r:g} m, the last profile that solved at this frequency "
             f"(seafloor {depth:g} m), or use RAM, which takes the track "
@@ -474,11 +467,15 @@ def modes_error_message(basename, original_error=None):
     (``env.bottom.is_elastic`` covers layers and half-space alike) to
     krakenc already, or raises when ``backend='kraken'`` is forced on
     one. A run that got here on an elastic seabed WAS krakenc, so being
-    told to try it is worse than being told nothing.
+    told to try it is worse than being told nothing: the secant failure's
+    remedy names ``backend='krakenc'`` only when the ``.prt`` banner is
+    kraken.exe's (``'Warning in KRAKEN - RootFinderSecant'``,
+    ``kraken.f90:359``, ``:407``; krakenc writes ``'Warning in KRAKENC -
+    RootFinderSecant'``, ``krakenc.f90:388``).
     """
     prt_file = basename + '.prt'
     error_msg = "Kraken did not produce valid modes. "
-    prt_content = read_prt(prt_file)
+    prt_content = _read_prt_if_present(prt_file)
     if prt_content is not None:
         # Slow/failed root-finding on interfacial (Scholte/Stoneley)
         # modes. misc/RootFinderSecantMod.f90:80,136 sets the message;
@@ -491,13 +488,16 @@ def modes_error_message(basename, original_error=None):
                       prt_content, re.IGNORECASE)
         )
         if secant_failure:
+            on_krakenc = bool(re.search(r'Warning in KRAKENC', prt_content,
+                                        re.IGNORECASE))
             error_msg += (
                 "Kraken reported 'Failure to converge in "
                 "RootFinderSecant': the root finder is converging slowly "
                 "to interfacial (Scholte / Stoneley) modes. Set c_low to "
                 "the minimum p-wave speed in the problem to exclude those "
-                "modes (kraken.htm, Phase Speed Limits), or use "
-                "Kraken(backend='krakenc')."
+                "modes (kraken.htm, Phase Speed Limits)"
+                + ("." if on_krakenc else
+                   ", or use Kraken(backend='krakenc').")
             )
         else:
             error_msg += f"Check the .prt file for details: {prt_file}"

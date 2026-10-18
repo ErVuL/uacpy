@@ -3,7 +3,7 @@
 Four seabeds of rising complexity, each with the model that handles it:
 
 1. an elastic half-space through Bellhop.run_with_bounce(), which is how you
-   pin BOUNCE's own c_low / c_high / rmax_m (plain run() auto-routes layered
+   pin BOUNCE's own c_low / c_high / rmax (plain run() auto-routes layered
    bottoms through BOUNCE already, with a warning);
 2. a three-layer sediment column with Scooter, which takes NMEDIA > 1;
 3. a scalar seabed that varies along range, with RAM;
@@ -13,13 +13,11 @@ Uses: Bellhop.run_with_bounce · SedimentLayer / SeabedColumn ·
 Bottom.from_halfspaces / from_columns · SoundSpeedProfile.from_2d ·
 env.bottom.is_layered / is_range_dependent · plot_field(contours=) ·
 plot_bottom_properties ·
-env.ssp.plot · plot.plot_field_difference
+env.ssp.plot · metrics.tl_difference
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -47,10 +45,10 @@ receiver = uacpy.Receiver(depths=np.linspace(1, 99, 30),
 # runs natively either way — bellhop.f90 applies its exact acousto-elastic
 # reflection coefficient, shear included. auto_bounce=False makes that explicit.
 native = uacpy.Bellhop(backend='fortran', auto_bounce=False).run(
-    elastic_env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+    elastic_env, source, receiver)
 bounced = uacpy.Bellhop(backend='fortran').run_with_bounce(
-    elastic_env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL,
-    c_low=1400.0, c_high=10000.0, rmax_m=10000.0)
+    elastic_env, source, receiver,
+    c_low=1400.0, c_high=10000.0, rmax=10000.0)
 print(f"  half-space TL {np.nanmin(native.dB):.1f}-{np.nanmax(native.dB):.1f} dB, "
       f"BOUNCE TL {np.nanmin(bounced.dB):.1f}-{np.nanmax(bounced.dB):.1f} dB, "
       f"max |Δ| {np.nanmax(np.abs(bounced.dB - native.dB)):.3f} dB")
@@ -60,8 +58,8 @@ uacpy.plot.plot_field(native, env=elastic_env, ax=axes[0], vmin=40, vmax=90,
                  title='Native elastic half-space')
 uacpy.plot.plot_field(bounced, env=elastic_env, ax=axes[1], vmin=40, vmax=90,
                  title='BOUNCE (with shear)')
-uacpy.plot.plot_field_difference(bounced, native, axes[2], env=elastic_env,
-                                 diff_vmax=10, title='BOUNCE − half-space')
+uacpy.metrics.tl_difference(bounced, native).plot(
+    ax=axes[2], env=elastic_env, diff_vmax=10, title='BOUNCE − half-space')
 fig.suptitle(f'Bellhop + BOUNCE at {source.frequencies[0]:.0f} Hz, elastic '
              f'sandy bottom (cp=1700, cs=400 m/s)', fontweight='bold')
 fig.tight_layout()
@@ -124,20 +122,19 @@ rd_bottom = uacpy.Bottom.from_halfspaces(
     sound_speed=np.array([1500, 1550, 1600, 1650, 1700, 1750]),
     density=np.array([1.2, 1.4, 1.5, 1.7, 1.8, 2.0]),
     attenuation=np.array([1.0, 0.8, 0.6, 0.5, 0.4, 0.3]),
-    shear_speed=np.zeros(6),
     acoustic_type='half-space',
 )
 
-# A 2-D water column too: warm inshore, cooler offshore. c(T, z) is Medwin's
-# equation truncated after the T² term, salinity fixed at S = 35 PSU — a smooth
-# stand-in; uacpy.acoustics.sound_speed_teos10 and its siblings are the calibrated ones.
+# A 2-D water column too: warm inshore, cooler offshore, 35 PSU, through
+# Mackenzie's equation.
 ssp_depths = np.array([0, 25, 50, 100, 150, 200, 250])
 ssp_ranges_km = np.array([0, 5, 10, 15])
 t_surface = 18 - 0.4 * ssp_ranges_km
 t_deep = 8 - 0.1 * ssp_ranges_km
 temperature = t_deep + (t_surface - t_deep) * np.exp(-ssp_depths[:, None] / 60)
-ssp_matrix = (1449 + 4.6 * temperature - 0.055 * temperature ** 2
-              + 0.016 * ssp_depths[:, None])
+ssp_matrix = uacpy.acoustics.sound_speed_mackenzie(
+    temperature, 35.0,
+    depth=np.repeat(ssp_depths[:, None], ssp_ranges_km.size, axis=1))
 
 rd_env = uacpy.Environment(
     name='Shelf break: mud to sand',

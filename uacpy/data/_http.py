@@ -48,9 +48,14 @@ _MAX_RETRIES = 4
 #: A refused TCP connection is the remote answering instantly with a
 #: rejection, so the exponential ladder buys nothing over one quick second
 #: attempt — and against a down host every sleep multiplies across every
-#: grid of a multi-file build.
-_REFUSED_RETRIES = 1
-_REFUSED_WAIT_S = 1.0
+#: grid of a multi-file build. A temporary resolver failure (``EAI_AGAIN``)
+#: is the resolver answering at once that it reached no name server — the
+#: answer every lookup gets on a host without a network — so it takes the
+#: same single quick retry: a passing resolver hiccup is ridden out, and an
+#: offline ``'auto'`` chain reaches its installed cache after about one
+#: second per live URL instead of the ladder's 18.5 s.
+_QUICK_RETRIES = 1
+_QUICK_WAIT_S = 1.0
 #: A connection that did not open within ``timeout`` is not retried: the
 #: kernel already retransmits the SYN inside that wait, and a host that drops
 #: packets (a firewall) would otherwise cost ``5·timeout + 18.5 s`` per URL on
@@ -176,9 +181,10 @@ def _chain_any(exc, predicate) -> bool:
 
 #: Resolver codes that mean the name will not resolve however long you wait.
 #: ``EAI_AGAIN`` is deliberately absent — a temporary resolver failure stays
-#: transient and keeps its retry ladder.
+#: transient and gets one quick retry (``_QUICK_RETRIES``).
 _PERMANENT_DNS_ERRNOS = frozenset(
     {getattr(socket, 'EAI_NONAME', -2), getattr(socket, 'EAI_FAIL', -4)})
+_TEMPORARY_DNS_ERRNO = getattr(socket, 'EAI_AGAIN', -3)
 
 
 def _is_permanent_dns_failure(exc) -> bool:
@@ -188,6 +194,13 @@ def _is_permanent_dns_failure(exc) -> bool:
     temporary resolver failure (``EAI_AGAIN``) stays transient."""
     return _chain_any(exc, lambda e: (isinstance(e, socket.gaierror)
                                       and e.errno in _PERMANENT_DNS_ERRNOS))
+
+
+def _is_temporary_dns_failure(exc) -> bool:
+    """True when the failure chain ends in the resolver's temporary failure
+    (``EAI_AGAIN``)."""
+    return _chain_any(exc, lambda e: (isinstance(e, socket.gaierror)
+                                      and e.errno == _TEMPORARY_DNS_ERRNO))
 
 
 def _is_connection_refused(exc) -> bool:
@@ -264,10 +277,11 @@ def http_get(
     timeout, truncated body, remote disconnect — with exponential backoff). So a
     public host's rate limit (e.g. OpenTopoData ≤1 req/s) or a mid-stream network
     hiccup is ridden out rather than failing the whole fetch. Permanent failures
-    (4xx other than 429, an over-size body, a blocked scheme) are not retried;
-    a refused connection gets one quick retry, and a connection that does not
-    open within ``timeout`` (a host that drops packets) none, so it costs one
-    ``timeout``.
+    (4xx other than 429, an over-size body, a blocked scheme, a host name the
+    resolver says does not exist) are not retried; a refused connection and a
+    temporary resolver failure (what a host without a network answers) get
+    one quick retry, and a connection that does not open within ``timeout`` (a
+    host that drops packets) none, so it costs one ``timeout``.
 
     Parameters
     ----------
@@ -338,12 +352,13 @@ def http_get(
                     remediation="Check base_url= for a typo, or the network "
                                 "(offline hosts resolve nothing).",
                 ) from exc
-            refused = _is_connection_refused(exc)
-            retries = (_REFUSED_RETRIES if refused
+            quick = (_is_connection_refused(exc)
+                     or _is_temporary_dns_failure(exc))
+            retries = (_QUICK_RETRIES if quick
                        else _CONNECT_TIMEOUT_RETRIES if _is_connect_timeout(exc)
                        else _MAX_RETRIES)
             if attempt < retries:
-                wait = (_REFUSED_WAIT_S if refused
+                wait = (_QUICK_WAIT_S if quick
                         else min(_MAX_BACKOFF_S, 1.5 * (2 ** attempt)))
                 log_message(source, f"transport error ({reason}); retrying in "
                             f"{wait:.1f}s (attempt {attempt + 1}/{retries})",

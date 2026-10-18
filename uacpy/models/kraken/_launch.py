@@ -11,9 +11,9 @@ from uacpy.core.exceptions import IOWarning, ModelExecutionError
 from uacpy.io.oalib_writer import (
     write_multi_profile_env, write_fieldflp, write_kraken_env_file,
 )
-from uacpy.io.oalib_reader import read_shd_bin, read_prt
+from uacpy.io.oalib_reader import read_shd_bin
 from uacpy.io.refl_io import stage_source_beam_pattern
-from uacpy.models._launch import attach_prt_tail
+from uacpy.models._launch import _read_prt_if_present, attach_prt_tail
 from uacpy.models.kraken._settings import KrakenLaunch
 from uacpy.models.kraken._segments import segments_at_ranges
 from uacpy.models.kraken._extract import deck_source, evaluated_receiver
@@ -95,7 +95,7 @@ def field_reached_completion(work_dir) -> bool:
     :func:`raise_on_field_fatal` this reads ``field.prt``, whose name
     ``field.f90:44`` hard-codes.
     """
-    prt = read_prt(Path(work_dir) / f'{_FIELD_PRT_ROOT}.prt')
+    prt = _read_prt_if_present(Path(work_dir) / f'{_FIELD_PRT_ROOT}.prt')
     return bool(prt) and _FIELD_COMPLETION_MARKER in prt.lower()
 
 
@@ -143,7 +143,7 @@ def raise_on_field_fatal(work_dir, *, model_name) -> None:
     size mismatch — a message that describes the stub and hides the
     diagnosis.
     """
-    prt = read_prt(Path(work_dir) / f'{_FIELD_PRT_ROOT}.prt')
+    prt = _read_prt_if_present(Path(work_dir) / f'{_FIELD_PRT_ROOT}.prt')
     if not prt:
         return
     marker = prt.lower().rfind(_FIELD_FATAL_MARKER)
@@ -195,27 +195,27 @@ def write_modes_deck(deck: Path, env, source, receiver,
     tabulation = (np.array(launch.tabulation_depths) if receiver is None
                   else Receiver(depths=np.array(launch.tabulation_depths),
                                 ranges=receiver.ranges))
-    if launch.profile_ranges_m is None:
+    if launch.profile_ranges is None:
         write_kraken_env_file(
             deck, env, source, tabulation,
             interp_ssp=interp_ssp,
             frequencies=(None if launch.marched_frequencies is None
                          else np.array(launch.marched_frequencies)),
             n_mesh=launch.n_mesh,
-            rmax_m=launch.rmax_m,
+            rmax=launch.rmax,
             c_low=launch.c_low, c_high=launch.c_high[0],
         )
         return
     write_multi_profile_env(
         filepath=deck,
-        segments=segments_at_ranges(env, launch.profile_ranges_m),
+        segments=segments_at_ranges(env, launch.profile_ranges),
         source=source,
         receiver=tabulation,
         interp_ssp=interp_ssp,
         n_mesh=launch.n_mesh,
         c_low=launch.c_low,
         c_high=launch.c_high,
-        rmax_m=launch.rmax_m,
+        rmax=launch.rmax,
     )
 
 
@@ -232,20 +232,29 @@ def write_decks(inputs, launch: KrakenLaunch, *, interp_ssp, log) -> Path:
     if launch.field_option is None:
         return deck
     receiver = evaluated_receiver(inputs)
-    pos = {
-        's': {'z': source.depths},
-        'r': {'z': receiver.depths, 'r': receiver.ranges},
-    }
+    engine = inputs.settings.engine
+    offsets = engine.knobs.get('range_offsets')
+    if offsets is not None:
+        # One offset per depth field.exe evaluates: the elastic sub-bottom
+        # depths the run drops take theirs out; a deck of none keeps one
+        # mid-water depth (``_checks.partition_elastic_subbottom``) at 0.
+        offsets = np.asarray(offsets, dtype=float)
+        keep = engine.receiver_keep
+        if keep is not None:
+            keep = np.asarray(keep, dtype=bool)
+            offsets = offsets[keep] if keep.any() else np.zeros(1)
     flp_kwargs = dict(
         title=getattr(inputs.env, 'name', ''),
-        n_profiles=launch.n_profiles,
-        profile_ranges=(None if launch.profile_ranges_m is None
-                          else np.array(launch.profile_ranges_m)),
+        profile_ranges=(None if launch.profile_ranges is None
+                          else np.array(launch.profile_ranges)),
     )
     if inputs.settings.engine.n_modes is not None:
         flp_kwargs['n_modes'] = int(inputs.settings.engine.n_modes)
     write_fieldflp(inputs.work_dir / f'{base}.flp', launch.field_option,
-                   pos, **flp_kwargs)
+                   source_depths=source.depths,
+                   receiver_depths=receiver.depths,
+                   receiver_ranges=receiver.ranges,
+                   receiver_range_offsets=offsets, **flp_kwargs)
     # field.exe reads <base>.sbp when Opt(3:3)='*'.
     if source.beam_pattern is not None:
         stage_source_beam_pattern(

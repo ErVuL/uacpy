@@ -2,9 +2,9 @@
 sum of a band at the instants asked for, the per-cell synthesis and its
 diagnostics, shared by :func:`uacpy.acoustic_signal.synthesize_time_series`,
 :func:`uacpy.acoustic_signal.impulse_response_from_transfer_function`,
-:meth:`uacpy.Field.to_time_trace`, :meth:`uacpy.Field.synthesize_time_series`,
-:meth:`uacpy.Field.impulse_response` and
-:meth:`BeamformedField.to_time_trace`.
+:meth:`uacpy.Field.synthesize_time_series` and
+:meth:`uacpy.Field.impulse_response` (and so by :meth:`uacpy.Field.to_time_trace`
+and :meth:`BeamformedField.to_time_trace`, which call them on one cell).
 
 A package-internal module: its names are public to the package, not to
 users.
@@ -32,8 +32,7 @@ _SCRATCH_BLOCK_ELEMS = 4_000_000
 
 # A record of n samples per cell can demand a multi-GB buffer from a too-high
 # sample_rate or a too-fine frequency grid. The synthesis refuses a record
-# longer than 2**26 ≈ 67 M samples it sized for itself; an explicit ``nfft=``
-# (the bare impulse response, no sample rate) bypasses it.
+# longer than 2**26 ≈ 67 M samples.
 MAX_SYNTHESIS_NFFT = 1 << 26
 
 #: Peak bytes the synthesis holds per sample of one cell's record: the
@@ -199,31 +198,39 @@ def band_sum(G, freqs, *, sample_rate: float, t_start, n_samples: int
     return out
 
 
+#: The synthesis' documented band window: none, spelled ``'boxcar'``. The
+#: received signal is ``S(f)·H(f)`` with no extra filter (Jensen et al.,
+#: *Computational Ocean Acoustics*, sect. 8.2.1.1); a window across the band
+#: filters the pulse. Every synthesis takes it for ``window=None``.
+SYNTHESIS_WINDOW = 'boxcar'
+
+
+def band_window_name(window) -> str:
+    """``window`` as the name of a band window: ``None`` is the synthesis'
+    documented default, :data:`SYNTHESIS_WINDOW`."""
+    return SYNTHESIS_WINDOW if window is None else window
+
+
+def recorded_band_window(window) -> Optional[str]:
+    """What a synthesised Field records as its ``synthesis_window`` for
+    ``window``: the band window's name, or ``None`` when no window was
+    applied (``'boxcar'``), so a record says one thing for no taper."""
+    name = band_window_name(window)
+    return None if name == 'boxcar' else name
+
+
 def synthesis_grid(
     freqs: np.ndarray,
     *,
     window: str,
-    nfft: Optional[int],
-    sample_rate: Optional[float],
-    n_samples_floor: int,
+    sample_rate: float,
     who: str,
 ) -> SynthesisPlan:
     """Validate a frequency axis and size the synthesis record on it
-    (:class:`SynthesisPlan`).
-
-    With ``sample_rate`` the record is sampled at exactly that rate:
-    :func:`record_samples` of it over ``1/df`` (``nfft`` is then refused —
-    the rate is the caller's). Without one (the bare impulse response) the
-    rate is ``nfft·df``: ``nfft`` as given, or ``next_fast_len`` of the
-    least length that samples the band's top frequency more than eight
-    times a period — the display rule ``Δt < 1/(8 f_max)`` of Jensen et
-    al., *Computational Ocean Acoustics*, sect. 8.2.1.3, eq. 8.17, Nyquist's
-    two samples a period being "insufficient to yield a reasonably looking
-    graphical signal display" — and never below ``n_samples_floor`` (a
-    model's reported time-sample count, or 0). Shared by the Field
-    synthesis and the array functions.
+    (:class:`SynthesisPlan`): :func:`record_samples` at exactly
+    ``sample_rate`` over ``1/df``. Shared by the Field synthesis and the
+    array functions.
     """
-    import scipy.fft as _sp_fft
     freqs = np.asarray(freqs, dtype=float)
     n_freq = freqs.size
 
@@ -246,62 +253,23 @@ def synthesis_grid(
     from uacpy.acoustic_signal.channel import _uniform_frequency_step
     df = _uniform_frequency_step(freqs, who=who)
 
-    if sample_rate is not None:
-        if nfft is not None:
-            raise ConfigurationError(
-                f"{who}: pass sample_rate= or nfft=, not both; with a sample "
-                f"rate the record is sampled at exactly that rate.",
-                remediation="Drop nfft=.")
-        n_samples = record_samples(sample_rate, df)
-        if n_samples > MAX_SYNTHESIS_NFFT:
-            raise ConfigurationError(
-                f"{who}: a {1.0 / df:.4g} s record (1/df, df = {df:.4g} Hz) "
-                f"at sample_rate={float(sample_rate):g} Hz is "
-                f"{n_samples:,} samples per cell (~"
-                f"{n_samples * SYNTHESIS_BYTES_PER_SAMPLE / 1e9:.1f} GB of "
-                f"working memory per cell), above the "
-                f"{MAX_SYNTHESIS_NFFT:,}-sample safety cap.",
-                remediation="Use a coarser frequency grid, or the "
-                            "impulse-response route, which convolves a "
-                            "signal of any length in blocks: "
-                            "Field.impulse_response(sample_rate) and "
-                            "apply(), or acoustic_signal."
-                            "apply_impulse_response_blocks.")
-        win = _taper(window, n_freq, who=who)
-        return SynthesisPlan(freqs, df, float(sample_rate), n_samples, win)
-
-    # The highest data bin of the band on a lattice of spacing df.
-    max_bin = int(np.floor(freqs[0] / df + 0.5)) + n_freq - 1
-    if nfft is None:
-        # More than eight samples a period at the band's top (JKPS eq.
-        # 8.17), which also keeps it below Nyquist, and never below a
-        # time-sample count the model already reported. The bins past the
-        # band are zero-padding, which interpolates the trace without
-        # changing its band.
-        target = max(int(n_samples_floor),
-                     int(np.floor(8.0 * freqs[-1] / df)) + 1, 2 * max_bin + 2)
-        nfft = _sp_fft.next_fast_len(target)
-        if nfft > MAX_SYNTHESIS_NFFT:
-            raise ConfigurationError(
-                f"{who}: the band implies an {nfft:,}-sample record (~"
-                f"{nfft * SYNTHESIS_BYTES_PER_SAMPLE / 1e9:.1f} GB of working "
-                f"memory per cell), above the {MAX_SYNTHESIS_NFFT:,}-sample "
-                f"safety cap.",
-                remediation="Use a coarser frequency grid, or pass an "
-                            "explicit nfft= if you need a record this "
-                            "large.")
-    elif max_bin >= nfft // 2:
+    n_samples = record_samples(sample_rate, df)
+    if n_samples > MAX_SYNTHESIS_NFFT:
         raise ConfigurationError(
-            f"{who}: nfft={nfft} puts the highest data bin "
-            f"({max_bin}, {freqs[-1]:.6g} Hz at Δf = {df:.6g} Hz) at or above "
-            f"Nyquist (bin {nfft // 2}); those bins fold into the "
-            f"negative-frequency half and alias onto the wrong frequencies. "
-            f"Use nfft >= {2 * max_bin + 2}, or drop nfft= to size it "
-            f"automatically.",
-            remediation=f"Pass nfft={2 * max_bin + 2} or larger.",
-        )
-    win = _taper(window, n_freq, who=who)
-    return SynthesisPlan(freqs, df, int(nfft) * df, int(nfft), win)
+            f"{who}: a {1.0 / df:.4g} s record (1/df, df = {df:.4g} Hz) "
+            f"at sample_rate={float(sample_rate):g} Hz is "
+            f"{n_samples:,} samples per cell (~"
+            f"{n_samples * SYNTHESIS_BYTES_PER_SAMPLE / 1e9:.1f} GB of "
+            f"working memory per cell), above the "
+            f"{MAX_SYNTHESIS_NFFT:,}-sample safety cap.",
+            remediation="Use a coarser frequency grid, or the "
+                        "impulse-response route, which convolves a "
+                        "signal of any length in blocks: "
+                        "Field.impulse_response(sample_rate) and "
+                        "apply(), or acoustic_signal."
+                        "apply_impulse_response_blocks.")
+    win = _taper(band_window_name(window), n_freq, who=who)
+    return SynthesisPlan(freqs, df, float(sample_rate), n_samples, win)
 
 
 def zero_no_mode_bins(
@@ -422,19 +390,15 @@ def warn_unsolved_bins(
                       NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
-# Level (dB re the spectrum's peak) above which a hard band edge cuts
-# through a source spectrum given without its waveform, and an untapered
-# synthesis rings. The model TIME_SERIES route cuts its band at the
-# waveform's -40 dB support, so it never trips this.
-_BAND_EDGE_RING_DB = -40.0
-
 # Energy (dB) an exposure may lose outside its band unreported, and the
 # change (dB) the band may make to the peak of the source pulse it limits:
-# under 0.1 dB a level does not move at the 0.1 dB it is quoted to.
+# under 0.1 dB a level does not move at the 0.1 dB it is quoted to. uacpy
+# guidance.
 _EXPOSURE_SHARE_LOSS_DB = 0.1
 _PEAK_CHANGE_DB = 0.1
 
-# Level (dB re the spectrum's peak) bounding a waveform's support.
+# Level (dB re the spectrum's peak) bounding a waveform's support. uacpy
+# guidance.
 _SUPPORT_FLOOR_DB = -40.0
 
 
@@ -480,9 +444,10 @@ def warn_band_edge_cuts_spectrum(source_spectrum, window: str,
     """Warn when an untapered synthesis's band ``freqs`` (Hz) cuts the
     source spectrum, judged by what the cut changes.
 
-    With ``window=None`` the band edge is a rectangular filter; it is
-    harmless where ``S(f)`` has already fallen away, and rings (Gibbs
-    overshoot, energy outside the pulse) where it has not.
+    Untapered (``window`` ``'boxcar'``, or ``None``, its documented
+    default, :func:`band_window_name`) the band edge is a rectangular
+    filter; it is harmless where ``S(f)`` has already fallen away, and
+    rings (Gibbs overshoot, energy outside the pulse) where it has not.
 
     ``energy_share`` (the band's share of the waveform's energy,
     :func:`band_energy_share`) is given for an exposure, which integrates
@@ -497,9 +462,8 @@ def warn_band_edge_cuts_spectrum(source_spectrum, window: str,
     ``_PEAK_CHANGE_DB`` (:func:`band_limited_pulse`), and names the
     waveform's support as the band to take, with what a Hann window would
     cost at the spectrum's peak (a damped 200 Hz sine in a 25-4000 Hz band:
-    -34.5 dB, which took a peak map 26 dB low). A spectrum given without its
-    waveform is judged by its edge level (``_BAND_EDGE_RING_DB``)."""
-    if window is not None or source_spectrum is None:
+    -34.5 dB, which took a peak map 26 dB low)."""
+    if band_window_name(window) != 'boxcar' or source_spectrum is None:
         return
     mag = np.abs(np.asarray(source_spectrum))
     if mag.size < 2 or not np.any(mag > 0):
@@ -534,14 +498,6 @@ def warn_band_edge_cuts_spectrum(source_spectrum, window: str,
                 f"{-_SUPPORT_FLOOR_DB:.0f} dB of its peak); "
                 f"{_hann_weight_at_peak(mag, freqs, who)}.",
                 NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    elif edge_dB > _BAND_EDGE_RING_DB:
-        warnings.warn(
-            f"{who}: the band's edge cuts the source spectrum at "
-            f"{edge_dB:.1f} dB re its peak (above {_BAND_EDGE_RING_DB:.0f} "
-            f"dB), so the untapered synthesis rings at the band edges. "
-            f"Widen the frequency band to the spectrum's support; "
-            f"{_hann_weight_at_peak(mag, freqs, who)}.",
-            NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 # A Fourier-synthesised record is periodic with period 1/Δf, so an arrival
@@ -555,14 +511,17 @@ def warn_band_edge_cuts_spectrum(source_spectrum, window: str,
 # the 2 s and 4 s records of the same run read below -54 dB at both edges.
 # Example 24 (Bellhop, 5 km Pekeris, 1/Δf = 0.73 s) reads -17.7 dB at its
 # tail, where a 2.9 s record shows steep bottom-bounce arrivals continuing
-# to 3.76 s, past the 3.70 s record end.
+# to 3.76 s, past the 3.70 s record end. uacpy guidance from these uacpy
+# measurements; the grounded statement is that the record "must be
+# selected large enough that it contains the entire transient response"
+# (Jensen et al., Computational Ocean Acoustics, sect. 8.2.1.3).
 _RECORD_EDGE_LEVEL_DB = -20.0
 
 
 _RECORD_EDGE_FRACTION = 0.05
 
 #: The fast/slow path-speed spread the window-wrap warning assumes
-#: (see :func:`record_start`): 5 % of the surface speed.
+#: (see :func:`record_start`): 5 % of the surface speed, uacpy guidance.
 _ASSUMED_PATH_SPEED_SPREAD = 0.05
 
 #: The least share of a synthesis record placed before the estimated first
@@ -763,8 +722,8 @@ def band_energy_share(source_spectrum, freqs, wf, sample_rate) -> float:
     return min(band / total, 1.0)
 
 
-def waveform_synthesis_setup(freqs, wf, sample_rate, *, window,
-                              n_samples_floor, who, exposure=False):
+def waveform_synthesis_setup(freqs, wf, sample_rate, *, window, who,
+                              exposure=False):
     """``(source_spectrum, plan)`` for synthesising a waveform through
     ``H(f)`` on ``freqs``: the checks, the exact source spectrum on the axis
     and the shared grid at ``sample_rate`` (:func:`synthesis_grid`). The
@@ -803,9 +762,8 @@ def waveform_synthesis_setup(freqs, wf, sample_rate, *, window,
         refuse_record_shorter_than_waveform(df, wf, sample_rate, who)
     from uacpy.acoustic_signal.spectrum_at import waveform_spectrum_at
     source_spectrum = waveform_spectrum_at(wf, sample_rate, freqs)
-    plan = synthesis_grid(freqs, window=window, nfft=None,
-                          sample_rate=sample_rate,
-                          n_samples_floor=n_samples_floor, who=who)
+    plan = synthesis_grid(freqs, window=window, sample_rate=sample_rate,
+                          who=who)
     warn_band_edge_cuts_spectrum(
         source_spectrum, window, who, freqs=freqs, waveform=wf,
         sample_rate=sample_rate,
@@ -837,12 +795,6 @@ def synthesize_cells(spectra, source_spectrum, plan, t_start, *, who):
             spectra[idx], plan, source_spectrum=source_spectrum,
             t_start=starts[idx], who=who)
     return out, np.arange(n_samples) / plan.sample_rate, head_dB, tail_dB
-
-
-def _band_width(freqs) -> float:
-    """The width (Hz) of the band a synthesis grid ``freqs`` spans."""
-    freqs = np.asarray(freqs, dtype=float)
-    return float(freqs.max() - freqs.min()) if freqs.size > 1 else 0.0
 
 
 def record_start(range: float, record_s: float, *, bandwidth: float,
@@ -923,9 +875,9 @@ def record_start(range: float, record_s: float, *, bandwidth: float,
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     # With only a c0 the anchor carries the fast/slow path spread as
-    # error. A 5 % spread is representative of an ocean waveguide; when
-    # it exceeds the lead the first arrival can fall before the window
-    # and wrap to the end of the record.
+    # error, taken as 5 % (_ASSUMED_PATH_SPEED_SPREAD, uacpy guidance);
+    # when it exceeds the lead the first arrival can fall before the
+    # window and wrap to the end of the record.
     #
     # Where the 5 % lives, exactly: c0 is a SURFACE sample, so it is the
     # fastest water speed only on a downward-refracting profile. The
@@ -963,10 +915,18 @@ def reduced_record_starts(ranges, record_s: float, *, bandwidth: float,
     range. The reduction speed is the anchor :func:`record_start` places a
     single record by: the faster of the stamped ``c_max`` and ``c0``, else
     the 1500 m/s default with a FallbackWarning. The record then has to
-    hold only the dispersion, ``r_max·(1/c_slow − 1/c_red)`` (eq. 8.16),
-    not the travel time across the range span; it warns when the record
-    ends before the arrival at the slowest stated water speed ``c_slow``
-    (0: none stated) at the farthest range."""
+    hold only the dispersion, not the travel time across the range span.
+    Eq. 8.16 sizes it ``T ≥ r_max·(1/u_min − 1/c_max)``, ``u_min`` the
+    minimum modal group velocity over the band; that minimum (the Airy
+    phase, the tail of a modal arrival, sect. 2.4.5.2) lies below the water
+    speed and is not known here. What this checks instead is the arrival
+    at the slowest stated water speed ``c_slow`` (0: none stated) at the
+    farthest range: it warns when the record ends before
+    ``r_max·(1/c_slow − 1/c_red)``. A silent check therefore does not show
+    that an Airy-phase tail, or a steep bottom-bounce multiple slower than
+    ``c_slow``, fits the record: the eq. 8.16 window "does not ensure
+    inclusion of the steep-angle multiples. If these or other late arrivals
+    are of interest, the time window must be extended" (sect. 8.2.2)."""
     distance = np.abs(np.atleast_1d(np.asarray(ranges, dtype=float)))
     stamped = [speed for speed in (c_max, c0) if speed > 0.0]
     speed = max(stamped) if stamped else DEFAULT_SOUND_SPEED
@@ -1002,55 +962,6 @@ def reduced_record_starts(ranges, record_s: float, *, bandwidth: float,
             f"record. Refine the frequency grid (the record is 1/Δf).",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     return starts, float(speed), float(lead)
-
-
-def synthesize_trace(spectrum, source_spectrum, plan, *, range: float,
-                     t_start: Optional[float], c_max: float, c0: float,
-                     c_slow: float, cell_label: str, who: str,
-                     no_mode_bins=None,
-                     pulse_s: Optional[float] = None):
-    """One cell's spectrum ``H(f)`` on the grid ``plan``
-    (:func:`synthesis_grid`) synthesised into a time trace: returns
-    ``(time, trace)``.
-
-    Evaluates the Fourier synthesis ``p(t) = 2·Re Σ H(f_k)·S(f_k)·
-    e^{2πi f_k t}·df`` (:func:`synthesize_traces`) at ``plan.sample_rate``
-    — a Riemann sum of the continuous inverse transform, so the amplitude
-    is independent of the sampling. ``source_spectrum`` is the
-    *continuous* source spectrum sampled at the grid frequencies (a raw DFT
-    times the source sampling interval); ``None`` synthesises the
-    band-limited impulse response.
-
-    ``t_start=None`` places the record by :func:`record_start` from the
-    cell's ``range`` and the stamped speeds ``c_max`` / ``c0`` / ``c_slow``,
-    and then
-    judges the record's edges (:func:`warn_record_edge_energy`) when
-    ``pulse_s`` — the transmitted signal's duration, 0 for the impulse
-    response, ``None`` when unknown — lets them be quiet. ``cell_label``
-    names the cell in the unsolved-bin warning (:func:`warn_unsolved_bins`);
-    the ``no_mode_bins`` (bin indices) are taken as zero
-    (:func:`zero_no_mode_bins`).
-    """
-    spectra = zero_no_mode_bins(np.asarray(spectrum)[None, :],
-                                no_mode_bins, who=who,
-                                frequencies=plan.freqs)
-    warn_unsolved_bins(spectra, who=who, cell_label=lambda i: cell_label,
-                       frequencies=plan.freqs)
-    record_s = 1.0 / plan.df
-    bandwidth = _band_width(plan.freqs)
-    t_start_estimated = t_start is None
-    if t_start_estimated:
-        t_start = record_start(range, record_s, bandwidth=bandwidth,
-                               c_max=c_max, c0=c0, c_slow=c_slow, who=who)
-    traces, (head_dB, tail_dB) = synthesize_traces(
-        spectra, plan, source_spectrum=source_spectrum, t_start=t_start,
-        who=who)
-    time = t_start + np.arange(plan.n_samples) / plan.sample_rate
-    if t_start_estimated and record_edges_are_judgeable(
-            record_s, pulse_s, record_lead(record_s, bandwidth)):
-        warn_record_edge_energy(head_dB, tail_dB, time=time, df=plan.df,
-                                who=who)
-    return time, traces[0]
 
 
 def source_waveform_problem(source_waveform) -> Optional[str]:
@@ -1116,16 +1027,3 @@ def waveform_spectrum_on(frequencies, source_waveform, sample_rate,
     from uacpy.acoustic_signal.spectrum_at import waveform_spectrum_at
     return waveform_spectrum_at(wf, sample_rate,
                                 np.asarray(frequencies, dtype=float))
-
-
-def check_source_spectrum(source_spectrum, n_frequencies: int,
-                          who: str) -> None:
-    """Refuse a ``source_spectrum`` that is not one value per frequency of
-    an ``n_frequencies`` axis."""
-    if (np.ndim(source_spectrum) != 1
-            or np.size(source_spectrum) != n_frequencies):
-        raise ConfigurationError(
-            f"{who}: source_spectrum has shape "
-            f"{np.shape(source_spectrum)} but the frequency axis has "
-            f"{n_frequencies} samples; it is the source spectrum ON this "
-            f"field's grid, one value per frequency.")

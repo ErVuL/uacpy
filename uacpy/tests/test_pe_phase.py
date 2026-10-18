@@ -32,7 +32,7 @@ def test_mpirams_narrowband_matches_closed_form():
     ranges = np.linspace(100.0, 1000.0, 4)
 
     out = psi_to_travelling_wave(
-        psi, convention=MPIRAMS, ranges_m=ranges, range_axis=1,
+        psi, convention=MPIRAMS, ranges=ranges, range_axis=1,
     )
 
     # peramx already bakes the Hankel 3-D scaling exp(+i(k0 r+π/4))/(4π) into
@@ -52,7 +52,7 @@ def test_mpirams_broadband_matches_closed_form():
     ranges = np.linspace(100.0, 1000.0, 4)
 
     out = psi_to_travelling_wave(
-        psif, convention=MPIRAMS, ranges_m=ranges, range_axis=2,
+        psif, convention=MPIRAMS, ranges=ranges, range_axis=2,
     )
 
     # conj(psif)·4π/√r — peramx's exp(+iπ/4)/(4π) already supplies the Hankel
@@ -71,7 +71,7 @@ def test_rams_broadband_no_carrier_no_radial():
     g = _rng(2)
     H = g.standard_normal((4, 6, 8)) + 1j * g.standard_normal((4, 6, 8))
     out = psi_to_travelling_wave(
-        H, convention=RAMS, ranges_m=np.linspace(100, 5000, 6),
+        H, convention=RAMS, ranges=np.linspace(100, 5000, 6),
         range_axis=1, freq_axis=2, apply_radial=False,
     )
     point_source_phase = np.exp(-1j * np.pi / 4.0)
@@ -90,7 +90,7 @@ def test_ramsurf_broadband_carrier_applied():
     ranges = np.linspace(100.0, 5000.0, 6)
 
     out = psi_to_travelling_wave(
-        H, convention=RAMSURF, ranges_m=ranges,
+        H, convention=RAMSURF, ranges=ranges,
         range_axis=1, k0=k0, freq_axis=2, apply_radial=False,
     )
 
@@ -107,7 +107,7 @@ def test_ramsurf_narrowband_scalar_k0():
     k0_scalar = 2.0 * np.pi * 100.0 / 1500.0
 
     out = psi_to_travelling_wave(
-        psi, convention=RAMSURF, ranges_m=ranges,
+        psi, convention=RAMSURF, ranges=ranges,
         range_axis=1, k0=k0_scalar, apply_radial=False,
     )
 
@@ -120,7 +120,7 @@ def test_unknown_convention_raises():
     psi = np.zeros((2, 2), dtype=complex)
     with pytest.raises(ConfigurationError, match="unknown PE convention"):
         psi_to_travelling_wave(
-            psi, convention='lytaev_v2', ranges_m=np.array([1.0, 2.0]),
+            psi, convention='lytaev_v2', ranges=np.array([1.0, 2.0]),
             range_axis=1,
         )
 
@@ -129,7 +129,7 @@ def test_ramsurf_without_k0_raises():
     psi = np.zeros((2, 2), dtype=complex)
     with pytest.raises(ConfigurationError, match="requires k0"):
         psi_to_travelling_wave(
-            psi, convention=RAMSURF, ranges_m=np.array([1.0, 2.0]),
+            psi, convention=RAMSURF, ranges=np.array([1.0, 2.0]),
             range_axis=1,
         )
 
@@ -142,11 +142,11 @@ def test_apply_radial_true_divides_by_sqrt_r():
     ranges = np.linspace(100.0, 1000.0, 4)
 
     with_radial = psi_to_travelling_wave(
-        psi, convention=MPIRAMS, ranges_m=ranges, range_axis=1,
+        psi, convention=MPIRAMS, ranges=ranges, range_axis=1,
         apply_radial=True,
     )
     without_radial = psi_to_travelling_wave(
-        psi, convention=MPIRAMS, ranges_m=ranges, range_axis=1,
+        psi, convention=MPIRAMS, ranges=ranges, range_axis=1,
         apply_radial=False,
     )
 

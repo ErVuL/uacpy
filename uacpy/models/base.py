@@ -72,7 +72,9 @@ from uacpy.models._checks import (
     total_media_depth, validate_geometry, warn_ignored_run_kwargs,
     warn_receivers_within_a_wavelength,
 )
-from uacpy.models._extract import _settings_as_run, check_output_contract
+from uacpy.models._extract import (
+    _settings_as_run, check_output_contract, run_notes_of,
+)
 from uacpy.core._records import _plain
 from uacpy.models._knobs import read_numeric_knobs, refuse_unknown_knob
 from uacpy.models._replay import (check_recorded_per_launch,
@@ -492,9 +494,9 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
     def _warn_restricted_provenance(self) -> None:
         """Emit a one-time ``ProvenanceWarning`` for a licence-restricted engine.
 
-        Mirrors the non-commercial fetch warning in ``data/`` (the audit's
-        CRUST1.0 fix): a ``commercial_use=False`` source — OASES — must never
-        be used silently. Deduplicated per source ``id`` per process so a
+        Mirrors the non-commercial fetch warning in ``data/`` (CRUST1.0's):
+        a ``commercial_use=False`` source — OASES — must never be used
+        silently. Deduplicated per source ``id`` per process so a
         parameter sweep warns once, not on every instance.
         """
         src = self.provenance
@@ -518,21 +520,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         spec = self.spec
         if spec.modes:
             self._supported_modes = list(spec.modes)
-        if 'volume_attenuation' in spec.supports:
-            raise ConfigurationError(
-                f"{self.model_name}.spec.supports must not list "
-                f"'volume_attenuation': it mirrors the class attribute "
-                f"spec.traits.consumes_volume_absorption, so declaring it here would "
-                f"give the same question two answers."
-            )
-        if 'multi_source_depth' in spec.supports:
-            raise ConfigurationError(
-                f"{self.model_name}.spec.supports must not list "
-                f"'multi_source_depth': it is read off "
-                f"spec.traits.native_multi_depth_modes (the modes whose deck carries "
-                f"every source depth), so declaring it here would give the "
-                f"same question two answers."
-            )
+        # The two derived flags are refused in the spec itself
+        # (ModelSpec.validate, at class definition).
         derived = {'volume_attenuation', 'multi_source_depth'}
         for flag in _CAPABILITY_FLAGS - derived:
             setattr(self, f'_supports_{flag}', flag in spec.supports)
@@ -561,24 +550,22 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         *,
         default: Optional['RunMode'] = None,
     ) -> 'RunMode':
-        """Default ``None`` to the model's first supported mode and then
-        validate that ``run_mode`` is in ``_supported_modes``. Raises
-        :class:`UnsupportedFeatureError` otherwise.
+        """Take ``default`` for ``None`` — the model's default mode for the
+        call, as :meth:`_default_run_mode_for` decides it, the one place
+        that does — and then validate that ``run_mode`` is in
+        ``_supported_modes``. Raises :class:`UnsupportedFeatureError`
+        otherwise.
 
         Strings matching a :class:`RunMode` value (e.g. ``'coherent_tl'``)
         are coerced to the corresponding enum member; any other string is
         refused with :class:`ConfigurationError` (naming the member when it
         is a member's name, ``'COHERENT_TL'``).
 
-        Pass ``default=`` to override the auto-pick when the model has a
-        smarter rule (e.g. Kraken picks BROADBAND when a frequency
-        vector is supplied).
-
         A mode the model does not run goes to :meth:`_refuse_run_mode`
         first, so an engine can refuse it with a message of its own.
         """
         if run_mode is None:
-            run_mode = default if default is not None else self._supported_modes[0]
+            run_mode = default
         if isinstance(run_mode, str):
             try:
                 run_mode = RunMode(run_mode)
@@ -595,8 +582,11 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
                 raise ConfigurationError(message) from None
         if not self.supports_mode(run_mode):
             self._refuse_run_mode(run_mode)
+            runners = engines_running(run_mode)
             raise UnsupportedFeatureError(
-                self.model_name, str(run_mode),
+                self.model_name,
+                str(run_mode) + (f" (run by {', '.join(runners)})"
+                                 if runners else ''),
                 alternatives=[str(m) for m in self._supported_modes],
                 alternatives_label='run modes',
             )
@@ -674,12 +664,13 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             for dr in (1.0, 2.0, 4.0):
                 run_one(base.copy(dr=dr), env, source, receiver)
 
-        Implementation: walks ``__init__`` along the MRO (so parameters
-        defined on a parent constructor are included, since subclasses
-        forward via ``super().__init__(**kwargs)``), pulls each parameter's
-        current value off the instance (uacpy models store every
-        constructor arg as ``self.<name>``), merges ``overrides``, and
-        instantiates. ``**kwargs``-only sinks on the constructor are ignored.
+        Implementation: walks ``__init__`` along the MRO (so the host
+        options a subclass declares keyword-only and forwards to
+        ``super().__init__`` are included; no engine constructor takes
+        ``**kwargs``, :func:`~uacpy.models._host.check_host_parameters`
+        refuses one), pulls each parameter's current value off the instance
+        (uacpy models store every constructor arg as ``self.<name>``),
+        merges ``overrides``, and instantiates.
 
         Parameters
         ----------
@@ -1306,9 +1297,11 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
           the other knobs, which are pinned;
         - OASR's ``reflection_type``: read from a raw ``options=`` line when
           one was given;
-        - OASP's ``freq_min`` / ``freq_max``: the band edges follow
-          ``run(frequencies=…)``;
-        - RAM's ``stability_range_m``: by default the farthest receiver of
+        - OASP's ``freq_min`` / ``freq_max`` / ``fc``: the band edges
+          follow ``run(frequencies=…)`` and ``fc`` is the centre of that
+          band or of the Source's frequencies (a pinned ``fc`` beside a
+          band changes nothing computed and draws a notice);
+        - RAM's ``stability_range``: by default the farthest receiver of
           the call;
         - RAM's ``q_factor`` / ``record_duration``: the ``(fc, Q, T)`` sweep
           follows the call's frequencies, and a pinned pair would march the
@@ -1554,10 +1547,14 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
 
         Where the engine's body chose the frequency grid itself, the
         stamped settings carry the grid the result was computed on, with a
-        note naming what the base rules had resolved."""
+        note naming what the base rules had resolved; the notes stage 5 left
+        on the result (:func:`~uacpy.models._extract.add_run_note`) follow."""
         slabs = _slabs_of(result)
         if slabs:
             settings = _settings_as_run(settings, slabs[0])
+            notes = run_notes_of(slabs)
+            if notes:
+                settings = settings._replace(notes=settings.notes + notes)
         spec = settings.output
         for slab in slabs:
             slab.run_mode = settings.mode
@@ -1975,19 +1972,15 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         """
         self._require_mode(RunMode.MODES, "normal mode computation")
 
-        # Every source depth is checked here, as run() checks it: the modes
-        # are solved once for the whole Source (they do not depend on the
-        # source depth; Kraken tabulates them at every depth), and a depth
-        # outside the domain must fail before the solve.
+        # The carriers are typed before ``source`` is copied below; every
+        # source depth is then checked in stage 2 (``_validate_geometry``)
+        # before the solve, as run() checks it (the modes are solved once
+        # for the whole Source; Kraken tabulates them at every depth).
         check_carrier_types(self.model_name, env, source, None,
                             allow_none_receiver=True)
-        self._check_source_depths(env, source)
         # A unit copy of the source: MODES applies no weight, and the
         # caller's weights would only be announced as unused.
-        unit = Source(depths=source.depths, frequencies=source.frequencies,
-                      source_type=source.source_type,
-                      beam_pattern=source.beam_pattern,
-                      source_level_dB=source.source_level_dB)
+        unit = dataclasses.replace(source, weights=None)
         # The env is passed through as-is: the run projects it exactly once
         # (Kraken's MODES path reduces a range-dependent env to its r=0
         # profile and then projects).
@@ -2400,8 +2393,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         left ``None`` shows the backend the instance resolved at
         construction (:meth:`_repr_backend`), when it resolves one.
 
-        Walks ``__init__`` along the MRO (subclasses forward to
-        ``super().__init__(**kwargs)``, so the union of named parameters
+        Walks ``__init__`` along the MRO (subclasses forward their host
+        options to ``super().__init__``, so the union of named parameters
         across the chain is the full configuration surface). Reads each
         param off ``self.<name>`` — the same contract that powers
         ``model.copy``. Ndarrays and long sequences are summarised so

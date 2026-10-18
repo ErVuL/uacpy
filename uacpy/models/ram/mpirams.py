@@ -8,6 +8,7 @@ import warnings
 from pathlib import Path
 from typing import Optional, List
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.absorption import _absorption_law
 from uacpy.models._budget import memory_budget
 from uacpy.models._launch import openmp_thread_env
 from uacpy.models._notices import give_notice
@@ -19,14 +20,14 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Field, SoundSpeeds
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.io.mpirams_writer import (
-    write_inpe, write_ssp_file, write_bth_file, write_ranges_file,
-    write_sediment_file, write_water_attenuation_file,
+    write_mpirams_inpe, write_mpirams_ssp, write_mpirams_bathymetry, write_mpirams_ranges,
+    write_mpirams_sediment, write_water_attenuation_file,
 )
 from uacpy.models.ram._settings import RamGrid
 from uacpy.models.ram._seabed import sample_at_depths
-from uacpy.core.bathymetry import mask_below_seafloor
-from uacpy.models.ram._interp import interp_to_receiver_grid
+from uacpy.core._grid import resample_depth_range
 from uacpy.models.ram._domain import (
+    absorber_floor_attenuation,
     absorber_span,
     check_source_inside_the_domain,
     check_source_row_is_solved,
@@ -35,6 +36,7 @@ from uacpy.models.ram._domain import (
     flat_earth_depth,
     flat_earth_depth_inverse,
     launch_grid,
+    mask_absorbing_layer,
     ssp_column,
     ssp_range_axis,
     water_alpha_dB_per_wavelength,
@@ -59,7 +61,8 @@ from uacpy.models.ram.grid import (
     warn_if_trapped_modes_unresolved,
 )
 from uacpy.models._extract import (
-    attach_output_paths, mask_source_axis, result_kwargs,
+    _restore_requested_axis, attach_output_paths, mask_source_axis,
+    result_kwargs,
 )
 
 
@@ -74,6 +77,16 @@ DEFAULT_N_SEDIMENT_POINTS = 1000
 # the speed spread (m/s) below which that range dependence is ignored.
 _MAX_SED_PROFILES = 128
 _CWG_RANGE_TOL = 0.01
+#: Relative precision of the sweep mpiramS writes to ``psif.dat``
+#: (``peramx.f90:471``) against :func:`~uacpy.models.ram._band.
+#: broadband_frequencies`: the binary forms each bin as ``fc ± m·df`` in
+#: REAL(KIND=8) with ``df = fs/(fs·T)`` (``peramx.f90:353-379``,
+#: ``kinds.f90:3``) from the deck's repr-exact ``fc``, ``Q``, ``T``, where
+#: the twin takes ``df = 1/T``; the two differ by a few roundings of at
+#: most 2**-53 of the axis's largest value (1.4e-14 Hz measured on an
+#: 80-120 Hz sweep, under 2**-52 of it). 2**-48 leaves room for 32 of them
+#: (uacpy guidance).
+_PSIF_FREQUENCY_RTOL = 2.0 ** -48
 #: Half the gap (m) of the pair of mpiramS sediment profiles written either
 #: side of a bottom column switch that the other profiles would displace
 #: (:func:`sediment_profile_ranges`): far below any march step, so the
@@ -231,13 +244,13 @@ def prepare_ssp(env: Environment, work_dir: Path,
         return ssp_column(env, rng, depths)
 
     ssp_filename = 'ssp.dat'
-    ranges_m = ssp_range_axis(env)
-    if len(ranges_m) > 1:
-        log(f"Writing {len(ranges_m)} SSP profiles")
-        speeds_2d = np.column_stack([_column(r) for r in ranges_m])
-        write_ssp_file(work_dir / ssp_filename, depths, speeds_2d, ranges_m)
+    ranges = ssp_range_axis(env)
+    if len(ranges) > 1:
+        log(f"Writing {len(ranges)} SSP profiles")
+        speeds_2d = np.column_stack([_column(r) for r in ranges])
+        write_mpirams_ssp(work_dir / ssp_filename, depths, speeds_2d, ranges)
     else:
-        write_ssp_file(work_dir / ssp_filename, depths, _column(0.0))
+        write_mpirams_ssp(work_dir / ssp_filename, depths, _column(0.0))
 
     return ssp_filename
 
@@ -264,7 +277,7 @@ def prepare_bathymetry(env: Environment, rmax: float,
         bathy = np.vstack([[0.0, bathy[0, 1]], bathy])
     if bathy[-1, 0] < rmax:
         bathy = np.vstack([bathy, [rmax, bathy[-1, 1]]])
-    write_bth_file(work_dir / bth_filename, bathy[:, 0], bathy[:, 1])
+    write_mpirams_bathymetry(work_dir / bth_filename, bathy[:, 0], bathy[:, 1])
     return bth_filename
 
 
@@ -410,25 +423,49 @@ def prepare_bottom_properties(env: Environment, work_dir: Path,
     # ``nzs-3 >= sedlayer/dz``, with :data:`DEFAULT_N_SEDIMENT_POINTS` as the
     # floor; a pinned ``n_sediment_points`` is written as given.
     dz_grid = float(dz)
-    # ``absorber_span`` is where the automatic domain puts the ramp start
-    # (``_domain.adequate_zmax``: the real-seabed pad below the stack); one
-    # depth cell is the floor that keeps control point ``nzs-1`` below the
-    # seafloor point. ``sediment_profiles`` stretches it to the modelled
-    # stack.
-    sedlayer = max(dz_grid, float(absorber_span))
-
-    # :func:`sediment_profiles` stretches ``sedlayer`` again, to the
-    # deepest modelled stack (``Bottom.total_thickness_max``). Size
-    # ``nzs`` against the span it will end up with, not the one it is
-    # handed.
+    sedlayer = mpirams_sedlayer(env, absorber_span, dz_grid)
     nzs = (int(knobs.n_sediment_points)
            if knobs.n_sediment_points is not None else
            max(DEFAULT_N_SEDIMENT_POINTS,
-               int(np.ceil(max(sedlayer,
-                               float(env.bottom.total_thickness_max()))
-                           / dz_grid)) + 3))
+               int(np.ceil(sedlayer / dz_grid)) + 3))
     return sediment_profiles(env, work_dir, nzs, sedlayer, zmax, knobs=knobs,
                              log=log)
+
+
+def mpirams_sedlayer(env: Environment, absorber_span: float,
+                     dz: float) -> float:
+    """``sedlayer`` (m) of the mpiramS deck: the depth under the local
+    seafloor of ``profl``'s control point ``nzs-1``, and so the top of the
+    absorbing layer (:func:`mpirams_absorber_top`). ``absorber_span``
+    (:func:`_domain.absorber_span`) is where the automatic domain puts the
+    ramp start (``_domain.adequate_zmax``: the real-seabed pad below the
+    stack); one depth cell ``dz`` is the floor that keeps control point
+    ``nzs-1`` below the seafloor point; the deepest modelled stack
+    (``Bottom.total_thickness_max``) is the floor that keeps every layer
+    sampled above the layer."""
+    return max(float(dz), float(absorber_span),
+               float(env.bottom.total_thickness_max()))
+
+
+def mpirams_absorber_top(env: Environment, engine, grid, ranges, *,
+                         knobs) -> np.ndarray:
+    """Geometric depth (m) of the top of the absorbing layer of the
+    mpiramS deck for ``engine`` / ``grid`` (the ``sedlayer`` its writer
+    takes, :func:`mpirams_sedlayer`) at each of ``ranges`` (m). ``profl`` lays its sediment control points from
+    the local seafloor — ``depth`` interpolated off the bathymetry at r —
+    to ``depth + sedlayer`` (point ``nzs-1``) and puts the last one on the
+    domain floor (``mpiramS/src/ram.f90:328-342``), and uacpy raises only
+    that last point to ``absorber_attenuation`` (:func:`sediment_profiles`),
+    so the layer is ``[depth + sedlayer, zmax]``. Under
+    ``earth_curvature`` the binary's depth axis is the flat-earth one,
+    mapped back as its output is."""
+    seafloor = np.asarray(env.bathymetry.eval(
+        range=np.atleast_1d(np.asarray(ranges, dtype=float))), dtype=float)
+    top = seafloor + mpirams_sedlayer(
+        env, absorber_span(env, engine.zmax_frequency, grid.zmax,
+                           knobs=knobs), grid.dz)
+    return (np.asarray(flat_earth_depth_inverse(top), dtype=float)
+            if knobs.earth_curvature else top)
 
 
 def sample_layered_column(col, nzs: int, sedlayer: float):
@@ -530,13 +567,12 @@ def sediment_profiles(env, work_dir, nzs, sedlayer, zmax, *, knobs, log):
     the nearest written profile — so a column switch sits midway between
     the two written samples straddling the bottom break) and referencing
     ``cs`` to the water column at its own seafloor
-    (:func:`sediment_offsets`). ``sedlayer`` is stretched to the deepest
-    modelled stack so every layer is sampled; a pure half-space samples
-    to the same value at every point. One range → the inline profile
-    (``isedrd = 0``); more → the ``.sed`` deck.
+    (:func:`sediment_offsets`). ``sedlayer`` (:func:`mpirams_sedlayer`)
+    reaches the deepest modelled stack, so every layer is sampled; a pure
+    half-space samples to the same value at every point. One range → the
+    inline profile (``isedrd = 0``); more → the ``.sed`` deck.
     """
     bottom = env.bottom
-    sedlayer = max(float(bottom.total_thickness_max()), float(sedlayer))
     ranges = sediment_profile_ranges(env, log=log)
     cs = np.zeros((nzs, len(ranges)))
     rho = np.zeros((nzs, len(ranges)))
@@ -547,13 +583,11 @@ def sediment_profiles(env, work_dir, nzs, sedlayer, zmax, *, knobs, log):
             col, nzs, sedlayer)
         cs[:, i] = sediment_offsets(env, rng, cp_abs, nzs,
                                     sedlayer, zmax)
-    # The absorber is a floor on the half-space value, not a replacement:
-    # RAM's guide has the attenuation "increased over the lower few
-    # wavelengths", the Collins ramp takes the same max
-    # (:func:`collins.ramp_absorbing_attenuation`), and ``gorp`` interpolates
-    # linearly between control points (``ram.f90:373-405``), so a seabed
-    # above ``absorber_attenuation`` would otherwise ramp DOWN into it.
-    attn[-1, :] = np.maximum(attn[-2, :], knobs.absorber_attenuation)
+    # ``gorp`` interpolates linearly between control points
+    # (``ram.f90:373-405``), so the last point sets the ramp below
+    # ``seafloor + sedlayer``: the default never ramps down into it, a pinned
+    # value is written as given (:func:`_domain.absorber_floor_attenuation`).
+    attn[-1, :] = absorber_floor_attenuation(attn[-2, :], knobs=knobs)
     # mpiramS fixes the water density at 1 (``profl``: rhob is the
     # seabed's alone), so the absolute g/cm³ become ratios here, as
     # ``collins.collins_deck_base`` does for the Collins decks.
@@ -594,8 +628,8 @@ def write_sediment_profiles(work_dir, ranges, cs_profiles,
                              rho_profiles, attn_profiles) -> str:
     """Write the mpiramS ``.sed`` deck and return its filename."""
     sed_filename = 'sediment.sed'
-    write_sediment_file(work_dir / sed_filename, np.asarray(ranges, float),
-                        cs_profiles, rho_profiles, attn_profiles)
+    write_mpirams_sediment(work_dir / sed_filename, np.asarray(ranges, float),
+                           cs_profiles, rho_profiles, attn_profiles)
     return sed_filename
 
 
@@ -633,9 +667,9 @@ def resolve_mpirams_tl(env, source, receiver, *,
     grid, rs = resolve_mpirams_deck(
         env, source, receiver, freq, Q_tl, T_tl, dr, dz, zmax_freq=freq,
         notices=notices, knobs=knobs, log=log)
-    return dict(fc=freq, q_factor=Q_tl, record_duration=T_tl, bandwidth_hz=None, df_hz=None,
+    return dict(fc=freq, q_factor=Q_tl, record_duration=T_tl, bandwidth=None, df=None,
                 marched_frequencies=marched, requested_frequencies=None,
-                zmax_frequency=freq, stability_range_m=rs, grids=(grid,))
+                zmax_frequency=freq, stability_range=rs, grids=(grid,))
 
 
 def resolve_mpirams_band(env, source, receiver, *,
@@ -687,9 +721,9 @@ def resolve_mpirams_band(env, source, receiver, *,
     report_band_grid_cost(env, 'mpirams', grid, freq_min, freq_max,
                           notices=notices, knobs=knobs, log=log)
     return dict(fc=freq, q_factor=Q_bb, record_duration=T_bb,
-                bandwidth_hz=2.0 * freq / Q_bb, df_hz=1.0 / T_bb,
+                bandwidth=2.0 * freq / Q_bb, df=1.0 / T_bb,
                 marched_frequencies=marched, requested_frequencies=target,
-                zmax_frequency=freq_min, stability_range_m=rs, grids=(grid,))
+                zmax_frequency=freq_min, stability_range=rs, grids=(grid,))
 
 
 def resolve_mpirams_deck(env, source, receiver, freq: float,
@@ -721,7 +755,7 @@ def resolve_mpirams_deck(env, source, receiver, freq: float,
     check_mpirams_memory(
         zmax_pe, dz, freq, q_factor, record_duration,
         len(np.atleast_1d(receiver.ranges)), notices=notices, knobs=knobs)
-    rs = (knobs.stability_range_m if knobs.stability_range_m is not None
+    rs = (knobs.stability_range if knobs.stability_range is not None
           else rmax)
     warn_stability_range_inert_on_a_multi_range_grid(receiver,
                                                      notices=notices,
@@ -959,7 +993,7 @@ def write_mpirams_deck(inputs, *, knobs, log) -> Path:
                                         zmax_pe, knobs=knobs)
         if water_attenuation_active(env) else '')
 
-    write_ranges_file(work_dir / 'ranges.dat', receiver.ranges)
+    write_mpirams_ranges(work_dir / 'ranges.dat', receiver.ranges)
 
     # mpiramS's horizontal-interpolation branch (ihorz=1) resamples the
     # SSP onto a uniform grid of nrp=nint(rmax/10000) points
@@ -971,7 +1005,7 @@ def write_mpirams_deck(inputs, *, knobs, log) -> Path:
     # uacpy already builds in _prepare_ssp (_ssp_range_axis) — both
     # crash-free and more faithful than the buggy 10-km resample.
     deck = work_dir / 'in.pe'
-    write_inpe(
+    write_mpirams_inpe(
         filepath=deck,
         fc=freq,
         q_factor=Q,
@@ -981,7 +1015,7 @@ def write_mpirams_deck(inputs, *, knobs, log) -> Path:
         dr=grid.dr,
         n_pade=knobs.n_pade,
         n_stability=stability_terms(knobs),
-        stability_range_m=engine.stability_range_m,
+        stability_range=engine.stability_range,
         depth_decimation=knobs.depth_decimation,
         ssp_filename=ssp_filename,
         earth_curvature=bool(knobs.earth_curvature),
@@ -1020,7 +1054,8 @@ def write_mpirams_water_attenuation(env: Environment,
                                         float(record_duration))
     depths = water_attenuation_depths(env, zmax_pe)
     c = ssp_column(env, 0.0, depths)
-    if env.absorption._needs_node_sound_speed:
+    absorption = _absorption_law(env.absorption)
+    if absorption._needs_node_sound_speed:
         table = np.column_stack([
             water_alpha_dB_per_wavelength(env, float(f), depths, c)
             for f in frequencies
@@ -1028,7 +1063,7 @@ def write_mpirams_water_attenuation(env: Environment,
     else:
         # One ``alpha`` call over the whole sweep: one out-of-range
         # notice for the band, not one per bin.
-        alpha_m = np.asarray(env.absorption.table(
+        alpha_m = np.asarray(absorption.table(
             frequencies, depths=depths, units='dB/m').data,
             dtype=float).reshape(depths.size, np.size(frequencies))
         table = alpha_m * c[:, None] / np.asarray(frequencies)[None, :]
@@ -1040,14 +1075,16 @@ def write_mpirams_water_attenuation(env: Environment,
 
 
 def assemble_tl_field(result, env, source, receiver, work_dir,
-                       freq, dr, *, knobs, model_name, provenance,
+                       engine, grid, *, knobs, model_name, provenance,
                        cleanup):
     """Stage 5 of an mpiramS COHERENT_TL run: the TL :class:`Field` from a
     finished ``psif`` result — pick the centre-frequency bin, interpolate
     complex pressure to the receiver grid (NaN-safe), convert to
-    travelling-wave pressure and mask below the seafloor. ``dr`` (m) is
-    the range a receiver at r = 0 is scaled at. The grid marched is the
-    run settings' (``run_settings.engine.grids``)."""
+    travelling-wave pressure and mask the absorbing layer
+    (:func:`_domain.mask_absorbing_layer`). ``grid`` is the one grid the
+    run marched (``engine.grids[0]``); a receiver at r = 0 is scaled at its
+    ``dr``."""
+    freq, dr = grid.frequency, grid.dr
     psif = result.pe_field  # (nzo, nf, nr)
     zg = result.depths
     rout = result.ranges
@@ -1064,7 +1101,7 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
     # BEFORE computing TL. Interpolating in dB destroys interference
     # nulls because linear interpolation of log-scale values smooths
     # out the sharp zeros in the field. Valid here — mpiramS writes its
-    # output on the receiver range grid (write_ranges_file), so psif is
+    # output on the receiver range grid (write_mpirams_ranges), so psif is
     # not undersampled in range. The Collins backends need the
     # modulus/phasor split instead (interp_envelope_to_receiver_grid).
 
@@ -1075,7 +1112,7 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
     # the march calling a range reached; the rest is a range it did not
     # reach. Snap the first kind onto rout[-1] so the outermost receiver
     # still interpolates, and leave the second kind alone so it lands
-    # off-grid and comes back NaN from interp_to_receiver_grid. A
+    # off-grid and comes back NaN from resample_depth_range. A
     # tolerance of half the RECEIVER spacing would say nothing about the
     # march: on a short rout it stretches wide enough to pull unmarched
     # receivers onto rout[-1] and hand back that position's field under
@@ -1096,7 +1133,7 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
     # that side has to separate "reached" from "not reached". ``rout[0]``
     # cannot: the march starts at ``rnow=0``, runs to each requested range
     # in turn under ``ram.f90:169``'s exit test, and records that ``rnow``
-    # as ``rout(irr)`` (``:271``); and write_ranges_file
+    # as ``rout(irr)`` (``:271``); and write_mpirams_ranges
     # writes ``receiver.ranges`` verbatim and in order, so ``rout[0]`` is
     # the first receiver's *own* achieved range. Receiver.ranges is
     # strictly increasing, so no receiver can sit below ``rout[0]`` by more
@@ -1126,8 +1163,8 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
     # Receivers outside the PE output domain return NaN pressure
     # so the resulting TL row is NaN (transparent in pcolormesh)
     # instead of saturating to the PRESSURE_FLOOR no-energy level.
-    pressure_rcv = interp_to_receiver_grid(
-        zg, rout, pressure, rcv_depths, rcv_ranges)
+    pressure_rcv = resample_depth_range(
+        pressure, zg, rout, rcv_depths, rcv_ranges)
 
     # Compute TL from interpolated pressure.
     #
@@ -1151,7 +1188,7 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
         pressure_field = psi_to_travelling_wave(
             pressure_rcv,
             convention='mpirams',
-            ranges_m=log_ranges,
+            ranges=log_ranges,
             range_axis=1,
         ).astype(np.complex128)
     # An exactly-zero sample is the pressure-release surface node (z = 0,
@@ -1170,7 +1207,9 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
         )
     )
     field = mask_source_axis(model_name, field, source)
-    field = field.mask_below_seafloor(env.bathymetry)
+    field.data = mask_absorbing_layer(
+        "RAM:mpirams", field.data, receiver.depths,
+        mpirams_absorber_top(env, engine, grid, receiver.ranges, knobs=knobs))
     attach_output_paths(
         field, work_dir, '',
         primary_files=(('psif_file', 'psif.dat'),), cleanup=cleanup
@@ -1178,15 +1217,33 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
     return field
 
 
+def _on_requested_ranges(pressure, rout, rcv_ranges):
+    """``(pressure, reached)``: the march's ``(.., n_rout)`` columns taken
+    onto the requested ``rcv_ranges`` (last axis), each from the recorded
+    range nearest it when that lies within :data:`MPIRAMS_RANGE_TOL_M`,
+    NaN where none does; ``reached`` marks the requested ranges found."""
+    rout = np.asarray(rout, dtype=np.float64)
+    pos = np.searchsorted(rout, rcv_ranges)
+    left = np.clip(pos - 1, 0, rout.size - 1)
+    right = np.clip(pos, 0, rout.size - 1)
+    nearest = np.where(np.abs(rout[left] - rcv_ranges)
+                       <= np.abs(rout[right] - rcv_ranges), left, right)
+    reached = np.abs(rout[nearest] - rcv_ranges) <= MPIRAMS_RANGE_TOL_M
+    out = np.array(pressure[..., nearest], dtype=np.complex128)
+    out[..., ~reached] = np.nan
+    return out, reached
+
+
 def assemble_broadband_field(result, env, source, receiver,
                               work_dir, engine, grid, *, log, model_name,
-                              provenance, cleanup):
+                              provenance, cleanup, knobs):
     """Stage 5 of an mpiramS BROADBAND / TIME_SERIES run: the
     transfer-function :class:`Field` from a finished ``psif`` result —
     convert to travelling-wave pressure, interpolate onto the receiver
     depth grid, trim the marched band onto the bins the settings ask for
-    (``engine.requested_frequencies``), mask below the seafloor, and tag
-    with the sweep and the grid marched.
+    (``engine.requested_frequencies``), mask the absorbing layer
+    (:func:`_domain.mask_absorbing_layer`), and tag with the sweep and the
+    grid marched.
     """
     dr, dz, zmax = grid.dr, grid.dz, grid.zmax
     # mpiramS stores psif = ψ·exp(+i(k0 r + π/4)) / (4π) under the
@@ -1211,7 +1268,7 @@ def assemble_broadband_field(result, env, source, receiver,
     pressure = psi_to_travelling_wave(
         psif,
         convention='mpirams',
-        ranges_m=rout_safe,
+        ranges=rout_safe,
         range_axis=2,
     )
     # An exactly-zero sample is the pressure-release surface node
@@ -1250,7 +1307,13 @@ def assemble_broadband_field(result, env, source, receiver,
     # frequency grid: pick the nearest marched bin for each requested
     # one and label the axis with the requested values, so H(f)
     # round-trips the request bin for bin.
-    frq_out = np.atleast_1d(np.asarray(result.frequencies, dtype=float))
+    # The sweep psif.dat records is the marched one up to the binary's own
+    # rounding (_PSIF_FREQUENCY_RTOL); restored, the axis is the one the
+    # settings state.
+    frq_out = _restore_requested_axis(
+        np.atleast_1d(np.asarray(result.frequencies, dtype=float)),
+        np.asarray(engine.marched_frequencies, dtype=float),
+        _PSIF_FREQUENCY_RTOL)
     target = engine.requested_frequencies
     if target is not None and not np.array_equal(frq_out, target):
         idx = np.array([int(np.argmin(np.abs(frq_out - f)))
@@ -1269,8 +1332,25 @@ def assemble_broadband_field(result, env, source, receiver,
         pressure = pressure[:, idx, :]
         frq_out = np.asarray(target, dtype=float)
 
+    # Label the range axis with the ranges the call asked for, as the TL
+    # path does (assemble_tl_field): rout is receiver.ranges handed back,
+    # each recorded within MPIRAMS_RANGE_TOL_M of the requested range
+    # (ram.f90:169, :271), and a march that stopped short records fewer.
+    # A requested range with no recorded range within that tolerance is
+    # NaN, with the TL path's warning.
+    rcv_ranges = np.asarray(receiver.ranges, dtype=np.float64)
+    pressure, reached = _on_requested_ranges(pressure, rout, rcv_ranges)
+    if not reached.all():
+        warnings.warn(
+            f"{model_name}: receiver ranges {rcv_ranges[~reached]} "
+            f"exceed the PE marched range {rout[-1]}; those columns are "
+            f"returned as NaN.",
+            NumericsWarning,
+            skip_file_prefixes=USER_FRAME_SKIP
+        )
+
     log(f"Output: {len(out_depths)} depths x {frq_out.size} "
-              f"freqs x {result.ranges.size} ranges")
+              f"freqs x {rcv_ranges.size} ranges")
 
     # (n_d, n_r, n_f).
     pressure = np.moveaxis(pressure, 1, 2)
@@ -1279,7 +1359,7 @@ def assemble_broadband_field(result, env, source, receiver,
         data=pressure,
         coords={
             'depth': out_depths,
-            'range': rout,
+            'range': rcv_ranges,
             'frequency': frq_out,
         },
         # The binary's own header ``cmin`` is the WATER minimum
@@ -1297,9 +1377,9 @@ def assemble_broadband_field(result, env, source, receiver,
         )
     )
     tf = mask_source_axis(model_name, tf, source)
-    # Mask sub-seafloor samples with NaN (same semantics as every
-    # backend), against the ranges the Field advertises.
-    tf.data = mask_below_seafloor(tf.data, out_depths, rout, env.bathymetry)
+    tf.data = mask_absorbing_layer(
+        "RAM:mpirams", tf.data, out_depths,
+        mpirams_absorber_top(env, engine, grid, rcv_ranges, knobs=knobs))
     attach_output_paths(
         tf, work_dir, '',
         primary_files=(('psif_file', 'psif.dat'),), cleanup=cleanup

@@ -38,6 +38,23 @@ class TestBathyIOTypedErrors:
                     attenuation=np.array([0.4, 0.6]))
                 write_bty_long_format(path, pairs, rd, interp_type='bogus')
 
+    @pytest.mark.parametrize('writer', ['bty', 'ati'])
+    @pytest.mark.parametrize('given, letter', [
+        ('curvilinear', 'C'), ('linear', 'L'), ('Curvilinear', 'C'),
+        ('C', 'C'), ('l', 'L')])
+    def test_the_interpolation_name_writes_its_letter(self, tmp_path, writer,
+                                                      given, letter):
+        """The names the models take (GEOMETRY_INTERP_CODES) are accepted
+        as well as the deck letters."""
+        from uacpy.io.bathy_io import (
+            read_altimetry, read_bathymetry, write_ati_file, write_bty_file)
+        pairs = np.array([[0.0, 100.0], [1000.0, 120.0]])
+        path = tmp_path / f'x.{writer}'
+        write, read = ((write_bty_file, read_bathymetry) if writer == 'bty'
+                       else (write_ati_file, read_altimetry))
+        write(path, pairs, interp_type=given)
+        assert read(path).interpolation == letter
+
     def test_long_format_bty_round_trips_geoacoustics(self, tmp_path):
         from uacpy.core.bottom import Bottom
         from uacpy.io.bathy_io import write_bty_long_format, read_bathymetry
@@ -189,6 +206,21 @@ class TestATableBuildsOnlyTheCarrierItCanHold:
         alt = table.to_altimetry()
         # The file is positive down; the carrier's heights are positive up.
         assert alt.heights.tolist() == [-1.0, 2.0]
+
+    def test_an_altimetry_carrier_writes_its_crests_as_crests(self, tmp_path):
+        """An Altimetry is positive up and the .ati positive down, so
+        write_ati_file negates a carrier's heights: a 2 m crest is written
+        as -2 (above MSL on Bellhop's z axis) and reads back as +2."""
+        from uacpy.core.altimetry import Altimetry
+        from uacpy.io.bathy_io import read_altimetry, write_ati_file
+        alt = Altimetry(ranges=[0.0, 1000.0, 2000.0], heights=[0.0, 2.0, 0.0])
+        p = tmp_path / 'crest.ati'
+        write_ati_file(p, alt)
+        assert p.read_text().splitlines()[3].split() == ['1.000000',
+                                                         '-2.000000']
+        back = read_altimetry(p).to_altimetry()
+        np.testing.assert_array_equal(back.heights, [0.0, 2.0, 0.0])
+        np.testing.assert_array_equal(alt.heights, [0.0, 2.0, 0.0])
 
     def test_the_table_is_one_row_per_point(self, tmp_path):
         pytest.importorskip('pandas')

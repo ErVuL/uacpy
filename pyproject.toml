@@ -270,6 +270,12 @@ filterwarnings = [
     # frame, not uacpy's, so the `:uacpy` gate never saw it — but the scoping
     # of the line above would surface it as report noise uacpy cannot act on.
     "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:numpy.ma.core",
+    # Cython's import-time size check of a compiled dependency (netCDF4 /
+    # cftime, imported by the NetCDF tests) built against older numpy
+    # headers. numpy registers this same ignore when it is imported
+    # (numpy/__init__.py), so a user's process never shows it; pytest's
+    # per-test filters do, so it is restated here. The load is unaffected.
+    "ignore:numpy.ndarray size changed:RuntimeWarning",
 ]
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",

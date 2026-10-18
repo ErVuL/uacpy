@@ -16,10 +16,8 @@ SoundSpeedProfile.from_2d · compare_models(ncols=, contours=)
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt

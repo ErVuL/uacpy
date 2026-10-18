@@ -241,10 +241,10 @@ class TestThreeDBoundaryFilesRoundTrip:
         with pytest.raises(FileFormatError, match='regular grid'):
             read_boundary_3d(path)
 
-    def test_a_missing_file_is_a_configuration_error(self, tmp_path):
-        """A boundary deck is authored by the user, not written by a model —
-        the provenance split ``FileFormatError`` documents."""
-        with pytest.raises(ConfigurationError, match='not found'):
+    def test_a_missing_file_is_a_missing_file_error(self, tmp_path):
+        """The type every reader raises for a path that names no file."""
+        from uacpy.core.exceptions import MissingFileError
+        with pytest.raises(MissingFileError, match='not found'):
             read_boundary_3d(tmp_path / 'absent.bty')
 
 
@@ -311,10 +311,10 @@ class TestTheFieldParameterDecksAreRecords:
         from uacpy.io import FlpFile, read_flp
         from uacpy.io.oalib_writer import write_fieldflp
         path = tmp_path / 'f.flp'
-        pos = {'s': {'z': np.array([25.0])},
-               'r': {'z': np.array([10.0, 20.0, 30.0]),
-                     'r': np.array([1000.0, 2000.0])}}
-        write_fieldflp(path, 'RA  ', pos, title='deck', n_modes=40)
+        write_fieldflp(path, 'RA  ', source_depths=[25.0],
+                       receiver_depths=[10.0, 20.0, 30.0],
+                       receiver_ranges=[1000.0, 2000.0], title='deck',
+                       n_modes=40)
         deck = read_flp(path)
         assert type(deck) is FlpFile
         assert (deck.title, deck.option, deck.component) == ('deck',
@@ -334,7 +334,7 @@ class TestTheFieldParameterDecksAreRecords:
         assert deck.n_modes == parsed['M_limit'] == 60
         assert deck.node_mode_files == tuple(parsed['nodes']['mode_file'])
         assert np.array_equal(deck.elements, parsed['elements'])
-        assert np.array_equal(deck.bearings, parsed['pos']['r']['theta'])
+        assert np.array_equal(deck.bearings_deg, parsed['pos']['r']['theta'])
         assert np.array_equal(deck.source_x, parsed['pos']['s']['x'])
 
 
@@ -351,10 +351,15 @@ class TestThreeDFieldParameterDeck:
     BATHY = {'X': np.linspace(0.0, 100000.0, 4),
              'Y': np.linspace(0.0, 60000.0, 3),
              'depth': np.full((3, 4), 100.0)}
+    #: The positions as write_field3dflp takes them, read_flp3d's names.
+    FLAT = dict(source_x=POS['s']['x'], source_y=POS['s']['y'],
+                source_depths=POS['s']['z'], receiver_depths=POS['r']['z'],
+                receiver_ranges=POS['r']['r'], bearings_deg=POS['r']['theta'])
 
     def _deck(self, tmp_path, **kwargs):
         path = tmp_path / 'lant.flp'
-        write_field3dflp(path, 'STDFM', self.POS, self.BATHY, **kwargs)
+        write_field3dflp(path, 'STDFM', **self.FLAT, bathy=self.BATHY,
+                         **kwargs)
         return _parse_flp3d(path)
 
     def test_a_written_deck_reads_back_with_every_axis_intact(self, tmp_path):
@@ -390,15 +395,17 @@ class TestThreeDFieldParameterDeck:
         bathy = dict(self.BATHY, depth=self.BATHY['depth'].copy())
         bathy['depth'][0, 0] = 0.0
         path = tmp_path / 'dry.flp'
-        write_field3dflp(path, 'STDFM', self.POS, bathy)
+        write_field3dflp(path, 'STDFM', **self.FLAT, bathy=bathy)
         assert _parse_flp3d(path)['nodes']['mode_file'][0] == 'DUMMY'
 
     def test_an_explicit_suffix_is_kept(self, tmp_path):
         """``.flp`` is appended only when the path has none — the convention
         ``write_fieldflp`` was corrected to, and the one ``read_flp3d``
         resolves with."""
-        write_field3dflp(tmp_path / 'case.v2', 'STDFM', self.POS, self.BATHY)
-        write_field3dflp(tmp_path / 'case', 'STDFM', self.POS, self.BATHY)
+        write_field3dflp(tmp_path / 'case.v2', 'STDFM', **self.FLAT,
+                         bathy=self.BATHY)
+        write_field3dflp(tmp_path / 'case', 'STDFM', **self.FLAT,
+                         bathy=self.BATHY)
         assert (tmp_path / 'case.v2').is_file()
         assert (tmp_path / 'case.flp').is_file()
 
@@ -409,7 +416,7 @@ class TestThreeDFieldParameterDeck:
         elastic-component column, so the pre-deletion ``comp`` key — column 3,
         the third letter of ``'STD'`` — named nothing."""
         path = tmp_path / 'opt.flp'
-        write_field3dflp(path, 'STDT  *', self.POS, self.BATHY)
+        write_field3dflp(path, 'STDT  *', **self.FLAT, bathy=self.BATHY)
         deck = _parse_flp3d(path)
         assert deck['method'] == 'STD'
         assert deck['tesselation_check'] is True
@@ -424,7 +431,7 @@ class TestThreeDFieldParameterDeck:
         an unescaped apostrophe inside the delimiters, which closes the
         literal early: ``Don't`` was written as ``'Don't'`` and read
         back as ``Don``.  ``quote_fortran_title`` applies the same
-        ``_sanitize_title`` the 2-D writers use — apostrophes are removed
+        ``sanitize_title`` the 2-D writers use — apostrophes are removed
         rather than doubled, because bellhopcxx's title parser rejects the
         Fortran ``''`` escape.
         """
@@ -432,7 +439,7 @@ class TestThreeDFieldParameterDeck:
         assert deck['title'] == 'OBrien ridge'
 
     def test_an_empty_title_becomes_the_shared_default(self, tmp_path):
-        """``_sanitize_title`` maps a blank name to ``unnamed``, which is
+        """``sanitize_title`` maps a blank name to ``unnamed``, which is
         what every other uacpy deck writes; the raw interpolation wrote an
         empty literal instead."""
         deck = self._deck(tmp_path)
@@ -463,16 +470,16 @@ class TestThreeDFieldParameterDeck:
         shift every column the evaluator, tesselation and beam-pattern
         flags live in."""
         path = tmp_path / 'opt2.flp'
-        write_field3dflp(path, "ST'D", self.POS, self.BATHY)
+        write_field3dflp(path, "ST'D", **self.FLAT, bathy=self.BATHY)
         deck = _parse_flp3d(path)
         assert deck['opt'] == 'STD'
         assert deck['method'] == 'STD'
 
     def test_a_grid_too_small_to_triangulate_is_refused(self, tmp_path):
         with pytest.raises(ConfigurationError, match='2 x 2'):
-            write_field3dflp(tmp_path / 'thin.flp', 'STDFM', self.POS,
-                             {'X': np.array([0.0]), 'Y': np.array([0.0]),
-                              'depth': np.full((1, 1), 100.0)})
+            write_field3dflp(tmp_path / 'thin.flp', 'STDFM', **self.FLAT,
+                             bathy={'X': np.array([0.0]), 'Y': np.array([0.0]),
+                                    'depth': np.full((1, 1), 100.0)})
 
     @pytest.mark.skipif(not _AT_3D_DECK.is_file(),
                         reason='vendored Acoustics-Toolbox tests/ absent')
@@ -600,8 +607,9 @@ class TestAsciiShadeFile:
             read_shd_asc(_write_lines(tmp_path / 'c.shd.asc',
                                       self.DECK[:-2]))
 
-    def test_a_missing_file_is_a_format_error(self, tmp_path):
-        with pytest.raises(FileFormatError, match='not found'):
+    def test_a_missing_file_is_a_missing_file_error(self, tmp_path):
+        from uacpy.core.exceptions import MissingFileError
+        with pytest.raises(MissingFileError, match='not found'):
             read_shd_asc(tmp_path / 'absent.shd.asc')
 
 
@@ -675,8 +683,9 @@ class TestAsciiModeFile:
                                modes=[1, 999])
         assert modes['M'] == 1
 
-    def test_a_missing_file_is_a_format_error(self, tmp_path):
-        with pytest.raises(FileFormatError, match='not found'):
+    def test_a_missing_file_is_a_missing_file_error(self, tmp_path):
+        from uacpy.core.exceptions import MissingFileError
+        with pytest.raises(MissingFileError, match='not found'):
             _read_modes_asc_payload(tmp_path / 'absent.moa')
 
     def test_read_modes_returns_the_carrier_of_a_moa(self, tmp_path):
@@ -769,8 +778,8 @@ class TestReflectionCoefficientRoundTrip:
         path = tmp_path / 'sand.brc'
         write_reflection_coefficient(path, self.THETA, self.R)
         table = read_reflection_coefficient(path)
-        assert len(table.angles) == 91
-        assert np.array_equal(table.angles, self.THETA)
+        assert len(table.angles_deg) == 91
+        assert np.array_equal(table.angles_deg, self.THETA)
         assert np.allclose(table.magnitude, np.abs(self.R), atol=1e-6)
         assert np.allclose(table.phase, np.angle(self.R), atol=1e-8)
 
@@ -828,7 +837,7 @@ class TestReflectionCoefficientRoundTrip:
         path = tmp_path / 'dup.brc'
         write_reflection_coefficient(path, np.array([0.0, 0.0, 45.0]),
                                      np.array([0.9, 0.9, 0.5]))
-        assert len(read_reflection_coefficient(path).angles) == 3
+        assert len(read_reflection_coefficient(path).angles_deg) == 3
 
     def test_an_empty_table_is_refused(self, tmp_path):
         with pytest.raises(ConfigurationError, match='absorbing'):
@@ -869,8 +878,9 @@ class TestCollinsTlLine:
         with pytest.raises(FileFormatError, match='column'):
             read_tl_line(_write_lines(tmp_path / 'tl.line', ['1.0', '2.0']))
 
-    def test_a_missing_file_is_a_format_error(self, tmp_path):
-        with pytest.raises(FileFormatError, match='not found'):
+    def test_a_missing_file_is_a_missing_file_error(self, tmp_path):
+        from uacpy.core.exceptions import MissingFileError
+        with pytest.raises(MissingFileError, match='not found'):
             read_tl_line(tmp_path / 'absent.line')
 
 
@@ -893,19 +903,16 @@ class TestWrittenTokenCollisionGuardsShareOneDetector:
         with pytest.raises(ConfigurationError,
                            match='profile axis non-increasing'):
             write_fieldflp(
-                tmp_path / 'bad.flp', 'RA',
-                {'r': {'r': np.array([1000.0]), 'z': np.array([50.0])},
-                 's': {'z': np.array([25.0])}},
-                n_profiles=2, profile_ranges=np.array([0.0, 0.0004]))
+                tmp_path / 'bad.flp', 'RA', receiver_ranges=[1000.0],
+                receiver_depths=[50.0], source_depths=[25.0],
+                profile_ranges=np.array([0.0, 0.0004]))
 
     def test_valid_profile_ranges_write(self, tmp_path):
         from uacpy.io.oalib_writer import write_fieldflp
         out = tmp_path / 'ok.flp'
         write_fieldflp(
-            out, 'RA',
-            {'r': {'r': np.array([1000.0]), 'z': np.array([50.0])},
-             's': {'z': np.array([25.0])}},
-            n_profiles=2, profile_ranges=np.array([0.0, 5000.0]))
+            out, 'RA', receiver_ranges=[1000.0], receiver_depths=[50.0],
+            source_depths=[25.0], profile_ranges=np.array([0.0, 5000.0]))
         assert out.exists()
 
     def test_oases_receiver_depth_tokens_that_collide_are_refused(self):

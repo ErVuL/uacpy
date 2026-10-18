@@ -1,8 +1,10 @@
 """The PE field resampled onto the receiver grid: the interpolation of the
-complex envelope and of the TL."""
+complex envelope, modulus and phase apart. The regrid itself is
+:func:`uacpy.acoustics.resample_depth_range`."""
 
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
+
+from uacpy.core._grid import resample_depth_range
 
 
 def interp_envelope_to_receiver_grid(src_depths, src_ranges, psi,
@@ -39,10 +41,9 @@ def interp_envelope_to_receiver_grid(src_depths, src_ranges, psi,
     mag = np.abs(psi)
     with np.errstate(invalid='ignore', divide='ignore'):
         unit = np.where(mag > 0.0, psi / mag, 0.0)
-    mag_out = interp_to_receiver_grid(
-        src_depths, src_r, mag, rcv_depths, rcv_r)
-    unit_out = interp_to_receiver_grid(
-        src_depths, src_r, unit, rcv_depths, rcv_r)
+    mag_out = resample_depth_range(mag, src_depths, src_r, rcv_depths, rcv_r)
+    unit_out = resample_depth_range(unit, src_depths, src_r, rcv_depths,
+                                    rcv_r)
     with np.errstate(invalid='ignore', divide='ignore'):
         mod = np.abs(unit_out)
         unit_out = np.where(mod > 0.0, unit_out / mod, 1.0 + 0.0j)
@@ -50,33 +51,3 @@ def interp_envelope_to_receiver_grid(src_depths, src_ranges, psi,
     if carrier_rate:
         out = out * np.exp(1j * float(carrier_rate) * rcv_r)[None, :]
     return out
-
-
-def interp_to_receiver_grid(src_depths, src_ranges, values,
-                             rcv_depths, rcv_ranges):
-    """Bilinear-interpolate a PE-grid ``(depth, range)`` field onto the
-    receiver grid. Real or complex ``values`` (complex via independent re/im);
-    out-of-grid samples become NaN.
-
-    A NaN in the source grid propagates into every receiver cell whose
-    stencil touches it. That is the point: a sample the march failed to
-    solve is no data, and substituting a zero for it would make it a real
-    pressure the interpolator averages against its neighbours, so cells
-    around a failure would come back finite and credible.
-
-    Returns ``(len(rcv_depths), len(rcv_ranges))``."""
-    rd = np.atleast_1d(np.asarray(rcv_depths, dtype=float))
-    rr = np.atleast_1d(np.asarray(rcv_ranges, dtype=float))
-    grid = (np.asarray(src_depths, dtype=float), np.asarray(src_ranges, dtype=float))
-    DD, RR = np.meshgrid(rd, rr, indexing='ij')
-    pts = np.stack([DD.ravel(), RR.ravel()], axis=-1)
-
-    def _one(v):
-        v = np.asarray(v)
-        rgi = RegularGridInterpolator(grid, v.astype(np.float64),
-                                      bounds_error=False, fill_value=np.nan)
-        return rgi(pts).reshape(DD.shape)
-
-    if np.iscomplexobj(values):
-        return _one(np.real(values)) + 1j * _one(np.imag(values))
-    return _one(values)

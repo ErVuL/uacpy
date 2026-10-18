@@ -25,7 +25,8 @@ import importlib
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-__all__ = ['EngineEntry', 'ENGINES', 'engine_classes', 'engines_running']
+__all__ = ['EngineEntry', 'ENGINES', 'engine_classes', 'engines_running',
+           'engines_supporting']
 
 
 @dataclass(frozen=True)
@@ -103,3 +104,12 @@ def engines_running(mode) -> List[str]:
     ``mode``, sorted — the list a refusal offers as alternatives."""
     return sorted(cls.__name__ for cls in engine_classes().values()
                   if mode in cls.spec.modes)
+
+
+def engines_supporting(flag: str) -> List[str]:
+    """Class names of the registered engines whose ``spec.supports``
+    declares the capability ``flag`` (``'rough_surface'``,
+    ``'source_beam_pattern'``, …), sorted — the list a notice or refusal
+    offers, so a new engine's declaration reaches it with no edit there."""
+    return sorted(cls.__name__ for cls in engine_classes().values()
+                  if flag in cls.spec.supports)

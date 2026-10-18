@@ -26,7 +26,6 @@ from uacpy.models import Bellhop, Kraken, RunMode
 from uacpy.plot import (
     plot_detection_probability,
     plot_matched_field,
-    plot_roc,
     plot_signal_excess,
     shared_colorbar,
 )
@@ -35,9 +34,9 @@ GUIDE = True
 
 # ── Detection thresholds, from the (P_D, P_F) each sonar is designed for ─────
 DT_PASSIVE = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=50.0, integration_time_s=10.0)
+    0.5, 1e-4, bandwidth=50.0, integration_time=10.0)
 DT_ACTIVE = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=100.0, integration_time_s=0.5)
+    0.5, 1e-4, bandwidth=100.0, integration_time=0.5)
 
 # ── Two passive budgets. Every level shares one band reference (dB re 1 µPa²
 # per Hz here), which is what makes the differences meaningful.
@@ -55,8 +54,8 @@ CUT_DEPTH = 60.0        # m — the depth the shelf range cut is taken at
 ACTIVE_SL = 170.0
 ACTIVE_NL = 60.0
 DIRECTIVITY = 15.0
-PULSE_S = 0.5
-BEAMWIDTH_RAD = 0.3
+PULSE_LENGTH = 0.5      # s
+BEAMWIDTH = 0.3         # rad
 SONAR_HEIGHT = 75.0     # m above the seabed — sets the grazing angle vs range
 
 # ── Matched-field geometry ───────────────────────────────────────────────────
@@ -93,16 +92,15 @@ def _passive_shelf():
     return env, tl, sonar.passive_signal_excess_field(tl, **PASSIVE_SHELF)
 
 
-def _csdm(modes, seed=0, snr_dB=10.0, n_snapshots=50):
+def simulated_csdm(modes, snr_dB=10.0, n_snapshots=50, seed=0):
     """A measured CSDM: one source at ``(TRUE_DEPTH, TRUE_RANGE)`` plus noise.
 
     ``modes`` describes the ocean the *data* came from — pass a perturbed
-    environment's modes to simulate environmental mismatch.
+    environment's modes to simulate environmental mismatch. sonar.md §9
+    shows it.
     """
-    e = sonar.synthesize_replica(modes,
-                                 source_depth=TRUE_DEPTH,
-                                 ranges=TRUE_RANGE,
-                                 array_depths=ARRAY_DEPTHS)
+    e = sonar.synthesize_replica(modes, source_depth=TRUE_DEPTH,
+                                 ranges=TRUE_RANGE, array_depths=ARRAY_DEPTHS)
     rng = np.random.default_rng(seed)
     phases = np.exp(1j * rng.uniform(0.0, 2.0 * np.pi, n_snapshots))
     n_power = np.mean(np.abs(e) ** 2) / 10.0 ** (snr_dB / 10.0)
@@ -166,8 +164,9 @@ def detection_range():
     _, tl, se = _passive_shelf()
     fom = sonar.figure_of_merit(**PASSIVE_SHELF)
     cut = se.at(depth=CUT_DEPTH)
-    r_det = sonar.detection_range_from_field(cut)
-    depths, ranges = sonar.detection_ranges_by_depth(se)
+    r_det = sonar.detection_ranges_field(cut)
+    ranges = sonar.detection_ranges_field(se)
+    depths = se.coords['depth']
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.2))
 
@@ -221,8 +220,9 @@ def detection_theory():
     """From a required (P_D, P_F) to the DT term of the sonar equation."""
     fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2))
 
-    plot_roc([1.0, 2.0, 3.0, 4.0, 5.0], ax=axes[0],
-             title='ROC — Gaussian detector')
+    for deflection in [1.0, 2.0, 3.0, 4.0, 5.0]:
+        sonar.roc_curve(deflection).plot(ax=axes[0],
+                                         title='ROC — Gaussian detector')
     axes[0].axvline(1e-4, color='k', ls='--', lw=1.0, alpha=0.6)
     axes[0].text(1.3e-4, 0.06, '$P_F = 10^{-4}$', fontsize=8)
 
@@ -248,8 +248,8 @@ def detection_theory():
         d = sonar.detection_index(pd_target, 1e-4)
         dt_large_m = 5.0 * np.log10(d / wt)
         dt_exact = [sonar.detection_threshold_energy(
-                        pd_target, 1e-4, bandwidth_hz=m,
-                        integration_time_s=1.0, exact=True)
+                        pd_target, 1e-4, bandwidth=m,
+                        integration_time=1.0, exact=True)
                     for m in wt]
         ax.semilogx(wt, dt_exact, color=colour,
                     label=f'$P_D$ = {pd_target}, exact')
@@ -314,19 +314,19 @@ def reverberation():
 
     bottom = sonar.boundary_reverberation(
         slant, 210.0, sonar.lambert_bottom(grazing),
-        pulse_length_s=0.02, horizontal_beamwidth_rad=0.15,
+        pulse_length=0.02, horizontal_beamwidth=0.15,
         sound_speed=sound_speed)
     surface = sonar.boundary_reverberation(
         slant, 210.0,
         sonar.chapman_harris_surface(frequency=5000.0,
                                      grazing_deg=grazing, wind_speed_kn=25.0),
-        pulse_length_s=0.02, horizontal_beamwidth_rad=0.15,
+        pulse_length=0.02, horizontal_beamwidth=0.15,
         sound_speed=sound_speed)
     volume = sonar.volume_reverberation(
         slant, 210.0, -70.0,
-        pulse_length_s=0.02, solid_angle_beamwidth_sr=0.01,
+        pulse_length=0.02, solid_angle_beamwidth=0.01,
         sound_speed=sound_speed)
-    total = sonar.total_reverberation(bottom, surface, volume)
+    total = uacpy.acoustics.sum_levels_dB(bottom, surface, volume)
     background = sonar.noise_background(55.0, 20.0)
 
     fig, ax = plt.subplots(figsize=WIDE)
@@ -382,7 +382,7 @@ def active_budget():
     grazing = np.rad2deg(np.arctan2(SONAR_HEIGHT, ranges))
     rl = sonar.boundary_reverberation(
         np.hypot(ranges, SONAR_HEIGHT), ACTIVE_SL, sonar.lambert_bottom(grazing),
-        pulse_length_s=PULSE_S, horizontal_beamwidth_rad=BEAMWIDTH_RAD,
+        pulse_length=PULSE_LENGTH, horizontal_beamwidth=BEAMWIDTH,
         tl_dB=tl_bottom)
 
     se_noise = sonar.active_signal_excess(
@@ -415,7 +415,7 @@ def active_budget():
     ax = axes[1]
     for se, colour, label in ((se_noise, 'C2', 'noise only'),
                               (se_both, 'C3', 'noise + reverberation')):
-        r_det = sonar.detection_range(ranges, signal_excess_dB=se)
+        r_det = sonar.detection_ranges(ranges, signal_excess_dB=se)
         ax.plot(ranges / 1e3, se, color=colour, lw=1.4,
                 label=f'{label} — detection range {r_det / 1e3:.1f} km')
         if np.isfinite(r_det):
@@ -458,8 +458,8 @@ def matched_field():
             sound_speed=1650.0, density=1.8, attenuation=0.6,
         ),
     )
-    k_matched = _csdm(modes)
-    k_mismatched = _csdm(Kraken().compute_modes(true_env, source))
+    k_matched = simulated_csdm(modes)
+    k_mismatched = simulated_csdm(Kraken().compute_modes(true_env, source))
 
     panels = [
         ('Bartlett — matched', sonar.bartlett(k_matched, bank)),
@@ -503,7 +503,7 @@ def replica_banks():
                                       run_mode=RunMode.COHERENT_TL)
     ray_bank = sonar.replica_bank_from_field(field, array_depths=ARRAY_DEPTHS)
 
-    K = _csdm(modes)
+    K = simulated_csdm(modes)
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.6), sharey=True)
     for i, (ax, title, bank) in enumerate((
             (axes[0], 'replica_bank — Kraken modes', modal_bank),

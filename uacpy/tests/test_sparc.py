@@ -22,7 +22,7 @@ from uacpy.models.sparc._plan import (
     checked_n_mesh, profile_speed_bounds, reject_halfspace_bottom,
     default_n_time_samples, refuse_band_pass_overflow,
     reject_oversized_snapshot, resolve_n_mesh, resolve_n_time_samples,
-    resolve_rmax_m, SPARC_C_HIGH_UNBOUNDED,
+    resolve_rmax, SPARC_C_HIGH_UNBOUNDED,
 )
 from uacpy.models.sparc._pulse import (
     multi_frequency_notice, resolve_pulse_type, short_series_notice,
@@ -362,7 +362,7 @@ class TestOnlyFirstSourceFrequencyIsUsed:
         """RA-WAVE-12: a time-domain Field's ``frequencies`` are the bins
         that produced it; SPARC marches in time and has none, so it carries
         ``[deck_frequency]`` — the one frequency the deck reads — and the
-        band it marched is ``band_hz``, the attribute the band
+        band it marched is ``band``, the attribute the band
         products use. The stamped settings agree, with no note of a grid
         replaced."""
         env, source, receiver = self._rig(np.array([30.0, 60.0]))
@@ -370,7 +370,7 @@ class TestOnlyFirstSourceFrequencyIsUsed:
                                           run_mode=RunMode.TIME_SERIES)
         assert np.asarray(result.frequencies) == pytest.approx([30.0])
         assert result.f0 == pytest.approx(30.0)
-        assert result.band_hz == pytest.approx((0.0, 90.0))
+        assert result.band == pytest.approx((0.0, 90.0))
         assert 'fc' not in result.metadata
         assert result.run_settings.engine.deck_frequency == 30.0
         assert list(result.run_settings.frequencies) == [30.0]
@@ -536,7 +536,7 @@ class TestThePulseBandComesFromTheBaseBandResolver:
         assert len(said) == 1, said
         deck = float(np.atleast_1d(source.frequencies)[0])
         assert f'source.frequencies[0] = {deck:g} Hz' in said[0]
-        assert 'band_hz' in said[0]
+        assert 'band' in said[0]
 
     def test_a_band_without_frequencies_is_not_said_to_come_from_them(self):
         env, source, receiver, kw = self._call()
@@ -941,14 +941,12 @@ class TestSPARCHankelNormalisation:
         n_r = len(receiver.ranges)
         assert n_d != n_r and n_d > 1 and n_r > 1
 
-        for mode, key, n_runs, tag in (('R', 'n_depth_runs', n_d, '_d'),
-                                       ('D', 'n_range_runs', n_r, '_r')):
+        for mode, n_runs, tag in (('R', n_d, '_d'), ('D', n_r, '_r')):
             work = tmp_path / mode
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 result = SPARC(output_mode=mode, verbose=False, cleanup=False,
                                work_dir=work).run(env, source, receiver)
-            assert result.metadata[key] == n_runs
             data = np.asarray(result.data)
             assert data.shape[0] == n_d and data.shape[1] == n_r
             decks = sorted(work.rglob('*.env'))
@@ -1138,12 +1136,12 @@ class TestSparcRangeAlias:
         is 4 r."""
         r, c = 1000.0, 1500.0
         for time_max in (2.5 * r / c, 5.0 * r / c, 0.3):
-            rmax, margin, origin = resolve_rmax_m(r, c, time_max,
-                                                  rmax_factor=None)
+            rmax, margin, origin = resolve_rmax(r, c, time_max,
+                                                rmax_factor=None)
             assert (rmax - r) / c == pytest.approx(1.2 * time_max)
             assert margin == pytest.approx(rmax / r)
             assert 'Sect. 8.3.2' in origin
-        assert resolve_rmax_m(r, c, 2.5 * r / c, rmax_factor=None)[0] == \
+        assert resolve_rmax(r, c, 2.5 * r / c, rmax_factor=None)[0] == \
             pytest.approx(4.0 * r)
 
     def test_the_default_rmax_reads_the_fastest_speed_of_the_deck(self):
@@ -1156,11 +1154,11 @@ class TestSparcRangeAlias:
             env, Source(depths=50.0, frequencies=20.0),
             Receiver(depths=[50.0], ranges=[2000.0])).engine
         assert engine.time_max == pytest.approx(2.5 * 2000.0 / 1480.0)
-        assert engine.rmax_m == pytest.approx(
+        assert engine.rmax == pytest.approx(
             2000.0 + 1.2 * 1520.0 * engine.time_max)
 
     def test_a_pinned_margin_is_used_exactly(self):
-        assert resolve_rmax_m(1000.0, 1500.0, 9.0, rmax_factor=3.0) == (
+        assert resolve_rmax(1000.0, 1500.0, 9.0, rmax_factor=3.0) == (
             3000.0, 3.0, 'SPARC(rmax_factor=…)')
 
     @pytest.mark.parametrize('window', [dict(time_max=4.0),
@@ -1177,7 +1175,7 @@ class TestSparcRangeAlias:
                 env, Source(depths=50.0, frequencies=20.0),
                 Receiver(depths=[50.0], ranges=[2000.0]),
                 run_mode=RunMode.TIME_SERIES, **call)
-        assert settings.engine.rmax_m == pytest.approx(2000.0 + 1.2 * 1500.0 * 4.0)
+        assert settings.engine.rmax == pytest.approx(2000.0 + 1.2 * 1500.0 * 4.0)
         assert not [w for w in caught if 'range alias' in str(w.message)]
         assert not [n for n in settings.engine.notices
                     if 'range alias' in n.message]
@@ -2097,6 +2095,25 @@ class TestRtsToPressureDividesByThePulseTheRunMarched:
         unnamed, _ = rts_to_pressure(rts, 40.0, pulse_type='P')
         assert abs(np.asarray(unnamed).ravel()[0] / channel(40.0) - 1) > 0.01
 
+    def test_the_deconvolution_solves_for_no_tone_image(self):
+        """The deconvolution divides two transients' spectra (the
+        convolution theorem): no steady tone, so no negative-frequency image
+        to solve for — near 0 Hz too it is the plain ratio of the two
+        rectangular DTFTs, where the steady-tone fit would not be."""
+        from uacpy.acoustic_signal.generate import sparc_pulse
+        from uacpy.models.sparc import rts_to_pressure
+        rts, _ = self._record(50.0)
+        t = np.asarray(rts.times, dtype=float)
+        s_t, _ = sparc_pulse(t, 50.0, 'P')
+        kernel = np.exp(-2j * np.pi * 0.05 * t)
+        want = (kernel @ np.asarray(rts.pressure)) / (kernel @ s_t)
+        with recorded_warnings() as rec:
+            got, _ = rts_to_pressure(rts, 0.05, pulse_type='P',
+                                     pulse_frequency=50.0)
+        np.testing.assert_allclose(np.asarray(got).ravel(), want.ravel(),
+                                   rtol=1e-10)
+        assert not [w for w in rec if 'coincides with it' in str(w.message)]
+
     def test_a_non_positive_pulse_frequency_is_refused(self):
         from uacpy.models.sparc import rts_to_pressure
         rts, _ = self._record(50.0)
@@ -2292,8 +2309,21 @@ class TestSparcRefusesAnInvertedWindowBeforeTheDeck:
         pinned bound names the constructor, a derived one the rule that
         derived it from this environment."""
         derived = self._settings().engine
-        assert derived.c_low_origin == '0.9 × min(env.ssp)'
+        assert derived.c_low_origin == (
+            '0.9 × 1500 m/s, the water — the slowest speed of every medium '
+            '(scooter.f90:193-259)')
         assert derived.c_high_origin.startswith('unbounded (1e+07 m/s): k_min = 0')
         pinned = self._settings(c_low=1400.0, c_high=1600.0).engine
         assert (pinned.c_low_origin, pinned.c_high_origin) == (
             'SPARC(c_low=…)', 'SPARC(c_high=…)')
+
+    @pytest.mark.parametrize('name', ['c_low_origin', 'c_high_origin'])
+    def test_a_record_without_an_origin_does_not_load(self, name):
+        """uacpy reads only records the current version writes, which always
+        state both origins: one without is refused, not loaded with a
+        ``None`` in its place."""
+        from uacpy.models.sparc import SparcSettings
+        record = self._settings().engine.to_dict()
+        del record[name]
+        with pytest.raises(TypeError, match=name):
+            SparcSettings.from_dict(record)

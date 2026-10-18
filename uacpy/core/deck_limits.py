@@ -41,12 +41,12 @@ AT_LAST_SSP_POINT_EPS_M = 100.0 * 2.0 ** -23          # 1.1920929e-05 m
 
 # Resolution at which the AT decks print their axes: depths in metres and ranges in
 # kilometres, both at ``%.6f``. Two samples closer than this collapse to one token.
-# On a range axis the readers then reject it outright — ``misc/sspMod.f90:342``,
-# ``Bellhop/bdryMod.f90:132``/``:231``, ``misc/SourceReceiverPositions.f90:163``,
-# with ``misc/monotonicMod.f90`` strict (``<=`` fails). On a source/receiver *depth*
-# axis the equivalent ERROUTs are commented out
-# (``SourceReceiverPositions.f90:142``/``:146``), so the collapse is silent instead:
-# the deck simply carries the same depth twice.
+# On a range axis the readers then reject it outright — ``Bellhop/bdryMod.f90:132``
+# /``:231``, ``misc/SourceReceiverPositions.f90:163``, with ``misc/monotonicMod.f90``
+# strict (``<=`` fails) — and so does the SSP's depth axis (``misc/sspMod.f90:342``,
+# ``.LE.`` fails). On a source/receiver *depth* axis the equivalent ERROUTs are
+# commented out (``SourceReceiverPositions.f90:142``/``:146``), so the collapse is
+# silent instead: the deck simply carries the same depth twice.
 #: Decimals each axis is printed at. One number, so the carriers' admission
 #: rule below and the writers' column format (``io/oalib_writer.py``, which
 #: imports these) are the same statement rather than two that agree today.

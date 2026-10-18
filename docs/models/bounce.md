@@ -95,7 +95,7 @@ a fluid stack they agree. They differ in reach and in plumbing:
 |---|---|---|
 | Media | fluid or elastic layers over a fluid or elastic half-space | full seismo-acoustic |
 | Frequency | one per run | swept in one run → 2-D `R(θ, f)` |
-| Angle grid | derived from `c_low`/`c_high`/`rmax_m` | you pass `angles=` |
+| Angle grid | derived from `c_low`/`c_high`/`rmax` | you pass `angles_deg=` |
 | Coefficient | P-P | P-P, transmission |
 | Writes `.brc` / `.irc` | ✅ — consumed directly by AT models | ✗ |
 
@@ -118,7 +118,7 @@ for when you need physics BOUNCE does not model, or a broadband picture.
 Bounce reads **no source or receiver geometry** — the plane-wave reflection
 coefficient does not depend on where anything is. `source.frequencies[0]` and
 `receiver.range_max` are the only two numbers it takes from those carriers, and
-`rmax_m=` replaces the second one.
+`rmax=` replaces the second one.
 
 See [environment carriers](../guide/environment.md) for how to build the
 `SeabedColumn`, `SedimentLayer` and `BoundaryProperties` that describe a stack,
@@ -138,15 +138,18 @@ from uacpy.models import Bounce, RunMode
 
 That is the entire list, and it is the default — `run_mode=` can be omitted.
 
-The result carries `angles` (grazing, degrees), `magnitude` (0–1) and `phase`
+The result carries `angles_deg` (grazing), `magnitude` (0–1) and `phase`
 (radians), plus the usual `.at` / `.isel` / `.eval` slicing on an `angle=` axis.
 Note the deliberate asymmetry documented in [results](../guide/results.md):
-slicing an *angle* keeps `angles` as a length-1 axis, because θ is this type's permanent
+slicing an *angle* keeps `angles_deg` as a length-1 axis, because θ is this type's permanent
 abscissa.
 
 Like every uacpy result it draws itself with `.plot()` — see
 [plotting](../guide/plotting.md). `show_phase=True` adds `φ(θ)` on a twin axis;
-a 2-D `R(θ, f)` (which only OASR produces) renders as a heatmap instead.
+`value='loss'` draws the bottom loss `-20·log10 |R|` in dB instead of `|R|`,
+and `value='phase'` the phase `φ(θ)` as the line, so several tables' phases
+overlay on one `ax=`; a 2-D `R(θ, f)` (which only OASR produces) renders as a
+heatmap instead.
 
 ---
 
@@ -160,14 +163,15 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 |---|---|---|
 | `c_low` | `None` | Lowest phase velocity tabulated (m/s). Must be `> 0`. `None` derives `min(1400, min(env.ssp))` at `run()` time — AT `bounce.htm` asks for "the lowest speed in the problem (say 1400.0)", and the 1400 there is the example, not the rule, so cold or brackish water needs the lower value or the table loses its grazing wedge. |
 | `c_high` | `None` | Highest phase velocity; `None` resolves to `1e9`, which zeroes the minimum wavenumber and buys the full 0–90° sweep — the manual's value: "For a full 90 degree calculation set CMin to the lowest speed in the problem (say 1400.0) CMax to 1.0E9." (`doc/bounce.htm`; `bounce.f90:47` sets `kMin = 0` above 1e6). |
-| `rmax_m` | `None` | Range (m) the table is sized for — it sets how many angles you get. `None` auto-derives from `receiver.range_max` (10 km when that is 0); with `receiver=None`, pin it or `n_angles`. Refused beside `n_angles`, which sets it. |
-| `n_angles` | `None` | The number of tabulated angles, exactly: `rmax_m` is set half an angle above the count, so the `INT` of `bounce.f90:49` gives `n_angles`; a count the deck's six-decimal km RMax cannot give is refused, naming the one it gives. A whole number ≥ 2; refused beside `rmax_m`. |
+| `rmax` | `None` | Range (m) the table is sized for — it sets how many angles you get. `None` auto-derives from `receiver.range_max` (10 km when that is 0); with `receiver=None`, pin it or `n_angles`. Refused beside `n_angles`, which sets it. |
+| `n_angles` | `None` | The number of tabulated angles, exactly: `rmax` is set half an angle above the count, so the `INT` of `bounce.f90:49` gives `n_angles`; a count the deck's six-decimal km RMax cannot give is refused, naming the one it gives. A whole number ≥ 2; refused beside `rmax`. |
 
 **Everything else**
 
 | Name | Default | Meaning |
 |---|---|---|
 | `executable` | `None` | Path to `bounce`; auto-detected. |
+| `n_mesh` | `None` | Finite-difference points per sediment medium (`NPTS`), written as given: one count for every medium, or one per medium; `0` is the reader's automatic 20 points per wavelength (`doc/bounce.htm`). `None` = 100 points per wavelength of each medium's slowest wave, at least 100 — the manual's "perhaps 100 points/wavelength as a good balance between run time and accuracy" (10 per wavelength, the reader's floor, it calls "very poor"). A count under the reader's floor (`ReadEnvironmentMod.f90:110-112`, "Mesh is too coarse") is refused; over a bare half-space, which has no medium to mesh, a pinned count gets a notice. Use it to check `R(θ)` for mesh convergence. |
 | `interp_ssp` | `None` | SSP interpolation scheme written into the `.env`; unset → `'linear'` (AT `'C'`), the manual's choice when unsure (`doc/EnvironmentalFile.htm`: "If your not sure which option to take, I'd suggest you use 'C'."). |
 | `collapse` | `None` | Override the collapse policy (default `bottom_range='median'`). |
 | `use_tmpfs` | `False` | Stage scratch files in RAM. |
@@ -191,7 +195,7 @@ import numpy as np
 import uacpy
 from uacpy.models import Bounce
 
-GRID = dict(c_low=1400.0, c_high=1e9, rmax_m=10_000.0)
+GRID = dict(c_low=1400.0, c_high=1e9, rmax=10_000.0)
 PROBE = uacpy.Receiver(depths=50.0, ranges=10_000.0)
 WATER_SPEED = 1500.0
 
@@ -235,7 +239,7 @@ exists down there. The field below the interface is evanescent, it carries no
 energy away, and everything comes back.
 
 The phase (dashed) tells the other half of the story. At grazing incidence the
-seabed behaves like a pressure-release surface — `R = −1`, a 180° shift — and as
+seabed behaves like a pressure-release surface — `R = −1`, a π (180°) shift — and as
 the angle steepens the phase sweeps continuously down to zero at the critical
 angle. Above the critical angle `R` is real and positive, so there is no phase
 shift at all. Total reflection is not free: it *delays* the wave by an
@@ -256,8 +260,7 @@ for alpha, style in [(0.0, '-'), (0.2, '--'), (0.6, '-.'), (1.5, ':')]:
         acoustic_type='half-space',
         sound_speed=1650.0, density=1.9, attenuation=alpha,
     ))
-    ax.plot(rc.angles, rc.magnitude, style, lw=1.6,
-            label=f'α = {alpha:g} dB/λ')
+    rc.plot(ax=ax, label=f'α = {alpha:g} dB/λ', linestyle=style, lw=1.6)
 ```
 
 ![Effect of sediment attenuation on |R|](figures/bounce_attenuation.png)
@@ -281,11 +284,11 @@ for i, name in enumerate(names):
     bottom = uacpy.BoundaryProperties.from_preset(name)
     rc = reflection(bottom)
     colour = f'C{i}'
-    ax.plot(rc.angles, rc.magnitude, color=colour, lw=1.6,
-            label=f'{name} ({bottom.sound_speed:.0f} m/s)')
+    rc.plot(ax=ax, label=f'{name} ({bottom.sound_speed:.0f} m/s)',
+            color=colour, lw=1.6)
     if bottom.sound_speed > WATER_SPEED:
         theta_c = uacpy.acoustics.critical_angle(bottom.sound_speed, WATER_SPEED)
-        ax.plot([theta_c], [np.interp(theta_c, rc.angles, rc.magnitude)],
+        ax.plot([theta_c], [np.interp(theta_c, rc.angles_deg, rc.magnitude)],
                 'o', color=colour, ms=5.0)
 ```
 
@@ -316,7 +319,7 @@ No preset is *slower* than the water, and a slow bottom behaves differently
 again: it has no critical angle at all, and instead an **intromission angle**
 where the two impedances match, `|R|` falls to zero and the seabed swallows
 everything. Soft mud at 1450 m/s and 1.4 g/cm³ puts it at 16.6° (15.7° over
-ρ_w = 1 water), where `|R|` falls below 10⁻³ and the phase steps through 180°.
+ρ_w = 1 water), where `|R|` falls below 10⁻³ and the phase steps through π (180°).
 If you are modelling mud rather than sand, that null is the feature to look
 for.
 
@@ -337,10 +340,11 @@ whether the preset's shear speed (3000 m/s) is kept. `from_preset` drops shear
 by default so the result works with every model; `elastic=True` keeps it.
 
 An elastic solid supports two body waves, and each gets its own critical angle:
-60° for shear, 74° for compression. Below 60° both are evanescent and the rock
+60° for shear, 75° for compression (`θc = arccos(c1/c2)`, JKPS §1.6.1, with
+the granite preset's 3000 and 5750 m/s). Below 60° both are evanescent and the rock
 is very nearly a mirror — though not identically to the fluid case, because the
 evanescent shear field still samples a lossy solid and gives up a little more on
-every bounce. **Between 60° and 74° the shear wave propagates**,
+every bounce. **Between 60° and 75° the shear wave propagates**,
 and it carries energy away — so `|R|` drops to ~0.73 while the fluid model,
 which has no shear wave to radiate into, still says 0.999.
 
@@ -370,7 +374,7 @@ that round-trip phase — 285° at the first, 578° at the second — because th
 granite's own reflection phase is swinging with angle too, and they are not
 perfect cancellations, because the two returns do not have equal amplitude.
 
-The phase panel shows the same thing more sharply: each null is a 360° phase
+The phase panel shows the same thing more sharply: each null is a 2π (360°) phase
 wrap. This structure is real and it is what makes sediment thickness estimable
 from acoustic data at all.
 
@@ -383,22 +387,21 @@ too — the seabed is the same stack as above, under the canonical water column.
 ```python
 env, _, _ = layered_elastic()          # 8 m sand over granite
 freqs = np.linspace(100.0, 2000.0, 72)
-theta = np.linspace(0.0, 90.0, 601)
-R = np.empty((theta.size, freqs.size))
-for j, f in enumerate(freqs):
-    source = uacpy.Source(depths=25.0, frequencies=float(f))
-    rc = Bounce(**GRID).run(env, source, PROBE)
-    R[:, j] = np.interp(theta, rc.angles, rc.magnitude)
-
-im = ax.pcolormesh(freqs, theta, R, shading='nearest', cmap='viridis',
-                   vmin=0.0, vmax=1.0)
+tables = [Bounce(**GRID).run(env, uacpy.Source(depths=25.0,
+                                               frequencies=float(f)),
+                             PROBE)
+          for f in freqs]
+rc = uacpy.ReflectionCoefficient.stack(
+    tables, angles_deg=np.linspace(0.0, 90.0, 601))
+fig, ax = rc.plot(figsize=TALL, frequency_unit='Hz', vmin=0.0, vmax=1.0,
+                  title='Bounce — 8 m sand over granite, |R(θ, f)|')
 ```
 
 ![|R(θ, f)| for the layered stack](figures/bounce_frequency.png)
 
 Bounce tabulates one frequency per run, so a band is a loop — and each run
-picks its own angle grid (denser at high frequency), which is why the rows are
-resampled onto a common axis before stacking.
+picks its own angle grid (denser at high frequency), which is why
+`ReflectionCoefficient.stack` reads every table on one angle axis.
 
 The picture pays for the loop. Frequency and angle enter the layer's round-trip
 phase only through the product `f · sin θ_layer`, so the nulls trace out a fan:
@@ -453,7 +456,7 @@ Two runs over the same seabed. With auto-BOUNCE the sediment layer is honoured
 exactly — its interference nulls strip whole families of angles out of the
 field, and the result has visible structure. Without it, the layer is discarded
 and the column flattens to the bare granite half-space, which reflects almost
-everything out to 74°: the field stays hot and nearly featureless to 5 km.
+everything out to 75°: the field stays hot and nearly featureless to 5 km.
 
 The route is **exact in the plane-wave reflection coefficient**, amplitude and
 phase alike, and the approximations left are the ones a ray tracer always makes.
@@ -501,8 +504,8 @@ propagation-facing table but not for inspecting normal incidence.
 
 **The angle grid is uniform in `cos θ`, not in θ.** It comes from a uniform
 sweep in horizontal slowness, which means it is *coarse where you probably care
-most*: with `rmax_m=10 km` the spacing is 0.9° below 5° grazing and 0.04° near
-normal incidence. Raise `rmax_m` (or set `n_angles`) if the sub-critical region
+most*: with `rmax=10 km` the spacing is 0.9° below 5° grazing and 0.04° near
+normal incidence. Raise `rmax` (or set `n_angles`) if the sub-critical region
 looks under-sampled. You cannot specify the angles directly — OASR can.
 
 **A bare half-space's phase is referenced at the seafloor — no workaround
@@ -532,12 +535,12 @@ the critical angle is *larger* than a surface-speed estimate suggests.
 
 **Files only exist if you pin `work_dir`.** Without it, uacpy uses a temp
 directory and wipes it when `run()` returns; `metadata['brc_file']` is not
-populated with a stale path. The in-memory `.angles` / `.magnitude` / `.phase` are always
+populated with a stale path. The in-memory `.angles_deg` / `.magnitude` / `.phase` are always
 there.
 
 **A `Receiver` is optional once the table is pinned.** `run()` keeps the
 uniform signature every model has; Bounce reads only `receiver.range_max`, and
-only when both `rmax_m` and `n_angles` are `None`. Pin either one and
+only when both `rmax` and `n_angles` are `None`. Pin either one and
 `run(env, source, None)` is accepted; with neither, `receiver=None` raises
 `ConfigurationError`.
 

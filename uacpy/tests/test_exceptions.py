@@ -57,6 +57,15 @@ class TestCustomExceptions:
         assert "100" in str(error)
         assert "Source" in str(error)
 
+    def test_invalid_depth_error_names_no_solver_class(self):
+        """The sediment bottom bounds Kraken (a modal solver) as it bounds
+        Scooter and SPARC, so the message says what the solver does rather
+        than naming a class of solver one of them is not."""
+        message = str(InvalidDepthError(depth=150, depth_max=100,
+                                        context="Source"))
+        assert "for a solver that computes the field in the sediment" in message
+        assert "spectral" not in message
+
     def test_invalid_depth_error_subclass_of_uacpyerror(self):
         try:
             raise InvalidDepthError(depth=200, depth_max=100, context="Receiver")
@@ -147,15 +156,11 @@ class TestWarningClasses:
         (lambda: uacpy.sonar.albersheim_snr(pd=0.99, pf=1e-6),
          'ValidityWarning'),
         (lambda: uacpy.comms.awgn(np.zeros(16), 10.0), 'ValidityWarning'),
-        (lambda: uacpy.acoustic_signal.synthesize_noise_from_psd(
-            np.ones(8), np.linspace(0.0, 100.0, 8), nfft=1000,
-            sample_rate=400.0, rng=np.random.default_rng(0)),
-         'FallbackWarning'),
         (lambda: uacpy.data.pelagic_lithology(100.0, 0.0),
          'ValidityWarning'),
     ], ids=['outside-a-fitted-range', 'a-default-taken',
             'outside-an-empirical-envelope', 'an-undefined-ratio',
-            'a-value-rounded', 'outside-a-models-domain'])
+            'outside-a-models-domain'])
     def test_a_site_warns_with_its_cause(self, call, category):
         with pytest.warns(getattr(uacpy, category)) as record:
             call()
@@ -189,8 +194,8 @@ class TestRunNoticesCarryTheirCause:
 
     @pytest.mark.requires_binary
     def test_bellhop_announces_its_geometry_notices_by_cause(self):
-        """The launch fan misses a receiver (numerics), the receiver ranges
-        start at r = 0 and the water column spans 1.07 wavelengths (validity)."""
+        """The launch fan misses a receiver (numerics) and the receiver
+        ranges start at r = 0 (validity)."""
         from uacpy.models import Bellhop
         env = uacpy.Environment(bathymetry=80.0, ssp=1500.0, bottom='sand')
         src = uacpy.Source(depths=10.0, frequencies=20.0)
@@ -198,21 +203,19 @@ class TestRunNoticesCarryTheirCause:
         settings, record = self._announced(
             lambda: Bellhop(verbose=False).run_settings(env, src, rcv))
         notices = settings.engine.notices
-        assert [w.category for w in record][:3] == [
-            uacpy.NumericsWarning, uacpy.ValidityWarning,
-            uacpy.ValidityWarning]
-        assert [n.category for n in notices[:3]] == [
-            uacpy.NumericsWarning, uacpy.ValidityWarning,
-            uacpy.ValidityWarning]
-        assert [str(w.message) for w in record][:3] == [
-            n.message for n in notices[:3]]
+        assert [w.category for w in record][:2] == [
+            uacpy.NumericsWarning, uacpy.ValidityWarning]
+        assert [n.category for n in notices[:2]] == [
+            uacpy.NumericsWarning, uacpy.ValidityWarning]
+        assert [str(w.message) for w in record][:2] == [
+            n.message for n in notices[:2]]
 
     def test_a_sink_notice_keeps_its_cause_and_a_direct_one_warns_it(self):
         """A resolver given a sink records a Notice of its class, and
         called on its own warns that class at once (RAM's knobs a backend
         cannot read)."""
         from uacpy.models import RAM
-        model = RAM(verbose=False, rams_rotation_angle=60.0)
+        model = RAM(verbose=False, rams_rotation_angle_deg=60.0)
         sink = []
         model._warn_on_mpirams_only_overrides('mpirams', notices=sink)
         assert len(sink) == 1 and sink[0].category is uacpy.FallbackWarning
@@ -245,8 +248,8 @@ class TestRunNoticesCarryTheirCause:
             lambda: Bellhop(verbose=False).run_settings(env, src, rcv))
         d = settings.to_dict()
         assert json.loads(json.dumps(d)) == d
-        assert [n['category'] for n in d['engine']['notices'][:3]] == [
-            'NumericsWarning', 'ValidityWarning', 'ValidityWarning']
+        assert [n['category'] for n in d['engine']['notices'][:2]] == [
+            'NumericsWarning', 'ValidityWarning']
         back = RunSettings.from_dict(d)
         assert back == settings
         assert [n.category for n in back.engine.notices] == [
@@ -399,9 +402,10 @@ def test_an_exit_code_of_zero_is_not_called_a_failed_execution(return_code,
 # ── 1. a missing file is typed by who was supposed to write it ───────────────
 
 class TestMissingFileProvenance:
-    """``.bty`` / ``.ati`` / ``.sbp`` are decks the caller authored — no uacpy
-    model writes one a uacpy reader reads back — so an absent one is a bad
-    argument. Everything else these readers open is model output."""
+    """Every reader raises ``MissingFileError`` for a path that names no
+    file — a ``ConfigurationError`` and a ``FileNotFoundError`` — whether the
+    caller authored the file (``.bty`` / ``.ati`` / ``.sbp``) or a model
+    should have written it; the remediation states the provenance."""
 
     def test_a_missing_bty_the_caller_named_is_a_configuration_error(
             self, tmp_path):
@@ -440,15 +444,14 @@ class TestMissingFileProvenance:
             stage_source_beam_pattern(absent, tmp_path / 'out.sbp')
         assert type(read_exc.value) is type(stage_exc.value)
 
-    def test_a_missing_brc_bounce_should_have_written_is_a_format_error(
+    def test_a_missing_brc_bounce_should_have_written_says_so(
             self, tmp_path):
-        """The other side of the rule, and the reason it is not "every
-        reflection table is the user's": ``Bounce`` calls this reader on the
-        ``.brc`` it just wrote, and the message says "Run Bounce
-        first". Its ``reflection_file=`` sibling — a path the user did supply
-        — raises ``ConfigurationError``; two provenances, two types."""
+        """``Bounce`` calls this reader on the ``.brc`` it just wrote, so the
+        message says "Run Bounce first"; the type is the one every missing
+        path raises."""
+        from uacpy.core.exceptions import MissingFileError
         from uacpy.io.refl_io import read_reflection_coefficient
-        with pytest.raises(FileFormatError, match='not found'):
+        with pytest.raises(MissingFileError, match='Run Bounce first'):
             read_reflection_coefficient(tmp_path / 'absent.brc')
 
 
@@ -491,8 +494,8 @@ def _model_output_readers():
     from uacpy.io.modes_reader import read_modes
     from uacpy.io.mpirams_reader import read_psif
     from uacpy.io.oalib_reader import (
-        read_arr_file, read_ray_file, read_rts_file, read_shd_asc,
-        read_shd_bin, read_shd_file, read_ts)
+        read_arr_file, read_prt, read_ray_file, read_rts_file, read_shd_asc,
+        read_shd_bin, read_shd_file)
     from uacpy.io.oases_reader import (
         read_oasn_covariance, read_oasn_replicas, read_oasp_trf,
         read_oasr_reflection_coefficients, read_oases_rhs_header,
@@ -500,7 +503,7 @@ def _model_output_readers():
     from uacpy.io.ramsurf_reader import (read_pcomplex_grid, read_tl_grid,
                                          read_tl_line)
     from uacpy.io.refl_io import read_reflection_coefficient
-    grid = dict(dr=1.0, ndr=1, dz=1.0, ndz=1)
+    grid = dict(dr=1.0, range_decimation=1, dz=1.0, depth_decimation=1)
     return [
         ('read_shd_file', lambda p: read_shd_file(p / 'a.shd')),
         ('read_shd_bin', lambda p: read_shd_bin(str(p / 'a.shd'))),
@@ -508,7 +511,7 @@ def _model_output_readers():
         ('read_arr_file', lambda p: read_arr_file(p / 'a.arr')),
         ('read_ray_file', lambda p: read_ray_file(p / 'a.ray')),
         ('read_rts_file', lambda p: read_rts_file(p / 'a.rts')),
-        ('read_ts', lambda p: read_ts(p / 'a.ts')),
+        ('read_prt', lambda p: read_prt(p / 'a.prt')),
         ('read_modes', lambda p: read_modes(p / 'a.mod')),
         ('read_grn_file', lambda p: read_grn_file(p / 'a.grn')),
         ('read_oast_tl', lambda p: read_oast_tl(p / 'a.plt')),
@@ -531,9 +534,15 @@ def _model_output_readers():
 
 @pytest.mark.parametrize('label,call', _model_output_readers(),
                          ids=[lbl for lbl, _ in _model_output_readers()])
-def test_a_missing_model_output_is_a_file_format_error(label, call, tmp_path):
-    with pytest.raises(FileFormatError, match='not found'):
+def test_a_missing_model_output_is_a_missing_file_error(label, call, tmp_path):
+    """A MissingFileError: a ConfigurationError, and a FileNotFoundError, so
+    ``except FileNotFoundError`` / ``except OSError`` catch it as they would
+    Python's own."""
+    from uacpy.core.exceptions import MissingFileError
+    with pytest.raises(MissingFileError, match='not found') as caught:
         call(tmp_path)
+    assert isinstance(caught.value, FileNotFoundError)
+    assert isinstance(caught.value, ConfigurationError)
 
 
 def _user_input_readers():
@@ -565,15 +574,16 @@ def _user_input_readers():
 
 @pytest.mark.parametrize('label,call', _user_input_readers(),
                          ids=[lbl for lbl, _ in _user_input_readers()])
-def test_a_missing_input_deck_is_a_configuration_error(label, call, tmp_path):
-    with pytest.raises(ConfigurationError, match='no file at|not found'):
+def test_a_missing_input_deck_is_a_missing_file_error(label, call, tmp_path):
+    from uacpy.core.exceptions import MissingFileError
+    with pytest.raises(MissingFileError,
+                       match='no file at|not found') as caught:
         call(tmp_path)
+    assert isinstance(caught.value, FileNotFoundError)
 
 
 #: Public readers held to neither list, with the reason.
-_READERS_WITHOUT_A_MISSING_FILE_ERROR = {
-    'read_prt': 'an engine log is optional: an absent .prt reads as None',
-}
+_READERS_WITHOUT_A_MISSING_FILE_ERROR = {}
 
 
 def test_every_public_reader_states_what_an_absent_file_is():
@@ -976,14 +986,16 @@ class TestOasesReadersRaiseTheirOwnErrorType:
     ``.rhs`` header reader leaked ``FileNotFoundError`` / ``IsADirectoryError``
     instead."""
 
-    def test_a_missing_rhs_is_a_file_format_error(self, tmp_path):
+    def test_a_missing_rhs_is_a_missing_file_error(self, tmp_path):
+        from uacpy.core.exceptions import MissingFileError
         from uacpy.io.oases_reader import read_oases_rhs_header
-        with pytest.raises(FileFormatError, match='not found'):
+        with pytest.raises(MissingFileError, match='not found'):
             read_oases_rhs_header(tmp_path / 'absent.rhs')
 
-    def test_a_directory_is_a_file_format_error(self, tmp_path):
+    def test_a_directory_is_a_missing_file_error(self, tmp_path):
+        from uacpy.core.exceptions import MissingFileError
         from uacpy.io.oases_reader import read_oases_rhs_header
-        with pytest.raises(FileFormatError, match='not found'):
+        with pytest.raises(MissingFileError, match='not found'):
             read_oases_rhs_header(tmp_path)
 
 

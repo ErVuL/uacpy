@@ -9,7 +9,7 @@ from uacpy.core.exceptions import ConfigurationError
 
 
 class TestGrnPhaseSpeedTaper:
-    """The cmin/cmax phase-speed taper: valid bands taper the spectrum edges;
+    """The c_low/c_high phase-speed taper: valid bands taper the spectrum edges;
     a band with no overlap with the file's phase-speed grid raises a typed
     ConfigurationError instead of a raw broadcast ValueError."""
 
@@ -20,7 +20,7 @@ class TestGrnPhaseSpeedTaper:
 
     def test_interior_band_tapers_edges(self):
         from uacpy.core.acoustics import wavenumber_taper
-        win = wavenumber_taper(self._k(), 100.0, cmin=1450.0, cmax=1650.0)
+        win = wavenumber_taper(self._k(), 100.0, c_low=1450.0, c_high=1650.0)
         assert win.shape == (64,)
         assert np.all((win >= 0.0) & (win <= 1.0))
         assert win[0] < 1.0 and win[-1] < 1.0     # rolled off at both edges
@@ -28,25 +28,25 @@ class TestGrnPhaseSpeedTaper:
 
     def test_generous_bounds_are_a_noop(self):
         from uacpy.core.acoustics import wavenumber_taper
-        win = wavenumber_taper(self._k(), 100.0, cmin=1000.0, cmax=3000.0)
+        win = wavenumber_taper(self._k(), 100.0, c_low=1000.0, c_high=3000.0)
         assert np.all(win == 1.0)
 
-    @pytest.mark.parametrize("cmin,cmax", [
-        (None, 100.0),      # cmax below the grid's slowest phase speed
-        (5000.0, None),     # cmin above the grid's fastest phase speed
-        (1650.0, 1450.0),   # inverted band (cmin > cmax)
+    @pytest.mark.parametrize("c_low,c_high", [
+        (None, 100.0),      # c_high below the grid's slowest phase speed
+        (5000.0, None),     # c_low above the grid's fastest phase speed
+        (1650.0, 1450.0),   # inverted band (c_low > c_high)
     ])
-    def test_no_overlap_band_raises_typed(self, cmin, cmax):
+    def test_no_overlap_band_raises_typed(self, c_low, c_high):
         from uacpy.core.exceptions import ConfigurationError
         from uacpy.core.acoustics import wavenumber_taper
         with pytest.raises(ConfigurationError, match='phase-speed taper: '):
-            wavenumber_taper(self._k(), 100.0, cmin=cmin, cmax=cmax)
+            wavenumber_taper(self._k(), 100.0, c_low=c_low, c_high=c_high)
 
     def test_greens_function_to_field_raises_typed(self):
         from uacpy.core.exceptions import ConfigurationError
         gf = _scooter_gf([100.0], np.ones((1, 1, 2, 32), dtype=np.complex64))
         with pytest.raises(ConfigurationError, match="no overlap"):
-            gf.to_field(np.array([1000.0]), cmax=100.0)
+            gf.to_field(np.array([1000.0]), c_high=100.0)
 
     def test_to_field_transforms_the_frequency_it_is_given(self):
         """A multi-frequency file transforms the slice ``frequency=``
@@ -84,6 +84,24 @@ class TestGrnPhaseSpeedTaper:
             assert gf.to_field(ranges, frequency=251.0).f0 == 200.0
         with pytest.warns(FallbackWarning, match='edge slice at 100 Hz'):
             assert gf.to_field(ranges, frequency=49.0).f0 == 100.0
+
+    def test_a_single_frequency_file_says_when_asked_for_another(self):
+        # Its one slice is transformed whatever is asked, as the multi-
+        # frequency file does past its band: a request off that frequency
+        # warns; the frequency itself, to a deck's rounding, is silent.
+        import warnings
+        from uacpy.core.exceptions import FallbackWarning
+        gf = _scooter_gf([200.0], np.ones((1, 1, 2, 32), dtype=np.complex64))
+        ranges = np.array([1000.0])
+        with pytest.warns(FallbackWarning,
+                          match=r'frequency=300 Hz is not this file.s one '
+                                r'frequency; its slice at 200 Hz'):
+            assert gf.to_field(ranges, frequency=300.0).f0 == 200.0
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', FallbackWarning)
+            assert gf.to_field(ranges, frequency=200.0 * (1 + 1e-9)).f0 \
+                == 200.0
+            assert gf.to_field(ranges).f0 == 200.0
 
     def test_to_field_refuses_a_frequency_that_is_not_finite(self):
         G = np.ones((2, 1, 2, 32), dtype=np.complex64)
@@ -126,7 +144,7 @@ def _uniform_k_phase_speeds(c_hi, c_lo, nk, freq):
     return omega / np.linspace(omega / c_hi, omega / c_lo, nk)
 
 
-def _scooter_gf(freqs, G, *, title="SCOOTER test", atten=0.0):
+def _scooter_gf(freqs, G, *, title="SCOOTER test", atten=0.0, **identity):
     """A frequency-domain GreensFunction on a decreasing phase-speed grid,
     as a ``.grn`` stores it."""
     from uacpy.core.results import GreensFunction
@@ -135,10 +153,11 @@ def _scooter_gf(freqs, G, *, title="SCOOTER test", atten=0.0):
         data=G, phase_speeds=_uniform_k_phase_speeds(1700.0, 1400.0, nk,
                                                      100.0),
         receiver_depths=np.array([25.0, 75.0]), source_depths=[50.0],
-        frequencies=freqs, stabilizing_attenuation=atten, title=title)
+        frequencies=freqs, stabilizing_attenuation=atten, title=title,
+        **identity)
 
 
-def _snapshot_gf(nt=8, nk=16, f0=50.0, dt=1e-3):
+def _snapshot_gf(nt=8, nk=16, f0=50.0, dt=1e-3, model='SPARC', **identity):
     from uacpy.core.results import GreensFunction
     rng = np.random.default_rng(5)
     G = (rng.standard_normal((nt, 1, 2, nk))
@@ -148,7 +167,7 @@ def _snapshot_gf(nt=8, nk=16, f0=50.0, dt=1e-3):
                                                      f0),
         receiver_depths=np.array([25.0, 75.0]), source_depths=[50.0],
         frequencies=f0, times=np.arange(nt) * dt,
-        title="SPARC-  snapshot", model='SPARC')
+        title="SPARC-  snapshot", model=model, **identity)
 
 
 class TestGreensFunctionCarriesItsAxes:
@@ -203,6 +222,40 @@ class TestGreensFunctionCarriesItsAxes:
                                  source_waveform=np.ones(7))
         gf.snapshot_to_field(np.array([100.0]), 50.0,
                              source_waveform=np.ones(8))
+
+    @pytest.mark.parametrize("snapshot,transform", [
+        (False, lambda gf: gf.to_field(np.array([100.0]), frequency=100.0)),
+        (False, lambda gf: gf.to_transfer_function(np.array([100.0]))),
+        (True, lambda gf: gf.snapshot_to_field(np.array([100.0]), 50.0,
+                                               normalize=None)),
+        (True, lambda gf: gf.snapshot_to_time_field(np.array([100.0]))),
+    ], ids=['to_field', 'to_transfer_function', 'snapshot_to_field',
+            'snapshot_to_time_field'])
+    def test_a_transform_carries_the_greens_functions_identity(
+            self, snapshot, transform):
+        # The Field a .grn transforms to says which model produced it, as
+        # every other derived result does; it holds the one source depth
+        # transformed, and the transform's keys join the file's metadata.
+        from uacpy.core.run_settings import RunMode, RunSettings
+        record = RunSettings(model='Test', mode=RunMode.COHERENT_TL,
+                             frequencies=np.array([100.0]),
+                             source_depths=np.array([50.0]))
+        identity = dict(model='Test', backend='fortran',
+                        run_mode='coherent_tl', source_level_dB=170.0,
+                        run_settings=record,
+                        metadata={'grn_file': 'run.grn'})
+        gf = (_snapshot_gf(**identity) if snapshot else
+              _scooter_gf([100.0, 110.0],
+                          np.full((2, 1, 2, 8), 1 + 2j, np.complex64),
+                          **identity))
+        field = transform(gf)
+        assert (field.model, field.backend, field.run_mode) == (
+            'Test', 'fortran', 'coherent_tl')
+        assert field.run_settings is record
+        assert field.source_level_dB == 170.0
+        np.testing.assert_array_equal(field.source_depths, [50.0])
+        assert field.metadata['grn_file'] == 'run.grn'
+        assert field.metadata['source_type'] == 'point'
 
     @pytest.mark.parametrize("make", [
         lambda: _scooter_gf([100.0, 200.0],

@@ -16,10 +16,8 @@ plot_taup · plot_cwt · plot_wigner_ville · plot_cepstrum · plot_radon
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt

@@ -30,20 +30,13 @@ Against ``acoustic_signal.beamforming``
 :func:`bartlett` and :func:`mvdr` here are
 :func:`uacpy.acoustic_signal.bartlett` / :func:`~uacpy.acoustic_signal.mvdr`
 over a :class:`~uacpy.core.results.Replicas` bank, returned as an ambiguity
-Field. They differ from the array functions' defaults in two stated ways:
-
-* normalisation: Bartlett here is ``normalize='trace'`` (a perfect match to
-  a rank-one CSDM scores 1) and MVDR ``normalize='max'``; the array
-  functions default to ``None`` (the power in the covariance's units);
-* MVDR loading: ``diagonal_loading=0.01`` here, ``1e-06`` there.
-
-The loading defaults differ on purpose and are **not** aligned: a replica bank
-over a dense candidate grid is routinely rank-deficient against a short
-snapshot record, which is why ``1e-2`` is the default here (see
-:func:`mvdr`); the array-processing surface assumes a full-rank sample
-covariance and only needs a numerical floor. The covariance estimate is the
-same under both names: :func:`csdm` and ``sample_covariance`` (which adds
-``diagonal_loading``).
+Field; :meth:`uacpy.core.results.Covariance.mvdr` calls :func:`mvdr` once
+per frequency of an OASN covariance. The normalisation is theirs:
+Bartlett here is ``normalize='trace'`` (a perfect match to a rank-one CSDM
+scores 1) and MVDR ``normalize='max'``, where the array functions default to
+``None`` (the power in the covariance's units). The MVDR loading defaults to
+``MVDR_DIAGONAL_LOADING`` (1e-2, uacpy guidance; see :func:`mvdr`).
+:func:`csdm` is the covariance estimate, with optional ``diagonal_loading``.
 """
 
 from __future__ import annotations
@@ -55,7 +48,7 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.acoustics import modal_field, mode_shapes_at
-from uacpy.core._beamforming import snapshot_covariance
+from uacpy.core._beamforming import MVDR_DIAGONAL_LOADING, snapshot_covariance
 
 __all__ = [
     "synthesize_replica",
@@ -304,36 +297,44 @@ def replica_bank_from_field(field, *, array_depths=None):
                     frequencies=field.frequencies, model=field.model)
 
 
-def csdm(snapshots: np.ndarray) -> np.ndarray:
+def csdm(snapshots: np.ndarray, *,
+         diagonal_loading: float = 0.0) -> np.ndarray:
     """Cross-spectral density matrix from complex single-frequency snapshots.
+
+    The sample CSDM of JKPS §10.3.2.1, ``K = (1/L) Σ_l d_l d_l^†`` over ``L``
+    snapshots, optionally diagonally loaded: ``K + diagonal_loading ·
+    tr(K)/N · I``, the "small quantity" added to the diagonal that
+    Stergiopoulos (*Advanced Signal Processing Handbook*, §4.2.3) names for a
+    matrix the MV processor must invert. :func:`mvdr` applies its own
+    loading (default 1e-2), so a CSDM loaded here is loaded twice there
+    unless ``mvdr(..., diagonal_loading=0)``.
 
     Parameters
     ----------
     snapshots : ndarray, shape ``(N, L)``
         ``N`` sensors, ``L`` snapshots.
+    diagonal_loading : float, optional
+        Loading as a fraction of the average eigenvalue ``tr(K)/N``, a finite
+        number ``>= 0``. Default 0: the plain average.
 
     Returns
     -------
     ndarray, shape ``(N, N)``
-        ``K = (1/L) sum_l d_l d_l^H`` (Hermitian).
+        ``K`` (Hermitian).
 
     Raises
     ------
     ConfigurationError
         If ``snapshots`` is not 2-D, carries no snapshot column, or holds a
-        NaN/Inf. A single non-finite sample makes every entry of ``K`` NaN
-        and :func:`bartlett` then returns an all-NaN ambiguity surface with
-        no diagnostic — engines NaN their ``r <= 0`` columns and Bellhop NaNs
-        shadow-zone cells, so snapshots assembled from modelled fields reach
-        here non-finite.
-
-    Notes
-    -----
-    :func:`uacpy.acoustic_signal.sample_covariance` is the same estimate
-    under the array-processing name; both call
-    ``core._beamforming.snapshot_covariance``.
+        NaN/Inf, or ``diagonal_loading`` is negative or not finite. A single
+        non-finite sample makes every entry of ``K`` NaN and :func:`bartlett`
+        then returns an all-NaN ambiguity surface with no diagnostic —
+        engines NaN their ``r <= 0`` columns and Bellhop NaNs shadow-zone
+        cells, so snapshots assembled from modelled fields reach here
+        non-finite.
     """
-    return snapshot_covariance(snapshots, "csdm")
+    return snapshot_covariance(snapshots, "csdm",
+                               diagonal_loading=diagonal_loading)
 
 
 def _single_frequency_bank(covariance, replicas, who):
@@ -398,7 +399,7 @@ def bartlett(covariance: np.ndarray, replicas):
 
 def mvdr(
     covariance: np.ndarray, replicas, *,
-    diagonal_loading: float = 1e-2
+    diagonal_loading: float = MVDR_DIAGONAL_LOADING
 ):
     """Minimum-variance (Capon/MVDR) matched-field ambiguity surface.
 
@@ -406,12 +407,13 @@ def mvdr(
     ``P_MV = 1 / (e^H Kinv e)`` for unit-norm replicas, with diagonal
     loading ``K + diagonal_loading * tr(K)/N * I``. Small loading gives sharp
     Capon peaks but is sensitive to environmental mismatch; larger loading
-    flattens the surface toward Bartlett for robustness. Loading is required
-    when ``K`` is rank-deficient (e.g. a single snapshot) — hence the 1e-2
-    default here, where ``K`` comes from :func:`csdm` over measured
-    snapshots. :meth:`uacpy.core.results.Covariance.mvdr` is the same
-    processor over OASN's full-rank ``.xsm`` covariance and defaults to
-    1e-6. A candidate the processor cannot evaluate is NaN.
+    flattens the surface toward Bartlett for robustness (JKPS §10.3.4.1:
+    "For a larger constraint, the processor starts to behave a bit like the
+    Bartlett"). Loading is required when ``K`` is rank-deficient (e.g. fewer
+    snapshots than sensors). :meth:`uacpy.core.results.Covariance.mvdr` is
+    this processor, called once per frequency of an OASN ``.xsm``
+    covariance, with the same default. A candidate the processor cannot
+    evaluate is NaN.
 
     Parameters
     ----------
@@ -420,7 +422,13 @@ def mvdr(
     replicas : Replicas
         One frequency's replica bank.
     diagonal_loading : float, optional
-        Diagonal-loading fraction of the average eigenvalue. Default 1e-2.
+        Diagonal-loading fraction of the average eigenvalue ``tr(K)/N``.
+        Default 1e-2 (``MVDR_DIAGONAL_LOADING``, uacpy guidance):
+        Stergiopoulos (*Advanced Signal Processing Handbook*, §4.2.3) says
+        only that "it may be necessary to diagonally load the matrix, i.e.,
+        add some small quantity to the diagonal", and JKPS §10.3.4.1 sets
+        the loading from an allowed white-noise-gain drop; neither gives a
+        fixed value.
 
     Returns
     -------

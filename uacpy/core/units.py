@@ -100,20 +100,24 @@ def knots_to_ms(x):
     return np.asarray(x, dtype=float) / KNOTS_PER_M_PER_S
 
 
-#: Beaufort force -> (sea state, wind speed range in knots), Urick (1983).
-#: It indexes the same way Knudsen, Alford & Emling (1948) Fig. 4 indexes its
-#: noise curves — except at sea state 6, where they differ. Fig. 4 pairs sea
-#: state 6 with wind force **7**; this table gives sea state 6 to both force 7
-#: and force 8, and :func:`sea_state_to_wind_speed` resolves it to 8 on the
-#: WMO convention below. So a reader reproducing Knudsen's top curve should
-#: ask for force 7 (30.5 kn), not sea state 6 (37 kn) — worth 1.7 dB in the
+#: Beaufort force -> (sea state, wind speed range in knots). Forces 0-7 are
+#: Wenz's descriptors as Jensen et al. reproduce them (*Computational Ocean
+#: Acoustics*, §1.8, Table 1.6 "from Wenz": the Beaufort ranges in knots and
+#: the sea states 0, 1/2, 1 … 6; the same ranges are Ainslie 2010 Table 4.11's
+#: WMO code 1100). At force 8 Wenz's table gives sea state 7; this table gives
+#: sea state 6, the WMO sea-state code's pairing: APL-UW TR 9407 §II.A
+#: recommends the WMO code ("the most widely used") and its Table 2 puts WMO
+#: sea state 6 at 37.5 kn, inside force 8's 34-40 kn, where Wenz's sea state 6
+#: is force 7 (mean 30.5 kn). Sea state 0 here is force 0 (0.5 kn, Wenz) where
+#: the WMO table lists 1.5 kn, and sea state 1/2 exists only in Wenz's scale.
+#: So a reader reproducing a curve indexed by Wenz's sea state 6 should ask
+#: for force 7 (30.5 kn), not sea state 6 (37 kn) — worth 1.7 dB in the
 #: ``'knudsen'`` wind model.
 #:
 #: Sea state 6 appears twice (forces 7 and 8), which is why the inverse
 #: direction below is a one-way map: a sea state names a *band* of winds and
-#: cannot recover the force that produced it. Dahl et al. (2007) resolve the
-#: ambiguity the other way for the WMO scale ("WMO sea state code 6
-#: corresponds to Beaufort scale of 8"), which is the convention taken here.
+#: cannot recover the force that produced it; :func:`sea_state_to_wind_speed`
+#: resolves it to force 8, as the WMO code does.
 BEAUFORT_SCALE = {
     0: (0.0, (0.0, 1.0)),
     1: (0.5, (1.0, 3.0)),
@@ -149,8 +153,9 @@ def beaufort_to_wind_speed(force, *, units="kn"):
     if force not in BEAUFORT_SCALE:
         raise ConfigurationError(
             f"beaufort_to_wind_speed: force must be one of "
-            f"{sorted(BEAUFORT_SCALE)}; got {force!r}. The Urick (1983) "
-            f"table this reads stops at force 8 (40 knots).")
+            f"{sorted(BEAUFORT_SCALE)}; got {force!r}. The table this "
+            f"reads (BEAUFORT_SCALE, Wenz's ranges) stops at force 8 "
+            f"(40 knots).")
     low, high = BEAUFORT_SCALE[force][1]
     kn = 0.5 * (low + high)
     return _in_wind_units(kn, units, "beaufort_to_wind_speed")
@@ -160,13 +165,16 @@ def sea_state_to_wind_speed(sea_state, *, units="kn"):
     """Representative wind speed for a sea state, via :data:`BEAUFORT_SCALE`.
 
     Sea state correlates with the noise far less well than wind speed does
-    — Dahl et al. (2007): "the noise from the sea surface correlates much
-    better with wind speed than with sea state" — so this is a bridge for
-    data that reports only a sea state, not a preferred input.
+    — Dahl et al. (2007): "the noise from the
+    sea surface correlates much better with wind speed than with sea
+    state" — so this is a bridge for data that reports only a sea state,
+    not a preferred input.
 
-    Sea state 6 maps to force 8 rather than 7, following Dahl's statement
-    of the WMO correspondence — 37 kn rather than 30.5 kn, worth +1.67 dB
-    in the default wind term at 1 kHz (+3.01 dB on ``'coates'``).
+    Sea state 6 maps to force 8 rather than 7, as the WMO sea-state code
+    does (APL-UW TR 9407 §II.A, Table 2: WMO sea state 6 = 37.5 kn) — the
+    force-8 midpoint 37 kn rather than Wenz's 30.5 kn (JKPS Table 1.6),
+    worth +1.67 dB in the default wind term at 1 kHz (+3.01 dB on
+    ``'coates'``).
 
     Parameters
     ----------

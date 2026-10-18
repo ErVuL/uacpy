@@ -14,13 +14,13 @@ from uacpy.models._knobs import whole_count
 from uacpy.models._spec import ModelSpec
 from uacpy.models._window import check_pinned_window
 from uacpy.core.run_settings import (
-    EngineSettings, OutputSpec, RunMode, RunSettings,
+    EngineSettings, Notice, OutputSpec, RunMode, RunSettings,
 )
 from uacpy.core.source import Source
 from uacpy.core.results import Field, PhaseReference
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, ModelExecutionError,
-    UnsupportedFeatureError, ValidityWarning,
+    NumericsWarning, UnsupportedFeatureError, ValidityWarning,
 )
 from uacpy.io.oases_writer import (
     write_oassp_input, oases_wavenumber_bounds, bottom_interface_roughness,
@@ -33,19 +33,28 @@ from uacpy.models.oases._common import (
     _check_n_wavenumbers_knob, _OASES_TRAITS, _OASS_MIN_MEAN_FIELD_ROUGHNESS, _OASS_SPECTRA,
     _geometry_options, _oases_binary, _option_letters,
     _reject_plane_geometry_letter_on_a_point_source,
-    _reject_unintegrable_spectral_exponent, _reject_wavenumber_overrun,
+    _refuse_volume_scattering, _reject_unintegrable_spectral_exponent,
+    _reject_unreadable_trf_options, _require_mean_field_rhs,
+    _reject_wavenumber_overrun,
     SCATTERING_UNPINNED_FIELDS, resolve_spectral_exponent,
     _roughness_notice, _warn_offset_ignored_under_auto_sampling,
 )
 from uacpy.models.oases._sampling import (
-    _OASSP_MAX_WAVENUMBERS, _oasp_fft_grid, _oassp_wavenumber_count,
-    check_power_of_two_time_samples,
+    _OASSP_MAX_WAVENUMBERS, _oasp_fft_grid, _oassp_fitting_c_low,
+    _oassp_wavenumber_count, check_power_of_two_time_samples,
 )
 from uacpy.models.oases._base import OASES
-from uacpy.models.oases.oasp import OASP, _read_trf_on_requested_ranges
+from uacpy.io._parsers import oasp_trf_pressure
+from uacpy.models.oases.oasp import (
+    OASP, _OASP_DEFAULT_OPTIONS, _read_trf_on_requested_ranges,
+)
 from uacpy.models.oases._mean_field import _MeanFieldRun, _mean_field_inputs
 from uacpy.models._notices import message_notice
-from uacpy.core.engine_defaults import OASSP_INTEGRATION_OFFSET, OASSP_REALIZATION
+from uacpy.core.engine_defaults import (
+    OASES_PRESSURE_LETTER, OASSP_INTEGRATION_OFFSET, OASSP_REALIZATION,
+    default_c_low,
+)
+from uacpy.models._projection import collapse_elastic_boundary, has_shear
 from uacpy.models._extract import (
     attach_output_paths, finish_broadband, mask_source_axis, result_kwargs,
 )
@@ -98,7 +107,11 @@ class OASSPSettings(EngineSettings):
     realization : int
         Block VII's fourth token, the realization seed ``k``.
     c_low : float
-        Block VII's ``CMIN`` (m/s).
+        Block VII's ``CMIN`` (m/s): the pinned value, else the documented
+        rule's (:func:`~uacpy.core.engine_defaults.default_c_low`) or, when
+        that one's wavenumber count passes :data:`_OASSP_MAX_WAVENUMBERS`
+        over a shear seabed, the lowest whole m/s whose count fits
+        (:func:`_fitted_c_low`).
     c_low_origin : str
         Where ``c_low`` came from.
     c_high : float or None
@@ -114,7 +127,7 @@ class OASSPSettings(EngineSettings):
         reads.
     notices : tuple of Notice
         What the run says about the chain it resolved (a CMIN that differs
-        from the mean field's).
+        from the mean field's, a fitted ``c_low``).
     """
 
     options: str
@@ -148,13 +161,22 @@ class OASSPSettings(EngineSettings):
         return super().from_dict(d)
 
 
+#: The option line of the OASP mean field OASSP builds when none is supplied:
+#: OASP's own default letters (:data:`~uacpy.models.oases.oasp.
+#: _OASP_DEFAULT_OPTIONS`) and ``'s'``, which writes the ``.rhs`` OASSP reads
+#: (unoasp22.f:250-254).
+_OASSP_MEAN_FIELD_OPTIONS = f"{_OASP_DEFAULT_OPTIONS} s"
+
+
 def _check_oassp_knobs(*, correlation_length,
                        spectral_exponent, roughness_spectrum,
                        mean_field, mean_field_knobs, options,
                        scattered_only) -> None:
     """Refuse an OASSP knob no run could use: a missing, negative (volume) or zero
     correlation length, an unintegrable spectral exponent, an unknown
-    roughness spectrum, FFT knobs beside the ``mean_field`` that owns
+    roughness spectrum, a supplied ``mean_field`` whose option line has no
+    ``'s'`` (:func:`~uacpy.models.oases._common._require_mean_field_rhs`),
+    FFT knobs beside the ``mean_field`` that owns
     them (``mean_field_knobs``, name to value), and a raw ``options``
     string beside the typed flags it would discard."""
     if correlation_length is None:
@@ -166,17 +188,7 @@ def _check_oassp_knobs(*, correlation_length,
             remediation="Pass correlation_length in metres, e.g. "
                         "OASSP(correlation_length=5.0).",
         )
-    if correlation_length < 0.0:
-        raise UnsupportedFeatureError(
-            'OASSP',
-            "volume scattering (correlation_length < 0 is OASES' switch "
-            "to the twelve-token layer record whose extra fields — SKW, "
-            "M, RMS, GAM — have no home on any uacpy carrier; "
-            "oaseun31.f:76-90)",
-            alternatives=["interface roughness scattering "
-                          "(correlation_length > 0)"],
-            alternatives_label='configurations',
-        )
+    _refuse_volume_scattering('OASSP', correlation_length)
     if correlation_length == 0.0:
         raise ConfigurationError(
             "OASSP(correlation_length=0) gives a degenerate roughness "
@@ -196,6 +208,11 @@ def _check_oassp_knobs(*, correlation_length,
             remediation=f"Pass one of {sorted(_OASS_SPECTRA)}.",
         )
     if mean_field is not None:
+        _require_mean_field_rhs(
+            'OASSP', mean_field,
+            (mean_field.options if mean_field.options is not None
+             else _OASP_DEFAULT_OPTIONS),
+            'unoasp22.f:250-254', f"OASP(options={_OASSP_MEAN_FIELD_OPTIONS!r})")
         pinned = [n for n, value in mean_field_knobs.items()
                   if value is not None]
         if pinned:
@@ -243,44 +260,12 @@ def _oassp_options(options, scattered_only, roughness_spectrum) -> str:
     (:meth:`OASSP._resolve_engine_settings`)."""
     if options is not None:
         return options
-    letters = ['N', 'J']
+    letters = [OASES_PRESSURE_LETTER, 'J']
     if scattered_only:
         letters.append('s')
     if str(roughness_spectrum).lower() == 'goff-jordan':
         letters.append('g')
     return ' '.join(letters)
-
-
-def _reject_unreadable_oassp_options(options, n_wavenumbers) -> None:
-    """Reject raw option letters whose ``.trf`` uacpy cannot read back.
-
-    unoassp30.f carries the same complex-frequency-contour trap as OASP:
-    ``:285-290`` sets CFRFL under automatic wavenumber sampling unless
-    ``'J'`` keeps ICNTIN = 1, ``:983`` sets it for ``'O'``, and
-    ``:382-385`` then bakes OMEGIM = -ln(50)·Δf into the spectrum, which
-    the time-series synthesis does not undo — the last output sample
-    comes back 50× (34 dB) too small. Only a caller-supplied
-    ``options`` string can reach this: :func:`_oassp_options`' typed
-    path always carries ``'J'`` and never ``'O'``.
-    """
-    if options is None:
-        return
-    opt_chars = set(str(options)) - set(' \t\n')
-    if 'O' in opt_chars:
-        raise ConfigurationError(
-            "OASSP.run: option 'O' (complex frequency integration) bakes "
-            "an exp(-ln(50)·Δf·t) contour into the spectrum "
-            "(unoassp30.f:983, :382-385) that uacpy's time-series "
-            "synthesis does not undo. Drop 'O'."
-        )
-    if 'J' not in opt_chars and n_wavenumbers is None:
-        raise ConfigurationError(
-            "OASSP.run: a custom options string without 'J' enables the "
-            "complex frequency contour (OMEGIM≠0) under automatic "
-            "wavenumber sampling (unoassp30.f:285-290, :382-385), which "
-            "uacpy's time-series synthesis cannot undo. Add 'J' or pin "
-            "n_wavenumbers >= 1."
-        )
 
 
 def _mean_field_source(source: Source) -> Source:
@@ -292,7 +277,14 @@ def _mean_field_source(source: Source) -> Source:
 
 
 def _deck_wavenumber_count(deck_text: str, receiver) -> int:
-    """NWVNO an OASSP deck makes oassp2 integrate on.
+    """NWVNO an OASSP deck makes oassp2 integrate on
+    (:func:`_oassp_wavenumber_count` on :func:`_deck_sampling`)."""
+    return _oassp_wavenumber_count(**_deck_sampling(deck_text, receiver))
+
+
+def _deck_sampling(deck_text: str, receiver) -> dict:
+    """The keywords of :func:`_oassp_wavenumber_count` an OASSP deck
+    carries.
 
     Read back from the deck's text itself — title, option line, frequency line,
     ``NL``, the ``NL`` layer records (depth, cp first), the source record
@@ -311,7 +303,7 @@ def _deck_wavenumber_count(deck_text: str, receiver) -> int:
     cmin, cmax = (float(t) for t in lines[-3][:2])
     nw = int(lines[-2][0])
     nx, _fr1, fr2, dt, r0_km, rspace_km, nplots = lines[-1][:7]
-    return _oassp_wavenumber_count(
+    return dict(
         layer_speeds=layers, c_low=cmin, c_high=cmax,
         source_depth=source_depth,
         receiver_depths=np.asarray(receiver.depths, dtype=float),
@@ -355,6 +347,80 @@ def _reject_roughness_wavenumber_overflow(deck_text: str,
             f"window NX*DT (fewer n_time_samples; the cref*NX*DT "
             f"term)."),
     )
+
+
+def _compressional_c_low(env) -> float:
+    """The ``c_low`` (m/s) :func:`~uacpy.core.engine_defaults.default_c_low`
+    gives on ``env`` with every shear speed left out (its media collapsed
+    to fluids, as an engine without shear collapses them): 0.90 × the
+    slowest compressional speed ("phase speed must be some 10% below
+    slowest acoustic speed", ``scooter.f90:258``). Equal to the derived
+    value itself when no medium carries shear."""
+    fluid = env.copy()
+    if fluid.surface is not None and has_shear(fluid.surface):
+        fluid.surface = collapse_elastic_boundary(fluid.surface, 'fluid')
+    if fluid.bottom.is_elastic:
+        fluid.bottom = collapse_elastic_boundary(fluid.bottom, 'fluid')
+    return default_c_low(fluid)[0]
+
+
+def _fitted_c_low(name, env, source, receiver, engine):
+    """``(c_low, origin, notice)`` an unpinned OASSP ``c_low`` takes when
+    the documented rule's value (``engine.c_low``,
+    :func:`~uacpy.core.engine_defaults.default_c_low`) makes a source
+    depth's deck pass :data:`_OASSP_MAX_WAVENUMBERS`; ``None`` when every
+    deck fits, or when no value fits.
+
+    The value is the lowest whole m/s whose count fits on every source
+    depth's deck (:func:`_oassp_fitting_c_low`), at most the rule's value
+    with the shear speeds left out (:func:`_compressional_c_low`), so it gives
+    up only phase speeds the seabed's shear brings into the integral. Over
+    a seabed without shear the two values are equal and nothing fits; a
+    pinned ``n_wavenumbers`` fixes the count whatever ``c_low`` is. Either
+    way :func:`_reject_roughness_wavenumber_overflow` then refuses the run.
+    The notice names oassp2's bound and the seabed interface (Scholte)
+    wave, whose phase speed is "generally about 0.85 times the minimum
+    shear-wave speed" (Jensen et al., *Computational Ocean Acoustics*,
+    §5.10.5), which a ``c_low`` above it leaves out of the integral.
+    """
+    samplings = []
+    for i in range(int(np.atleast_1d(source.depths).size)):
+        deck = io.StringIO()
+        _write_oassp_deck(deck, env, source.at_depth(i), receiver, engine,
+                          warn=False)
+        samplings.append(_deck_sampling(deck.getvalue(), receiver))
+    needed = max(_oassp_wavenumber_count(**s) for s in samplings)
+    if needed <= _OASSP_MAX_WAVENUMBERS:
+        return None
+    c_low_max = _compressional_c_low(env)
+    fitted = [_oassp_fitting_c_low(c_low_max=c_low_max, **s)
+              for s in samplings]
+    if None in fitted:
+        return None
+    c_low = max(fitted)
+    count = max(_oassp_wavenumber_count(**{**s, 'c_low': c_low})
+                for s in samplings)
+    documented = engine.c_low
+    origin = (f"{c_low:g} m/s, the lowest value whose oassp2 wavenumber "
+              f"count fits its {_OASSP_MAX_WAVENUMBERS}; the documented "
+              f"{documented:g} m/s ({engine.c_low_origin}) needs {needed}")
+    notice = Notice(
+        f"c_low {c_low:g} m/s: the documented {documented:g} m/s needs "
+        f"{needed} wavenumbers, past oassp2's {_OASSP_MAX_WAVENUMBERS}",
+        f"{name}: the documented c_low = {documented:g} m/s makes oassp2 "
+        f"integrate on {needed} wavenumbers, past the "
+        f"{_OASSP_MAX_WAVENUMBERS} its roughness branch holds (it rounds the "
+        f"count up to a power of two, unoassp30.f:542-544, and PV indexes "
+        f"arrays of nnkr = 8192 up to twice that, oasvun31.f:2273, "
+        f":2532-2533; comvol.f:3). The run takes c_low = {c_low:g} m/s, the "
+        f"lowest value whose count ({count}) fits, so phase speeds between "
+        f"{documented:g} and {c_low:g} m/s are left out of the integral: the "
+        f"seabed interface (Scholte) wave, about 0.85 × the minimum shear "
+        f"speed (Jensen et al., Computational Ocean Acoustics, §5.10.5), may "
+        f"be missed. Pin n_wavenumbers={_OASSP_MAX_WAVENUMBERS} to keep "
+        f"c_low = {documented:g} m/s on a coarser wavenumber step, or pin "
+        f"c_low.", NumericsWarning)
+    return c_low, origin, notice
 
 
 def _require_single_rough_interface(env) -> None:
@@ -526,8 +592,10 @@ def _oassp_settings(name: str, mean_settings, projection_notices, *,
     settings (its BROADBAND run on the same environment and receiver,
     :meth:`OASSP._build_mean_field`), whose pinned wavenumber count
     oassp2 must be able to hold
-    (:data:`_OASSP_MAX_MEAN_FIELD_WAVENUMBERS`). ``name`` is the model
-    the roughness notice names."""
+    (:data:`_OASSP_MAX_MEAN_FIELD_WAVENUMBERS`). An unpinned ``c_low`` is
+    the documented rule's, or the value :func:`_fitted_c_low` gives when
+    that one's wavenumber count passes oassp2's bound. ``name`` is the
+    model the roughness and ``c_low`` notices name."""
     mean_nw = mean_settings.engine.n_wavenumbers
     if mean_nw is not None and mean_nw > _OASSP_MAX_MEAN_FIELD_WAVENUMBERS:
         raise ConfigurationError(
@@ -542,40 +610,19 @@ def _oassp_settings(name: str, mean_settings, projection_notices, *,
     if c_low_pinned is not None:
         c_low, origin = c_low_pinned, 'OASSP(c_low=…)'
     else:
-        ssp_data = env.ssp.extend_to(env.depth).to_pairs()
-        c_low = oases_wavenumber_bounds(ssp_data)[0]
-        origin = "oases_wavenumber_bounds(water column)"
-    notices = list(projection_notices)
-    mean_c_low = mean_settings.engine.c_low
-    if not np.isclose(float(c_low), mean_c_low, rtol=C_LOW_MATCH_RTOL):
-        notices.append(
-            message_notice(f"OASSP's CMIN {float(c_low):g} m/s differs from the mean "
-                        f"field's {mean_c_low:g} m/s. oassp2 takes its incident "
-                        f"spectrum from the mean field's .rhs records alone "
-                        f"(oasvun31.f:313-332, :55-74), so the scattering integral "
-                        f"holds no incident energy below the mean field's CMIN. Set "
-                        f"the same c_low on both, or leave the mean field to OASSP.",
-                        ValidityWarning))
+        c_low = oases_wavenumber_bounds(env)[0]
+        origin = default_c_low(env)[1]
     options = _geometry_options(options, source)
     # 'g' is the Goff-Jordan spectrum; OASSP's 'G' is another option
     # (unoassp30.f:933, :1034).
     spectral_exponent, unused = resolve_spectral_exponent(
         name, spectral_exponent, goff='g' in options)
-    notices.append(message_notice(unused, FallbackWarning))
     interface = _oassp_scattering_interface(env, interface)
     mean = mean_settings.engine
     grid = _oasp_fft_grid(mean.n_time_samples, mean.freq_min,
                           mean.freq_max, mean.time_step)
     mean_field_grid = (grid.n_time_samples, grid.freq_min,
                        grid.freq_max, grid.time_step)
-    # P grows with k, so the top of the band is the worst case. The band
-    # OASSP computes is the mean field's FR1..FR2, which on the OASP
-    # producer reaches past the source frequency.
-    notices.append(_roughness_notice(
-        name, env, interface,
-        max(grid.freq_max, float(np.max(np.asarray(
-            source.frequencies, dtype=float)))),
-        rms_roughness, oass_index_space=False))
     engine = OASSPSettings(
         options=options,
         interface=interface,
@@ -591,8 +638,37 @@ def _oassp_settings(name: str, mean_settings, projection_notices, *,
         n_wavenumbers=n_wavenumbers,
         integration_offset=integration_offset,
         mean_field=mean_settings,
-        notices=tuple(n for n in notices if n is not None),
+        notices=(),
     )
+    fitted = (None if c_low_pinned is not None
+              else _fitted_c_low(name, env, source, receiver, engine))
+    if fitted is not None:
+        c_low, origin, _ = fitted
+    notices = list(projection_notices)
+    mean_c_low = mean_settings.engine.c_low
+    if not np.isclose(float(c_low), mean_c_low, rtol=C_LOW_MATCH_RTOL):
+        notices.append(
+            message_notice(f"OASSP's CMIN {float(c_low):g} m/s differs from the mean "
+                        f"field's {mean_c_low:g} m/s. oassp2 takes its incident "
+                        f"spectrum from the mean field's .rhs records alone "
+                        f"(oasvun31.f:313-332, :55-74), so the scattering integral "
+                        f"holds no incident energy below the mean field's CMIN. Set "
+                        f"the same c_low on both, or leave the mean field to OASSP.",
+                        ValidityWarning))
+    notices.append(message_notice(unused, FallbackWarning))
+    # P grows with k, so the top of the band is the worst case. The band
+    # OASSP computes is the mean field's FR1..FR2, which on the OASP
+    # producer reaches past the source frequency.
+    notices.append(_roughness_notice(
+        name, env, interface,
+        max(grid.freq_max, float(np.max(np.asarray(
+            source.frequencies, dtype=float)))),
+        rms_roughness, oass_index_space=False))
+    if fitted is not None:
+        notices.append(fitted[2])
+    engine = dataclasses.replace(
+        engine, c_low=float(c_low), c_low_origin=origin,
+        notices=tuple(n for n in notices if n is not None))
     counts = []
     for i in range(int(np.atleast_1d(source.depths).size)):
         # One deck per source depth (the base loop launches each).
@@ -670,7 +746,9 @@ class OASSP(OASES):
         ``freq_min`` / ``freq_max`` / ``fc`` and from
         ``c_low`` / ``c_high`` / ``n_wavenumbers`` / ``integration_offset``;
         passing one makes the first four exclusive with it, since the mean
-        field owns the FFT grid. The mean field runs on the call's Source,
+        field owns the FFT grid. A supplied producer's option line must
+        carry ``'s'`` (e.g. ``OASP(options='K J s')``), or it writes no
+        ``.rhs`` and is refused. The mean field runs on the call's Source,
         so it has the scatterer's geometry (a raw ``'P'`` on a point Source
         is refused, as on :class:`OASP`); a pinned ``n_wavenumbers`` above 8192
         (oassp2's ``nnkr``) is refused, and a ``CMIN`` that differs from
@@ -692,7 +770,13 @@ class OASSP(OASES):
         (``oasvun31.f:313-332``, ``:55-74``), so a ``c_low`` that admits
         slow seabed branches must reach the mean field too. ``c_high`` is
         inert in cylindrical geometry (a point Source). The receiver ranges
-        are ``receiver.ranges``.
+        are ``receiver.ranges``. An unpinned ``c_low`` whose derived value
+        makes oassp2 integrate on more than its 4096 wavenumbers (a shear
+        seabed's 0.85 × shear speed) is the lowest whole m/s whose count
+        fits, at most 0.90 × the slowest compressional speed, on both decks,
+        with a ``NumericsWarning`` (:func:`_fitted_c_low`); a pinned
+        ``c_low`` or ``n_wavenumbers`` is written as given, and refused past
+        the bound.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -875,12 +959,12 @@ class OASSP(OASES):
             executable, lambda: self._find_binary('oassp'),
         )
 
-    def _build_mean_field(self, band_from_call: bool = False) -> 'OASP':
-        """The OASP producer, with option ``'s'`` guaranteed.
-
-        Without ``'s'`` OASP never calls ``opfilb(45)`` (``unoasp22.f:251-254``)
-        and no ``.rhs`` is written at all, so the letter is plumbing rather
-        than a physics choice and is added rather than demanded of the caller.
+    def _build_mean_field(self, band_from_call: bool = False,
+                          c_low: Optional[float] = None) -> 'OASP':
+        """The OASP producer: the supplied one (whose ``'s'`` the
+        constructor checks, :func:`_check_oassp_knobs`), or one built with
+        :data:`_OASSP_MEAN_FIELD_OPTIONS` — without ``'s'`` OASP never calls
+        ``opfilb(45)`` (``unoasp22.f:251-254``) and no ``.rhs`` is written.
 
         The default producer describes the problem the OASSP deck does, as
         the manual requires ("The input files for OASSP are virtually
@@ -897,6 +981,8 @@ class OASSP(OASES):
         OASSP's. Its ``cleanup`` is OASSP's: its files share OASSP's
         directory, which OASSP's ``cleanup`` keeps or wipes, so the mean
         field's result records their paths exactly when they survive.
+        ``c_low`` replaces OASSP's own on the default producer: the value
+        :func:`_fitted_c_low` gives an unpinned one.
         """
         mean = self.mean_field
         if mean is None:
@@ -906,18 +992,16 @@ class OASSP(OASES):
             skipped = {'freq_min', 'freq_max'} if band_from_call else set()
             kwargs = {k: getattr(self, k) for k in self._MEAN_FIELD_KNOBS
                       if getattr(self, k) is not None and k not in skipped}
-            mean = OASP(options='N J s', n_wavenumbers=self.n_wavenumbers,
-                        c_low=self.c_low, c_high=self.c_high,
+            mean = OASP(options=_OASSP_MEAN_FIELD_OPTIONS,
+                        n_wavenumbers=self.n_wavenumbers,
+                        c_low=self.c_low if c_low is None else c_low,
+                        c_high=self.c_high,
                         verbose=self.verbose, timeout=self.timeout,
                         cleanup=self.cleanup, **kwargs)
             # Set after construction: OASSP's own constructor has already
             # said whether the offset reaches the binary.
             mean.integration_offset = self.integration_offset
             return mean
-        if 's' not in set(str(mean.options or 'N J')) - set(' \t\n'):
-            mean = mean.copy(options=f"{mean.options or 'N J'} s")
-            self._log("Added option 's' to the mean-field model: without it "
-                      "OASP writes no .rhs (unoasp22.f:251-254)")
         return mean.copy(cleanup=self.cleanup)
 
     def _check_knobs(self) -> None:
@@ -941,15 +1025,21 @@ class OASSP(OASES):
 
     def _validate_engine(self, env, source, receiver, run_mode, *,
                          request=None) -> None:
-        """Stage 2: an option line whose ``.trf`` uacpy cannot read back
-        (:func:`_reject_unreadable_oassp_options`), a raw ``'P'`` with a point
+        """Stage 2: the family's boundary refusals
+        (:meth:`OASES._validate_engine`), then an option line whose ``.trf``
+        uacpy cannot read back
+        (:func:`~uacpy.models.oases._common._reject_unreadable_trf_options`),
+        a raw ``'P'`` with a point
         Source (the Source decides the geometry), and an environment whose
         ``.rhs`` oassp2 cannot consume
         (:func:`_require_single_rough_interface`) — all before a mean-field
         run is spent (stage 3 refuses a pinned ``interface=`` that is not its
         rough one, :func:`_oassp_scattering_interface`). A supplied mean field's own raw ``'P'`` on a point Source is
         refused by its own checks, in stage 3."""
-        _reject_unreadable_oassp_options(self.options, self.n_wavenumbers)
+        super()._validate_engine(env, source, receiver, run_mode,
+                                 request=request)
+        _reject_unreadable_trf_options('OASSP', self.options,
+                                       self.n_wavenumbers)
         _reject_plane_geometry_letter_on_a_point_source(
             'OASSP', _oassp_options(self.options, self.scattered_only,
                                     self.roughness_spectrum),
@@ -980,7 +1070,10 @@ class OASSP(OASES):
     def _resolve_engine_settings(self, env, source, receiver, settings, *,
                                  given_env, request=None) -> 'OASSPSettings':
         """Stage 3: the mean field's settings, from its producer, and
-        :func:`_oassp_settings` over them for this model's knobs."""
+        :func:`_oassp_settings` over them for this model's knobs. A
+        ``c_low`` fitted to oassp2's wavenumber bound (:func:`_fitted_c_low`)
+        is handed to the producer OASSP builds, whose settings are resolved
+        again on it, its origin stating the fit."""
         band_from_call = settings.frequencies is not None
         own_notices = []
         pinned = [f"{name}={getattr(self, name):g}"
@@ -1002,23 +1095,39 @@ class OASSP(OASES):
                 f"OASSP({', '.join(pinned)}) is not used: the mean field "
                 f"sweeps the band this {settings.mode.name} run derives "
                 f"from its source waveform.", FallbackWarning))
-        mean_settings, projection_notices = (
-            self._build_mean_field(band_from_call)._producer_settings(
-                env, _mean_field_source(source), receiver,
-                RunMode.BROADBAND, frequencies=settings.frequencies))
-        projection_notices = list(projection_notices) + own_notices
-        return _oassp_settings(
-            type(self).__name__, mean_settings, projection_notices,
-            options=_oassp_options(self.options, self.scattered_only,
-                                   self.roughness_spectrum),
-            correlation_length=self.correlation_length,
-            spectral_exponent=self.spectral_exponent,
-            rms_roughness=self.rms_roughness,
-            realization=self.realization, interface=self.interface,
-            c_low_pinned=self.c_low, c_high=self.c_high,
-            n_wavenumbers=self.n_wavenumbers,
-            integration_offset=self.integration_offset,
-            env=env, source=source, receiver=receiver)
+        def resolve(c_low=None):
+            mean_settings, projection_notices = (
+                self._build_mean_field(band_from_call, c_low)
+                ._producer_settings(
+                    env, _mean_field_source(source), receiver,
+                    RunMode.BROADBAND, frequencies=settings.frequencies))
+            return mean_settings, _oassp_settings(
+                type(self).__name__, mean_settings,
+                list(projection_notices) + own_notices,
+                options=_oassp_options(self.options, self.scattered_only,
+                                       self.roughness_spectrum),
+                correlation_length=self.correlation_length,
+                spectral_exponent=self.spectral_exponent,
+                rms_roughness=self.rms_roughness,
+                realization=self.realization, interface=self.interface,
+                c_low_pinned=self.c_low, c_high=self.c_high,
+                n_wavenumbers=self.n_wavenumbers,
+                integration_offset=self.integration_offset,
+                env=env, source=source, receiver=receiver)
+
+        mean_settings, engine = resolve()
+        if (self.mean_field is None and self.c_low is None
+                and engine.c_low != mean_settings.engine.c_low):
+            # A fitted c_low (_fitted_c_low) reaches the mean field OASSP
+            # builds, as the manual's worked example carries one CMIN on
+            # both decks (oassp.tex:559-600); the mean field's FFT grid,
+            # which the count reads, does not depend on it.
+            _, engine = resolve(engine.c_low)
+            mean = engine.mean_field
+            engine = dataclasses.replace(engine, mean_field=dataclasses.replace(
+                mean, engine=dataclasses.replace(
+                    mean.engine, c_low_origin=engine.c_low_origin)))
+        return engine
 
     def _announce_engine_settings(self, env, source, receiver,
                                   settings) -> None:
@@ -1087,8 +1196,10 @@ class OASSP(OASES):
             'FOR045': f'{stem}.045', 'FOR046': f'{stem}.046',
         })
         # unoassp30.f has no NWVNO.GT.NP test either (see
-        # _reject_wavenumber_overrun), and its reference range min(cref·NX·DT + RM, 6·RM)
-        # (:295-306) can push NW ~2× past the mean-field OASP's, so the
+        # _reject_wavenumber_overrun), and its reference range
+        # min(cref·NX·DT + 2·RM, 6·RM) (:295-306: RANREF + RM at :304, then
+        # min(RANREF + RM, 6·RM) at :305) can push NW ~2× past the mean-field
+        # OASP's, so the
         # producer passing is no proxy for this run being in bounds.
         _reject_wavenumber_overrun(
             self.model_name, proc,
@@ -1138,13 +1249,15 @@ class OASSP(OASES):
         mean field's result as ``components['mean_field']``.
 
         Convention: (n_depth, n_range, n_frequencies) — trailing axis is the
-        variable dim. Source axes: (freq, range, depth). Negated like
-        OASP's (the payload is the normal stress, -p in the water:
-        oasp.tex:185): the raw payload comes from the same TRFHEAD writer
-        with the same sign (measured with scattered_only=False on a
-        near-smooth seabed, the raw total field over OASP's raw mean field
-        is +1: |ratio| 0.995, arg 0.35 deg), so the same negation is what
-        makes 'travelling_wave' mean the family's convention here too.
+        variable dim. Converted like OASP's
+        (:func:`~uacpy.io._parsers.oasp_trf_pressure`: the default payload
+        is the bulk pressure 'K', read as written, oasp.tex:178-183; a raw
+        'N' line's normal stress is negated, oasp.tex:185): the raw payload
+        comes from the same TRFHEAD writer with the same sign (measured with
+        scattered_only=False on a near-smooth seabed, the raw total field
+        over OASP's raw mean field is +1: |ratio| 0.995, arg 0.35 deg), so
+        the same conversion is what makes 'travelling_wave' mean the
+        family's convention here too.
         """
         mean, trf_data = raw
         settings = inputs.settings
@@ -1152,10 +1265,9 @@ class OASSP(OASES):
         rhs = mean.rhs_header
         rhs_path = inputs.work_dir / f'{mean.stem}.045'
         vol_path = inputs.work_dir / f'{mean.stem}.046'
-        tf_reordered = -np.transpose(
-            trf_data['transfer_function'], (2, 1, 0)).astype(np.complex128)
         result = Field(
-            data=tf_reordered,
+            data=oasp_trf_pressure(trf_data, 'OASSP',
+                                   inputs.work_dir / f'{deck[1].stem}.trf'),
             coords={
                 'depth': trf_data['depths'],
                 'range': trf_data['ranges'],

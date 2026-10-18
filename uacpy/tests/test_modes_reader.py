@@ -19,6 +19,7 @@ import uacpy
 from uacpy.core import Environment, BoundaryProperties, Source, Receiver
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.core.run_settings import RunMode
+from uacpy.core.results import Modes
 from uacpy.io.modes_reader import _read_modes_payload, read_modes
 from uacpy.models import Kraken
 
@@ -352,7 +353,7 @@ class TestHalfspaceVerticalWavenumber:
 
     def test_kraken_uses_the_real_part_only(self, tmp_path):
         data = self._gamma(tmp_path, 'kraken.exe', 'gk')
-        bot = data.metadata['bottom_halfspace']
+        bot = data.halfspace_tails['bottom']
         assert data.metadata['title'][:7] == 'KRAKEN-'
         assert data.backend == 'kraken'
         expected = np.sqrt(np.real(data.k) ** 2 - bot['k2'])
@@ -363,25 +364,86 @@ class TestHalfspaceVerticalWavenumber:
 
     def test_krakenc_uses_the_full_complex_eigenvalue(self, tmp_path):
         data = self._gamma(tmp_path, 'krakenc.exe', 'gc')
-        bot = data.metadata['bottom_halfspace']
+        bot = data.halfspace_tails['bottom']
         assert data.metadata['title'][:7] == 'KRAKENC'
         assert data.backend == 'krakenc'
         expected = np.sqrt(data.k ** 2 - bot['k2'])
         assert np.allclose(np.abs(bot['gamma']), np.abs(expected))
 
 
+@pytest.mark.requires_binary
+def test_a_rigid_floor_keeps_the_files_density_and_has_no_halfspace_density(
+        tmp_path):
+    """A rigid or vacuum boundary has no medium: the .mod stores rho = 0.0
+    there (misc/ReadEnvironmentMod.f90:280). read_modes reports that value
+    as the file holds it and gives MediaTable no half-space density, rather
+    than a density of 1.0 the file does not hold."""
+    deck = _isovelocity_deck('rig').replace("'A' 0.0\n  100.0 1800.0 0.0 "
+                                            "1.8 0.5 /\n", "'R' 0.0\n")
+    assert "'R' 0.0" in deck
+    _run_kraken(tmp_path, 'rig', deck)
+    data = read_modes(str(tmp_path / 'rig.mod'), frequency=100.0)
+    bot = data.metadata['bottom_halfspace']
+    assert bot['BC'] == 'R'
+    assert bot['rho'] == 0.0
+    # The deck's top is a vacuum, which has no medium either.
+    assert data.metadata['top_halfspace']['BC'] == 'V'
+    assert data.metadata['top_halfspace']['rho'] == 0.0
+    assert data.media.halfspace_density is None
+    # Neither boundary is an acoustic half-space, so neither has a tail.
+    assert data.halfspace_tails == {}
+
+
+@pytest.mark.requires_binary
+def test_the_halfspace_tails_leave_metadata_for_their_attribute(tmp_path):
+    """metadata keeps only the file's half-space records; the k2, gamma and
+    phi read_modes computes (OALIB read_modes.m) are
+    ``Modes.halfspace_tails``, sliced by first_n and kept through to_dict
+    and NetCDF."""
+    _run_kraken(tmp_path, 'tl', _isovelocity_deck('tl'))
+    data = read_modes(str(tmp_path / 'tl.mod'), frequency=100.0)
+    assert set(data.metadata['bottom_halfspace']) == {
+        'BC', 'cp', 'cs', 'rho', 'depth'}
+    assert set(data.halfspace_tails) == {'bottom'}
+    bot = data.halfspace_tails['bottom']
+    assert bot['k2'] == pytest.approx(
+        (2 * np.pi * 100.0 / data.metadata['bottom_halfspace']['cp']) ** 2)
+    np.testing.assert_array_equal(bot['phi'], data.phi[-1, :])
+    assert bot['gamma'].shape == data.k.shape
+    assert np.all(np.real(bot['gamma']) >= 0.0)
+    two = data.first_n(2)
+    np.testing.assert_array_equal(two.halfspace_tails['bottom']['gamma'],
+                                  bot['gamma'][:2])
+    for back in (Modes.from_dict(data.to_dict()),
+                 Modes.from_netcdf(_netcdf_round_trip(data, tmp_path))):
+        assert set(back.halfspace_tails) == {'bottom'}
+        assert back.halfspace_tails['bottom']['k2'] == pytest.approx(
+            bot['k2'])
+        np.testing.assert_allclose(back.halfspace_tails['bottom']['gamma'],
+                                   bot['gamma'])
+        np.testing.assert_allclose(back.halfspace_tails['bottom']['phi'],
+                                   bot['phi'])
+
+
+def _netcdf_round_trip(modes, tmp_path):
+    path = tmp_path / 'modes.nc'
+    modes.to_netcdf(path)
+    return path
+
+
 def test_a_missing_mod_file_is_named_with_its_resolved_extension(tmp_path):
     """The ``.mod`` extension is appended before the file is looked for, so
     the typed error names the path that was actually opened."""
-    with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
+    from uacpy.core.exceptions import MissingFileError
+    with pytest.raises(MissingFileError, match=r'not found.*absent\.mod'):
         _read_modes_payload(str(tmp_path / 'absent'))
-    with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
+    with pytest.raises(MissingFileError, match=r'not found.*absent\.mod'):
         _read_modes_payload(str(tmp_path / 'absent.mod'))
     # A suffix-less Path resolves the same way as its string, through the
     # public reader too.
-    with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
+    with pytest.raises(MissingFileError, match=r'not found.*absent\.mod'):
         _read_modes_payload(tmp_path / 'absent')
-    with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
+    with pytest.raises(MissingFileError, match=r'not found.*absent\.mod'):
         read_modes(tmp_path / 'absent')
 
 

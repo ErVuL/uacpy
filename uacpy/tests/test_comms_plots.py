@@ -11,6 +11,8 @@ and ``test_comms_equalizers.py``; the constellation/BER plotters are covered in
 ``test_carrier_plot_methods.py`` callers and the doc figure gates.
 """
 
+import inspect
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
@@ -28,8 +30,9 @@ _TAPS = np.array([1.0, 0.5j, -0.25])
 def test_plot_subcarriers_addresses_bins_like_ofdm_demodulate():
     # ofdm_demodulate equalizes bin k with np.fft.fft(h, nsc)[k]; the plot
     # must put that same value at x = k (unshifted, DC at index 0).
+    from uacpy.comms import subcarrier_response
     nsc = 8
-    fig, ax = plot_subcarriers(_TAPS, nsc)
+    fig, ax = plot_subcarriers(subcarrier_response(_TAPS, nsc))
     line = ax.lines[0]
     np.testing.assert_array_equal(line.get_xdata(), np.arange(nsc))
     expected = 20 * np.log10(np.abs(np.fft.fft(_TAPS, nsc)) + 1e-12)
@@ -37,77 +40,49 @@ def test_plot_subcarriers_addresses_bins_like_ofdm_demodulate():
     plt.close(fig)
 
 
-def test_plot_channel_builds_its_own_two_panel_figure_when_ax_is_none():
+def test_plot_channel_draws_the_taps_on_one_axes():
+    """The delay view only: the frequency response is a result of its own
+    (``channel_response(...).plot()``), not a panel this plotter computes."""
     fig, ax = plot_channel(_TAPS, 1000.0)
-    assert len(ax) == 2
-    assert ax[0].figure is fig and ax[1].figure is fig
-    assert ax[0].containers          # stem in the delay panel
-    assert ax[1].lines               # spectrum in the frequency panel
+    assert ax.figure is fig
+    assert ax.containers             # one stem per tap
+    assert ax.get_title() == 'Channel impulse response'
+    plt.close(fig)
+    fig, given = plt.subplots()
+    out_fig, out_ax = plot_channel(_TAPS, 1000.0, given, title='delay')
+    assert out_fig is fig and out_ax is given
+    assert given.get_title() == 'delay'
     plt.close(fig)
 
 
-def test_plot_channel_draws_on_a_given_tuple_of_axes():
-    fig, (ax_d, ax_f) = plt.subplots(1, 2)
-    out_fig, out_ax = plot_channel(_TAPS, 1000.0, (ax_d, ax_f))
-    assert out_fig is fig
-    assert out_ax[0] is ax_d and out_ax[1] is ax_f
-    assert ax_d.containers and ax_f.lines
-    plt.close(fig)
-
-
-def test_plot_channel_titles_each_panel_from_its_own_keyword():
-    """The frequency panel's title was hardcoded, so a caller who wanted a
-    different one got a second title drawn over the first."""
-    fig, ax = plot_channel(_TAPS, 1000.0, title='delay',
-                           freq_title='response')
-    assert ax[0].get_title() == 'delay'
-    assert ax[1].get_title() == 'response'
-    # nothing left behind in the other title slots to overlap with
-    for a in ax:
-        assert a.get_title(loc='left') == ''
-        assert a.get_title(loc='right') == ''
-    plt.close(fig)
-
-
-def test_plot_channel_refuses_a_pair_where_a_string_belongs():
-    """A pair was briefly accepted here; str()ing it into the panel would
-    draw "('a', 'b')" as the title, which is worse than refusing it."""
+def test_plot_subcarriers_refuses_a_channel_and_a_count():
+    """The plotter computes no DFT: a (channel, count) call is refused, naming
+    ``subcarrier_response``."""
     from uacpy.core.exceptions import ConfigurationError
-    with pytest.raises(ConfigurationError, match='freq_title'):
-        plot_channel(_TAPS, 1000.0, title=('delay', 'response'))
-
-
-def test_plot_channel_title_alone_leaves_the_frequency_panel_default():
-    fig, ax = plot_channel(_TAPS, 1000.0, title='just the left one')
-    assert ax[0].get_title() == 'just the left one'
-    assert ax[1].get_title() == 'Frequency response'
-    plt.close(fig)
-
-
-def test_plot_channel_freq_title_alone_leaves_the_delay_panel_default():
-    fig, ax = plot_channel(_TAPS, 1000.0, freq_title='just the right one')
-    assert ax[0].get_title() == 'Channel impulse response'
-    assert ax[1].get_title() == 'just the right one'
-    plt.close(fig)
+    with pytest.raises(ConfigurationError, match='subcarrier_response'):
+        plot_subcarriers(_TAPS, 8)
+    assert not plt.get_fignums()
 
 
 def test_plot_channel_delay_axis_is_milliseconds():
     fig, ax = plot_channel(np.array([1.0, 0.5, 0.25, 0.1]), 1000.0)
-    stem_x = ax[0].containers[0].markerline.get_xdata()
+    stem_x = ax.containers[0].markerline.get_xdata()
     np.testing.assert_allclose(stem_x, [0.0, 1.0, 2.0, 3.0])
     plt.close(fig)
 
 
-def test_plot_channel_spectrum_is_centred_on_zero_hz():
+def test_the_channel_response_is_drawn_centred_on_zero_hz():
+    from uacpy.acoustic_signal import channel_response
     fs = 500.0
-    fig, ax = plot_channel(_TAPS, fs)
-    f = ax[1].lines[0].get_xdata()
-    mag_dB = ax[1].lines[0].get_ydata()
+    fig, ax = channel_response(_TAPS, fs).plot()
+    f = ax.lines[0].get_xdata()
+    mag_dB = ax.lines[0].get_ydata()
     assert np.all(np.diff(f) > 0)
     assert f[0] == -fs / 2
     # H(0) = sum of the taps; misaligned f/H shifts would break this pairing.
     dc = 20 * np.log10(np.abs(_TAPS.sum()) + 1e-12)
     np.testing.assert_allclose(mag_dB[f == 0.0], [dc])
+    assert ax.get_title() == 'Frequency response'
     plt.close(fig)
 
 
@@ -161,10 +136,9 @@ def test_plot_doppler_ambiguity_plots_scales_in_thousandths_and_marks_the_peak()
     plt.close(fig)
 
 
-def test_plot_doppler_ambiguity_marks_the_estimators_plateau_centre():
-    """Example 31's probe: the metric is a plateau, whose low edge argmax
-    finds 1.40e-3 while the estimator returns its centre, 1.50e-3. The line
-    marks the estimate's own best_scale; the plotter computes nothing."""
+def test_plot_doppler_ambiguity_marks_the_estimators_best_scale():
+    """Example 31's probe. The line marks the estimate's own best_scale;
+    the plotter computes nothing."""
     from uacpy import comms
     fs = 12000.0
     t = np.arange(4000) / fs
@@ -172,8 +146,7 @@ def test_plot_doppler_ambiguity_marks_the_estimators_plateau_centre():
     estimate = comms.estimate_doppler_scale(
         comms.compensate_doppler(probe, -1.5e-3), probe,
         np.linspace(0, 3e-3, 61))
-    assert estimate.scales[int(np.argmax(estimate.peak_metric))] < (
-        estimate.best_scale)
+    assert estimate.best_scale == pytest.approx(1.5e-3, abs=1e-12)
     for fig, ax in (plot_doppler_ambiguity(estimate), estimate.plot()):
         np.testing.assert_allclose(ax.lines[1].get_xdata(),
                                    [estimate.best_scale * 1e3] * 2)
@@ -202,7 +175,7 @@ def test_plot_convergence_plots_mse_in_decibels_with_a_floor():
     (plot_doppler_ambiguity, (_doppler_estimate(
         0.0, np.linspace(-1e-3, 1e-3, 5),
         np.array([0.2, 0.4, 1.0, 0.5, 0.3])),)),
-    (plot_subcarriers, (_TAPS, 8)),
+    (plot_subcarriers, (np.fft.fft(_TAPS, 8),)),
 ])
 def test_comms_plotters_return_fig_ax_and_honour_ax(plotter, args):
     fig, ax = plotter(*args)
@@ -253,6 +226,101 @@ def test_an_error_free_point_is_not_drawn_as_a_measured_ber():
     plt.close(fig)
 
 
+def test_the_theory_curve_does_not_stretch_the_axis_past_the_run():
+    """QPSK theory at 20 dB Eb/N0 is ~1e-45: drawn over the whole Eb/N0 span
+    it pulled the log axis down ~47 decades, the measurement squeezed into
+    the top few. The axis stops one decade below the lowest rate the run
+    resolved — its lowest measured BER, or 1/n_bits when lower."""
+    from uacpy.comms import BerCurve, ber_theory_curve
+    from uacpy.plot import plot_ber_curve
+    ebn0 = np.array([0.0, 5.0, 10.0, 20.0])
+    ber = np.array([7.9e-2, 6e-3, 4e-6, 0.0])
+    theory = ber_theory_curve('qpsk', np.linspace(0.0, 20.0, 100))
+    curve = BerCurve(ebn0, ber, scheme='qpsk', n_bits=100000)
+    fig, ax = curve.plot()
+    theory.plot(ax=ax)
+    try:
+        assert [line.get_label() for line in ax.lines][-1] == 'qpsk theory'
+        assert ax.get_ylim()[0] == pytest.approx(4e-7, rel=1e-9)
+    finally:
+        plt.close(fig)
+    fig, ax = plot_ber_curve(ebn0, ber, n_bits=1e7)
+    plot_ber_curve(theory, ax=ax)
+    try:
+        assert ax.get_ylim()[0] == pytest.approx(1e-8, rel=1e-9)
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize('theory_first', [False, True])
+def test_a_second_measured_curve_does_not_clip_the_first(theory_first):
+    """The axis bound reads every measured curve on the axes: a second
+    curve resolving only 1e-3 keeps the first curve's 1e-6 point in view
+    (one decade below it), whichever order the curves and the theory line
+    are drawn in."""
+    from uacpy.comms import ber_theory_curve
+    from uacpy.plot import plot_ber_curve
+    ebn0 = np.array([0.0, 5.0, 10.0])
+    theory = ber_theory_curve('qpsk', np.linspace(0.0, 20.0, 50))
+    fig, ax = plt.subplots()
+    calls = [lambda: plot_ber_curve(ebn0, [1e-1, 1e-3, 1e-6], ax=ax,
+                                    label='deep'),
+             lambda: plot_ber_curve(theory, ax=ax),
+             lambda: plot_ber_curve(ebn0, [2e-1, 5e-2, 1e-3], ax=ax,
+                                    label='shallow')]
+    if theory_first:
+        calls = [calls[1], calls[0], calls[2]]
+    for call in calls:
+        call()
+    try:
+        assert ax.get_ylim()[0] == pytest.approx(1e-7, rel=1e-9)
+        assert ax.get_ylim()[1] >= 2e-1
+    finally:
+        plt.close(fig)
+
+
+def test_a_theory_curve_is_a_record_it_draws_dashed():
+    """``ber_theory_curve`` is ``ber_theory`` on the caller's grid; its
+    ``.plot()`` is ``plot_ber_curve(curve)``, a dashed black line, and the
+    plotter has no ``scheme=`` that would compute one."""
+    from uacpy import comms
+    from uacpy.plot import plot_ber_curve
+    grid = np.linspace(0.0, 10.0, 11)
+    theory = comms.ber_theory_curve('16qam', grid)
+    np.testing.assert_array_equal(theory.ber, comms.ber_theory('16qam', grid))
+    assert theory.scheme == '16qam'
+    fig, ax = theory.plot()
+    (line,) = ax.lines
+    assert (line.get_linestyle(), line.get_color()) == ('--', 'k')
+    assert line.get_label() == '16qam theory'
+    plt.close(fig)
+    assert 'scheme' not in inspect.signature(plot_ber_curve).parameters
+
+
+def test_two_curves_on_one_axes_are_named_apart():
+    """A ``BerCurve`` names its own legend entry from what its link carried,
+    so two curves on one axes read apart. ``label=`` wins over it, and bare
+    arrays are labelled 'measured'."""
+    from uacpy.comms import BerCurve
+    from uacpy.comms.equalize import DFE
+    from uacpy.plot import plot_ber_curve
+    ebn0 = np.array([0.0, 5.0, 10.0])
+    ber = np.array([1e-1, 1e-2, 1e-3])
+    awgn = BerCurve(ebn0, ber, scheme='qpsk', n_bits=1000)
+    multipath = BerCurve(ebn0, ber, scheme='qpsk', n_bits=1000,
+                         channel=np.array([1.0, 0.5]), equalizer=DFE())
+    fig, ax = plot_ber_curve(awgn)
+    plot_ber_curve(multipath, ax=ax)
+    plot_ber_curve(ebn0, ber, ax=ax)
+    plot_ber_curve(ebn0, ber, ax=ax, label='mine')
+    try:
+        labels = [line.get_label() for line in ax.lines
+                  if 'theory' not in line.get_label()]
+        assert labels == ['qpsk', 'qpsk, channel, DFE', 'measured', 'mine']
+    finally:
+        plt.close(fig)
+
+
 class TestOneNullPolicyForMagnitudesInDecibels:
     """A null of ``20·log10|x|`` is drawn on a floor ``dynamic_range_dB``
     below the peak (120 dB by default), by every magnitude-in-dB plotter,
@@ -261,13 +329,14 @@ class TestOneNullPolicyForMagnitudesInDecibels:
     def test_the_channel_and_subcarrier_views_floor_a_null_alike(self):
         import warnings
         import matplotlib.pyplot as plt
-        from uacpy.plot import plot_channel, plot_subcarriers
+        from uacpy.acoustic_signal import channel_response
+        from uacpy.plot import plot_subcarriers
         taps = np.array([1.0, 1.0])              # H = 0 at Nyquist
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            fig, (_, ax_f) = plot_channel(taps, sample_rate=2.0)
+            fig, ax_f = channel_response(taps, 2.0).plot()
             channel = ax_f.lines[-1].get_ydata()
-            fig2, ax_s = plot_subcarriers(taps, 8)
+            fig2, ax_s = plot_subcarriers(np.fft.fft(taps, 8))
             subcarriers = ax_s.lines[-1].get_ydata()
         for drawn in (channel, subcarriers):
             assert np.all(np.isfinite(drawn))
@@ -278,7 +347,7 @@ class TestOneNullPolicyForMagnitudesInDecibels:
     def test_the_floor_follows_dynamic_range_dB(self, span):
         import matplotlib.pyplot as plt
         from uacpy.plot import plot_subcarriers
-        fig, ax = plot_subcarriers(np.array([1.0, 1.0]), 8,
+        fig, ax = plot_subcarriers(np.fft.fft([1.0, 1.0], 8),
                                    dynamic_range_dB=span)
         drawn = ax.lines[-1].get_ydata()
         assert np.min(drawn) == pytest.approx(np.max(drawn) - span)

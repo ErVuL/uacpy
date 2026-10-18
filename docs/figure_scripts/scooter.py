@@ -20,7 +20,7 @@ from figure_scripts._common import (
 import uacpy
 from uacpy.io import read_grn_file
 from uacpy.models import Bellhop, Kraken, RunMode, Scooter
-from uacpy.plot import shared_colorbar
+from uacpy.plot import plot_greens_function, shared_colorbar
 from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 
@@ -101,11 +101,9 @@ def greens_function():
     k_water = 2.0 * np.pi * freq / c_water
     axes[1].axvspan(k_bottom, k_water, color='0.85', zorder=0,
                     label=f'trapped: {c_bottom:.0f} > c > {c_water:.0f} m/s')
-    axes[1].plot(k, G_dB[zi], color='C0', linewidth=0.9,
-                 label=f"$|G(k)|$ at z = {grn.receiver_depths[zi]:.0f} m")
-    for i, km in enumerate(np.real(modes.k)):
-        axes[1].axvline(km, color='C3', linestyle=':', linewidth=1.0,
-                        label='Kraken eigenvalues $k_m$' if i == 0 else None)
+    # The cut at the source depth, Kraken's eigenvalues marked on it.
+    plot_greens_function(grn, ax=axes[1], depth=grn.receiver_depths[zi],
+                         modes=modes, title='')
     for ax, colour in zip(axes, ('white', '0.25')):
         for kc in (k_bottom, k_water):
             ax.axvline(kc, color=colour, linestyle='--', linewidth=1.2)

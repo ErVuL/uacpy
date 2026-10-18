@@ -10,7 +10,7 @@ Named ``acoustic_signal`` so it does not collide with Python's stdlib
                       ``probabilistic_`` twin of each)
 * ``cqt``           — the constant-Q transform and spectrogram
 * ``bands``         — the standard band ladders a level is reported on
-* ``timefreq``      — the time-resolved views (``spectrogram``, ``cwt``,
+* ``timefreq``      — the time-resolved views (``spectrogram``, ``stft``, ``cwt``,
                       ``wigner_ville``, the analytic signal, cepstra)
 * ``spectrum_at``   — one tone's phasor, and a spectrum at the frequencies
                       asked for
@@ -115,9 +115,8 @@ _EXPORTS = {
     'FRF': 'frf', 'FRFResult': 'frf', 'frf_welch': 'frf', 'etfe': 'frf',
     'periodic_etfe': 'frf', 'lsfir': 'frf',
     # arrays: beamforming
-    'bartlett': 'beamforming', 'beamform': 'beamforming',
-    'BeamformResult': 'beamforming', 'music_spectrum': 'beamforming',
-    'mvdr': 'beamforming', 'sample_covariance': 'beamforming',
+    'bartlett': 'beamforming', 'music_spectrum': 'beamforming',
+    'mvdr': 'beamforming',
     'snapshots': 'beamforming', 'Snapshots': 'beamforming',
     'steering_vectors': 'beamforming', 'shading_taper': 'beamforming',
     'beamform_field': 'beamforming', 'BeamformedField': 'beamforming',
@@ -144,8 +143,8 @@ _EXPORTS = {
     'received_amplitudes': 'channel',
     'remove_delay': 'channel',
     'delayandsum': 'channel',
-    'broadband_propagation_loss': 'channel',
-    'gate_transfer_function': 'channel',
+    'broadband_loss': 'channel',
+    'truncate_response': 'channel',
     'tone_phasor': 'spectrum_at',
     'waveform_spectrum_at': 'spectrum_at',
     'simulate_arrival_reception': 'channel',
@@ -158,25 +157,26 @@ _EXPORTS = {
     'energy_support': 'delay_profile',
     'synthesis_band': 'delay_profile',
     'coherence_bandwidth': 'delay_profile',
-    'coherence_factor': 'delay_profile',
     'channel_regime': 'delay_profile',
-    'channel_response': 'channel',
+    'channel_response': 'channel', 'ChannelResponse': 'channel',
     'simulate_reception': 'channel',
     'apply_impulse_response': 'channel',
     'apply_impulse_response_blocks': 'channel',
     'arrival_impulse_response': 'channel',
     'arrival_grid_impulse_response': 'channel',
     # system: modal dispersion and warping
-    'modal_group_velocity': 'dispersion', 'unwarp_signal': 'dispersion',
-    'warp_signal': 'dispersion',
+    'modal_group_speeds': 'dispersion', 'unwarp_signal': 'dispersion',
+    'warp_signal': 'dispersion', 'Warped': 'dispersion',
     # estimate: time-frequency views
-    'spectrogram': 'timefreq', 'analytic_signal': 'timefreq',
+    'spectrogram': 'timefreq', 'stft': 'timefreq',
+    'analytic_signal': 'timefreq',
     'cepstrum': 'timefreq', 'Cepstrum': 'timefreq',
     'ComplexCepstrum': 'timefreq',
     'complex_cepstrum': 'timefreq', 'cwt': 'timefreq', 'envelope': 'timefreq',
     'instantaneous_frequency': 'timefreq',
     'inverse_complex_cepstrum': 'timefreq', 'inverse_cwt': 'timefreq',
     'wigner_ville': 'timefreq', 'SpectrogramResult': 'timefreq',
+    'STFTResult': 'timefreq',
     'CWTResult': 'timefreq', 'WignerVilleResult': 'timefreq',
     # estimate: the constant-Q transform and spectrogram (the constant-Q
     # estimators sit with the other estimators above)
@@ -184,7 +184,7 @@ _EXPORTS = {
     'constant_q_spectrogram': 'cqt',
     'CQTResult': 'cqt', 'CQSpectrogramResult': 'cqt',
     # estimate: standard band ladders
-    'decidecade_bands': 'bands', 'decidecade_band_levels': 'bands',
+    'decidecade_bands': 'bands',
     'octave_bands': 'bands',
     'standard_bands': 'bands', 'band_levels': 'bands',
     'BandLevels': 'bands',

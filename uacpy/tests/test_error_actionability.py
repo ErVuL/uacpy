@@ -22,7 +22,8 @@ import re
 import numpy as np
 import pytest
 
-from uacpy.core.exceptions import ConfigurationError, FileFormatError
+from uacpy.core.exceptions import (ConfigurationError, FileFormatError,
+                                   MissingFileError)
 
 
 def _band_exposure(data, sample_rate, **options):
@@ -45,7 +46,7 @@ class TestReadersNameWhatWritesTheFile:
 
     def test_oasn_covariance_not_found_names_the_option_letter(self, tmp_path):
         from uacpy.io.oases_reader import read_oasn_covariance
-        with pytest.raises(FileFormatError,
+        with pytest.raises(MissingFileError,
                            match='OASN covariance file not found') as exc:
             read_oasn_covariance(tmp_path / 'absent.xsm')
         assert "'N'" in exc.value.remediation
@@ -53,7 +54,7 @@ class TestReadersNameWhatWritesTheFile:
 
     def test_oasn_replicas_not_found_names_the_option_letter(self, tmp_path):
         from uacpy.io.oases_reader import read_oasn_replicas
-        with pytest.raises(FileFormatError,
+        with pytest.raises(MissingFileError,
                            match='OASN replica file not found') as exc:
             read_oasn_replicas(tmp_path / 'absent.rpo')
         assert "'R'" in exc.value.remediation
@@ -62,7 +63,7 @@ class TestReadersNameWhatWritesTheFile:
     def test_oasr_reflection_not_found_names_the_option_letter(self, tmp_path):
         from uacpy.io.oases_reader import read_oasr_reflection_coefficients
         with pytest.raises(
-                FileFormatError,
+                MissingFileError,
                 match='OASR reflection coefficient file not found') as exc:
             read_oasr_reflection_coefficients(tmp_path / 'absent.rco')
         assert "'T'" in exc.value.remediation
@@ -70,7 +71,7 @@ class TestReadersNameWhatWritesTheFile:
     def test_oasp_trf_not_found_sends_the_user_to_the_run_log(self, tmp_path):
         from uacpy.io.oases_reader import read_oasp_trf
         with pytest.raises(
-                FileFormatError,
+                MissingFileError,
                 match='OASP transfer function file not found') as exc:
             read_oasp_trf(tmp_path / 'absent.trf', receiver_depths=[10.0])
         assert 'stdout' in exc.value.remediation
@@ -81,7 +82,7 @@ class TestReadersNameWhatWritesTheFile:
         nothing. A remediation naming only the letter sends that user in a
         circle."""
         from uacpy.io.oases_reader import read_oases_rhs_header
-        with pytest.raises(FileFormatError,
+        with pytest.raises(MissingFileError,
                            match='mean-field file not found') as exc:
             read_oases_rhs_header(tmp_path / 'absent.rhs')
         assert "'s'" in exc.value.remediation
@@ -220,20 +221,20 @@ class TestConstraintMessagesNameTheOffendingValue:
     def test_column_scattering_strength_names_the_offending_thickness(self):
         from uacpy.sonar.scattering import column_scattering_strength
         with pytest.raises(ConfigurationError,
-                           match='thickness_m must be > 0') as exc:
-            column_scattering_strength(-30.0, thickness_m=0.0)
+                           match='thickness must be > 0') as exc:
+            column_scattering_strength(-30.0, thickness=0.0)
         assert 'got 0.0' in str(exc.value)
 
     def test_detection_threshold_energy_names_both_offending_inputs(self):
         from uacpy.sonar.detection import detection_threshold_energy
         with pytest.raises(
                 ConfigurationError,
-                match='bandwidth_hz and integration_time_s must be > 0') as exc:
-            detection_threshold_energy(0.5, 1e-4, bandwidth_hz=-1.0,
-                                       integration_time_s=2.0)
+                match='bandwidth and integration_time must be > 0') as exc:
+            detection_threshold_energy(0.5, 1e-4, bandwidth=-1.0,
+                                       integration_time=2.0)
         msg = str(exc.value)
-        assert 'bandwidth_hz=-1.0' in msg
-        assert 'integration_time_s=2.0' in msg
+        assert 'bandwidth=-1.0' in msg
+        assert 'integration_time=2.0' in msg
 
     def test_rrc_filter_names_the_offending_rolloff(self):
         from uacpy.comms.phy import rrc_filter
@@ -378,7 +379,7 @@ _REMEDIATION_PASS_THROUGH = {
     ('acoustic_signal/delay_profile.py', '_fold_notice'):
         "one fold notice for every synthesis record; each caller names its "
         "own way out (energy_fraction, record=, frequencies=).",
-    ('core/absorption.py', 'warn_if_band_absorption_frozen'):
+    ('core/absorption.py', '_warn_if_band_absorption_frozen'):
         "one frozen-law warning for the band engines; each names its own "
         "remedy (sub-bands, per-frequency runs).",
 }
@@ -564,15 +565,15 @@ def _guard_cases():
     """
     from uacpy.acoustic_signal.detect import (
         ambiguity_function, matched_filter, processing_gain_dB)
-    from uacpy.acoustic_signal.beamforming import sample_covariance
+    from uacpy.acoustic_signal.beamforming import Snapshots
     from uacpy.acoustic_signal.bands import (
-        decidecade_band_levels, decidecade_bands,
+        band_levels, decidecade_bands,
     )
     from uacpy.acoustic_signal.channel import impulse_response
     from uacpy.acoustic_signal.cqt import (
         constant_q_spectrogram, constant_q_transform,
     )
-    from uacpy.acoustic_signal.dispersion import modal_group_velocity
+    from uacpy.acoustic_signal.dispersion import modal_group_speeds
     from uacpy.acoustic_signal.generate import (
         synthesize_noise_from_psd)
     from uacpy.acoustic_signal.generate import bpsk_modulate, m_sequence
@@ -588,10 +589,9 @@ def _guard_cases():
     from uacpy.comms.transceiver import OFDMReceiver, OFDMTransmitter
     from uacpy.sonar.matched_field import (
         replica_bank_from_field, synthesize_replica)
-    from uacpy.sonar.reverberation import total_reverberation
     from uacpy.sonar.sonar_equation import (
-        detection_range, noise_background, passive_signal_excess_field,
-        transition_probability_field)
+        active_signal_excess, detection_ranges, noise_background,
+        passive_signal_excess_field, transition_probability_field)
 
     z4 = np.linspace(5, 95, 4)
     return [
@@ -603,10 +603,12 @@ def _guard_cases():
          lambda: fk_transform(np.zeros((8, 4)), 1000.0, 1.0, nfft=(8, 4, 2)),
          ('got 3 entries',)),
         ('radon_transform_data_ndim',
-         lambda: radon_transform(np.zeros(8), 1000.0, 1.0, [1.0]),
+         lambda: radon_transform(np.zeros(8), 1000.0, 1.0, [1.0],
+                                 'parabolic'),
          ('got shape (8,)',)),
         ('inverse_radon_R_ndim',
-         lambda: inverse_radon(np.zeros(8), 1000.0, 1.0, [1.0], 4),
+         lambda: inverse_radon(np.zeros(8), 1000.0, 1.0, [1.0], 4,
+                               'parabolic'),
          ('got shape (8,)',)),
         ('taup_transform_data_ndim',
          lambda: taup_transform(np.zeros(8), 1000.0, 1.0),
@@ -621,9 +623,9 @@ def _guard_cases():
          lambda: fk_transform(np.zeros(8), 1000.0, 1.0),
          ('got shape (8,)',)),
         # ── acoustic_signal/timefreq.py ──────────────────────────────────
-        ('analytic_signal_data_ndim',
-         lambda: analytic_signal(np.zeros((2, 3))),
-         ('got shape (2, 3)',)),
+        ('analytic_signal_data_scalar',
+         lambda: analytic_signal(np.float64(0.0)),
+         ('got a scalar',)),
         ('wigner_ville_window_length',
          lambda: wigner_ville(np.zeros(32), 1000.0, time_smoothing=0),
          ('got 0',)),
@@ -634,18 +636,18 @@ def _guard_cases():
         ('wigner_ville_data_ndim',
          lambda: wigner_ville(np.zeros((2, 3)), 1000.0),
          ('got shape (2, 3)',)),
-        ('cwt_data_ndim',
-         lambda: cwt(np.zeros((2, 3)), 1000.0),
-         ('got shape (2, 3)',)),
+        ('cwt_data_scalar',
+         lambda: cwt(np.float64(0.0), 1000.0),
+         ('got a scalar',)),
         ('cwt_frequencies_positive',
          lambda: cwt(np.zeros(64), 1000.0, frequencies=[10.0, 0.0, -5.0]),
          ('got 2 value(s) <= 0', 'first at index 1')),
         ('inverse_cwt_W_shape',
          lambda: inverse_cwt(np.zeros((2, 4)), [1.0, 2.0, 3.0], 1000.0),
          ('got W shape (2, 4)', '3 frequencies')),
-        ('cepstrum_data_ndim',
-         lambda: cepstrum(np.zeros((2, 3))),
-         ('got shape (2, 3)',)),
+        ('cepstrum_data_scalar',
+         lambda: cepstrum(np.float64(0.0)),
+         ('got a scalar',)),
         ('complex_cepstrum_data_ndim',
          lambda: complex_cepstrum(np.zeros((2, 3))),
          ('got shape (2, 3)',)),
@@ -662,7 +664,7 @@ def _guard_cases():
          ('received shape (2, 3)', 'replica shape (4,)')),
         ('processing_gain_bt_product',
          lambda: processing_gain_dB(0.0, 2.0),
-         ('bandwidth_hz=0.0', 'duration_s=2.0')),
+         ('bandwidth=0.0', 'duration=2.0')),
         ('ambiguity_function_waveform_ndim',
          lambda: ambiguity_function(np.zeros((2, 3)), 1000.0),
          ('got shape (2, 3)',)),
@@ -677,18 +679,18 @@ def _guard_cases():
         ('decidecade_bands_edges',
          lambda: decidecade_bands(0.0, 100.0),
          ('got freq_min=0.0', 'freq_max=100.0')),
-        ('decidecade_band_levels_negative_psd',
-         lambda: decidecade_band_levels(np.array([1.0, -2.0, -3.0]),
+        ('band_levels_negative_psd',
+         lambda: band_levels(np.array([1.0, -2.0, -3.0]),
                                         frequencies=np.array([10.0, 20.0, 30.0])),
          ('Got 2 negative value(s)', 'minimum -3')),
-        ('decidecade_band_levels_frequency_order',
-         lambda: decidecade_band_levels(np.array([1.0, 2.0, 3.0]),
+        ('band_levels_frequency_order',
+         lambda: band_levels(np.array([1.0, 2.0, 3.0]),
                                         frequencies=np.array([10.0, 30.0, 20.0])),
          ('Got 1 non-increasing step(s)', 'first at index 1')),
         # ── acoustic_signal/channel.py ──────────────────────────────────
         ('impulse_response_shapes',
          lambda: impulse_response(np.ones(3), np.zeros(4), sample_rate=1000.0),
-         ('amplitudes shape (3,)', 'delays_s shape (4,)')),
+         ('amplitudes shape (3,)', 'delays shape (4,)')),
         ('impulse_response_negative_delays',
          lambda: impulse_response(np.ones(3), np.array([0.0, -1.0, -2.0]),
                                   sample_rate=1000.0),
@@ -701,11 +703,11 @@ def _guard_cases():
          lambda: constant_q_transform(np.zeros((2, 3)), 8000.0),
          ('got shape (2, 3)',)),
         # ── acoustic_signal/dispersion.py ─────────────────────────────────
-        ('modal_group_velocity_frequency_order',
-         lambda: modal_group_velocity([100.0, 50.0], k_horizontal=[1.0, 2.0]),
+        ('modal_group_speeds_frequency_order',
+         lambda: modal_group_speeds([100.0, 50.0], k_horizontal=[1.0, 2.0]),
          ('got shape (2,)', '1 non-increasing step(s)')),
-        ('modal_group_velocity_wavenumber_rows',
-         lambda: modal_group_velocity([1.0, 2.0, 3.0], k_horizontal=np.zeros(2)),
+        ('modal_group_speeds_wavenumber_rows',
+         lambda: modal_group_speeds([1.0, 2.0, 3.0], k_horizontal=np.zeros(2)),
          ('k_horizontal shape (2,)', '3 frequencies')),
         # ── acoustic_signal/generate.py ───────────────────────────
         ('synthesize_noise_frequency_order',
@@ -719,14 +721,14 @@ def _guard_cases():
          ('Fxx[0]=1', 'non-positive Pxx value(s)')),
         # ── acoustic_signal/generate.py ─────────────────────────────────
         ('bpsk_samples_per_chip_integer',
-         lambda: bpsk_modulate(np.array([1, -1, 1]), 100.0, sample_rate=1000.0, chips_per_sec=300.0),
-         ('sample_rate/chips_per_sec = 1000/300',)),
+         lambda: bpsk_modulate(np.array([1, -1, 1]), 100.0, sample_rate=1000.0, chip_rate=300.0),
+         ('sample_rate/chip_rate = 1000/300',)),
         ('m_sequence_register_length',
          lambda: m_sequence(20),
          ('got 20',)),
         # ── acoustic_signal/beamforming.py ───────────────────────────────
-        ('sample_covariance_snapshots_ndim',
-         lambda: sample_covariance(np.ones(8)),
+        ('snapshots_covariance_snapshots_ndim',
+         lambda: Snapshots(100.0, np.ones(8)).covariance(),
          ('got shape (8,)',)),
         # ── core/_validate.py ────────────────────────────────────────────
         ('require_finite_signal_nonfinite_count',
@@ -763,9 +765,12 @@ def _guard_cases():
              _pressure_slab(z4, np.linspace(500, 4000, 6)),
              array_depths=np.linspace(5, 95, 7)),
          ("field 'depth' axis of shape (4,)", 'array_depths of shape (7,)')),
-        ('total_reverberation_zero_length',
-         lambda: total_reverberation(np.array([1.0, 2.0]), np.array([])),
-         ('Got sizes [2, 0]',)),
+        ('active_signal_excess_zero_length_background',
+         lambda: active_signal_excess(200.0, 70.0, 10.0,
+                                      detection_threshold_dB=10.0,
+                                      noise_level_dB=60.0,
+                                      reverberation_level_dB=np.array([])),
+         ('zero-length reverberation_level_dB',)),
         ('noise_background_di_and_ag',
          lambda: noise_background(60.0, 10.0, array_gain_dB=12.0),
          ('directivity_index_dB=10.0', 'array_gain_dB=12.0')),
@@ -778,9 +783,9 @@ def _guard_cases():
          lambda: transition_probability_field(_complex_se_field(),
                                                 sigma_dB=8.0),
          ('Got dtype complex',)),
-        ('detection_range_shape_mismatch',
-         lambda: detection_range(np.zeros(3), signal_excess_dB=np.zeros(4)),
-         ('ranges_m shape (3,)', 'signal_excess_dB shape (4,)')),
+        ('detection_ranges_shape_mismatch',
+         lambda: detection_ranges(np.arange(3.0), signal_excess_dB=np.zeros(4)),
+         ('signal_excess_dB has 4 samples along axis', 'ranges has 3')),
     ]
 
 
@@ -789,7 +794,7 @@ _GUARD_CASES = _guard_cases()
 
 class TestShapeAndArrayGuardsNameWhatTheyGot:
     """Fifty-one guards in ``acoustic_signal`` / ``comms`` / ``sonar`` stated
-    their contract ("data must be 1-D", "delays_s must be >= 0") and left the
+    their contract ("data must be 1-D", "delays must be >= 0") and left the
     caller to find the offending input by inspection.
 
     Each case names one fragment the message has to carry: a shape, a dtype, a

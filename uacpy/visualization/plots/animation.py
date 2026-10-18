@@ -51,6 +51,66 @@ def _time_layout(field, who: str, what: str = 'field'):
     return (data, *(np.asarray(coords[a], dtype=float) for a in _TIME_AXES))
 
 
+#: Rounds of :func:`_fit_inset_colorbars`; each one moves the panels by the
+#: overhang it measures, and an equal-aspect panel's drawn box follows its
+#: slot only in proportion, so a second round takes up the remainder.
+_INSET_FIT_ROUNDS = 3
+
+
+def _fit_inset_colorbars(fig, anchors, pad_px=4.0):
+    """Narrow the panels until every colorbar inset beside ``anchors`` (and
+    its label) ends inside the canvas.
+
+    An inset bar sits outside its panel, so the right margin a figure
+    reserves for it is a guess in inches, while the bar's tick labels and
+    label are in points: measured, the default 1×3 montage's label ended
+    5 px past the canvas. The overhang is measured on the drawn figure and
+    the subplot right edge pulled in by it."""
+    for _ in range(_INSET_FIT_ROUNDS):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        reach = max((child.get_tightbbox(renderer).x1
+                     for ax in anchors for child in ax.child_axes),
+                    default=None)
+        if reach is None:
+            return
+        over = reach + pad_px - fig.bbox.width
+        right = fig.subplotpars.right - over / fig.bbox.width
+        if over <= 0 or right <= fig.subplotpars.left:
+            return
+        fig.subplots_adjust(right=right)
+
+
+#: The snapshot montage's default slot (inches): a panel drawn at its data
+#: aspect ('auto'), and the share of the width a 4:1-floored panel is tall,
+#: plus the room its title and axis labels take (uacpy guidance).
+_SNAPSHOT_PANEL_WIDTH_IN = 3.2
+_SNAPSHOT_PANEL_HEIGHT_IN = 2.8
+_SNAPSHOT_FLOOR_HEIGHT_RATIO = 0.25
+_SNAPSHOT_PANEL_TEXT_IN = 1.0
+
+
+def _snapshot_aspect(depths, ranges):
+    """The default axes aspect of a (depth, range) snapshot panel.
+
+    The panel is km in x and m in y, so ``1/1000`` displays 1 m of depth as
+    long as 1 m of range — isotropic, wavefronts stay round. The gate admits
+    only long, shallow panels — range span more than ten times depth span —
+    so their depth/range ratio is under 0.1 and an isotropic panel would be a
+    sliver at most 1:10. Every panel the gate admits is therefore stretched to
+    a 4:1 floor: a quarter as tall as it is wide. Isotropic is not offered
+    inside the gate for that reason (a ``ratio >= 0.25`` condition would
+    contradict the gate and select nothing); a caller who wants it passes
+    ``aspect=1/1000``. A single receiver depth has no depth span to scale by
+    and takes ``'auto'``, as does every panel outside the gate."""
+    range_span = float(ranges[-1] - ranges[0])
+    depth_span = float(depths[-1] - depths[0])
+    if depth_span > 0 and range_span > 10.0 * depth_span:
+        ratio = depth_span / range_span
+        return _SNAPSHOT_FLOOR_HEIGHT_RATIO / ratio / 1000.0
+    return 'auto'
+
+
 def _pmax_percentile(data) -> float:
     """Symmetric colour limit for ±pressure: the 99.5th percentile of
     ``|data|`` over the finite samples, so the early-time near-source spike
@@ -234,8 +294,8 @@ def save_animation(
     field: 'Field',
     path,
     *,
-    fps: int = 20,
-    figsize: Tuple[float, float] = (8, 4),
+    fps: int = 30,
+    figsize: Tuple[float, float] = (8, 4.5),
     writer=None,
     **animate_kwargs,
 ):
@@ -255,9 +315,10 @@ def save_animation(
         Output file. ``.gif`` → :class:`PillowWriter`; ``.mp4`` →
         ``'ffmpeg'`` (requires ffmpeg installed).
     fps : int, optional
-        Playback frame rate. Default 20.
+        Playback frame rate. Default 30, as :func:`animate_field`'s.
     figsize : tuple, optional
-        Figure size (inches). Default ``(8, 4)``.
+        Figure size (inches). Default ``(8, 4.5)``, as
+        :func:`animate_field`'s.
     writer : matplotlib animation writer, optional
         Override the suffix-inferred writer.
 
@@ -293,7 +354,7 @@ def save_animation(
 @typed_plot_error
 def plot_time_snapshots(
     fields,
-    times_s: Sequence[float],
+    times: Sequence[float],
     *,
     env: Optional[Environment] = None,
     cmap: Optional[str] = None,
@@ -307,7 +368,7 @@ def plot_time_snapshots(
     """Snapshot grid: per-model rows × per-time columns of ``p(d, r, t)``.
 
     Time-series analogue of :func:`compare_models`. Each row is one
-    field, each column is the time slice nearest ``times_s[j]``. Useful
+    field, each column is the time slice nearest ``times[j]``. Useful
     for multi-solver comparison panels where the same propagation event
     is captured at matched wall-clock times across rows.
 
@@ -321,9 +382,9 @@ def plot_time_snapshots(
         ``(name, field)`` pairs names them explicitly; any other bare
         :class:`Field` or a sequence of fields is named by each field's
         ``model``.
-    times_s : sequence of float
+    times : sequence of float
         Wall-clock times to sample (s). Each model's nearest time bin
-        is picked independently.
+        is picked independently, and each cell is titled with its own.
     env : Environment, optional
         When supplied, the seafloor overlay is drawn on every panel.
     cmap : str, optional
@@ -345,12 +406,14 @@ def plot_time_snapshots(
         Pass a scalar for a global scale, or a sequence of length
         ``n_models`` for explicit per-row scales. Each row carries its own
         colour bar, labelled from the field's kind and unit as
-        :func:`plot_field` labels it (``'p(t) (Pa)'``), with ``', row
-        scale'`` appended unless a scalar ``p_max`` puts every row on one
-        scale.
+        :func:`plot_field` labels a view of a time-series field
+        (``'p(t) (Pa)'``), with ``', row scale'`` appended unless a scalar
+        ``p_max`` puts every row on one scale.
     figsize_per_panel : tuple, optional
         ``(width, height)`` inches per snapshot panel of a new figure.
-        Default ``(3.2, 2.8)``.
+        ``None`` (default) is ``(3.2, 2.8)``, or ``(3.2, 1.8)`` when every
+        panel is drawn at the 4:1 floor (a quarter of the width tall, plus
+        its title and labels).
     title : str, optional
         ``fig.suptitle`` text.
     fig : Figure or SubFigure, optional
@@ -389,10 +452,10 @@ def plot_time_snapshots(
             for item in fields
         ]
     n_models = len(rows)
-    n_times = len(times_s)
+    n_times = len(times)
     if n_models == 0 or n_times == 0:
         raise ConfigurationError(
-            f"plot_time_snapshots: empty fields or times_s. Got "
+            f"plot_time_snapshots: empty fields or times. Got "
             f"{n_models} field(s) and {n_times} snapshot time(s); both must "
             f"be non-empty — the grid is one row per field, one column per "
             f"time.")
@@ -403,7 +466,18 @@ def plot_time_snapshots(
                             f"field {(name or type(field).__name__)!r}")
                for name, field in rows]
 
-    per_panel = (3.2, 2.8) if figsize_per_panel is None else figsize_per_panel
+    row_aspects = [_snapshot_aspect(depths, ranges) if aspect is None
+                   else aspect for _, depths, ranges, _ in layouts]
+    if figsize_per_panel is not None:
+        per_panel = figsize_per_panel
+    elif all(row != 'auto' for row in row_aspects) and aspect is None:
+        # Every panel is drawn at the 4:1 floor, so the slot is sized to it:
+        # a quarter of its width for the panel, plus its title and labels.
+        width = _SNAPSHOT_PANEL_WIDTH_IN
+        per_panel = (width, width * _SNAPSHOT_FLOOR_HEIGHT_RATIO
+                     + _SNAPSHOT_PANEL_TEXT_IN)
+    else:
+        per_panel = (_SNAPSHOT_PANEL_WIDTH_IN, _SNAPSHOT_PANEL_HEIGHT_IN)
     fig, axes, owns_fig = _grid_figure(
         fig, n_models, n_times,
         None if figsize_per_panel is None else (
@@ -425,38 +499,12 @@ def plot_time_snapshots(
                 f"{len(p_max_per_row)} != n_models {n_models}."
             )
 
-    for i, ((name, field), (data3, depths, ranges, times)) in enumerate(
+    for i, ((name, field), (data3, depths, ranges, field_times)) in enumerate(
             zip(rows, layouts)):
-        # Decide aspect ratio once per row from the data extent. The panel
-        # is km in x and m in y, so aspect = 1/1000 displays 1 m of
-        # depth as long as 1 m of range — isotropic, wavefronts stay round.
-        row_aspect: 'float | str'
-        if aspect is None:
-            range_span = float(ranges[-1] - ranges[0])
-            depth_span = float(depths[-1] - depths[0])
-            # The gate admits only long, shallow panels — range_span more
-            # than ten times depth_span — so ratio < 0.1 throughout it, and an
-            # isotropic panel (aspect 1/1000: 1 m of depth as long as 1 m of
-            # range, so wavefronts stay round with range in km and depth in m)
-            # would be a sliver at most 1:10. Every panel the gate admits is
-            # therefore stretched to a 4:1 floor: a quarter as tall as it is
-            # wide. Isotropic is not offered inside the gate for exactly that
-            # reason (a ``ratio >= 0.25`` condition would contradict the gate
-            # and select nothing); a caller who wants it passes
-            # ``aspect=1/1000`` explicitly.
-            # A single receiver depth has depth_span == 0 and so no ratio to
-            # scale by; it falls to 'auto' rather than dividing by zero.
-            ratio = depth_span / range_span if range_span > 0 else 1.0
-            if depth_span > 0 and range_span > 10.0 * depth_span:
-                row_aspect = 0.25 / ratio / 1000.0
-            else:
-                row_aspect = 'auto'
-        else:
-            row_aspect = aspect
-
+        row_aspect = row_aspects[i]
         pm = p_max_per_row[i]
-        for j, t_target in enumerate(times_s):
-            k = int(np.argmin(np.abs(times - t_target)))
+        for j, t_target in enumerate(times):
+            k = int(np.argmin(np.abs(field_times - t_target)))
             slab = data3[:, :, k]
             ax = axes[i, j]
             im = _depth_range_heatmap(
@@ -472,8 +520,9 @@ def plot_time_snapshots(
                 ax.set_ylim(depths[-1], depths[0])
             # From the source out to the far edge of the last painted cell.
             ax.set_xlim(0, _painted_x_span(im)[1])
-            if i == 0:
-                ax.set_title(f"t = {times[k] * 1000:.0f} ms", fontsize='medium')
+            # Each row picks its own nearest time bin, so each cell is
+            # titled with the time it draws.
+            ax.set_title(f"t = {field_times[k] * 1000:.0f} ms", fontsize='medium')
             if j == 0:
                 ax.set_ylabel(f"{name}\nDepth (m)", fontsize='medium')
             if i == n_models - 1:
@@ -505,6 +554,8 @@ def plot_time_snapshots(
         bar.set_label(label if shared else f"{label}, row scale",
                       fontsize='small')
         bar.ax.tick_params(labelsize='small')
+    if owns_fig and show_colorbar:
+        _fit_inset_colorbars(fig, [row[-1] for row in axes])
     # The source star sits on the left limit and widens it by its own half
     # width, measured in the panel's pixels — so it is drawn once the layout
     # has fixed the panel size.

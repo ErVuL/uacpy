@@ -779,7 +779,7 @@ def test_ram_stepped_waveguide_matches_coupled_mode_reference():
     one cell to 1.899 dB while its median stays at 0.076 dB.
 
     The grid is pinned rather than left to the Lytaev optimizer, which relaxes
-    ``angle_max`` to 20 deg on this problem and lands at 2.74 dB median — the
+    ``angle_max_deg`` to 20 deg on this problem and lands at 2.74 dB median — the
     47 deg mode carrying a third of the transmitted energy is outside a 20 deg
     aperture.
 

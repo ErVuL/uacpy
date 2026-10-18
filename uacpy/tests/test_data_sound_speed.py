@@ -5,6 +5,8 @@ they run fully offline; one ``requires_network`` test hits the live NCEI
 THREDDS server (auto-skipped offline).
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -168,6 +170,44 @@ def test_wet_cell_fallback_stamps_the_cell_actually_used(monkeypatch):
     assert kept.data_sources[0].data_point == (30.5, -39.5)
 
 
+@pytest.mark.parametrize('who, call', [
+    ('fetch_environment', lambda: ss._woa23_point(
+        'opendap', (30.5, -40.5), date=None, formula='teos10',
+        resolution='1.00', timeout=5.0, verbose=False)),
+    ('fetch_environment', lambda: ss._woa23_transect(
+        'opendap', (30.5, -40.5), (30.5, -40.4), n_points=2, max_points=1000,
+        date=None, formula='teos10', resolution='1.00', timeout=5.0,
+        verbose=False, seafloor=None)),
+    ('fetch_environment', lambda: ss._fetch_ts_profile_backend(
+        (30.5, -40.5), who='fetch_environment')),
+    ('fetch_ssp_transect', lambda: ss.fetch_ssp_transect(
+        (30.5, -40.5), (30.5, -40.4), n_points=2)),
+])
+def test_the_wet_cell_hop_names_the_function_called(monkeypatch, who, call):
+    """The WOA23 hop notice of a column read for fetch_environment or
+    fetch_ssp_transect names that function, not fetch_ssp, which the user
+    did not call."""
+    from uacpy.data import SOURCES
+    wet = (120, 140)                              # cell centre (30.5, -39.5)
+
+    def fake_get_column(source, period, lat_idx, lon_idx, **kw):
+        if (lat_idx, lon_idx) == wet:
+            return (np.asarray(_Z), np.asarray([18.0, 16.0, 13.0, 8.0, 5.0]),
+                    np.asarray([36.0, 36.1, 36.2, 35.5, 35.0]))
+        return np.array([]), np.array([]), np.array([])
+
+    monkeypatch.setattr(ss, '_get_column', fake_get_column)
+    monkeypatch.setattr(bathymetry, '_refuse_a_dry_point', lambda *a, **k: None)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        call()
+    notes = [str(w.message) for w in rec
+             if issubclass(w.category, ProvenanceWarning)
+             and 'nearest wet 1° cell' in str(w.message)]
+    assert notes
+    assert all(f"{who}: {SOURCES['woa23'].name}" in m for m in notes), notes
+
+
 def test_on_centre_request_stamps_zero_offset(monkeypatch):
     def fake_get_column(source, period, lat_idx, lon_idx, **kw):
         return (np.asarray(_Z), np.asarray([18.0, 16.0, 13.0, 8.0, 5.0]),
@@ -321,7 +361,7 @@ def test_month_splices_annual_below_cap(monkeypatch):
     assert np.all(np.diff(profile.depths) > 0)
     # The record says which period lies where.
     (rec,) = profile.data_sources
-    assert (rec.split_depth_m, rec.period_below) == (1500.0, 'annual mean')
+    assert (rec.split_depth, rec.period_below) == (1500.0, 'annual mean')
     assert ('date month 07 (climatology) above 1500 m, annual mean below'
             in rec._fetch_line())
 
@@ -338,7 +378,7 @@ def test_month_no_splice_when_seafloor_above_cap(monkeypatch):
     profile = ss.fetch_ssp((30.5, -40.5), month=7)
     assert profile.depths.tolist() == [0.0, 50.0, 200.0]
     (rec,) = ss.fetch_ssp((30.5, -40.5), month=7).data_sources
-    assert rec.split_depth_m is None and rec.period_below is None
+    assert rec.split_depth is None and rec.period_below is None
 
 
 def test_date_selects_month(monkeypatch):
@@ -415,7 +455,7 @@ def test_assemble_range_dependent_reorders_unsorted_ranges():
             SoundSpeedProfile(depths=z, sound_speed=np.array([[1480.0], [1490.0]]))]
     # Ranges supplied out of order: the result must come back ascending, with
     # each column following its range.
-    ssp = ss.assemble_range_dependent(cols, [2000.0, 0.0, 1000.0])
+    ssp = ss._assemble_range_dependent(cols, [2000.0, 0.0, 1000.0])
     assert list(ssp.ranges) == [0.0, 1000.0, 2000.0]
     assert ssp.sound_speed[0, 0] == 1490.0              # the 0 m column
     assert ssp.sound_speed[0, 1] == 1480.0              # the 1000 m column
@@ -432,7 +472,7 @@ def test_assemble_range_dependent_refuses_a_range_dependent_column():
                            ranges=np.array([0.0, 1000.0]))
     one = SoundSpeedProfile(depths=z, sound_speed=np.array([[1500.0], [1490.0]]))
     with pytest.raises(ConfigurationError, match='column 0 has 2 range'):
-        ss.assemble_range_dependent([rd, one], [0.0, 5000.0])
+        ss._assemble_range_dependent([rd, one], [0.0, 5000.0])
 
 
 def test_the_default_extension_latitude_is_the_core_reference():
@@ -492,8 +532,8 @@ def test_assemble_range_dependent_aggregates_through_the_carrier_deduper(
     # The name the assembly calls is the carrier deduper itself, not a copy.
     assert ss.dedupe_provenance is _provenance.dedupe_provenance
     monkeypatch.setattr(ss, 'dedupe_provenance', _spy)
-    out = ss.assemble_range_dependent(_provenance_columns(),
-                                      [3000.0, 0.0, 2000.0, 1000.0])
+    out = ss._assemble_range_dependent(_provenance_columns(),
+                                       [3000.0, 0.0, 2000.0, 1000.0])
     assert tuple(out.data_sources) == sentinel
     # It is handed the columns in assembled (ascending-range) order, so the
     # first-seen record is the one from the nearest column.
@@ -508,15 +548,15 @@ def test_assemble_range_dependent_keeps_every_columns_record_at_its_range():
     before, so columns 2-4 lost their offsets. A column without
     ``data_sources`` contributes none."""
     cols = _provenance_columns()
-    out = ss.assemble_range_dependent(cols, [3000.0, 0.0, 2000.0, 1000.0])
+    out = ss._assemble_range_dependent(cols, [3000.0, 0.0, 2000.0, 1000.0])
     assert isinstance(out.data_sources, tuple)
-    assert [(p.source.id, p.range_m) for p in out.data_sources] == [
+    assert [(p.source.id, p.range) for p in out.data_sources] == [
         ('copernicus', 0.0), ('gebco', 1000.0), ('copernicus', 1000.0),
         ('copernicus', 3000.0), ('woa23', 3000.0)]
     assert out.data_sources[0].requested_point == (31.0, -40.0)
     # The same record carried by one column twice stays one record.
-    again = ss.assemble_range_dependent([cols[0], cols[0]], [0.0, 10.0])
-    assert [(p.source.id, p.range_m) for p in again.data_sources] == [
+    again = ss._assemble_range_dependent([cols[0], cols[0]], [0.0, 10.0])
+    assert [(p.source.id, p.range) for p in again.data_sources] == [
         ('copernicus', 0.0), ('woa23', 0.0), ('copernicus', 10.0),
         ('woa23', 10.0)]
 
@@ -528,8 +568,8 @@ def test_assemble_range_dependent_tolerates_a_column_without_provenance():
         sound_speed = np.array([[1500.0], [1499.0]])
 
     cols = _provenance_columns()
-    out = ss.assemble_range_dependent([cols[0], _NoProvenance()],
-                                      [0.0, 100.0])
+    out = ss._assemble_range_dependent([cols[0], _NoProvenance()],
+                                       [0.0, 100.0])
     assert [p.source.id for p in out.data_sources] == ['copernicus', 'woa23']
 
 
@@ -747,22 +787,22 @@ def test_a_twice_extended_profile_stays_on_its_own_equation():
 
 def test_assembling_columns_keeps_a_formula_they_all_agree_on():
     from uacpy.core.environment import SoundSpeedProfile
-    from uacpy.data.sound_speed import assemble_range_dependent
+    from uacpy.data.sound_speed import _assemble_range_dependent
     cols = [SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, 1490.0],
                               kind='measured', formula='delgrosso')
             for _ in range(3)]
-    assert assemble_range_dependent(cols, [0.0, 1e3, 2e3]).formula == 'delgrosso'
+    assert _assemble_range_dependent(cols, [0.0, 1e3, 2e3]).formula == 'delgrosso'
 
 
 def test_assembling_mixed_columns_keeps_no_formula():
     """A stack whose columns disagree has no single equation, so the assembled
     field carries none and a later extension falls back to UNESCO."""
     from uacpy.core.environment import SoundSpeedProfile
-    from uacpy.data.sound_speed import assemble_range_dependent
+    from uacpy.data.sound_speed import _assemble_range_dependent
     cols = [SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, 1490.0],
                               kind='measured', formula=f)
             for f in ('delgrosso', 'unesco', 'delgrosso')]
-    assert assemble_range_dependent(cols, [0.0, 1e3, 2e3]).formula is None
+    assert _assemble_range_dependent(cols, [0.0, 1e3, 2e3]).formula is None
 
 
 def test_every_ssp_route_defaults_to_teos10():

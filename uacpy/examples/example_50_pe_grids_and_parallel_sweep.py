@@ -18,9 +18,7 @@ Field.run_settings · run_parallel · Job · plot.compare
 """
 
 import os
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -45,16 +43,16 @@ frequencies = [25.0, 50.0, 100.0, 200.0]
 if __name__ == '__main__':
     # The medium as RAM scores it: c0 from Lytaev's Eq. (15), the accuracy
     # band the water's speeds widened to contain c0, the stability band
-    # reaching the seabed's 1700 m/s, and the Padé order RAM marches.
+    # reaching the seabed's 1700 m/s (the Padé order is RAM's by default).
     c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=1700.0)
     medium = dict(c_min=1500.0, c_max=max(1500.0, c0), c_max_all=1700.0,
-                  x_max=5000.0, angle_max=30.0, p=uacpy.RAM().n_pade)
+                  x_max=5000.0, angle_max_deg=30.0)
     plans = {f: optimize_grid(frequency=f, c0=c0, eps=1e-3, **medium)
              for f in frequencies}
 
     jobs = [uacpy.Job(uacpy.RAM(), env,
                       uacpy.Source(depths=25.0, frequencies=f), receiver,
-                      run_mode=uacpy.RunMode.COHERENT_TL, label=f)
+                      label=f)
             for f in frequencies]
     batch = uacpy.run_parallel(jobs, n_workers=2)
 
@@ -71,7 +69,7 @@ if __name__ == '__main__':
         marched[f] = grid
         error = grid_error(dr=grid.dr, dz=grid.dz, frequency=f, c0=c0,
                            **medium)
-        print(f"  {f:6.0f}   {plans[f]['dr']:7.2f} / {plans[f]['dz']:6.4f}"
+        print(f"  {f:6.0f}   {plans[f].dr:7.2f} / {plans[f].dz:6.4f}"
               f"      {grid.dr:7.2f} / {grid.dz:6.4f}       {error:.3f}")
 
     fig, axes = plt.subplots(1, 2, figsize=(15, 5))
@@ -79,7 +77,7 @@ if __name__ == '__main__':
                        labels=[f'{f:g} Hz' for f in frequencies], ax=axes[0],
                        title='RAM, one Job per frequency — TL at 50 m')
     for key, style in (('dr', '-'), ('dz', ':')):
-        axes[1].plot(frequencies, [plans[f][key] for f in frequencies],
+        axes[1].plot(frequencies, [getattr(plans[f], key) for f in frequencies],
                      'o' + style, color='C0',
                      label=f'{key}, Padé-error search')
         axes[1].plot(frequencies,

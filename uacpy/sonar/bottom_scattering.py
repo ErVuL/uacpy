@@ -17,8 +17,13 @@ References
 ----------
 APL-UW (1994). *High-Frequency Ocean Environmental Acoustic Models Handbook*,
 Technical Report APL-UW TR 9407, Section IV (Bottom).
-Mourad, P.D. & Jackson, D.R. (1989). Oceans '89 (the model's basis, TR 9407
-ref. 9). Jackson, Winebrenner & Ishimaru (1986), JASA 79, 1410-1422.
+Mourad, P.D. & Jackson, D.R. (1989). "High frequency sonar equation models
+for bottom backscatter and forward loss", Proc. OCEANS '89, 1168-1175 (the
+model's basis, TR 9407 ref. 9).
+Jackson, D.R., Winebrenner, D.P. & Ishimaru, A. (1986). "Application of the
+composite roughness model to high-frequency bottom backscattering", J. Acoust.
+Soc. Am. 79, 1410-1422 (the Kirchhoff integral; restated as Eqs. h.1-h.4 of
+Chakraborty, B. & Kodagali, V.N., US Patent 6,549,853 B2, 2003).
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Dict, Optional, Union
 
 import numpy as np
-from scipy.special import erf, gamma as _gamma
+from scipy.special import erf, gamma as _gamma, hankel1
 
 from uacpy.core.boundary import BoundaryProperties
 from uacpy.core._repr import FieldsRepr
@@ -78,19 +83,24 @@ _WATER_SPEED_LIMITS = (1400.0, 1600.0)
 _MIN_GRAZING_DEG = 0.001
 #: Kirchhoff cross section is used at and above this angle (Eq. 37).
 _KIRCHHOFF_MIN_DEG = 40.0
-#: Level factor on the Kirchhoff cross section, ``2^(2(1-alpha)/alpha)``
-#: (2.30 at gamma = 3.25). Eqs. 36-40 exactly as printed give a
-#: near-vertical strength 3.56 +- 0.08 dB below the report's own Table 3
-#: in all 24 cells where that branch governs — every sand, silt at both
-#: sigma2, 10 to 100 kHz — while the composite-roughness, large-roughness
-#: and volume terms match the table to 0.1 dB. The table was computed by the
-#: authors' code and is what the model was validated as (IV.C.3), so it is
-#: taken as the authority; this is the same as evaluating q_c with ``k/2``
-#: in the level only. Whether the print or the code carries the slip cannot
-#: be told from the report, and every table cell has gamma = 3.25, so the
-#: gamma-dependence of the factor is the closed form's, not measured.
-def _kirchhoff_level(alpha: float) -> float:
-    return 2.0 ** (2.0 * (1.0 - alpha) / alpha)
+#: Quadrature of the Kirchhoff integral (:func:`_kirchhoff_integral`): Gauss-
+#: Legendre panels of this order, this many per decade of ``|u|``, from
+#: ``_KIRCHHOFF_U_MIN`` to where ``H0`` has decayed by ``_KIRCHHOFF_DECAY``
+#: e-folds. Numerical settings, measured: the integral matches its closed form
+#: at alpha = 1/2, ``q / (1 + q^2)^(3/2)``, to 1e-14, and its convergent
+#: power series in ``q`` (alpha < 1/2) to 1e-12, for q = 1e-3 to 1e2.
+_KIRCHHOFF_GL_ORDER = 12
+_KIRCHHOFF_PANELS_PER_DECADE = 8
+_KIRCHHOFF_U_MIN = 1e-9
+_KIRCHHOFF_DECAY = 60.0
+#: Below this length scale ``q^(-1/(2 alpha))`` of the integrand, the integral
+#: is its expansion in powers of ``q^(-1/alpha)`` (``J0`` expanded about 0),
+#: ``_KIRCHHOFF_SERIES_TERMS`` terms; at the switch it equals the quadrature
+#: to 3e-9 (measured, alpha 0.2 to 0.95). Near vertical incidence ``q`` grows
+#: without bound, and the expansion carries the ``cos^2`` the cross section
+#: divides by exactly.
+_KIRCHHOFF_SERIES_SCALE = 1e-4
+_KIRCHHOFF_SERIES_TERMS = 4
 #: Interpolation reference angles (Eq. 64), degrees.
 _THETA_R_DEG, _DELTA_THETA_DEG = 7.0, 0.5
 #: Critical angle assigned to bottoms slower than water (Eq. 54), degrees.
@@ -268,7 +278,7 @@ class BottomParameters(FieldsRepr, CarrierExport):
 
     @classmethod
     def from_geoacoustics(cls, *, sound_speed: float, density: float,
-                          attenuation_dB_per_wavelength: float,
+                          attenuation: float,
                           water_sound_speed: float,
                           water_density: float,
                           grain_size_phi: Optional[float] = None,
@@ -303,7 +313,7 @@ class BottomParameters(FieldsRepr, CarrierExport):
         """
         nu = float(sound_speed) / float(water_sound_speed)
         rho = float(density) / float(water_density)
-        delta = float(attenuation_dB_per_wavelength) * np.log(10.0) / (40.0 * np.pi)
+        delta = float(attenuation) * np.log(10.0) / (40.0 * np.pi)
         if grain_size_phi is not None:
             mz = _checked_grain_size(grain_size_phi, 'from_geoacoustics')
         else:
@@ -402,7 +412,7 @@ class BottomParameters(FieldsRepr, CarrierExport):
                 f"{', '.join(missing)}, which the geoacoustics route needs.")
         return cls.from_geoacoustics(
             sound_speed=cp, density=rho,
-            attenuation_dB_per_wavelength=alpha,
+            attenuation=alpha,
             water_sound_speed=water_sound_speed, water_density=water_density,
             grain_size_phi=mz)
 
@@ -509,6 +519,14 @@ def apl_uw_bottom_loss(grazing_deg, params: BottomParameters):
     The model neglects roughness, so on rough bottoms it under-predicts the
     energy lost from the specular direction (IV.B.2, p. IV-20).
 
+    The number is the package's fluid reflection loss in the handbook's
+    ratios: ``-20 log10 |uacpy.acoustics.reflection_coeff(grazing_deg,
+    sound_speed=nu*c_w, density=rho*rho_w, attenuation=40*pi*log10(e)*delta,
+    water_sound_speed=c_w, water_density=rho_w)|`` for any water ``c_w``,
+    ``rho_w`` (equal to rounding), and :func:`uacpy.acoustics.bottom_loss_curve`
+    for the same material. This function takes the APL-UW model's own
+    parameter record.
+
     Parameters
     ----------
     grazing_deg : float or array
@@ -539,6 +557,80 @@ def _slope_average(theta_deg, cross_section, theta_s_deg):
         arg = np.clip(theta_deg - node * theta_s_deg, 0.0, 90.0)
         total = total + weight * cross_section(np.deg2rad(arg))
     return total / np.sqrt(np.pi)
+
+
+def _kirchhoff_integral(q, alpha):
+    """``I(q) = ∫_0^∞ exp(-q u^(2 alpha)) J0(u) u du`` for each ``q > 0``.
+
+    ``J0`` is the real part of ``H0^(1)`` on the real axis, and
+    ``H0^(1)(u) exp(-q u^(2 alpha)) u`` is analytic in the sector
+    ``0 <= arg u <= phi``, where both factors decay (``H0^(1)`` by its
+    large-argument form, JKPS Eq. 2.39; the exponential while
+    ``2 alpha phi < pi/2``). The path therefore moves onto the ray
+    ``u = t e^(i phi)``, as JKPS §2.4.4.2 closes its wavenumber integral in
+    the upper half plane, and the integrand decays as ``exp(-t sin phi)``
+    instead of oscillating:
+    ``I = Re[e^(2 i phi) ∫_0^∞ H0^(1)(t e^(i phi))
+    exp(-q t^(2 alpha) e^(2 i alpha phi)) t dt]``, with
+    ``phi = min(pi/4, pi/(8 alpha))``.
+    """
+    beta = 2.0 * alpha
+    phi = min(np.pi / 4.0, np.pi / (4.0 * beta))
+    u_max = _KIRCHHOFF_DECAY / np.sin(phi)
+    n_panels = int(np.ceil(np.log10(u_max / _KIRCHHOFF_U_MIN)
+                           * _KIRCHHOFF_PANELS_PER_DECADE))
+    edges = np.geomspace(_KIRCHHOFF_U_MIN, u_max, n_panels + 1)
+    x, w = np.polynomial.legendre.leggauss(_KIRCHHOFF_GL_ORDER)
+    lo, hi = edges[:-1, None], edges[1:, None]
+    t = (0.5 * (hi - lo) * x + 0.5 * (hi + lo)).ravel()
+    weights = (0.5 * (hi - lo) * w).ravel()
+    kernel = hankel1(0, t * np.exp(1j * phi)) * t * weights * np.exp(2j * phi)
+    t_beta = t ** beta * np.exp(1j * beta * phi)
+    q = np.asarray(q, dtype=float).ravel()
+    out = np.empty(q.shape)
+    # Blocks of q keep the (q, node) matrix to a few MB.
+    for start in range(0, q.size, 1024):
+        block = q[start:start + 1024, None]
+        out[start:start + 1024] = np.real(np.exp(-block * t_beta) @ kernel)
+    return out
+
+
+def _kirchhoff_cross_section(theta_rad, qc, alpha, R90_sq):
+    """The Kirchhoff backscattering cross section of a power-law relief:
+
+    ``sigma_kr = |R(90°)|^2 / (8 pi sin^2 theta cos^2 theta) I(q)``,
+    ``q = sin^2 theta cos^(-2 alpha) theta q_c``, with ``I`` the integral of
+    :func:`_kirchhoff_integral` (Jackson, Winebrenner & Ishimaru 1986, as
+    restated in US Patent 6,549,853 B2, Eqs. h.1-h.4; its ``q`` coefficient
+    is TR 9407's ``q_c``, Eq. 38). TR 9407 p. IV-27: "The Kirchhoff
+    approximation yields an integral for the backscattering cross section …
+    which must be integrated numerically or otherwise approximated"; its
+    Eq. 37 is that approximation, exact at alpha = 1/2. Where the integrand's
+    length scale ``q^(-1/(2 alpha))`` is below ``_KIRCHHOFF_SERIES_SCALE``,
+    ``I / cos^2 theta`` is summed from the expansion
+    ``I = Σ_n (-1)^n Γ((n+1)/alpha) q^(-(n+1)/alpha) / (2 alpha 4^n n!^2)``
+    written in ``Q = q_c sin^2 theta``, which holds at vertical incidence
+    (``Γ(1/alpha) q_c^(-1/alpha) / (2 alpha)`` there).
+    """
+    theta = np.asarray(theta_rad, dtype=float)
+    sin2 = np.sin(theta) ** 2
+    cos = np.cos(theta)
+    big_q = qc * sin2                              # q = big_q / cos^(2 alpha)
+    beta = 2.0 * alpha
+    out = np.empty(theta.shape)
+    series = big_q ** (-1.0 / beta) * cos < _KIRCHHOFF_SERIES_SCALE
+    if np.any(series):
+        n = np.arange(_KIRCHHOFF_SERIES_TERMS)[:, None]
+        coef = ((-1.0) ** n * _gamma((n + 1.0) / alpha)
+                / (beta * 4.0 ** n * _gamma(n + 1.0) ** 2))
+        bq, c = big_q[series], cos[series]
+        out[series] = np.sum(coef * bq ** (-(n + 1.0) / alpha) * c ** (2 * n),
+                             axis=0) / sin2[series]
+    quad = ~series
+    if np.any(quad):
+        q = big_q[quad] * cos[quad] ** (-beta)
+        out[quad] = _kirchhoff_integral(q, alpha) / (sin2[quad] * cos[quad] ** 2)
+    return R90_sq * out / (8.0 * np.pi)
 
 
 def _interp(x):
@@ -587,6 +679,19 @@ def apl_uw_bottom_backscatter(grazing_deg, frequency: float,
     10 dB for rock and gravel above 15 deg and more below. For soft bottoms
     (``Mz > 3``) the output is most sensitive to ``sigma2``, which is best
     fitted to backscatter data; for harder ones to ``gamma`` and ``w2``.
+
+    **The Kirchhoff term is the integral, not Eq. 37.** TR 9407 (p. IV-27)
+    states that the Kirchhoff approximation "yields an integral for the
+    backscattering cross section … which must be integrated numerically or
+    otherwise approximated", and its Eq. 37 is that approximation, exact
+    only at ``gamma = 3`` (``alpha = 1/2``). Here the integral itself
+    (Jackson, Winebrenner & Ishimaru 1986) is evaluated, with the report's
+    ``C_h^2``, ``q_c`` and ``|R(90°)|^2`` (Eqs. 36, 38) and the report's
+    40 deg lower limit for this branch. At the ``gamma = 3.25`` of every
+    Table 3 cell (and of ``from_sediment`` / ``from_grain_size``) the
+    integral lies 3.6 dB above Eq. 37 near vertical, the level Table 3
+    prints; at other ``spectral_exponent`` values it follows the integral,
+    with no further assumption.
     """
     theta_deg = _grazing('apl_uw_bottom_backscatter', grazing_deg)
     f = require_positive_finite_scalar(
@@ -618,22 +723,19 @@ def apl_uw_bottom_backscatter(grazing_deg, frequency: float,
     R90, _, _ = _rayleigh(np.pi / 2.0, p)
     R90_sq = float(np.abs(R90) ** 2)
 
-    # --- Kirchhoff approximation, Eqs. 35-40 ---------------------------------
+    # --- Kirchhoff approximation: the integral of Eqs. 35-38 ------------------
     alpha = gamma_ / 2.0 - 1.0
     ch2 = (2.0 * np.pi * w2 * _gamma(2.0 - alpha) * 2.0 ** (-2.0 * alpha)
            / (_H0_CM ** gamma_ * alpha * (1.0 - alpha) * _gamma(1.0 + alpha)))
     qc = ch2 * 2.0 ** (1.0 - 2.0 * alpha) * k ** (2.0 * (1.0 - alpha))
+    # Eq. 39's constant enters the Kirchhoff/composite interpolation below.
     a = (8.0 * alpha ** 2 * _gamma(1.0 / (2.0 * alpha) + 0.5)
          / (_gamma(0.5) * _gamma(1.0 / alpha) * _gamma(1.0 / (2.0 * alpha)))
          ) ** (2.0 * alpha)
-    b = a ** (0.5 - 1.0 / (2.0 * alpha)) * _gamma(1.0 / alpha) / (2.0 * alpha)
-    sigma_kr = np.where(
-        theta_deg >= _KIRCHHOFF_MIN_DEG,
-        _kirchhoff_level(alpha) * b * qc * R90_sq
-        / (8.0 * np.pi * (np.cos(theta) ** (4.0 * alpha)
-                                          + a * qc ** 2 * np.sin(theta) ** 4)
-                           ** ((1.0 + alpha) / (2.0 * alpha))),
-        0.0)
+    sigma_kr = np.zeros(theta.shape)
+    kirchhoff = theta_deg >= _KIRCHHOFF_MIN_DEG
+    sigma_kr[kirchhoff] = _kirchhoff_cross_section(theta[kirchhoff], qc, alpha,
+                                                   R90_sq)
 
     # --- composite roughness, Eqs. 41-52 --------------------------------------
     s2 = ((2.0 * np.pi * w2 * _H0_CM ** (-gamma_)) ** (1.0 / alpha)

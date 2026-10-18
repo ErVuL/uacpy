@@ -34,8 +34,8 @@ def test_scooter_resolves_its_named_multiplier():
 
 
 def test_sparc_resolves_its_named_margin():
-    rmax, _, _ = sparc_plan.resolve_rmax_m(1000.0, 1500.0, 2.0,
-                                           rmax_factor=None)
+    rmax, _, _ = sparc_plan.resolve_rmax(1000.0, 1500.0, 2.0,
+                                         rmax_factor=None)
     assert rmax == 1000.0 + sparc_plan.SPARC_RMAX_TIME_MARGIN * 1500.0 * 2.0
 
 
@@ -46,15 +46,15 @@ class _Rx:
 
 
 def test_kraken_resolves_the_farthest_receiver_range():
-    rmax, _ = kraken_grid.resolve_rmax_m(_Rx([1000.0, 4000.0]),
-                                         pinned_rmax_m=None)
+    rmax, _ = kraken_grid.resolve_rmax(_Rx([1000.0, 4000.0]),
+                                       pinned_rmax=None)
     assert rmax == 4000.0
 
 
 def test_kraken_falls_back_to_the_named_range():
-    rmax, _ = kraken_grid.resolve_rmax_m(_Rx([0.0]), pinned_rmax_m=None)
+    rmax, _ = kraken_grid.resolve_rmax(_Rx([0.0]), pinned_rmax=None)
     assert rmax == kraken_grid.KRAKEN_RMAX_NO_RANGE_M
-    assert kraken_grid.compute_rmax_m(None) == \
+    assert kraken_grid.compute_rmax(None) == \
         kraken_grid.KRAKEN_RMAX_NO_RANGE_M
 
 
@@ -81,8 +81,8 @@ def test_bellhop_falls_back_to_the_named_range():
 
 
 def test_bounce_falls_back_to_the_same_range():
-    rmax, origin = bounce_plan.resolve_rmax_m(
-        _Rx([0.0]), 100.0, 1400.0, n_angles=None, rmax_m=None, c_high=1e9)
+    rmax, origin = bounce_plan.resolve_rmax(
+        _Rx([0.0]), 100.0, 1400.0, n_angles=None, rmax=None, c_high=1e9)
     assert rmax == NO_RECEIVER_RANGE_FALLBACK_M
     assert origin == 'the 10 km fallback (no receiver range)'
 

@@ -82,8 +82,8 @@ def spreading_gain_dB(code):
     return float(10.0 * np.log10(np.asarray(code).size))
 
 
-# Rate-1/2 maximum-free-distance generator pair for K=7 (Proakis & Salehi
-# Table 8.3-1, after Odenwalder 1970 / Larsen 1973): d_free = 10, which meets
+# Rate-1/2 maximum-free-distance generator pair for K=7 (Proakis &
+# Salehi Table 8.3-1, after Odenwalder 1970 / Larsen 1973): d_free = 10, which meets
 # that table's upper bound, so no other K=7 rate-1/2 code does better.
 DEFAULT_POLYS = (0o171, 0o133)
 
@@ -177,13 +177,18 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, constraint_length=DEFAULT_CONSTRA
     bm0 = bm_all[:, prev0, bit_in]
     bm1 = bm_all[:, prev1, bit_in]
 
-    bits = viterbi_hard(bm0, bm1, prev0, prev1, n_states,
-                        lambda state: (state >> (constraint_length - 2)) & 1)
+    bits = viterbi_from_branch_metrics(
+        bm0, bm1, prev0, prev1, n_states,
+        lambda state: (state >> (constraint_length - 2)) & 1)
     return bits[: nsteps - (constraint_length - 1)]
 
 
-def viterbi_hard(bm0, bm1, prev0, prev1, n_states, bit_of_state):
-    """Hard-decision Viterbi add-compare-select over a binary-input trellis.
+def viterbi_from_branch_metrics(bm0, bm1, prev0, prev1, n_states,
+                                bit_of_state):
+    """Viterbi add-compare-select and traceback over a binary-input trellis,
+    from the branch metrics the caller supplies (Hamming distances for a
+    hard decision, or any other additive metric); returns the decoded input
+    bits.
 
     The rate-1/n core of :func:`viterbi_decode`, which feeds it any number of
     generator polynomials: every state has two predecessors for any k = 1
@@ -397,9 +402,14 @@ def bits_to_bytes(bits):
     Parameters
     ----------
     bits : array_like of int
-        MSB-first bits, 0/1.
+        MSB-first bits, 0/1 (any other value is refused).
     """
-    b = np.asarray(bits, dtype=np.uint8).ravel()
+    return _packed_bytes(bits, "bits_to_bytes")
+
+
+def _packed_bytes(bits, who):
+    """:func:`bits_to_bytes`, its refusal naming ``who``."""
+    b = _require_binary_bits(who, bits).astype(np.uint8)
     n = (b.size // 8) * 8
     return np.packbits(b[:n]).tobytes()
 
@@ -436,7 +446,7 @@ def unpack_frame(bits):
     bits : array_like of int
         The framed bit stream, as :func:`pack_frame` produced it.
     """
-    data = bits_to_bytes(bits)
+    data = _packed_bytes(bits, "unpack_frame")
     if len(data) < _HEADER_BYTES + _CRC_BYTES:
         return b"", False
     length = int.from_bytes(data[:_HEADER_BYTES], "big")

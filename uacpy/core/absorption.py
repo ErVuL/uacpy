@@ -11,7 +11,8 @@ every water SSP row.
 
 ``Environment(absorption=...)`` takes a law, or a measured
 :class:`AbsorptionCoefficient` with no law behind it (its docstring has the
-rules): that table is the one public path to a tabulated α(f, z).
+rules): that table is the one public path to a tabulated α(f, z), and
+``env.absorption`` is that table (the environment's copy).
 
 Concrete subclasses
 -------------------
@@ -58,7 +59,7 @@ from uacpy.core.acoustics.attenuation import (
     absorption_francois_garrison, ph_to_nbs, absorption_thorp,
 )
 from uacpy.core._validate import (
-    require_attenuation_in_range, require_finite, require_non_negative,
+    require_finite, require_non_negative, warn_attenuation_past_at_ceiling,
     water_pairs, water_property, water_shape,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
@@ -73,9 +74,7 @@ __all__ = [
     'AbsorptionCoefficient',
     'Absorption', 'Thorp', 'FrancoisGarrison', 'BiologicalLayer',
     'Biological', 'ConstantAbsorption', 'arrival_absorption_exponent',
-    'band_absorption_error_dB_per_km', 'MINIMAX_ANCHOR_GRID',
-    'minimax_anchor_frequency', 'BAND_ABSORPTION_WARN_DB_PER_KM',
-    'BAND_ABSORPTION_CHECK_DEPTHS', 'warn_if_band_absorption_frozen',
+    'minimax_anchor_frequency',
 ]
 
 
@@ -130,7 +129,7 @@ def _ocean_bits(parameters: Dict[str, Any]) -> List[str]:
             n = len(value)
             bits.append(f"{n} layer{'s' if n > 1 else ''} "
                         f"{num(top)}–{num(bottom)} m")
-        elif name == 'value_dB_per_wavelength':
+        elif name == 'value':
             bits.append(qty(value, 'dB/λ'))
         elif name != 'ph_scale':
             bits.append(f"{name}={num(value)}")
@@ -171,7 +170,9 @@ class AbsorptionCoefficient(CarrierExport):
     ``ValidityWarning``, and linear in ``log f`` between its frequencies. A
     frequency outside :attr:`frequencies` is refused
     (``ConfigurationError``): a table carries no law to extrapolate with. A
-    1-D table (no depth axis) applies at every depth.
+    1-D table (no depth axis) applies at every depth. ``env.absorption`` is
+    then this table (the environment's own copy), with its :meth:`plot`,
+    :attr:`data` and exports.
     """
 
     frequencies: np.ndarray
@@ -188,14 +189,14 @@ class AbsorptionCoefficient(CarrierExport):
     #: ``None`` for a curve; without this the evaluation depth would be used
     #: and then dropped, and the empty-curve warning could not tell a
     #: Biological user which depth they had just evaluated at.
-    depth_m: Optional[float] = None
+    depth: Optional[float] = None
     #: The values the law was evaluated with, under its field names
     #: (Francois-Garrison: ``temperature``, ``salinity``, ``pH`` — each a
     #: number or a profile, the
     #: :class:`~uacpy.core._water.WaterProfile` the law stores
     #: its ``(depth, value)`` pairs as — and
     #: ``ph_scale``; Biological: ``layers``, as ``(z_top, z_bottom, f0,
-    #: Q, a0)`` tuples; constant: ``value_dB_per_wavelength``), so
+    #: Q, a0)`` tuples; constant: ``value``), so
     #: ``FrancoisGarrison(**a.parameters)`` is the law again. ``None`` for a
     #: model that takes no values (Thorp) and for a measured table.
     parameters: Optional[Dict[str, Any]] = None
@@ -235,7 +236,7 @@ class AbsorptionCoefficient(CarrierExport):
 
         ``pairs`` is either one spectrum, shape ``(N, 2)`` as ``(frequency
         in Hz, value)`` rows, which applies at every depth; or a mapping
-        ``{depth_m: pairs}`` with one spectrum per depth, all on the same
+        ``{depth: pairs}`` with one spectrum per depth, all on the same
         frequencies (a depth on other frequencies is refused rather than
         interpolated, which would invent data). The result is a measured
         table (``model=None``), the one table ``Environment(absorption=...)``
@@ -265,7 +266,7 @@ class AbsorptionCoefficient(CarrierExport):
             if not pairs:
                 raise ConfigurationError(
                     f"{who}: the depth mapping is empty.",
-                    remediation="Pass {depth_m: [(frequency_Hz, value), ...]}.")
+                    remediation="Pass {depth: [(frequency_Hz, value), ...]}.")
             depths = np.array(sorted(float(z) for z in pairs), dtype=float)
             by_depth = {float(z): v for z, v in pairs.items()}
             freqs, data = None, []
@@ -290,7 +291,7 @@ class AbsorptionCoefficient(CarrierExport):
             f, v = rows(pairs, "")
             table = cls(frequencies=f, data=v, units=units)
         # The same rules the table meets when an environment takes it.
-        _TabulatedAbsorption(measured=table)
+        _absorption_law(table)
         return table
 
     def to_units(self, units: str, *,
@@ -320,7 +321,7 @@ class AbsorptionCoefficient(CarrierExport):
             sound_speed=sound_speed), dtype=float)
         return AbsorptionCoefficient(
             frequencies=self.frequencies, data=out, units=units,
-            model=self.model, depths=self.depths, depth_m=self.depth_m,
+            model=self.model, depths=self.depths, depth=self.depth,
             parameters=self.parameters)
 
     #: The plotter :func:`uacpy.plot.plot_carrier` draws this table with.
@@ -345,8 +346,8 @@ class AbsorptionCoefficient(CarrierExport):
         bits = [self.model or 'tabulated', *_ocean_bits(parameters)]
         if self.is_depth_dependent:
             bits.append(axis(self.depths, 'depths', 'm'))
-        elif self.depth_m is not None:
-            bits.append(f"at {qty(self.depth_m, 'm')}")
+        elif self.depth is not None:
+            bits.append(f"at {qty(self.depth, 'm')}")
         bits += [axis(self.frequencies, 'frequencies', 'Hz'), self.units]
         return build('AbsorptionCoefficient', bits)
 
@@ -363,9 +364,12 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     ``(n_depths, n_frequencies)`` grid (used by the Kraken-class modal
     perturbation kernel; the Acoustics-Toolbox writers read the model's
     letter and records from :mod:`uacpy.io.at_codes` instead, or
-    :meth:`alpha_dB_per_wavelength` per SSP row for a law with no letter).
-    The public :meth:`alpha_dB_per_m` checks the frequency and delegates to
-    it; :meth:`table` evaluates its whole grid in one call.
+    :meth:`_alpha_dB_per_wavelength_at_frequency` per SSP row for a law with
+    no letter). :meth:`table` evaluates its whole grid in one call and is
+    the route to the law's values (``law.table(f, depths, units='dB/m')``,
+    a carrier to plot or export); an engine's one-frequency evaluation,
+    :meth:`_alpha_dB_per_m_at_frequency`, checks the frequency and delegates
+    to it.
     """
 
     #: ``(low, high)`` Hz the model was fitted over, or ``None`` for a model
@@ -374,6 +378,12 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     _FREQUENCY_RANGE_HZ = None
     #: The source sentence the out-of-band notice quotes after the counts.
     _FREQUENCY_RANGE_NOTE = ""
+    #: ``(low, high)`` m the equation is stated for, or ``None``; a depth
+    #: outside it is evaluated as given and announced once per call by
+    #: :meth:`_check_depth_range`.
+    _DEPTH_RANGE_M = None
+    #: The source sentence the out-of-range depth notice quotes.
+    _DEPTH_RANGE_NOTE = ""
 
     def __post_init__(self):
         if type(self) is Absorption:
@@ -410,7 +420,27 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 f"{self._FREQUENCY_RANGE_NOTE}",
                 ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
-    def alpha_dB_per_m(
+    def _check_depth_range(self, depths) -> None:
+        """One notice per call for the depths outside the law's stated
+        depth range, naming how many and their span; nothing for a law with
+        none."""
+        if self._DEPTH_RANGE_M is None:
+            return
+        low, high = self._DEPTH_RANGE_M
+        z = np.atleast_1d(np.asarray(depths, dtype=float))
+        out = z[(z < low) | (z > high)]
+        if out.size:
+            span = (f"{out.min():.10g} m" if out.size == 1 else
+                    f"{out.min():.10g}-{out.max():.10g} m")
+            warnings.warn(
+                f"{type(self).__name__}: {out.size} of {z.size} "
+                f"{'depth' if z.size == 1 else 'depths'} ({span}) "
+                f"{'is' if out.size == 1 else 'are'} outside the "
+                f"{low:g}..{high:g} m the equation is stated for. "
+                f"{self._DEPTH_RANGE_NOTE}",
+                ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+    def _alpha_dB_per_m_at_frequency(
         self,
         frequency: float,
         depths: _ArrayLike,
@@ -438,11 +468,12 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         f = float(frequency)
         if not f > 0.0:
             raise ConfigurationError(
-                f"{type(self).__name__}.alpha_dB_per_m: frequency must be "
-                f"> 0 Hz; got {frequency}."
+                f"{type(self).__name__}: frequency must be > 0 Hz; got "
+                f"{frequency}."
             )
         self._check_frequency_range(f)
         z = np.atleast_1d(np.asarray(depths, dtype=float))
+        self._check_depth_range(z)
         return self._alpha_dB_per_m(np.array([f]), z.ravel())[:, 0].reshape(
             z.shape)
 
@@ -513,6 +544,7 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             z_eval = np.array([float(depths)], dtype=float)
         else:
             z_eval = z_axis
+        self._check_depth_range(z_eval)
         # dB/m out of the per-model kernel, one column per frequency.
         grid = self._alpha_dB_per_m_at_sound_speed(f, z_eval,
                                                    float(sound_speed))
@@ -520,7 +552,7 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             frequencies=f,
             data=grid if z_axis is not None else grid[0, :],
             units='dB/m', model=self._model_name(), depths=z_axis,
-            depth_m=None if z_axis is not None else float(z_eval[0]),
+            depth=None if z_axis is not None else float(z_eval[0]),
             parameters=self._carrier_parameters())
         return carrier.to_units(units, sound_speed=sound_speed)
 
@@ -566,7 +598,7 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         wavelength, override it."""
         return self._alpha_dB_per_m(frequencies, depths)
 
-    def alpha_dB_per_wavelength(
+    def _alpha_dB_per_wavelength_at_frequency(
         self,
         frequency: float,
         depths: _ArrayLike,
@@ -585,7 +617,8 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         Parameters
         ----------
         frequency : float
-            Frequency (Hz), > 0 (checked as :meth:`alpha_dB_per_m` checks it).
+            Frequency (Hz), > 0 (checked as
+            :meth:`_alpha_dB_per_m_at_frequency` checks it).
         depths : float or 1-D array
             Node depths (m).
         sound_speeds : float or 1-D array
@@ -597,7 +630,7 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         """
         f = float(frequency)
         c = np.asarray(sound_speeds, dtype=float)
-        return np.atleast_1d(self.alpha_dB_per_m(f, depths)) * c / f
+        return np.atleast_1d(self._alpha_dB_per_m_at_frequency(f, depths)) * c / f
 
     @property
     def _scales_by_frequency_ratio(self) -> bool:
@@ -606,14 +639,14 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         rather than linearly in ``f``: a law whose frequency dependence is
         one shape at every depth — exactly (Thorp) or up to the pressure terms
         (one Francois-Garrison water row). The ratio's error over the column
-        is measured by :func:`band_absorption_error_dB_per_km` with
+        is measured by :func:`_band_absorption_error_dB_per_km` with
         ``by_ratio=True``. False unless a law says so."""
         return False
 
     @property
     def _needs_node_sound_speed(self) -> bool:
         """Whether an engine takes the law through
-        :meth:`alpha_dB_per_wavelength` node by node, at each node's own
+        :meth:`_alpha_dB_per_wavelength_at_frequency` node by node, at each node's own
         sound speed, rather than through one dB/m table: a law stated per
         wavelength (its dB/m depends on the speed it is converted at) and a
         table (whose units may be)."""
@@ -698,10 +731,9 @@ class FrancoisGarrison(Absorption):
     :func:`absorption_francois_garrison`. The formula's depth (pressure)
     term varies down the column, so the
     law has no depth of its own: every evaluation takes the depth it is
-    evaluated at — :meth:`alpha_dB_per_m` at the depths asked, :meth:`table`
-    at the depths asked or, given none, at the surface (0 m) for one water
-    row and at the profile's own depths for a profile — and every engine sees
-    the same α(z).
+    evaluated at — :meth:`table` at the depths asked or, given none, at the
+    surface (0 m) for one water row and at the profile's own depths for a
+    profile — and every engine sees the same α(z).
 
     Notes
     -----
@@ -730,7 +762,7 @@ class FrancoisGarrison(Absorption):
     then extrapolates in ``sqrt(S/35)``), and ``pH``
     outside 7.7..8.3 (the seawater range, Mellen et al. 1987; TR 9407 warns
     of discrepancies "as high as 40 % below 1 kHz" for pH under 7.7 or over
-    8.2); :meth:`alpha_dB_per_m` warns for a frequency under 200 Hz or over
+    8.2); :meth:`table` and every engine's evaluation warn for a frequency under 200 Hz or over
     1 MHz. The authors quote 5 % accuracy inside the measured range and
     about 10 % outside their frequency range; TR 9407 §I.B adds that the
     absorption in a particular area "may vary by ±10 % from the given
@@ -769,7 +801,10 @@ class FrancoisGarrison(Absorption):
     on one depth axis. Each profile is stored as a profile record, which the
     law hands back (``law.temperature``) and every water-property input
     takes again. The fitted-envelope warning is checked value by value,
-    once per law. RAM samples every property's depths
+    once per law; :meth:`table` and every engine's evaluation also announce,
+    once per call, a frequency outside 200 Hz-1 MHz and a depth beyond the
+    5000 m the equation is stated for (Part II, §IV). RAM samples every
+    property's depths
     (:attr:`profile_depths`).
 
     **pH scale.** ``pH`` is taken on ``ph_scale`` — ``'nbs'`` (default, the
@@ -785,6 +820,12 @@ class FrancoisGarrison(Absorption):
         "200 Hz\", and Table IV stops at 1000 kHz. The polynomial is "
         "evaluated as given; below 200 Hz a scattering loss the equation "
         "omits can exceed the boric-acid term.")
+    _DEPTH_RANGE_M = (0.0, 5000.0)
+    _DEPTH_RANGE_NOTE = (
+        "Francois & Garrison 1982 Part II, §IV: the equation predicts "
+        "absorption \"to depths of 5000 m\" (its boric-acid term rests on "
+        "measurements to 1500 m, §III). The pressure terms are evaluated as "
+        "given.")
 
     # Each water property takes a single value (constant water) or
     # (depth, value) pairs, an (M, 2) array; a law has no evaluation depth,
@@ -1124,9 +1165,9 @@ class BiologicalLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
     Parameters
     ----------
-    z_top_m, z_bottom_m : float
+    z_top, z_bottom : float
         Depth bounds (m) of the layer in the water column.
-    f0_hz : float
+    f0 : float
         Resonance frequency (Hz).
     Q : float
         Quality factor (dimensionless).
@@ -1157,16 +1198,18 @@ class BiologicalLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     (``@carrier``'s ``__init__`` included) that :data:`USER_FRAME_SKIP`
     steps over.
     """
-    z_top_m: float
-    z_bottom_m: float
-    f0_hz: float
+    _REPR_UNITS = {'z_top': 'm', 'z_bottom': 'm', 'f0': 'Hz'}
+
+    z_top: float
+    z_bottom: float
+    f0: float
     Q: float
     a0: float
 
     def __repr__(self) -> str:
         return build('BiologicalLayer', [
-            f"{num(self.z_top_m)}–{num(self.z_bottom_m)} m",
-            f"f0={qty(self.f0_hz, 'Hz')}", f"Q={num(self.Q)}",
+            f"{num(self.z_top)}–{num(self.z_bottom)} m",
+            f"f0={qty(self.f0, 'Hz')}", f"Q={num(self.Q)}",
             f"a0={qty(self.a0, 'dB/km')}"])
 
     def __post_init__(self):
@@ -1181,22 +1224,22 @@ class BiologicalLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         # depth measured down from the surface — so the depths are held to
         # ``>= 0`` here rather than only to their ordering. This is the same
         # pair of guards every other core carrier routes through.
-        require_non_negative(self.z_top_m, "BiologicalLayer.z_top_m",
+        require_non_negative(self.z_top, "BiologicalLayer.z_top",
                              hint="metres below the surface")
-        require_non_negative(self.z_bottom_m, "BiologicalLayer.z_bottom_m",
+        require_non_negative(self.z_bottom, "BiologicalLayer.z_bottom",
                              hint="metres below the surface")
-        require_finite(self.f0_hz, "BiologicalLayer.f0_hz", hint="Hz")
+        require_finite(self.f0, "BiologicalLayer.f0", hint="Hz")
         require_finite(self.Q, "BiologicalLayer.Q", hint="dimensionless")
         require_finite(self.a0, "BiologicalLayer.a0", hint="dB/km")
-        if self.z_bottom_m <= self.z_top_m:
+        if self.z_bottom <= self.z_top:
             raise ConfigurationError(
-                "BiologicalLayer: z_bottom_m must be strictly greater than "
-                f"z_top_m (got z_top_m={self.z_top_m}, "
-                f"z_bottom_m={self.z_bottom_m})"
+                "BiologicalLayer: z_bottom must be strictly greater than "
+                f"z_top (got z_top={self.z_top}, "
+                f"z_bottom={self.z_bottom})"
             )
-        if self.f0_hz <= 0:
+        if self.f0 <= 0:
             raise ConfigurationError(
-                f"BiologicalLayer: f0_hz must be positive (Hz); got {self.f0_hz}."
+                f"BiologicalLayer: f0 must be positive (Hz); got {self.f0}."
             )
         if self.Q <= 0:
             raise ConfigurationError(
@@ -1212,7 +1255,7 @@ class BiologicalLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         # seabed and surface carriers are held to.
         peak_dB_km = float(self.a0) * float(self.Q) ** 2
         peak_dB_lambda = float(convert_attenuation_units(
-            peak_dB_km, float(self.f0_hz), 'dB/km', 'dB/wavelength',
+            peak_dB_km, float(self.f0), 'dB/km', 'dB/wavelength',
             sound_speed=DEFAULT_SOUND_SPEED))
         if peak_dB_lambda > MAX_ATTENUATION_DB_PER_WAVELENGTH:
             ceiling_dB_km = peak_dB_km * (
@@ -1220,7 +1263,7 @@ class BiologicalLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             warnings.warn(
                 f"BiologicalLayer: the on-resonance peak a0*Q² = "
                 f"{peak_dB_km:g} dB/km is {peak_dB_lambda:g} dB/wavelength at "
-                f"f0={self.f0_hz:g} Hz in {DEFAULT_SOUND_SPEED:g} m/s water, "
+                f"f0={self.f0:g} Hz in {DEFAULT_SOUND_SPEED:g} m/s water, "
                 f"over the {MAX_ATTENUATION_DB_PER_WAVELENGTH:.4f} above which "
                 f"misc/AttenMod.f90's CRCI (:116) finds an imaginary sound "
                 f"speed larger than the real part and aborts. A run at or near "
@@ -1274,8 +1317,8 @@ class Biological(Absorption):
                         f"dB/km.")
                 z_top, z_bottom, f0, Q, a0 = entry
                 normalized.append(BiologicalLayer(
-                    z_top_m=float(z_top), z_bottom_m=float(z_bottom),
-                    f0_hz=float(f0), Q=float(Q), a0=float(a0),
+                    z_top=float(z_top), z_bottom=float(z_bottom),
+                    f0=float(f0), Q=float(Q), a0=float(a0),
                 ))
         if not normalized:
             raise ConfigurationError(
@@ -1287,18 +1330,18 @@ class Biological(Absorption):
         n = len(self.layers)
         if not n:
             return ['no layers']
-        top = min(layer.z_top_m for layer in self.layers)
-        bottom = max(layer.z_bottom_m for layer in self.layers)
+        top = min(layer.z_top for layer in self.layers)
+        bottom = max(layer.z_bottom for layer in self.layers)
         return [f"{n} layer{'s' if n > 1 else ''} {num(top)}–{num(bottom)} m"]
 
     def _carrier_parameters(self) -> Dict[str, Any]:
-        return {'layers': [(float(layer.z_top_m), float(layer.z_bottom_m),
-                            float(layer.f0_hz), float(layer.Q),
+        return {'layers': [(float(layer.z_top), float(layer.z_bottom),
+                            float(layer.f0), float(layer.Q),
                             float(layer.a0)) for layer in self.layers]}
 
     def _breakpoint_depths(self) -> np.ndarray:
         return np.array(sorted({float(z) for layer in self.layers
-                                for z in (layer.z_top_m, layer.z_bottom_m)}))
+                                for z in (layer.z_top, layer.z_bottom)}))
 
     def _alpha_dB_per_m(
         self,
@@ -1315,9 +1358,9 @@ class Biological(Absorption):
         # exactly on a boundary two stacked layers share receives both
         # layers' contributions.
         for layer in self.layers:
-            in_layer = (z >= layer.z_top_m) & (z <= layer.z_bottom_m)
+            in_layer = (z >= layer.z_top) & (z <= layer.z_bottom)
             a_km[in_layer, :] += absorption_biological(
-                frequencies, layer.f0_hz, layer.Q, layer.a0)
+                frequencies, layer.f0, layer.Q, layer.a0)
         return a_km / 1000.0
 
 
@@ -1328,14 +1371,15 @@ class ConstantAbsorption(Absorption):
 
     Parameters
     ----------
-    value_dB_per_wavelength : float
+    value : float
         Absorption coefficient (dB/wavelength). Non-negative.
 
     Notes
     -----
     dB/wavelength is the unit the deck carries, so the value written to the
-    ``alphaI`` column is exact and the divergence is only in
-    :meth:`alpha_dB_per_m`. That accessor holds no SSP, so it converts to
+    ``alphaI`` column is exact and the divergence is only in the law's dB/m
+    evaluation (:meth:`_alpha_dB_per_m_at_frequency`, what the modal
+    perturbation reads). That evaluation holds no SSP, so it converts to
     dB/m at :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`, while the
     solver converts at each SSP row's own ``c``
     (``misc/AttenMod.f90:73``, the ``'W'`` branch: ``alphaT = alpha * freq /
@@ -1347,37 +1391,37 @@ class ConstantAbsorption(Absorption):
     :meth:`uacpy.core.results.modes.Modes.with_attenuation` for where the
     difference is felt.
     """
-    value_dB_per_wavelength: float = 0.0
+    value: float = 0.0
 
     def _repr_bits(self) -> List[str]:
-        return [qty(self.value_dB_per_wavelength, 'dB/λ')]
+        return [qty(self.value, 'dB/λ')]
 
     def __post_init__(self):
         Absorption.__post_init__(self)
-        if not (self.value_dB_per_wavelength >= 0):
+        if not (self.value >= 0):
             raise ConfigurationError(
-                f"ConstantAbsorption.value_dB_per_wavelength must be "
-                f"non-negative; got {self.value_dB_per_wavelength}."
+                f"ConstantAbsorption.value must be "
+                f"non-negative; got {self.value}."
             )
-        require_attenuation_in_range(
-            self.value_dB_per_wavelength,
-            "ConstantAbsorption.value_dB_per_wavelength")
+        warn_attenuation_past_at_ceiling(
+            self.value,
+            "ConstantAbsorption.value")
 
     def _model_name(self) -> str:
         return 'constant'
 
     def _carrier_parameters(self) -> Dict[str, Any]:
-        return {'value_dB_per_wavelength': float(self.value_dB_per_wavelength)}
+        return {'value': float(self.value)}
 
     @property
     def _needs_node_sound_speed(self) -> bool:
         return True
 
-    def alpha_dB_per_wavelength(self, frequency, depths, sound_speeds):
+    def _alpha_dB_per_wavelength_at_frequency(self, frequency, depths, sound_speeds):
         # The value is already per local wavelength: written as given at
         # every node, whatever its sound speed.
         return np.full(np.shape(np.atleast_1d(depths)),
-                       float(self.value_dB_per_wavelength))
+                       float(self.value))
 
     def _alpha_dB_per_m(
         self,
@@ -1399,7 +1443,7 @@ class ConstantAbsorption(Absorption):
         # units='dB/wavelength', sound_speed=c)`` returns the value exactly
         # at any c.
         alpha = convert_attenuation_units(
-            self.value_dB_per_wavelength, frequencies,
+            self.value, frequencies,
             'dB/wavelength', 'dB/m', sound_speed=sound_speed,
         )
         return np.broadcast_to(alpha[None, :],
@@ -1413,10 +1457,11 @@ _TABLE_FREQUENCY_RTOL = 1e-9
 @carrier(eq=False)
 class _TabulatedAbsorption(Absorption):
     """A measured α(f, z) as the water's law: an
-    :class:`AbsorptionCoefficient` with no law behind it, which
-    ``Environment(absorption=table)`` makes into this (the rules are in
-    :class:`AbsorptionCoefficient`'s docstring). Not public: the table is the
-    one public path, and ``env.absorption`` prints as it.
+    :class:`AbsorptionCoefficient` with no law behind it, evaluated the way
+    every law is (the rules are in :class:`AbsorptionCoefficient`'s
+    docstring). Not public: ``env.absorption`` holds the table itself, and
+    :func:`_absorption_law` builds this law over it, held as
+    :attr:`measured`, wherever the absorption is evaluated.
 
     Linear in depth between the rows and held at the first and last row
     beyond them (the Environment says so when its water reaches past them);
@@ -1464,10 +1509,10 @@ class _TabulatedAbsorption(Absorption):
                 f"{expected} (depth first, then frequency).")
         self.measured = AbsorptionCoefficient(
             frequencies=f, data=data, units=t.units, model=t.model,
-            depths=depths, depth_m=t.depth_m, parameters=t.parameters)
+            depths=depths, depth=t.depth, parameters=t.parameters)
 
     def __repr__(self) -> str:
-        return repr(self.measured)
+        return f"tabulated absorption (.measured = {self.measured!r})"
 
     def _short(self) -> str:
         return 'tabulated'
@@ -1547,7 +1592,7 @@ class _TabulatedAbsorption(Absorption):
             self.measured.units, 'dB/m', sound_speed=float(sound_speed)),
             dtype=float)
 
-    def alpha_dB_per_wavelength(self, frequency, depths, sound_speeds):
+    def _alpha_dB_per_wavelength_at_frequency(self, frequency, depths, sound_speeds):
         f = float(frequency)
         if not f > 0.0:
             raise ConfigurationError(
@@ -1580,9 +1625,22 @@ class _TabulatedAbsorption(Absorption):
         return gaps
 
 
-def arrival_absorption_exponent(delays_imag_s, frequencies, *,
+def _absorption_law(absorption) -> Optional[Absorption]:
+    """The law that evaluates ``absorption`` as an environment holds it: a
+    law (or ``None``) as it is, and a measured :class:`AbsorptionCoefficient`
+    as the tabulated law over it (:class:`_TabulatedAbsorption`, checked by
+    the table rules). The one place a table becomes a law: every engine,
+    deck writer and result that evaluates ``env.absorption`` reads it
+    through this."""
+    if isinstance(absorption, AbsorptionCoefficient):
+        return _TabulatedAbsorption(measured=absorption)
+    return absorption
+
+
+def arrival_absorption_exponent(delays_imag, frequencies, *,
                                 trace_frequency: Optional[float] = None,
-                                absorption: Optional[Absorption] = None
+                                absorption: Optional[Union[
+                                    Absorption, AbsorptionCoefficient]] = None
                                 ) -> np.ndarray:
     """The volume-absorption exponent of each ray arrival at each frequency:
     the received amplitude is ``A · exp(exponent)``.
@@ -1601,7 +1659,7 @@ def arrival_absorption_exponent(delays_imag_s, frequencies, *,
       arrival by arrival, to 0.0011 dB on a multipath guide with refraction)
       and one :class:`FrancoisGarrison` water row, whose pressure terms bend
       the ratio with depth by an amount the callers measure
-      (:func:`band_absorption_error_dB_per_km`, ``by_ratio=True``).
+      (:func:`_band_absorption_error_dB_per_km`, ``by_ratio=True``).
     - ``2π f · Im τ``, linear in ``f``, otherwise: with no law, with no
       ``trace_frequency``, for :class:`ConstantAbsorption` (dB/wavelength,
       so exactly linear), and for a law that does not separate — a
@@ -1612,7 +1670,7 @@ def arrival_absorption_exponent(delays_imag_s, frequencies, *,
 
     Parameters
     ----------
-    delays_imag_s : array_like, shape (n_arrivals,)
+    delays_imag : array_like, shape (n_arrivals,)
         Imaginary travel times (s), ≤ 0 for a lossy medium.
     frequencies : array_like, shape (n_frequencies,)
         Frequencies (Hz). Non-negative when a separable law is applied: the
@@ -1621,14 +1679,16 @@ def arrival_absorption_exponent(delays_imag_s, frequencies, *,
         form.
     trace_frequency : float, optional
         Frequency (Hz) the arrivals were traced at.
-    absorption : Absorption, optional
-        The water-column law the trace carried in ``Im τ``.
+    absorption : Absorption or AbsorptionCoefficient, optional
+        The water-column absorption the trace carried in ``Im τ``, as the
+        traced environment holds it: a law, or a measured table.
 
     Returns
     -------
     ndarray, shape (n_arrivals, n_frequencies)
     """
-    imag = np.atleast_1d(np.asarray(delays_imag_s, dtype=float)).ravel()
+    absorption = _absorption_law(absorption)
+    imag = np.atleast_1d(np.asarray(delays_imag, dtype=float)).ravel()
     freqs = np.atleast_1d(np.asarray(frequencies, dtype=float)).ravel()
     omega = 2.0 * np.pi * freqs
     if (absorption is None or trace_frequency is None
@@ -1646,11 +1706,12 @@ def arrival_absorption_exponent(delays_imag_s, frequencies, *,
             f"value at a negative frequency; got {freqs.min():g} Hz.",
             remediation="Pass the non-negative half of the frequency axis "
                         "(np.fft.rfftfreq), or no law for the linear form.")
-    # At 0 Hz the exponent is 0, the value the linear form gives: the law's
-    # constant term there (Thorp's 3.3e-3 dB/km) is leakage out of the deep
-    # sound channel, not absorption (Jensen et al., Computational Ocean
-    # Acoustics, §1.5.2, region I of Fig. 1.20; see absorption_thorp), so no
-    # loss scales to the DC bin.
+    # At 0 Hz the exponent is 0, the value the linear form gives. The terms
+    # JKPS assigns to absorption mechanisms (regions II-IV of Fig. 1.20:
+    # boric acid, MgSO4 relaxation, viscosity) all vanish as f² at 0 Hz; the
+    # law's constant term (Thorp's 3.3e-3 dB/km) is region I, which JKPS
+    # §1.5.2 calls "conjectured" duct leakage rather than absorption (see
+    # absorption_thorp), so no loss scales to the DC bin.
     positive = freqs > 0.0
     alpha = np.asarray(absorption.table(
         np.concatenate([[f_t], freqs[positive]]), units='dB/m').data,
@@ -1662,10 +1723,12 @@ def arrival_absorption_exponent(delays_imag_s, frequencies, *,
     return np.outer(imag, scale)
 
 
-def band_absorption_error_dB_per_km(absorption: Absorption, frequencies,
-                                    anchor_frequency: float, *, depths,
-                                    power: float = 1.0,
-                                    by_ratio: bool = False) -> float:
+def _band_absorption_error_dB_per_km(absorption: Union[
+                                         Absorption, AbsorptionCoefficient],
+                                     frequencies,
+                                     anchor_frequency: float, *, depths,
+                                     power: float = 1.0,
+                                     by_ratio: bool = False) -> float:
     """Largest error (dB/km) of an absorption law frozen at one frequency.
 
     An engine that evaluates ``absorption`` once, at ``anchor_frequency``,
@@ -1684,7 +1747,11 @@ def band_absorption_error_dB_per_km(absorption: Absorption, frequencies,
     applies to a law that :attr:`Absorption._scales_by_frequency_ratio`:
     ``α(f_a, z) · α(f, 0) / α(f_a, 0)``, the surface ratio at every depth
     (``power`` is then unused).
+
+    ``absorption`` is a law, or a measured table as an environment holds
+    it (evaluated as tabulated).
     """
+    absorption = _absorption_law(absorption)
     freqs = np.atleast_1d(np.asarray(frequencies, dtype=float)).ravel()
     z = np.atleast_1d(np.asarray(depths, dtype=float)).ravel()
     f_a = float(anchor_frequency)
@@ -1708,16 +1775,17 @@ def band_absorption_error_dB_per_km(absorption: Absorption, frequencies,
 #: Frequencies (evenly spaced across the band) on which
 #: :func:`minimax_anchor_frequency` measures each candidate's error, and the
 #: number of candidates in each of its two passes.
-MINIMAX_ANCHOR_GRID = 257
+_MINIMAX_ANCHOR_GRID = 257
 
 
-def minimax_anchor_frequency(absorption: Optional[Absorption],
+def minimax_anchor_frequency(absorption: Optional[Union[
+                                 Absorption, AbsorptionCoefficient]],
                              freq_min: float, freq_max: float, *, depths,
                              power: float = 1.0) -> float:
     """The frequency ``f_a`` in ``[freq_min, freq_max]`` at which to freeze
     ``absorption`` so that ``α(f_a, z) · (f/f_a) ** power`` departs least, at
     its worst over the band and ``depths``, from ``α(f, z)``: the ``f_a``
-    minimising :func:`band_absorption_error_dB_per_km`.
+    minimising :func:`_band_absorption_error_dB_per_km`.
 
     A minimax choice: one frozen value serves every frequency, so the worst
     departure over the band is the error it sets. Thorp frozen at the band
@@ -1727,17 +1795,20 @@ def minimax_anchor_frequency(absorption: Optional[Absorption],
     ``α(f_a)/f_a``, so an anchor elsewhere in the band with the same slope
     gives the same line.
 
-    The band is sampled at :data:`MINIMAX_ANCHOR_GRID` evenly spaced
+    The band is sampled at :data:`_MINIMAX_ANCHOR_GRID` evenly spaced
     positive frequencies. Each is tried as the anchor, then the best is
     refined on as many points spanning its two neighbours. The band centre
     is returned when no anchor beats it by more than ``1e-9`` of the law's
     largest value in the band — a law already linear in ``f`` (a constant
     dB/wavelength, under ``power=1``) misses by zero at every anchor — and
     when there is no law or no band with two positive frequencies.
+    ``absorption`` is a law, or a measured table as an environment holds it
+    (evaluated as tabulated).
     """
+    absorption = _absorption_law(absorption)
     lo, hi = float(freq_min), float(freq_max)
     centre = 0.5 * (lo + hi)
-    freqs = np.linspace(lo, hi, MINIMAX_ANCHOR_GRID)
+    freqs = np.linspace(lo, hi, _MINIMAX_ANCHOR_GRID)
     freqs = freqs[freqs > 0.0]
     if absorption is None or not hi > lo or freqs.size < 2:
         return centre
@@ -1770,7 +1841,7 @@ def minimax_anchor_frequency(absorption: Optional[Absorption],
     j = int(np.argmin(coarse_err))
     fine = np.linspace(coarse[max(j - 1, 0)],
                        coarse[min(j + 1, coarse.size - 1)],
-                       MINIMAX_ANCHOR_GRID)
+                       _MINIMAX_ANCHOR_GRID)
     fine_err = worst(fine)
     k = int(np.argmin(fine_err))
     best, best_err = ((fine[k], fine_err[k]) if fine_err[k] < coarse_err[j]
@@ -1785,24 +1856,24 @@ def minimax_anchor_frequency(absorption: Optional[Absorption],
 #: water law at one frequency across a band says so. A threshold choice:
 #: 0.05 dB/km is 0.5 dB over a 10 km path, so a run that stays silent is off
 #: the law by less than half a decibel at that range.
-BAND_ABSORPTION_WARN_DB_PER_KM = 0.05
+_BAND_ABSORPTION_WARN_DB_PER_KM = 0.05
 
 #: Depths (evenly spaced, surface to the water depth) the band check scans,
 #: so a Biological layer below the surface is seen.
-BAND_ABSORPTION_CHECK_DEPTHS = 65
+_BAND_ABSORPTION_CHECK_DEPTHS = 65
 
 
-def warn_if_band_absorption_frozen(who: str, absorption, frequencies,
-                                   anchor_frequency: float, *,
-                                   water_depth: float, mechanism: str,
-                                   remediation: str,
-                                   power: float = 1.0,
-                                   by_ratio: bool = False) -> Optional[float]:
+def _warn_if_band_absorption_frozen(who: str, absorption, frequencies,
+                                    anchor_frequency: float, *,
+                                    water_depth: float, mechanism: str,
+                                    remediation: str,
+                                    power: float = 1.0,
+                                    by_ratio: bool = False) -> Optional[float]:
     """Warn when a law frozen at ``anchor_frequency`` and scaled as
     ``(f/f_a) ** power`` (or by the law's surface ratio, ``by_ratio``)
     misses ``absorption`` by at least
-    :data:`BAND_ABSORPTION_WARN_DB_PER_KM` somewhere in the band and the
-    water column (:func:`band_absorption_error_dB_per_km`).
+    :data:`_BAND_ABSORPTION_WARN_DB_PER_KM` somewhere in the band and the
+    water column (:func:`_band_absorption_error_dB_per_km`).
 
     The one check every engine that freezes the law runs — Bellhop's single
     trace under a Biological layer, OASES's one water AC per deck — with the
@@ -1810,7 +1881,10 @@ def warn_if_band_absorption_frozen(who: str, absorption, frequencies,
     (what froze the law, and where in the source) and ``remediation`` sentences.
     Returns the error in dB/km, or ``None`` when there is nothing to check
     (no law, fewer than two positive frequencies, a non-positive anchor).
+    ``absorption`` is a law, or a measured table as an environment holds it
+    (evaluated as tabulated).
     """
+    absorption = _absorption_law(absorption)
     if absorption is None:
         return None
     freqs = np.atleast_1d(np.asarray(frequencies, dtype=float)).ravel()
@@ -1818,11 +1892,11 @@ def warn_if_band_absorption_frozen(who: str, absorption, frequencies,
     f_a = float(anchor_frequency)
     if freqs.size < 2 or not f_a > 0.0:
         return None
-    depths = np.linspace(0.0, float(water_depth), BAND_ABSORPTION_CHECK_DEPTHS)
-    err = band_absorption_error_dB_per_km(absorption, freqs, f_a,
-                                          depths=depths, power=power,
-                                          by_ratio=by_ratio)
-    if err >= BAND_ABSORPTION_WARN_DB_PER_KM:
+    depths = np.linspace(0.0, float(water_depth), _BAND_ABSORPTION_CHECK_DEPTHS)
+    err = _band_absorption_error_dB_per_km(absorption, freqs, f_a,
+                                           depths=depths, power=power,
+                                           by_ratio=by_ratio)
+    if err >= _BAND_ABSORPTION_WARN_DB_PER_KM:
         warnings.warn(
             f"{who}: {mechanism} Across {freqs.min():.4g}-{freqs.max():.4g} "
             f"Hz and the water column the {absorption._short()} law "

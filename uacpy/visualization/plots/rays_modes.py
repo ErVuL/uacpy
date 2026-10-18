@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 
+from types import SimpleNamespace
+
+import matplotlib as mpl
 import numpy as np
-from typing import Optional, Tuple
+from matplotlib.ticker import MaxNLocator
+from typing import Optional, Sequence, Tuple
 
 from uacpy.core.environment import Environment
 from uacpy.core.constants import PRESSURE_FLOOR
@@ -15,7 +19,10 @@ from uacpy.core.acoustics.wavenumber import (alias_period,
                                              ranges_fit_alias_period)
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient, GreensFunction
 from uacpy.core.units import m_to_km
-from uacpy.visualization.plots._common import ZORDER_LEGEND, ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, _plot_warn, fig_ax, typed_plot_error, invert_yaxis_once, _title_or, _fit_rotated_axis_label, _checked_dynamic_range_dB
+from uacpy.visualization.style import (MAGNITUDE_COLORMAP,
+                                      MODE_SHAPE_COLORMAP,
+                                      REPLICA_COLORMAP)
+from uacpy.visualization.plots._common import ZORDER_LEGEND, ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, _plot_warn, fig_ax, typed_plot_error, invert_yaxis_once, _title_or, _fit_rotated_axis_label, _checked_dynamic_range_dB, _floored_dB, _refuse_axes_after_carrier
 
 
 #: Multipath class -> colour, for the ray fan and the arrival stems alike:
@@ -27,9 +34,13 @@ RAY_CLASS_COLOURS = {
     'both': '#000000',
 }
 
+#: Colour of an arrival whose ``kind`` the table above does not hold (a
+#: hand-built Arrivals): grey, so it reads as none of the four classes.
+_UNCLASSED_ARRIVAL_COLOUR = '0.5'
+
 #: Right-hand margin on the receiver extent, so a receiver at the maximum
 #: range is not clipped to the spine. The seafloor overlay and the x-limit
-#: both use it — anchoring them differently is what left a bare strip.
+#: both use it — anchored differently, they leave a bare strip between them.
 _RECEIVER_EDGE_MARGIN = 1.03
 
 #: Span of the arrival stem plot's dB axis when the caller names none, in dB
@@ -41,7 +52,7 @@ _ARRIVALS_DYNAMIC_RANGE_DB = 60.0
 
 
 @typed_plot_error(who='Rays.plot')
-def _plot_rays(
+def plot_rays(
     rays: Rays,
     ax=None,
     *,
@@ -65,6 +76,30 @@ def _plot_rays(
     another. ``color=`` alone paints the whole fan that colour, which is
     ``color_by=None``: one colour has no classes to tell apart. The legend
     reports per-class ray counts when the fan is coloured by class.
+
+    Parameters
+    ----------
+    rays : Rays
+        The ray fan or eigenray set.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    env : Environment, optional
+        Draws the surface and seafloor under the fan.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(12, 6)`` by default; unused when
+        ``ax`` is given.
+    color_by : {'bounces', None}, optional
+        Colour by multipath class (default), or one colour.
+    color : optional
+        The one colour of the fan (see above).
+    show_receivers, show_source, show_legend : bool, optional
+        Mark the receivers, the source, and draw the legend. Default True.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    linewidth, alpha : float, optional
+        Line width and opacity of the rays. Default 1.0 and 0.55.
+    **mpl_kw
+        Matplotlib keywords for the ray lines.
     """
     if not isinstance(rays, Rays):
         raise ConfigurationError(f"Rays.plot: expected Rays, got {type(rays).__name__}.")
@@ -181,11 +216,11 @@ def _plot_rays(
 
 
 @typed_plot_error(who='Arrivals.plot')
-def _plot_arrivals(
+def plot_arrivals(
     arrivals: Arrivals,
     ax=None,
     *,
-    receiver: Optional[Tuple[float, float]] = None,
+    receiver=None,
     figsize: Tuple[float, float] = (10, 4),
     title: Optional[str] = None,
     dB: bool = False,
@@ -193,7 +228,7 @@ def _plot_arrivals(
 ):
     """Stem plot of arrivals: received level vs delay, by multipath class.
 
-    Colour palette matches :func:`_plot_rays`: direct = red,
+    Colour palette matches :func:`plot_rays`: direct = red,
     surface = green, bottom = blue, both = black. Each arrival is drawn
     as a vertical stem plus a head marker.
 
@@ -225,11 +260,32 @@ def _plot_arrivals(
     ``dynamic_range_dB`` without ``dB=True`` raises: the linear axis is not
     clipped to it, and accepting it would look as though it were.
 
-    One receiver's channel is drawn: ``receiver=(depth_m, range_m)`` picks
+    One receiver's channel is drawn: ``receiver=(depth, range)`` picks
     the cell (:meth:`Arrivals.at_receiver`), and a set spanning several
     cells without it is refused, as the channel methods refuse it.
 
-    The default title names the receiver when the set holds one."""
+    The default title names the receiver when the set holds one.
+
+    Parameters
+    ----------
+    arrivals : Arrivals
+        The arrivals to draw.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    receiver : (float, float), optional
+        ``(depth, range)`` of the cell to draw, as
+        :meth:`Arrivals.at_receiver` takes it; needed when the set spans
+        several cells.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(10, 4)`` by default; unused when
+        ``ax`` is given.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    dB : bool, optional
+        Draw the level in dB re unit source instead of the amplitude.
+    dynamic_range_dB : float, optional
+        With ``dB=True``, how far under the loudest arrival the axis reaches.
+    """
     if not isinstance(arrivals, Arrivals):
         raise ConfigurationError(
             f"Arrivals.plot: expected Arrivals, got {type(arrivals).__name__}."
@@ -273,16 +329,19 @@ def _plot_arrivals(
         # -600 dB rather than -inf, which would take the whole axis with it.
         levels = 20.0 * np.log10(np.maximum(levels, PRESSURE_FLOOR))
         floor = float(np.max(levels)) - range_dB
+    # ``levels`` is None only when there are no arrivals, and then the loop
+    # below reads none.
+    arrival_levels = np.empty(0) if levels is None else levels
     for index, a in enumerate(arrivals.arrivals):
         kind = a.get('kind', 'direct')
-        col = color_map.get(kind, '#1e88e5')
+        col = color_map.get(kind, _UNCLASSED_ARRIVAL_COLOUR)
         d_ms = a['delay'] * 1000.0
         # Recorded before the floor test, so the delay axis spans the same
         # arrivals in both views: which stems the level floor hides says
         # nothing about when the energy arrives.
         delays_ms.append(d_ms)
-        level = float(levels[index]) if levels is not None else a['amplitude']
-        counts[kind] += 1
+        level = float(arrival_levels[index])
+        counts[kind] = counts.get(kind, 0) + 1
         if dB and level < floor:
             # Skip it and count it. Clipped to the floor it would read as a
             # level it does not have, on a stem with no length left to read.
@@ -303,10 +362,12 @@ def _plot_arrivals(
         first = min(delays_ms)
         # Every drawn arrival is the one receiver's, so the span is that
         # channel's.
+        # The rule of Arrivals.energy_support, on the arrivals as drawn and
+        # with a refusal naming the call the user made.
         from uacpy.acoustic_signal.delay_profile import _energy_support
         support_ms = _energy_support(
             arrivals.delays, np.abs(arrivals.received_amplitudes) ** 2,
-            who="plot_arrivals") * 1000.0
+            who="Arrivals.plot") * 1000.0
         span = support_ms if support_ms > 0 else (max(delays_ms) - first)
         if dB and drawn_ms:
             # The energy support collapses when two near-simultaneous
@@ -339,7 +400,8 @@ def _plot_arrivals(
     handles = [
         mlines.Line2D([], [], color=col, marker='o', linestyle='-',
                       label=f"{kind} ({counts[kind]})")
-        for kind, col in color_map.items() if counts[kind] > 0
+        for kind, col in ((kind, color_map.get(kind, _UNCLASSED_ARRIVAL_COLOUR))
+                          for kind in counts) if counts[kind] > 0
     ]
     counted = sum(counts.values())
     if beyond:
@@ -363,7 +425,7 @@ def _plot_arrivals(
         handles.append(mlines.Line2D(
             [], [], linestyle='none', marker='', label=label))
     if handles:
-        # Placed clear of the stems, as _plot_rays places its own: pinned to
+        # Placed clear of the stems, as plot_rays places its own: pinned to
         # a corner, it can cover the head marker of the last stem drawn.
         ax.legend(handles=handles, loc='best', fontsize='small', framealpha=0.85)
     auto = 'Arrivals'
@@ -397,21 +459,93 @@ def _plot_arrivals(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _selected_modes(who: str, available: int, n_modes,
+                    mode_numbers) -> np.ndarray:
+    """The 0-based mode columns a mode plotter draws out of ``available``
+    modes: ``mode_numbers`` (1-based, as the legend and
+    ``Modes.to_dataframe`` number them), else the first ``n_modes``, else
+    every mode. The two forms are one choice, so both together are
+    refused."""
+    if mode_numbers is None:
+        n = available if n_modes is None else min(int(n_modes), available)
+        return np.arange(n)
+    if n_modes is not None:
+        raise ConfigurationError(
+            f"{who}: got both n_modes={n_modes!r} and mode_numbers=; pass "
+            f"one — n_modes for the first N modes, mode_numbers=[...] for "
+            f"chosen modes.")
+    numbers = np.atleast_1d(np.asarray(mode_numbers))
+    if (numbers.size == 0 or numbers.ndim != 1
+            or not np.issubdtype(numbers.dtype, np.integer)):
+        raise ConfigurationError(
+            f"{who}: mode_numbers= is a sequence of mode numbers (integers, "
+            f"mode 1 the first); got {mode_numbers!r}.")
+    outside = numbers[(numbers < 1) | (numbers > available)]
+    if outside.size or np.unique(numbers).size != numbers.size:
+        raise ConfigurationError(
+            f"{who}: mode_numbers={numbers.tolist()} must be distinct mode "
+            f"numbers from 1 to {available}, the modes this result "
+            f"carries.",
+            remediation="Mode 1 is the first mode; e.g. "
+                        "mode_numbers=range(1, 6), or "
+                        "np.flatnonzero(mask) + 1 for a boolean mask.")
+    return numbers - 1
+
+
 @typed_plot_error(who='Modes.plot')
-def _plot_mode_functions(
+def plot_mode_shapes(
     modes: Modes,
     ax=None,
     *,
     n_modes: Optional[int] = None,
+    mode_numbers: Optional[Sequence[int]] = None,
     figsize: Tuple[float, float] = (8, 6),
     title: Optional[str] = None,
     show_imaginary: bool = False,
+    label: Optional[str] = None,
+    color=None,
+    **mpl_kw,
 ):
-    """Plot the first ``n_modes`` mode shapes ``ψ_m(z)`` as overlaid 1-D curves.
+    """The mode shapes ``ψ_m(z)`` as overlaid 1-D curves against depth:
+    what ``modes.plot()`` draws.
 
-    ``show_imaginary`` overlays ``Im(ψ_m)`` as a dashed line in the matching
-    colour — meaningful only for a complex-arithmetic solve (``backend=
-    'krakenc'``), where leaky modes carry a non-zero imaginary part."""
+    ``n_modes`` draws the first N modes; ``mode_numbers`` draws chosen ones
+    (1-based, as the legend numbers them: ``mode_numbers=[1, 3, 4]``, or
+    ``np.flatnonzero(modes.phase_speeds < 1550.0) + 1`` for the modes a
+    criterion picks); passing both is refused. ``show_imaginary`` overlays
+    ``Im(ψ_m)`` as a dashed line in the matching colour — meaningful only
+    for a complex-arithmetic solve (``backend='krakenc'``), where leaky
+    modes carry a non-zero imaginary part.
+
+    ``color=`` draws every curve in one colour and ``label=`` names the set
+    with one legend entry, so two mode sets overlay on one ``ax=``; without
+    them each mode takes its own colour and an ``m=…`` entry. ``**mpl_kw``
+    styles every curve.
+
+    Parameters
+    ----------
+    modes : Modes
+        The mode set to draw.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    n_modes : int, optional
+        Draw the first ``n_modes``; exclusive with ``mode_numbers``.
+    mode_numbers : sequence of int, optional
+        The modes to draw, 1-based.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(8, 6)`` by default; unused when
+        ``ax`` is given.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    show_imaginary : bool, optional
+        Overlay ``Im(ψ_m)`` dashed (a complex-arithmetic solve).
+    label : str, optional
+        One legend entry for the whole set.
+    color : optional
+        One colour for every curve.
+    **mpl_kw
+        Matplotlib keywords for every curve.
+    """
     if not isinstance(modes, Modes):
         raise ConfigurationError(
             f"Modes.plot: expected Modes, got {type(modes).__name__}."
@@ -421,13 +555,18 @@ def _plot_mode_functions(
             "Modes.plot: show_imaginary=True needs complex mode "
             "functions; this Modes result is real (use backend='krakenc')."
         )
+    columns = _selected_modes('Modes.plot', modes.n_modes, n_modes,
+                              mode_numbers)
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    n_modes = modes.n_modes if n_modes is None else min(int(n_modes), modes.n_modes)
-    for m in range(n_modes):
+    for k, m in enumerate(columns):
         psi = np.asarray(modes.phi[:, m])
+        curve_label = (f"m={m + 1}" if label is None
+                       else (label if k == 0 else '_nolegend_'))
         line, = ax.plot(psi.real if np.iscomplexobj(psi) else psi,
-                        modes.depths, label=f"m={m+1}", linewidth=1.0)
+                        modes.depths, label=curve_label, linewidth=1.0,
+                        **({} if color is None else {'color': color}),
+                        **mpl_kw)
         if show_imaginary:
             ax.plot(psi.imag, modes.depths, linestyle='--', linewidth=0.9,
                     color=line.get_color())
@@ -435,9 +574,9 @@ def _plot_mode_functions(
     ax.set_ylabel('Depth (m)')
     invert_yaxis_once(ax)
     ax.grid(True, alpha=0.3)
-    if n_modes <= 12:
+    if label is not None or columns.size <= 12:
         ax.legend(fontsize='small', loc='best')
-    ax.set_title(_title_or(title, f"Mode functions (n={n_modes})"))
+    ax.set_title(_title_or(title, f"Mode functions (n={columns.size})"))
     if _owns_fig:
         _draw_result_credit(fig, modes, env=None)
     return fig, ax
@@ -479,6 +618,8 @@ def plot_mode_wavenumbers(
         ax2.plot(idx, k.imag, 's--', color='C1')
         ax2.set_ylabel(r'$\mathrm{Im}(k_m)$ (1/m)')
     ax.set_xlabel('Mode index')
+    # An integer axis, as plot_modes_heatmap's: mode 4.5 does not exist.
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.set_ylabel(r'$\mathrm{Re}(k_m)$ (1/m)')
     ax.grid(True, alpha=0.3)
     ax.set_title(_title_or(title, 'Modal wavenumbers'))
@@ -495,7 +636,7 @@ def plot_wavenumber_sampling(
     delta_k: float,
     ax=None,
     *,
-    rmax_m: Optional[float] = None,
+    rmax: Optional[float] = None,
     water_sound_speed: Optional[float] = None,
     c_bottom: Optional[float] = None,
     figsize: Tuple[float, float] = (9, 3.2),
@@ -508,17 +649,28 @@ def plot_wavenumber_sampling(
     answer silently:
 
     * the **window** ``[omega/c_high, omega/c_low]`` decides which physics is
-      carried. Closing ``c_high`` below the seabed speed discards trapped
-      modes; raising ``c_low`` discards the steep and evanescent components
-      that build the near field.
+      carried. Its low end holds the steep propagation angles, the
+      continuous spectrum at small ``k_r`` (JKPS §9.2.6.2: "the continuous
+      portion of the spectrum that corresponds to steep propagation
+      angles"), which matters at ranges shorter than typically 5-10 water
+      depths (JKPS §4.9.1). Lowering ``c_high`` raises that end and discards
+      it, and below the seabed speed also the trapped modes nearest cutoff.
+      Its high end holds the evanescent components, significant when source
+      and receiver are at about the same depth, the highest significant
+      ``k_r`` being omega over the lowest wave speed in the problem (JKPS
+      ch. 4, Appendix 1, "Wavenumber Integration", step 1; §4.5.2). Raising
+      ``c_low`` lowers that end and discards them, and past the slowest
+      water speed also the near-horizontal propagating components.
     * the **step** ``Delta k`` sets the alias period ``r_wrap = 2*pi/Delta k``.
-      Energy from beyond ``r_wrap`` folds back inside it, and folded energy is
-      indistinguishable from real energy once it has landed — it makes the
-      field too LOUD, which reads as a physical result rather than an error.
+      The discrete sum is the superposition of the true field and its images
+      repeated every ``r_wrap`` (JKPS §4.5.3), so a field that has not died
+      out within the window is wrapped into it and adds to the field there,
+      where nothing tells it apart from the field itself — an error that reads
+      as a physical result.
 
     This draws the window against the wavenumbers that matter — ``omega/c`` in
     the water and in the seabed, whose interval is the trapped band — and, if
-    ``rmax_m`` is given, says whether the requested ranges fit inside the alias
+    ``rmax`` is given, says whether the requested ranges fit inside the alias
     period.
 
     Parameters
@@ -530,7 +682,7 @@ def plot_wavenumber_sampling(
         ``omega/c_low``, so ``c_low`` sets the LARGEST wavenumber.
     delta_k : float
         Wavenumber step (rad/m) of the sampled transform.
-    rmax_m : float, optional
+    rmax : float, optional
         Farthest receiver range (m), to test against the alias period.
     water_sound_speed, c_bottom : float, optional
         Water and seabed sound speeds (m/s), marked on the axis; their
@@ -543,7 +695,7 @@ def plot_wavenumber_sampling(
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
     """
-    optional = (('rmax_m', rmax_m), ('water_sound_speed', water_sound_speed), ('c_bottom', c_bottom))
+    optional = (('rmax', rmax), ('water_sound_speed', water_sound_speed), ('c_bottom', c_bottom))
     for name, value in (('frequency', frequency), ('c_low', c_low),
                         ('c_high', c_high), ('delta_k', delta_k),
                         *((n, v) for n, v in optional if v is not None)):
@@ -581,8 +733,8 @@ def plot_wavenumber_sampling(
     if water_sound_speed is not None and c_bottom is not None:
         # A seabed SLOWER than the water traps nothing -- there is no angle
         # beyond critical because there is no critical angle. Drawn blind,
-        # the span came out reversed and still carried the label, which is a
-        # picture of a trapped band over a channel that has none.
+        # the span would come out reversed and carry the label, a picture of
+        # a trapped band over a channel that has none.
         if float(c_bottom) > float(water_sound_speed):
             ax.axvspan(omega / float(water_sound_speed), omega / float(c_bottom),
                        color='C2', alpha=0.12, label='trapped band')
@@ -593,9 +745,9 @@ def plot_wavenumber_sampling(
     ax.set_yticks([])
     ax.set_xlabel('Horizontal wavenumber $k_r$ (rad/m)')
     note = f'alias period $2\\pi/\\Delta k$ = {r_wrap:.0f} m'
-    if rmax_m is not None:
-        safe = ranges_fit_alias_period(delta_k, rmax_m)
-        note += (f'; farthest receiver {float(rmax_m):.0f} m '
+    if rmax is not None:
+        safe = ranges_fit_alias_period(delta_k, rmax)
+        note += (f'; farthest receiver {float(rmax):.0f} m '
                  + ('is inside it — necessary, not sufficient: refine until '
                     'the field stops moving' if safe
                     else 'is BEYOND it — the field folds'))
@@ -628,10 +780,10 @@ def plot_greens_function(
     depth: Optional[float] = None,
     modes: Optional[Modes] = None,
     dynamic_range_dB: float = 60.0,
-    cmap: str = 'viridis',
+    cmap: Optional[str] = None,
     figsize: Tuple[float, float] = (9, 6),
     title: Optional[str] = None,
-    show_colorbar: bool = True,
+    show_colorbar: Optional[bool] = None,
 ):
     """Image the depth-separated Green's function ``|G(k_r, z)|`` of a ``.grn``.
 
@@ -654,7 +806,9 @@ def plot_greens_function(
 
     With ``depth`` the view becomes a cut: ``|G|`` in dB against wavenumber at
     the stored depth nearest the one asked for, which is where the poles are
-    easiest to read off individually.
+    easiest to read off individually. The cut has no colour axis, so
+    ``cmap=`` and ``show_colorbar=`` are refused with it rather than
+    ignored.
 
     Parameters
     ----------
@@ -672,15 +826,26 @@ def plot_greens_function(
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
     cmap : str, optional
-        Colormap of the 2-D panel. Default ``'viridis'``.
+        Colormap of the 2-D panel. ``None`` is ``style.MAGNITUDE_COLORMAP``
+        (viridis).
     figsize : tuple, optional
         Size (inches) of the new figure, ``(9, 6)`` by default; unused when
         ``ax`` is given.
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
     show_colorbar : bool, optional
-        Draw the colorbar of the 2-D panel. Default True.
+        Draw the colorbar of the 2-D panel. ``None`` draws it.
     """
+    unused = [name for name, value in (('cmap', cmap),
+                                       ('show_colorbar', show_colorbar))
+              if value is not None and depth is not None]
+    if unused:
+        raise ConfigurationError(
+            f"plot_greens_function: {', '.join(f'{n}=' for n in unused)} "
+            f"has no effect on the depth= cut, a line with no colour axis; "
+            f"it styles the 2-D |G(k_r, z)| panel.",
+            remediation="Drop depth= for the 2-D panel, or drop the "
+                        "colour keywords for the cut.")
     floor_dB = -_checked_dynamic_range_dB('plot_greens_function',
                                           dynamic_range_dB)
     if not isinstance(greens_function, GreensFunction):
@@ -720,10 +885,11 @@ def plot_greens_function(
 
     if depth is None:
         with np.errstate(divide='ignore'):
-            db = 20.0 * np.log10(np.maximum(panel, PRESSURE_FLOOR) / ref)
-        im = ax.pcolormesh(k_r, z, db, shading='auto', cmap=cmap,
+            level_dB = 20.0 * np.log10(np.maximum(panel, PRESSURE_FLOOR) / ref)
+        im = ax.pcolormesh(k_r, z, level_dB, shading='auto',
+                           cmap=MAGNITUDE_COLORMAP if cmap is None else cmap,
                            vmin=floor_dB, vmax=0.0)
-        if show_colorbar:
+        if show_colorbar is None or show_colorbar:
             fig.colorbar(im, ax=ax, label='$|G|$ (dB re panel max)')
         ax.set_ylabel('Depth (m)')
         invert_yaxis_once(ax)
@@ -758,6 +924,94 @@ def plot_greens_function(
     return fig, ax
 
 
+def _recorded_seabed_speed(modes: Modes) -> Optional[float]:
+    """The fluid half-space speed (m/s) a mode set records
+    (``media.halfspace_sound_speed``), or ``None``."""
+    return None if modes.media is None else modes.media.halfspace_sound_speed
+
+
+@typed_plot_error
+def plot_mode_attenuation(
+    modes: Modes,
+    ax=None,
+    *,
+    c_bottom: Optional[float] = None,
+    label: Optional[str] = None,
+    color=None,
+    figsize: Tuple[float, float] = (7, 5.5),
+    title: Optional[str] = None,
+    **mpl_kw,
+):
+    """Modal attenuation ``|Im k_m|`` (1/m) against phase speed, log-log.
+
+    A trapped mode decays only through the media's absorption; past the
+    seabed sound speed a mode radiates into the bottom and its attenuation
+    jumps (JKPS Sect. 2.4.5.1), so the seabed speed is drawn as a dashed
+    rule: the result's own (``modes.media.halfspace_sound_speed``), or
+    ``c_bottom`` when given. ``label=``, ``color=`` and ``**mpl_kw`` style
+    the points, so two mode sets (a default and a ``leaky_modes=True`` run)
+    overlay on one ``ax=``. A mode with no attenuation has no place on the
+    log axis.
+
+    Parameters
+    ----------
+    modes : Modes
+        The mode set to draw.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    c_bottom : float, optional
+        Seabed sound speed (m/s), drawn as given; ``None`` is the result's
+        own, when it records one.
+    label : str, optional
+        Legend label of the points; a labelled set adds a legend.
+    color : optional
+        Colour of the points.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(7, 5.5)`` by default; unused when
+        ``ax`` is given.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    **mpl_kw
+        Matplotlib keywords for the points (``marker='s'``, …).
+    """
+    if not isinstance(modes, Modes):
+        raise ConfigurationError(
+            f"plot_mode_attenuation: expected Modes, got "
+            f"{type(modes).__name__}.")
+    if c_bottom is None:
+        c_bottom = _recorded_seabed_speed(modes)
+    _owns_fig = ax is None
+    fig, ax = fig_ax(ax, figsize)
+    mpl_kw.setdefault('marker', 'o')
+    mpl_kw.setdefault('linestyle', 'none')
+    mpl_kw.setdefault('markersize', 5)
+    ax.plot(modes.phase_speeds, np.abs(np.imag(modes.k)), label=label,
+            **({} if color is None else {'color': color}), **mpl_kw)
+    if c_bottom is not None:
+        cb = float(c_bottom)
+        # One rule per speed: an overlay of two sets of the same seabed
+        # draws it once.
+        if not any(line.get_gid() == f'seabed-speed-{cb:g}'
+                   for line in ax.lines):
+            ax.axvline(cb, color='0.4', linestyle='--', linewidth=1.0,
+                       gid=f'seabed-speed-{cb:g}')
+            ax.text(cb, 0.02, f' seabed $c_p$ = {cb:g} m/s', color='0.3',
+                    fontsize='small', rotation=90, va='bottom',
+                    transform=ax.get_xaxis_transform())
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel('Phase speed $c_p$ (m/s)')
+    ax.set_ylabel('Modal attenuation $|\\mathrm{Im}\\,k_m|$ (1/m)')
+    ax.grid(True, which='both', alpha=0.3)
+    if label is not None:
+        ax.legend(fontsize='small', loc='upper left')
+    ax.set_title(_title_or(title, f'Modal attenuation at {modes.f0:g} Hz')
+                 if modes.f0 else _title_or(title, 'Modal attenuation'))
+    if _owns_fig:
+        _draw_result_credit(fig, modes, env=None)
+    return fig, ax
+
+
 @typed_plot_error
 def plot_mode_speeds(
     modes: Modes,
@@ -772,13 +1026,16 @@ def plot_mode_speeds(
     ``plot_mode_wavenumbers`` draws the raw eigenvalue ``Re(k_m)``; this draws
     what the eigenvalue means. The phase speed ``omega / Re(k_m)`` rises with
     mode number, and where it crosses the seabed sound speed the mode stops
-    being trapped and starts radiating into the bottom (JKPS Sect. 2.4.5.1) —
-    pass ``c_bottom`` to mark that boundary and the trapped count reads off
-    the figure.
+    being trapped and starts radiating into the bottom (JKPS Sect. 2.4.5.1).
+    That boundary is drawn, with the trapped count, at the seabed speed the
+    result records (``modes.media.halfspace_sound_speed``, KRAKEN's fluid
+    half-space), or at ``c_bottom`` when given; a result recording none (an
+    elastic seabed, a hand-built mode set) draws no boundary unless
+    ``c_bottom`` is given.
 
     The group speed is overlaid when the result carries one. Only
     ``backend='krakenc'`` reports it from a single run
-    (:attr:`~uacpy.core.results.Modes.group_velocity`); on the real backend
+    (:attr:`~uacpy.core.results.Modes.group_speeds`); on the real backend
     it is ``None`` and only the phase speed is drawn. Gaps are left where the
     print file strided over a mode rather than interpolated across them.
 
@@ -787,7 +1044,9 @@ def plot_mode_speeds(
     modes : Modes
         The mode set to draw.
     c_bottom : float, optional
-        Seabed sound speed (m/s). Drawn as the trapped/leaky boundary.
+        Seabed sound speed (m/s), drawn as the trapped/leaky boundary as
+        given; ``None`` is the result's own
+        (``modes.media.halfspace_sound_speed``), when it records one.
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
     figsize : tuple, optional
@@ -799,13 +1058,16 @@ def plot_mode_speeds(
     if not isinstance(modes, Modes):
         raise ConfigurationError(
             f"plot_mode_speeds: expected Modes, got {type(modes).__name__}.")
+    recorded = c_bottom is None
+    if recorded:
+        c_bottom = _recorded_seabed_speed(modes)
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
     idx = np.arange(1, modes.n_modes + 1)
     cp = modes.phase_speeds
     ax.plot(idx, cp, 'o-', ms=4, color='C0', label='phase speed $\\omega/\\mathrm{Re}\\,k_m$')
 
-    vg = getattr(modes, 'group_velocity', None)
+    vg = getattr(modes, 'group_speeds', None)
     if vg is not None and np.any(np.isfinite(vg)):
         ax.plot(idx, vg, 's--', ms=4, color='C1',
                 label='group speed $d\\omega/dk_m$')
@@ -813,7 +1075,11 @@ def plot_mode_speeds(
     if c_bottom is not None:
         cb = float(c_bottom)
         ax.axhline(cb, color='C3', ls='--', lw=1.0)
-        n_trapped = int(np.sum(cp <= cb))
+        # The result's own boundary is its trapped mask; a speed of the
+        # caller's takes the same rule, phase speed below the seabed's.
+        trapped = modes.trapped if recorded else None
+        n_trapped = int(np.sum(cp < cb) if trapped is None
+                        else np.sum(trapped))
         # The label sits in the band just above the rule, and that is the
         # one band the phase-speed curve is guaranteed to enter: cp rises
         # with mode index and leaves the rule behind at mode ``n_trapped``,
@@ -833,6 +1099,8 @@ def plot_mode_speeds(
                 transform=ax.get_yaxis_transform())
 
     ax.set_xlabel('Mode index $m$')
+    # An integer axis, as plot_modes_heatmap's: mode 4.5 does not exist.
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.set_ylabel('Speed (m/s)')
     ax.grid(True, alpha=0.3)
     ax.legend(loc='best', fontsize='small')
@@ -843,40 +1111,51 @@ def plot_mode_speeds(
     return fig, ax
 
 
+def _record_credit(fig, record) -> None:
+    """The model credit of a record derived from a model's result
+    (``model``, ``backend``, ``model_source_id``), as a result's own."""
+    from uacpy.models.provenance import model_provenance
+    source = (None if record.model_source_id is None
+              else model_provenance(record.model_source_id))
+    _draw_result_credit(fig, SimpleNamespace(
+        model=record.model, backend=record.backend, model_source=source))
+
+
+#: The modes :func:`plot_dispersion` draws when neither ``n_modes`` nor
+#: ``mode_numbers`` is given: the first three (uacpy guidance, so the
+#: solid/dashed pairs of each mode stay readable).
+_DISPERSION_N_MODES = 3
+
+
 @typed_plot_error
 def plot_dispersion(
-    modes_by_frequency,
+    dispersion,
     ax=None,
     *,
-    n_modes: int = 3,
+    n_modes: Optional[int] = None,
+    mode_numbers: Optional[Sequence[int]] = None,
     figsize: Tuple[float, float] = (8, 5),
     title: Optional[str] = None,
 ):
-    """Phase and group speed against frequency — the dispersion diagram.
+    """Phase and group speed against frequency — the dispersion diagram of
+    the :class:`~uacpy.core.results.ModeDispersion`
+    :meth:`Modes.dispersion <uacpy.core.results.Modes.dispersion>` returns
+    (``dispersion.plot()`` draws the same picture).
 
-    Takes a sequence of :class:`~uacpy.core.results.Modes`, one per frequency,
-    and draws mode ``m``'s phase speed (solid) and group speed (dashed) as
-    curves in frequency. This is the picture of geometric dispersion: both
-    speeds start at the seabed speed at that mode's cutoff and tend to the
-    water speed at high frequency, the phase speed falling monotonically
-    while the group speed passes through a minimum — the frequency of that
-    minimum arrives last in a transient, the Airy phase (JKPS Sect. 2.4.5.2).
-
-    The group speed is taken from each result's
-    :attr:`~uacpy.core.results.Modes.group_velocity` when the solver supplied
-    one (``backend='krakenc'``), and otherwise differenced between
-    neighbouring frequencies with
-    :meth:`~uacpy.core.results.Modes.group_velocity_between`, which is what
-    the real backend needs. Both carry the caveat the KRAKEN source states at
-    ``kraken.f90:772``: group speeds are wrong for leaky modes.
+    Mode ``m``'s phase speed is drawn solid and its group speed dashed, in
+    one colour, each through the frequencies where the record holds it. The
+    frequency of the group-speed minimum arrives last in a transient, the
+    Airy phase (JKPS Sect. 2.4.5.2).
 
     Parameters
     ----------
-    modes_by_frequency : sequence of Modes
-        At least two mode sets at distinct frequencies. Sorted here, so the
-        caller need not.
+    dispersion : ModeDispersion
+        The speeds to draw.
     n_modes : int, optional
-        How many low-order modes to draw (default 3).
+        Draw the first ``n_modes``; exclusive with ``mode_numbers``. With
+        neither given, the first 3 (uacpy guidance).
+    mode_numbers : sequence of int, optional
+        The modes to draw, 1-based.
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
     figsize : tuple, optional
@@ -885,60 +1164,31 @@ def plot_dispersion(
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
     """
-    sets = list(modes_by_frequency)
-    if len(sets) < 2:
+    if type(dispersion).__name__ != 'ModeDispersion':
         raise ConfigurationError(
-            "plot_dispersion: needs Modes at two or more frequencies — "
-            f"got {len(sets)}. Dispersion is a statement about how the modal "
-            "speeds vary with frequency, so one solve cannot show it.")
-    for m in sets:
-        if not isinstance(m, Modes):
-            raise ConfigurationError(
-                f"plot_dispersion: expected a sequence of Modes, found "
-                f"{type(m).__name__}.")
-        if m.f0 is None:
-            raise ConfigurationError(
-                "plot_dispersion: every Modes needs a frequency (f0); one "
-                "carries none, so it cannot be placed on the frequency axis.")
-    sets.sort(key=lambda m: float(m.f0))
-    freqs = np.array([float(m.f0) for m in sets])
-    if np.any(np.diff(freqs) <= 0):
-        raise ConfigurationError(
-            f"plot_dispersion: frequencies must be distinct, got {freqs}.")
-
+            f"plot_dispersion: expected a ModeDispersion; got "
+            f"{type(dispersion).__name__}.",
+            remediation="Compute it first: d = uacpy.Modes.dispersion("
+                        "modes_by_frequency); then d.plot().")
+    if n_modes is None and mode_numbers is None:
+        n_modes = _DISPERSION_N_MODES
+    columns = _selected_modes('plot_dispersion', dispersion.n_modes, n_modes,
+                              mode_numbers)
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    for mode_i in range(int(n_modes)):
-        vp, ff = [], []
-        vg, ff_g = [], []
-        for j, m in enumerate(sets):
-            if m.n_modes <= mode_i:
-                continue                      # below this mode's cutoff
-            ff.append(freqs[j])
-            vp.append(float(m.phase_speeds[mode_i]))
-            reported = getattr(m, 'group_velocity', None)
-            if reported is not None and np.isfinite(reported[mode_i]):
-                # The solver's own value belongs AT this frequency.
-                vg.append(float(reported[mode_i]))
-                ff_g.append(freqs[j])
-            elif j + 1 < len(sets) and sets[j + 1].n_modes > mode_i:
-                # A finite difference estimates d(omega)/dk at the MIDPOINT of
-                # the pair, which is what group_velocity_between's own
-                # docstring says. Plotting it at the left endpoint shifted the
-                # whole curve half a step -- and on the last pair it repeated
-                # one value at two frequencies, on the very plot whose purpose
-                # is reading off the Airy-phase frequency.
-                fd = m.group_velocity_between(sets[j + 1])
-                if mode_i < len(fd):
-                    vg.append(float(fd[mode_i]))
-                    ff_g.append(0.5 * (freqs[j] + freqs[j + 1]))
-        if not ff:
+    for i in columns:
+        colour = f'C{i % 10}'
+        phase = np.asarray(dispersion.phase_speeds[:, i])
+        held = np.isfinite(phase)
+        if not np.any(held):
             continue
-        colour = f'C{mode_i}'
-        ax.plot(ff, vp, '-', color=colour, lw=1.4, label=f'mode {mode_i + 1}')
-        if ff_g:
-            ax.plot(ff_g, vg, '--', color=colour, lw=1.2)
-
+        ax.plot(dispersion.frequencies[held], phase[held], '-',
+                color=colour, lw=1.4, label=f'mode {i + 1}')
+        group = np.asarray(dispersion.group_speeds[:, i])
+        known = np.isfinite(group)
+        if np.any(known):
+            ax.plot(dispersion.group_frequencies[known], group[known], '--',
+                    color=colour, lw=1.2)
     ax.set_xlabel('Frequency (Hz)')
     ax.set_ylabel('Speed (m/s)')
     ax.grid(True, alpha=0.3)
@@ -946,7 +1196,7 @@ def plot_dispersion(
               title_fontsize='x-small')
     ax.set_title(_title_or(title, 'Modal dispersion'))
     if _owns_fig:
-        _draw_result_credit(fig, sets[0], env=None)
+        _record_credit(fig, dispersion)
     return fig, ax
 
 
@@ -956,21 +1206,23 @@ def plot_modes_heatmap(
     ax=None,
     *,
     n_modes: Optional[int] = None,
+    mode_numbers: Optional[Sequence[int]] = None,
     figsize: Tuple[float, float] = (8, 6),
     title: Optional[str] = None,
-    mode_range: Optional[Tuple[int, int]] = None,
     normalize: bool = True,
-    cmap: str = 'RdBu_r',
+    cmap: str = MODE_SHAPE_COLORMAP,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     show_colorbar: bool = True,
 ):
     """Heatmap of ``ψ_m(z)`` over (depth, mode index).
 
-    ``mode_range=(start, stop)`` selects a half-open mode-index slice with
-    ``0 <= start < stop`` (``stop`` past the last mode simply clamps), and is
-    an alternative to ``n_modes``, not a modifier of it — passing both is a
-    :class:`~uacpy.core.exceptions.ConfigurationError`.
+    ``n_modes`` draws the first N modes; ``mode_numbers`` draws chosen ones
+    (1-based, as :func:`plot_mode_shapes` takes them: ``range(4, 8)`` for
+    modes 4 to 7); passing both is a
+    :class:`~uacpy.core.exceptions.ConfigurationError`. Chosen modes that do
+    not run consecutively are drawn side by side, each column labelled with
+    its mode number.
     ``normalize=True`` (default) rescales each column to peak ``±1`` so
     high-order modes don't disappear next to the dominant low-order ones.
 
@@ -979,7 +1231,9 @@ def plot_modes_heatmap(
     modes : Modes
         The modes to draw.
     n_modes : int, optional
-        Draw the first ``n_modes``; exclusive with ``mode_range``.
+        Draw the first ``n_modes``; exclusive with ``mode_numbers``.
+    mode_numbers : sequence of int, optional
+        The modes to draw, 1-based; exclusive with ``n_modes``.
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
     figsize : tuple, optional
@@ -987,8 +1241,6 @@ def plot_modes_heatmap(
         ``ax`` is given.
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
-    mode_range : (int, int), optional
-        Half-open mode-index slice (see above).
     normalize : bool, optional
         Scale each mode to peak ±1. Default True.
     cmap : str, optional
@@ -1003,39 +1255,12 @@ def plot_modes_heatmap(
         raise ConfigurationError(
             f"plot_modes_heatmap: expected Modes, got {type(modes).__name__}."
         )
-    if mode_range is not None:
-        if n_modes is not None:
-            # mode_range takes the slice wholesale, so a call passing both
-            # would plot the range and drop n_modes without saying so.
-            raise ConfigurationError(
-                f"plot_modes_heatmap: got both n_modes={n_modes!r} and "
-                f"mode_range={mode_range!r}; pass one — n_modes for the first "
-                "N modes, mode_range=(start, stop) for a slice."
-            )
-        start, stop = mode_range
-        start, stop = int(start), int(stop)
-        if not 0 <= start < stop:
-            # A negative start wraps under numpy slicing and start >= stop
-            # selects nothing, both of which reach pcolormesh as a shape
-            # mismatch rather than as an error about the range.
-            raise ConfigurationError(
-                f"plot_modes_heatmap: mode_range={mode_range!r} must be a "
-                "half-open (start, stop) with 0 <= start < stop."
-            )
-        if start >= modes.n_modes:
-            raise ConfigurationError(
-                f"plot_modes_heatmap: mode_range={mode_range!r} starts past "
-                f"the {modes.n_modes} mode(s) this result carries."
-            )
-        stop = min(stop, modes.n_modes)
+    columns = _selected_modes('plot_modes_heatmap', modes.n_modes, n_modes,
+                              mode_numbers)
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    if mode_range is None:
-        start = 0
-        stop = (modes.n_modes if n_modes is None
-                else min(int(n_modes), modes.n_modes))
-    n_plot = stop - start
-    phi = np.asarray(modes.phi[:, start:stop])
+    n_plot = columns.size
+    phi = np.asarray(modes.phi[:, columns])
     if np.iscomplexobj(phi):
         phi = phi.real
     phi = phi.copy()
@@ -1049,9 +1274,13 @@ def plot_modes_heatmap(
         vabs = float(np.max(np.abs(phi))) if phi.size else 1.0
     vmin = -vabs if vmin is None else vmin
     vmax = vabs if vmax is None else vmax
-    idx = np.arange(start + 1, stop + 1)
-    # ``shading='nearest'`` centres each column on its integer mode index,
-    # so no (n+1)-long edge array is needed.
+    numbers = columns + 1
+    consecutive = bool(np.all(np.diff(numbers) == 1))
+    # ``shading='nearest'`` centres each column on its x, so no (n+1)-long
+    # edge array is needed. Chosen modes with gaps sit side by side, each
+    # labelled: on their own numbers, 'nearest' would widen a column across
+    # every mode left out, drawing modes the selection does not contain.
+    idx = numbers if consecutive else np.arange(n_plot)
     im = ax.pcolormesh(idx, modes.depths, phi, cmap=cmap,
                        shading='nearest', vmin=vmin, vmax=vmax)
     if show_colorbar:
@@ -1060,11 +1289,13 @@ def plot_modes_heatmap(
             label='Normalised amplitude' if normalize else r'$\psi_m(z)$',
         )
     ax.set_xlabel('Mode index')
-    # A mode index is an integer — mode 4.5 does not exist. On a short span the
-    # default locator subdivides: mode_range=(3, 7) drew 3.5, 4.5, 5.5, 6.5 and
-    # 7.5, five of nine ticks naming modes the field does not contain.
-    from matplotlib.ticker import MaxNLocator
-    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    if consecutive:
+        # A mode index is an integer — mode 4.5 does not exist. On a short
+        # span the default locator subdivides, five of nine ticks of a
+        # four-mode span naming modes the field does not contain.
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    else:
+        ax.set_xticks(idx, [str(n) for n in numbers])
     ax.set_ylabel('Depth (m)')
     invert_yaxis_once(ax)
     # A Modes carrying no f0 gets no frequency in the title rather than a
@@ -1086,23 +1317,24 @@ def _coefficient_symbol(rc: ReflectionCoefficient) -> Tuple[str, str]:
     """``(symbol letter, quantity name)`` for what this result actually holds.
 
     OASR returns a transmission coefficient under ``reflection_type=
-    'transmission'`` (``models/oases/oasr.py``
+    'transmission'`` or ``'P-SV transmission'`` (``models/oases/oasr.py``
     ``_resolve_reflection_type``), and
     that column is an amplitude ratio across the interface, not a reflection
     coefficient — it is not bounded by 1 and it is not the same quantity. A
     result carrying no ``reflection_type`` is a reflection coefficient:
     Bounce writes only BRC/TRC tables, and OASR's own default is 'P-P'.
     """
-    if rc.reflection_type == 'transmission':
+    if str(rc.reflection_type).endswith('transmission'):
         return 'T', 'Transmission coefficient'
     return 'R', 'Reflection coefficient'
 
 
-#: The knobs each branch of ``_plot_reflection_coefficient`` cannot use.
+#: The knobs each branch of ``plot_reflection_coefficient`` cannot use.
 _REFLECTION_MAP_ONLY = ('angle_on_x', 'frequency_unit', 'cmap', 'vmin', 'vmax',
                         'show_colorbar')
+_REFLECTION_LINE_ONLY = ('show_phase', 'mark_critical', 'label', 'color')
 _REFLECTION_BRANCH_UNUSED = {
-    'broadband': ('show_phase',),
+    'broadband': _REFLECTION_LINE_ONLY,
     'narrowband': _REFLECTION_MAP_ONLY,
 }
 
@@ -1121,66 +1353,131 @@ def _loss_name(rc: ReflectionCoefficient) -> str:
     table as readily as a bottom one, and the plotter cannot tell which
     interface the caller bounced off.
     """
-    if rc.reflection_type == 'transmission':
+    if str(rc.reflection_type).endswith('transmission'):
         return 'Transmission loss'
     return 'Reflection loss'
 
 
 @typed_plot_error(who='ReflectionCoefficient.plot')
-def _plot_reflection_coefficient(
+def plot_reflection_coefficient(
     rc: ReflectionCoefficient,
     ax=None,
     *,
     figsize: Tuple[float, float] = (8, 5),
     title: Optional[str] = None,
-    quantity: str = 'magnitude',
+    value: str = 'magnitude',
     show_phase: Optional[bool] = None,
+    mark_critical: Optional[bool] = None,
+    label: Optional[str] = None,
+    color=None,
     angle_on_x: Optional[bool] = None,
     frequency_unit: Optional[str] = None,
     cmap: Optional[str] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     show_colorbar: Optional[bool] = None,
+    **mpl_kw,
 ):
-    """Auto-detect narrowband (line) vs broadband (heatmap) reflection coefficient.
+    """A reflection coefficient: a line ``|R|(θ)`` for a narrowband table,
+    a heatmap ``|R|(θ, f)`` for a broadband one. ``rc.plot()`` draws the
+    same picture.
 
-    ``quantity='loss'`` draws ``-20 log10 |R|`` in decibels instead of the
+    ``value='loss'`` draws ``-20 log10 |R|`` in decibels instead of the
     linear magnitude — the form a reflection is read in against grazing
     angle, where the critical angle is the knee and the plateau is the loss
-    per bounce. ``quantity='magnitude'`` (the default) keeps ``|R|``.
+    per bounce. ``value='magnitude'`` (the default) keeps ``|R|``, and
+    ``value='phase'`` draws the phase ``φ(θ)`` (radians) as the line of a
+    narrowband table, so several tables' phases overlay on one ``ax=``.
 
-    ``show_phase=True`` overlays the phase ``φ(θ)`` on a twin y-axis
-    when the input is narrowband (single frequency).
+    On the narrowband line: ``show_phase=True`` overlays the phase ``φ(θ)``
+    (radians) on a twin y-axis; ``mark_critical=True`` rules the table's
+    :attr:`~uacpy.core.results.ReflectionCoefficient.critical_angle_deg` in the
+    line's colour (a seabed slower than the water has none and gets no rule;
+    a table that does not know its critical angle is refused); ``label=``,
+    ``color=`` and ``**mpl_kw`` style the line, so several tables overlay on
+    one ``ax=`` — labelled lines take the colour cycle unless ``color=`` is
+    given and add a legend, and a single unlabelled line colours the y
+    axis::
+
+        fig, ax = bottom_loss_curve('clay').plot(value='loss', label='clay')
+        bottom_loss_curve('sand').plot(value='loss', label='sand', ax=ax)
 
     For the broadband map, ``angle_on_x=True`` puts grazing angle on the
     abscissa so the map can sit beside a narrowband ``|R|(θ)`` panel on a
     shared axis, and ``frequency_unit='Hz'`` labels the other axis in hertz --
     a band of tens to thousands of hertz reads as 0.02-2 on a kHz axis.
     ``show_colorbar=False`` leaves the bar to the caller. ``cmap`` (default
-    ``'viridis'``), ``vmin`` and ``vmax`` style the map.
+    ``style.MAGNITUDE_COLORMAP``, viridis), ``vmin`` and ``vmax`` style the map.
 
     Each of these knobs belongs to one branch, and a knob the drawn branch
-    cannot use is refused rather than ignored: ``show_phase`` on a broadband
-    result, or any map knob on a narrowband one."""
+    cannot use is refused rather than ignored: a line knob on a broadband
+    result, or any map knob on a narrowband one.
+
+    Parameters
+    ----------
+    rc : ReflectionCoefficient
+        The table to draw.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(8, 5)`` by default; unused when
+        ``ax`` is given.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    value : {'magnitude', 'loss', 'phase'}, optional
+        ``|R|`` (default), ``-20 log10 |R|`` in dB, or the phase (rad) —
+        the last on the line only.
+    show_phase : bool, optional
+        Line only: overlay the phase (rad) on a twin axis.
+    mark_critical : bool, optional
+        Line only: rule the table's critical angle.
+    label : str, optional
+        Line only: legend label of the line.
+    color : optional
+        Line only: colour of the line.
+    angle_on_x : bool, optional
+        Map only: grazing angle on the abscissa.
+    frequency_unit : {'kHz', 'Hz'}, optional
+        Map only: unit of the frequency axis (kHz by default).
+    cmap : str, optional
+        Map only: colormap.
+    vmin, vmax : float, optional
+        Map only: colour limits.
+    show_colorbar : bool, optional
+        Map only: draw the colorbar (default True).
+    **mpl_kw
+        Line only: matplotlib keywords for the line.
+    """
     if not isinstance(rc, ReflectionCoefficient):
         raise ConfigurationError(
             f"ReflectionCoefficient.plot: expected ReflectionCoefficient, "
             f"got {type(rc).__name__}."
         )
-    if quantity not in ('magnitude', 'loss'):
+    if value not in ('magnitude', 'loss', 'phase'):
         raise ConfigurationError(
-            f"ReflectionCoefficient.plot: quantity must be 'magnitude' or "
-            f"'loss', got {quantity!r}.")
-    supplied = {'show_phase': show_phase, 'angle_on_x': angle_on_x,
+            f"ReflectionCoefficient.plot: value must be 'magnitude', 'loss' "
+            f"or 'phase', got {value!r}.")
+    if value == 'phase' and show_phase:
+        raise ConfigurationError(
+            "ReflectionCoefficient.plot: value='phase' draws the phase as the "
+            "line and show_phase=True overlays it again on a twin axis; the "
+            "two ask for the same curve twice.",
+            remediation="Pass value='phase' for a phase panel, or "
+                        "show_phase=True to overlay it on the |R| line.")
+    supplied = {'show_phase': show_phase, 'mark_critical': mark_critical,
+                'label': label, 'color': color, 'angle_on_x': angle_on_x,
                 'frequency_unit': frequency_unit, 'cmap': cmap, 'vmin': vmin,
                 'vmax': vmax, 'show_colorbar': show_colorbar}
     branch = 'broadband' if rc.is_broadband else 'narrowband'
     unused = [k for k in _REFLECTION_BRANCH_UNUSED[branch]
               if supplied[k] is not None]
+    if branch == 'broadband':
+        unused += sorted(mpl_kw)
     if unused:
         message = (
             f"ReflectionCoefficient.plot: {', '.join(f'{k}=' for k in unused)} "
-            f"has no effect on a {branch} result. show_phase= applies to the "
+            f"has no effect on a {branch} result. show_phase=, "
+            f"mark_critical=, label=, color= and line keywords apply to the "
             f"single-frequency |R|(θ) line; angle_on_x=, frequency_unit=, "
             f"cmap=, vmin=, vmax= and show_colorbar= to the broadband "
             f"|R|(θ, f) map.")
@@ -1191,8 +1488,13 @@ def _plot_reflection_coefficient(
                             "for the phase line.")
         raise ConfigurationError(message)
     if rc.is_broadband:
+        if value == 'phase':
+            raise ConfigurationError(
+                "ReflectionCoefficient.plot: value='phase' draws the phase "
+                "line of a single-frequency table; this one is broadband.",
+                remediation="Pick one frequency first, rc.at(frequency=f).")
         frequency_unit = 'kHz' if frequency_unit is None else frequency_unit
-        cmap = 'viridis' if cmap is None else cmap
+        cmap = MAGNITUDE_COLORMAP if cmap is None else cmap
         _owns_fig = ax is None
         fig, ax = fig_ax(ax, figsize)
         if frequency_unit not in ('kHz', 'Hz'):
@@ -1205,29 +1507,29 @@ def _plot_reflection_coefficient(
         # rc.magnitude is (angle, frequency); pcolormesh wants C indexed (y, x), so the
         # orientation is read off the result's documented layout rather than
         # inferred from which axis length happens to match.
-        values = rc.magnitude if quantity == 'magnitude' else rc.dB
-        saturates = (quantity == 'loss' and vmax is None
+        values = rc.magnitude if value == 'magnitude' else rc.dB
+        saturates = (value == 'loss' and vmax is None
                      and (vmin is None or vmin < _LOSS_VIEW_MAX_DB)
                      and np.nanmax(values) > _LOSS_VIEW_MAX_DB)
         if saturates:
             vmax = _LOSS_VIEW_MAX_DB
         if angle_on_x:
-            x, y, C = rc.angles, f_axis, values.T
+            x, y, C = rc.angles_deg, f_axis, values.T
             xlabel, ylabel = 'Grazing angle (°)', f_label
         else:
-            x, y, C = f_axis, rc.angles, values
+            x, y, C = f_axis, rc.angles_deg, values
             xlabel, ylabel = f_label, 'Grazing angle (°)'
         im = ax.pcolormesh(x, y, C, shading='nearest', cmap=cmap,
                            vmin=vmin, vmax=vmax)
         letter, quantity_name = _coefficient_symbol(rc)
-        bar_label = (f'|{letter}|' if quantity == 'magnitude'
+        bar_label = (f'|{letter}|' if value == 'magnitude'
                      else f'{_loss_name(rc)} (dB)')
         if show_colorbar is None or show_colorbar:
             fig.colorbar(im, ax=ax, label=bar_label,
                          extend='max' if saturates else 'neither')
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        auto = (f'{quantity_name} |{letter}(θ, f)|' if quantity == 'magnitude'
+        auto = (f'{quantity_name} |{letter}(θ, f)|' if value == 'magnitude'
                 else f'{_loss_name(rc)} (θ, f)')
         ax.set_title(_title_or(title, auto))
         if _owns_fig:
@@ -1237,27 +1539,56 @@ def _plot_reflection_coefficient(
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
     letter, quantity_name = _coefficient_symbol(rc)
-    if quantity == 'magnitude':
+    if value == 'magnitude':
         values, ylabel, auto = rc.magnitude, f'|{letter}|', quantity_name
+    elif value == 'phase':
+        values = rc.phase
+        ylabel, auto = f'Phase of {letter} (rad)', f'{quantity_name} phase'
     else:
         values = rc.dB
         ylabel = auto = f'{_loss_name(rc)}'
         ylabel = f'{ylabel} (dB)'
-    ax.plot(rc.angles, values, label=ylabel, color='C0')
-    if quantity == 'loss' and np.nanmax(values) > _LOSS_VIEW_MAX_DB:
+    if mark_critical and rc.critical_angle_deg is None:
+        raise ConfigurationError(
+            "ReflectionCoefficient.plot: mark_critical=True, but this table "
+            "does not carry its critical angle (critical_angle is None).",
+            remediation="A fluid seabed's table from uacpy.acoustics."
+                        "bottom_loss_curve carries it; for another table, "
+                        "rule uacpy.acoustics.critical_angle(c_bottom, "
+                        "c_water) with ax.axvline.")
+    # One unlabelled line takes C0; labelled lines overlay and take the
+    # colour cycle unless color= is given.
+    if color is None and label is None:
+        color = 'C0'
+    line, = ax.plot(rc.angles_deg, values,
+                    label=ylabel if label is None else label,
+                    **({} if color is None else {'color': color}), **mpl_kw)
+    colour = line.get_color()
+    if value == 'loss' and np.nanmax(values) > _LOSS_VIEW_MAX_DB:
         # The view autoscaling would give a line whose top is the cut level.
         low = min(np.nanmin(values), _LOSS_VIEW_MAX_DB)
         pad = ax.margins()[1] * (_LOSS_VIEW_MAX_DB - low)
         ax.set_ylim(low - pad, _LOSS_VIEW_MAX_DB + pad)
+    critical = rc.critical_angle_deg
+    if mark_critical and critical is not None and np.isfinite(critical):
+        ax.axvline(critical, color=colour, ls=':', lw=1.0)
     ax.set_xlabel('Grazing angle (°)')
-    ax.set_ylabel(ylabel, color='C0')
-    ax.tick_params(axis='y', labelcolor='C0')
+    if label is None:
+        # One line: the axis takes its colour, which tells it from the phase
+        # axis show_phase adds.
+        ax.set_ylabel(ylabel, color=colour)
+        ax.tick_params(axis='y', labelcolor=colour)
+    else:
+        # Labelled lines overlay, and the legend tells them apart; an axis in
+        # one line's colour would claim it for that line.
+        ax.set_ylabel(ylabel, color=mpl.rcParams['axes.labelcolor'])
+        ax.tick_params(axis='y', labelcolor=mpl.rcParams['ytick.color'])
+        ax.legend(fontsize='small')
     ax.grid(True, alpha=0.3)
     if show_phase:
         ax_phi = ax.twinx()
-        ax_phi.plot(rc.angles, np.rad2deg(rc.phase), '--', color='C1',
-                    label='φ')
-        ax_phi.set_ylabel('Phase (°)', color='C1')
+        ax_phi.plot(rc.angles_deg, rc.phase, '--', color='C1', label='φ')
+        ax_phi.set_ylabel('Phase (rad)', color='C1')
         ax_phi.tick_params(axis='y', labelcolor='C1')
     ax.set_title(_title_or(title, auto))
     if _owns_fig:
@@ -1295,13 +1626,14 @@ def _array_coordinate(positions):
 
 
 @typed_plot_error(who='Covariance.plot')
-def _plot_covariance(
-    cov: Covariance,
+def plot_covariance(
+    covariance: Covariance,
     ax=None,
     *,
     frequency_index: int = 0,
     figsize: Tuple[float, float] = (6, 5),
     title: Optional[str] = None,
+    cmap: Optional[str] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     show_colorbar: bool = True,
@@ -1311,47 +1643,72 @@ def _plot_covariance(
     A line array whose ``receiver_positions`` run along one coordinate (a
     vertical array in depth, a horizontal one in x or y) is drawn against
     that coordinate, depth increasing downward; any other array is drawn
-    against the receiver index. ``vmin`` / ``vmax`` fix the colour limits
-    (``None`` autoscales each) and ``show_colorbar=False`` leaves the bar to
-    :func:`~uacpy.plot.shared_colorbar`, as on :func:`~uacpy.plot.plot_field`."""
-    if not isinstance(cov, Covariance):
+    against the receiver index. ``cmap`` (default
+    ``style.MAGNITUDE_COLORMAP``, viridis), ``vmin`` / ``vmax`` fix the colour
+    map and limits (``None`` autoscales each) and ``show_colorbar=False`` leaves the bar to
+    :func:`~uacpy.plot.shared_colorbar`, as on :func:`~uacpy.plot.plot_field`.
+
+    Parameters
+    ----------
+    covariance : Covariance
+        The covariance to draw.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    frequency_index : int, optional
+        Which frequency of the covariance (default the first).
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(6, 5)`` by default; unused when
+        ``ax`` is given.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    cmap : str, optional
+        Colormap (see above).
+    vmin, vmax : float, optional
+        Colour limits (see above).
+    show_colorbar : bool, optional
+        Draw the colorbar. Default True.
+    """
+    if not isinstance(covariance, Covariance):
         raise ConfigurationError(
-            f"Covariance.plot: expected Covariance, got {type(cov).__name__}."
+            f"Covariance.plot: expected Covariance, got "
+            f"{type(covariance).__name__}."
         )
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    C = np.abs(cov.covariance[frequency_index])
-    along = _array_coordinate(getattr(cov, 'receiver_positions', None))
+    C = np.abs(covariance.covariance[frequency_index])
+    along = _array_coordinate(getattr(covariance, 'receiver_positions', None))
     if along is None:
-        im = ax.imshow(C, cmap='viridis', aspect='auto', origin='upper',
+        im = ax.imshow(C, cmap=MAGNITUDE_COLORMAP if cmap is None else cmap,
+                       aspect='auto', origin='upper',
                        vmin=vmin, vmax=vmax)
         ax.set_xlabel('Receiver j')
         ax.set_ylabel('Receiver i')
     else:
         coordinate, label, is_depth = along
-        im = ax.pcolormesh(coordinate, coordinate, C, cmap='viridis',
+        im = ax.pcolormesh(coordinate, coordinate, C,
+                           cmap=MAGNITUDE_COLORMAP if cmap is None else cmap,
                            shading='nearest', vmin=vmin, vmax=vmax)
         ax.set_xlabel(f'{label}, j')
         ax.set_ylabel(f'{label}, i')
         if is_depth:
             invert_yaxis_once(ax)
-    unit = cov.unit
+    unit = covariance.unit
     if show_colorbar:
         fig.colorbar(im, ax=ax, label=f'|C| ({unit})' if unit else '|C|')
-    f_hz = (float(cov.frequencies[frequency_index])
-            if cov.frequencies is not None else None)
+    f_hz = (float(covariance.frequencies[frequency_index])
+            if covariance.frequencies is not None else None)
     if title is None and f_hz is not None:
         title = f"Covariance at {f_hz:.1f} Hz"
     if title:
         ax.set_title(title)
     if _owns_fig:
-        _draw_result_credit(fig, cov, env=None)
+        _draw_result_credit(fig, covariance, env=None)
     return fig, ax
 
 
 @typed_plot_error(who='Replicas.plot')
-def _plot_replicas(
-    rep: Replicas,
+def plot_replicas(
+    replicas: Replicas,
     ax=None,
     *,
     frequency_index: int = 0,
@@ -1359,6 +1716,7 @@ def _plot_replicas(
     y_index: int = 0,
     figsize: Tuple[float, float] = (8, 5),
     title: Optional[str] = None,
+    cmap: Optional[str] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     show_colorbar: bool = True,
@@ -1373,21 +1731,44 @@ def _plot_replicas(
     ``y_index`` picks the plane of an OASN ``(depth, x, y)`` candidate grid
     (the first by default) and the default title names it, with the
     frequency and the element; a ``(depth, range)`` bank has no ``y``.
-    ``vmin`` / ``vmax`` fix the colour limits (``None`` autoscales each) and
+    ``cmap`` (default ``style.REPLICA_COLORMAP``, magma), ``vmin`` / ``vmax``
+    fix the colour map and limits (``None`` autoscales each) and
     ``show_colorbar=False`` leaves the bar to
-    :func:`~uacpy.plot.shared_colorbar`, as on :func:`~uacpy.plot.plot_field`."""
-    if not isinstance(rep, Replicas):
+    :func:`~uacpy.plot.shared_colorbar`, as on :func:`~uacpy.plot.plot_field`.
+
+    Parameters
+    ----------
+    replicas : Replicas
+        The replica bank to draw.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    frequency_index, sensor_index, y_index : int, optional
+        Which frequency, element and ``y`` plane (each the first by
+        default).
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(8, 5)`` by default; unused when
+        ``ax`` is given.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    cmap : str, optional
+        Colormap (see above).
+    vmin, vmax : float, optional
+        Colour limits (see above).
+    show_colorbar : bool, optional
+        Draw the colorbar. Default True.
+    """
+    if not isinstance(replicas, Replicas):
         raise ConfigurationError(
-            f"Replicas.plot: expected Replicas, got {type(rep).__name__}."
+            f"Replicas.plot: expected Replicas, got {type(replicas).__name__}."
         )
-    names = list(rep.candidates)
+    names = list(replicas.candidates)
     horizontal = [name for name in names if name in ('range', 'x')]
     if 'depth' not in names or len(horizontal) != 1 or not set(names) <= {
             'depth', horizontal[0], 'y'}:
         raise ConfigurationError(
             f"Replicas.plot: draws a candidate (depth, range) or (depth, x) "
             f"grid, with an optional y; these candidates are {names}.")
-    n_y = rep.candidates['y'].size if 'y' in names else 1
+    n_y = replicas.candidates['y'].size if 'y' in names else 1
     if not -n_y <= y_index < n_y:
         raise ConfigurationError(
             f"Replicas.plot: y_index={y_index} is outside the {n_y} candidate "
@@ -1396,31 +1777,33 @@ def _plot_replicas(
     fig, ax = fig_ax(ax, figsize)
     # replicas is (n_freq, *candidates, n_rcv): take one frequency and one
     # array element, and cut the candidate grid at one y node.
-    cut = rep.replicas[frequency_index, ..., sensor_index]
+    cut = replicas.replicas[frequency_index, ..., sensor_index]
     if 'y' in names:
         cut = np.take(cut, y_index, axis=names.index('y'))
         names = [name for name in names if name != 'y']
     R = np.abs(np.transpose(cut, (names.index('depth'),
                                   names.index(horizontal[0]))))
     im = ax.pcolormesh(
-        m_to_km(rep.candidates[horizontal[0]]), rep.candidates['depth'], R,
-        shading='nearest', cmap='magma', vmin=vmin, vmax=vmax,
+        m_to_km(replicas.candidates[horizontal[0]]),
+        replicas.candidates['depth'], R,
+        shading='nearest', cmap=REPLICA_COLORMAP if cmap is None else cmap,
+        vmin=vmin, vmax=vmax,
     )
     if show_colorbar:
         fig.colorbar(im, ax=ax, label='|R|')
     ax.set_xlabel(f'Candidate {horizontal[0]} (km)')
     ax.set_ylabel('Candidate depth (m)')
     invert_yaxis_once(ax)
-    freqs = getattr(rep, 'frequencies', None)
+    freqs = getattr(replicas, 'frequencies', None)
     freqs = np.atleast_1d(freqs if freqs is not None else [])
     at_f = (f", {float(freqs[frequency_index]):g} Hz"
             if freqs.size > abs(frequency_index) else "")
-    at_y = (f", y = {float(rep.candidates['y'][y_index]):g} m"
-            if 'y' in rep.candidates else "")
+    at_y = (f", y = {float(replicas.candidates['y'][y_index]):g} m"
+            if 'y' in replicas.candidates else "")
     ax.set_title(_title_or(
         title, f"Replica |R|, element {sensor_index}{at_f}{at_y}"))
     if _owns_fig:
-        _draw_result_credit(fig, rep, env=None)
+        _draw_result_credit(fig, replicas, env=None)
     return fig, ax
 
 
@@ -1462,7 +1845,7 @@ def _resolve_beam_pattern(pattern) -> np.ndarray:
     if isinstance(pattern, (str, Path)):
         from uacpy.io.refl_io import read_source_beam_pattern
         read = read_source_beam_pattern(pattern)
-        return np.column_stack([read.angles, read.levels_dB])
+        return np.column_stack([read.angles_deg, read.levels_dB])
     table = np.asarray(pattern, dtype=float)
     if table.ndim != 2 or table.shape[1] != 2:
         raise ConfigurationError(
@@ -1561,58 +1944,36 @@ def _densify_in_angle(angles, levels, step_deg: float = 1.0):
 
 @typed_plot_error
 def plot_mode_excitation(
-    modes,
-    source,
+    pattern,
     ax=None,
     *,
-    sound_speed: Optional[float] = None,
-    env=None,
     show_array_factor: bool = True,
     dynamic_range_dB: float = 40.0,
     figsize: Tuple[float, float] = (8.0, 4.5),
     title: Optional[str] = None,
 ):
-    """What a source array drives, both ways, on one angle axis.
+    """What a source array drives, both ways, on one angle axis: the
+    :class:`~uacpy.core.results.ExcitationPattern`
+    :meth:`Modes.excitation_pattern
+    <uacpy.core.results.Modes.excitation_pattern>` returns
+    (``pattern.plot()`` draws the same picture).
 
-    A stem per trapped mode at that mode's grazing angle
-    ``θₘ = arccos(c / vₚ,ₘ)``, whose height is the modal excitation
-    ``|Σₙ wₙ·φₘ(zₙ)|`` (:meth:`~uacpy.core.results.Modes.excitation`) — what
-    the array actually does in the waveguide, the *mode filter* of Medwin &
-    Clay §11.3.1. Over it, optionally, the free-field pattern of the same
-    array: its **array beam pattern** ``P(θ) = f(θ)·A(θ)`` when the elements
-    are directional, or the bare array factor ``A(θ)`` when they are not
-    (Butler & Sherman §7.1.1; :meth:`~uacpy.Source.array_beam_pattern`).
-    Both the stems and the curve carry the element pattern the engine
-    applies, so the comparison is one array described two ways.
-
-    Both are normalised to their own maximum, so the figure compares
-    *shapes*, which is the comparison that means something: the two agree
+    A stem per mode at that mode's grazing angle, whose height is the modal
+    excitation — what the array actually does in the waveguide, the *mode
+    filter* of Medwin & Clay §11.3.1. Over it, optionally, the free-field
+    pattern of the same array folded over ±θ: its array beam pattern
+    ``P = f·A`` when the elements are directional, the bare array factor
+    ``A`` when they are not (Butler & Sherman §7.1.1). Both are drawn in dB
+    re their own maximum, so the figure compares *shapes*: the two agree
     while the pattern is symmetric in ±θ and part company once steering
     breaks that symmetry, because a trapped mode is a standing wave with
-    equal up- and down-going halves and no single angle to be steered onto.
-    A reader who takes the free-field curve for the channel's response is
-    the reason this plot draws them together rather than apart.
+    equal up- and down-going halves. A mode with no grazing angle (NaN) or
+    no excitation has no stem.
 
     Parameters
     ----------
-    modes : Modes
-        From ``Kraken(...).compute_modes(env, source)``, tabulated over a
-        depth range spanning the array.
-    source : Source
-        The array: its ``depths`` and complex ``weights``.
-    sound_speed : float, optional
-        Reference speed (m/s) the grazing angles are measured against.
-        ``None`` (default) reads it from ``env`` at the source depth — the
-        depth at which the array factor's ``θ`` is a launch angle. With
-        neither, the call is **refused**: the x axis is an angle measured
-        against this speed, so defaulting it silently moved every stem (up to
-        5.3° on a 1545 m/s environment). A mode whose phase
-        speed is below it has no real grazing angle at that depth and is
-        dropped, with a warning naming how many: clipping them onto 0°
-        would pile evanescent modes on the axis origin as if they travelled
-        horizontally.
-    env : Environment, optional
-        Supplies ``sound_speed`` at the source depth when it is not given.
+    pattern : ExcitationPattern
+        What to draw.
     show_array_factor : bool
         Draw the free-field curve. ``False`` leaves the mode filter alone.
     dynamic_range_dB : float
@@ -1626,41 +1987,17 @@ def plot_mode_excitation(
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
     """
+    if type(pattern).__name__ != 'ExcitationPattern':
+        raise ConfigurationError(
+            f"plot_mode_excitation: expected an ExcitationPattern; got "
+            f"{type(pattern).__name__}.",
+            remediation="Compute it first: p = modes.excitation_pattern("
+                        "source, sound_speed=...); then p.plot().")
     floor_dB = -_checked_dynamic_range_dB('plot_mode_excitation',
                                           dynamic_range_dB)
-    if sound_speed is None:
-        if env is None:
-            raise ConfigurationError(
-                "plot_mode_excitation: the x axis is a grazing angle, "
-                "arccos(c/v_m), so it needs the speed those angles are "
-                "measured against. Pass sound_speed= (the speed at the "
-                "source depth), or env= to read it off the profile.",
-                remediation="sound_speed=env.ssp.sound_speed_at("
-                            "source.depths[0])")
-        # env.ssp.sound_speed_at is the accessor for a speed at a depth, and it
-        # is called unguarded: a failure here must surface, because a
-        # substituted reference speed moves every stem (5.3 degrees on a
-        # 1545 m/s environment, one mode from 8.0 to 15.9).
-        z_s = float(np.atleast_1d(source.depths)[0])
-        sound_speed = float(np.atleast_1d(env.ssp.sound_speed_at(z_s))[0])
-    amp = np.abs(modes.excitation(source, sound_speed=sound_speed))
-    # One home for arccos(c/v_m): Modes owns it, and owns the knowledge that
-    # a mode below the reference speed is evanescent and has no real angle.
-    angles = modes.grazing_angles(sound_speed)
-    propagating = np.isfinite(angles)
-    dropped = int(np.sum(~propagating))
-    # Silent when the source carries a pattern: Modes.excitation has already
-    # warned about these same modes against this same reference speed, and
-    # said they come back as NaN. Two warnings for one condition teach the
-    # reader to skip both, and "returned as NaN" already implies "not drawn".
-    if dropped and getattr(source, 'beam_pattern', None) is None:
-        _plot_warn(
-            f"plot_mode_excitation: {dropped} of {angles.size} modes have a "
-            f"phase speed below the {float(sound_speed):g} m/s reference, so "
-            f"they have no real grazing angle there and are not drawn. Pass "
-            f"sound_speed= (or env=) for the speed at the source depth.", ValidityWarning)
-    good = (propagating & np.isfinite(angles) & np.isfinite(amp)
-            & (amp > 0.0))
+    angles = np.asarray(pattern.grazing_angles_deg, dtype=float)
+    amp = np.asarray(pattern.excitation, dtype=float)
+    good = np.isfinite(angles) & np.isfinite(amp) & (amp > 0.0)
     if not np.any(good):
         raise ConfigurationError(
             "plot_mode_excitation: no mode has both a finite grazing angle "
@@ -1674,61 +2011,55 @@ def plot_mode_excitation(
     ax.stem(angles, np.maximum(level, floor_dB), bottom=floor_dB,
             basefmt=' ', linefmt='C0-', markerfmt='C0o',
             label='mode excitation (waveguide)')
-    if show_array_factor:
-        # Folded over +/-theta, and normalised over the whole fan rather than
-        # the drawn half. A trapped mode is a standing wave — it responds to
-        # e^{+ik_z z} AND e^{-ik_z z} — so the free-field quantity comparable
-        # to a mode stem is max(|AF(+θ)|, |AF(−θ)|). Drawing |AF(+θ)| over
-        # [0, 90] alone put an upward-steered array's main lobe off the plot
-        # and normalised a 12 dB sidelobe to 0 dB.
-        span = np.linspace(0.0, max(90.0, float(angles.max())), 721)
-        # P = f*A when the elements are directional, A alone when they are
-        # not (Butler & Sherman §7.1.1). Drawing the bare factor for a shaded
-        # array would show the geometry only and make a directional source
-        # look omnidirectional, while the stems beside it carry f.
-        shaped = getattr(source, 'beam_pattern', None) is not None
-        pattern = (source.array_beam_pattern if shaped
-                   else source.array_factor)
-        af = np.maximum(
-            np.abs(pattern(span, sound_speed=sound_speed)),
-            np.abs(pattern(-span, sound_speed=sound_speed)))
-        if af.max() > 0.0:
-            ax.plot(span, np.maximum(20.0 * np.log10(af / af.max()),
-                                      floor_dB),
-                    'C3-', lw=1.2, alpha=0.85,
-                    label=('array beam pattern P=f·A (free field, ±θ)'
-                           if shaped else
-                           'array factor (free field, folded ±θ)'))
+    af = np.asarray(pattern.pattern, dtype=float)
+    if show_array_factor and af.max() > 0.0:
+        ax.plot(pattern.pattern_angles_deg,
+                np.maximum(20.0 * np.log10(af / af.max()), floor_dB),
+                'C3-', lw=1.2, alpha=0.85,
+                label=('array beam pattern P=f·A (free field, ±θ)'
+                       if pattern.directional else
+                       'array factor (free field, folded ±θ)'))
     ax.set_xlabel('Mode grazing angle (°)')
     ax.set_ylabel('Normalised amplitude (dB re max)')
     ax.set_ylim(floor_dB, 3.0)
     ax.grid(True, alpha=0.3)
     ax.legend(loc='lower left', fontsize='small')
-    n_src = len(np.atleast_1d(source.depths))
-    aperture = float(np.ptp(np.atleast_1d(source.depths)))
     ax.set_title(_title_or(
-        title, f"Array response — {n_src} source(s) over {aperture:g} m"))
+        title, f"Array response — {pattern.n_sources} source(s) over "
+               f"{pattern.aperture:g} m"))
     if _owns_fig:
-        _draw_result_credit(fig, modes)
+        _record_credit(fig, pattern)
     return fig, ax
 
 
 @typed_plot_error
-def plot_beam_power(beams, ax=None, *, at=None, normalize: bool = True,
+def plot_beam_power(angles_deg, power=None, ax=None, *, at=None,
+                    normalize: bool = True, dB: bool = True,
+                    label: Optional[str] = None,
+                    dynamic_range_dB: Optional[float] = None,
                     title: Optional[str] = None,
                     figsize: Tuple[float, float] = (8, 5), **mpl_kw):
-    """Beam power against look angle, from a :class:`BeamformedField`.
+    """Beam power against look angle: a :class:`BeamformedField`, or an
+    angular spectrum as arrays (what ``bartlett`` / ``mvdr`` /
+    ``music_spectrum`` give for each look angle).
 
     The RECEIVE dual of :func:`plot_beam_pattern`, and deliberately not that
     function: a source beam pattern is a launch fan, so it labels its axis
     'Launch angle' and warns when a table does not span the +/-90 deg
     Bellhop can steer into. A scanned beam is neither — it is what the array
-    heard, over whatever sector was scanned.
+    heard, over whatever sector was scanned. ``beams.plot()`` is
+    ``plot_beam_power(beams)``; ``label=`` and ``ax=`` overlay several
+    processors on one axes.
 
     Parameters
     ----------
-    beams : BeamformedField
-        What :func:`uacpy.acoustic_signal.beamform_field` returned.
+    angles_deg : BeamformedField or array_like
+        What :func:`uacpy.acoustic_signal.beamform_field` returned, or the
+        look angles (deg) of ``power``.
+    power : array_like, optional
+        The beam power at each look angle, with array input. A MVDR or
+        MUSIC output carries no absolute reference, which is what
+        ``normalize`` is for.
     at : int, tuple or dict, optional
         Which point of the grid to draw, when the beamformer ran over one.
         A ``(n_elements, n_ranges)`` field gives ``power`` of shape
@@ -1738,10 +2069,18 @@ def plot_beam_power(beams, ax=None, *, at=None, normalize: bool = True,
         coordinates, ``{'range': 4000.0}``, read at the nearest sample of
         the ``grid_coords`` the result carries (``'frequency'`` for the
         frequency axis of a band). The title names the point drawn. Not
-        needed when the beamformer ran on a single point.
+        needed when the beamformer ran on a single point; refused with
+        array input.
     normalize : bool, default True
-        Draw dB re the peak of the curve, which is how a beam is read. False
-        keeps the absolute ``10*log10(power)``.
+        Draw relative to the peak of the curve, which is how a beam is
+        read. False keeps the absolute power.
+    dB : bool, default True
+        Draw ``10*log10`` of the power; False draws it linear.
+    label : str, optional
+        Legend label of the line; a labelled line adds a legend.
+    dynamic_range_dB : float, optional
+        With ``dB``, the depth below the peak at which the curve is floored,
+        a null drawn on the floor; ``None`` is 120 dB.
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
     title : str, optional
@@ -1749,42 +2088,67 @@ def plot_beam_power(beams, ax=None, *, at=None, normalize: bool = True,
     figsize : tuple, optional
         Size (inches) of the new figure, ``(8, 5)`` by default; unused when
         ``ax`` is given.
+    **mpl_kw
+        Matplotlib keywords for the line.
 
     Returns
     -------
     (fig, ax)
     """
-    power = np.asarray(getattr(beams, 'power', None))
-    angles = np.asarray(getattr(beams, 'angles', None), dtype=float)
-    if power.ndim == 0 or angles.ndim != 1:
-        raise ConfigurationError(
-            "plot_beam_power: expected a BeamformedField from "
-            "beamform_field; got something without power/angles.")
-    axes = _beam_grid_axes(beams, power.ndim - 1)
     where = ''
-    if at is not None:
-        index = _beam_grid_index(at, axes)
-        power = power[(slice(None),) + index]
-        where = ', '.join(
-            f"{name}={values[i]:g}" for (name, values), i in zip(axes, index)
-            if values is not None)
-    if power.ndim != 1:
-        raise ConfigurationError(
-            f"plot_beam_power: the beamformer ran over a grid, so its power "
-            f"is {power.shape} and there is no single curve to draw. Pass "
-            f"at= to choose the point — an index into the axes after the "
-            f"angle one (a range index, or a frequency bin for a broadband "
-            f"run).")
-    with np.errstate(divide='ignore'):
-        level = 10.0 * np.log10(power)
+    if hasattr(angles_deg, 'power'):
+        _refuse_axes_after_carrier('plot_beam_power', angles_deg,
+                                   [('power', power)])
+    if power is None:
+        beams = angles_deg
+        power = np.asarray(getattr(beams, 'power', None))
+        angles = np.asarray(getattr(beams, 'angles_deg', None), dtype=float)
+        if power.ndim == 0 or angles.ndim != 1:
+            raise ConfigurationError(
+                "plot_beam_power: pass a BeamformedField from "
+                "beamform_field, or the look angles and the power, "
+                "plot_beam_power(angles_deg, power).")
+        axes = _beam_grid_axes(beams, power.ndim - 1)
+        if at is not None:
+            index = _beam_grid_index(at, axes)
+            power = power[(slice(None),) + index]
+            where = ', '.join(
+                f"{name}={values[i]:g}" for (name, values), i
+                in zip(axes, index) if values is not None)
+        if power.ndim != 1:
+            raise ConfigurationError(
+                f"plot_beam_power: the beamformer ran over a grid, so its "
+                f"power is {power.shape} and there is no single curve to "
+                f"draw. Pass at= to choose the point — an index into the axes "
+                f"after the angle one (a range index, or a frequency bin for "
+                f"a broadband run).")
+    else:
+        if at is not None:
+            raise ConfigurationError(
+                "plot_beam_power: at= picks a point of a BeamformedField's "
+                "grid; array input is one curve already.",
+                remediation="Drop at=, or index the power array yourself.")
+        angles = np.asarray(angles_deg, dtype=float)
+        power = np.real(np.asarray(power))
+    if dB:
+        # A null look angle sits on the floor below the peak, as on every
+        # magnitude-in-dB line (``_floored_dB``), not dropped from it.
+        level = _floored_dB(power, power=True,
+                            dynamic_range_dB=dynamic_range_dB,
+                            who='plot_beam_power')
         if normalize:
             level = level - np.max(level)
+        ylabel = 'Beam power (dB re max)' if normalize else 'Beam power (dB)'
+    else:
+        level = power / np.max(power) if normalize else power
+        ylabel = 'Beam power (re max)' if normalize else 'Beam power'
     fig, ax = fig_ax(ax, figsize)
-    ax.plot(angles, level, **mpl_kw)
+    ax.plot(angles, level, label=label, **mpl_kw)
     ax.set_xlabel('Look angle (°)')
-    ax.set_ylabel('Beam power (dB re max)' if normalize
-                  else 'Beam power (dB)')
+    ax.set_ylabel(ylabel)
     ax.grid(True, alpha=0.3)
+    if label is not None:
+        ax.legend(fontsize='small')
     ax.set_title(_title_or(title, f'Beam power at {where}' if where
                            else 'Beam power'))
     return fig, ax
@@ -1958,9 +2322,9 @@ def plot_beam_pattern(
     # (``misc/beampattern.f90:59``; Bellhop interpolates it inline at
     # ``bellhop.f90:267-274``). On a polar axes a straight screen segment
     # also cuts a chord across the arc — a two-row 0 dB table, omnidirectional
-    # to Bellhop, drew as a chord through the origin, i.e. a deep broadside
+    # to Bellhop, draws as a chord through the origin, i.e. a deep broadside
     # null. Densifying here keeps the two views showing the same curve;
-    # doing it in one branch only left them 11.2 dB apart.
+    # densified in one branch only, they would sit 11.2 dB apart.
     angles, levels = _densify_in_angle(angles, levels)
 
     if not polar:
@@ -2001,7 +2365,6 @@ def plot_beam_pattern(
     ax.set_ylabel('Level (dB)', labelpad=22)   # the rectilinear view's label
     # A polar radius is short and every radial label sits on the one spoke, so
     # the ~9 ticks a linear dB axis defaults to overprint one another.
-    from matplotlib.ticker import MaxNLocator
     ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
     # Clear of that thetamin spoke, which runs along the top edge — and through
     # an unpadded title — whenever the wedge opens forward.

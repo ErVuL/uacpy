@@ -256,7 +256,7 @@ def frequencies_span_notice(band: _PulseBand, frequencies,
     else ``None``. SPARC marches one pulse in time (doc/sparc.htm), so the
     values set only the band edges they span, not a grid of solves, and the
     result's frequency axis is the deck frequency ``source.frequencies[0]``
-    with the band as its ``band_hz``."""
+    with the band as its :attr:`~uacpy.core.results.Field.band`."""
     if _BAND_FROM_FREQUENCIES not in (band.freq_min_origin,
                                       band.freq_max_origin):
         return None
@@ -270,7 +270,7 @@ def frequencies_span_notice(band: _PulseBand, frequencies,
         f"freq_min = {band.freq_min:g} Hz ({band.freq_min_origin}), "
         f"freq_max = {band.freq_max:g} Hz ({band.freq_max_origin}). The "
         f"result's frequency axis is the deck frequency "
-        f"source.frequencies[0] = {deck:g} Hz, and the band is its band_hz.",
+        f"source.frequencies[0] = {deck:g} Hz, and the band is result.band.",
         FallbackWarning)
 
 

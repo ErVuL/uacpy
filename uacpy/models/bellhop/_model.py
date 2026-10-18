@@ -25,10 +25,8 @@ from uacpy.core.run_settings import OutputSpec, RunMode
 from uacpy.core.source import Source
 from uacpy.io.bellhop_writer import CERVENY_DEFAULTS, write_bellhop_env_file
 from uacpy.io.oalib_writer import (
-    SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
     reject_biological_edges_under_neighbour_interp,
 )
-from uacpy.io.refl_io import stage_source_beam_pattern
 from uacpy.models._spec import EngineTraits, ModelSpec
 from uacpy.models._stacking import _slabs_of
 from uacpy.models.base import (
@@ -54,7 +52,10 @@ from uacpy.models.bellhop._checks import (
     reject_source_outside_the_medium, reject_unequal_paired_grid,
     warn_on_ignored_cerveny_knobs,
 )
-from uacpy.models.bellhop._output import assemble, read_bellhop_output
+from uacpy.models._extract import add_run_note
+from uacpy.models.bellhop._output import (
+    assemble, chosen_beam_count, read_bellhop_output,
+)
 from uacpy.models._budget import work_dir_is_memory_backed
 from uacpy.models.bellhop._plan import (
     band_origin, beam_type_run_mode_notice, carrier_frequency,
@@ -62,16 +63,16 @@ from uacpy.models.bellhop._plan import (
     geometry_notices, launch_source,
     line_source_sgb_notice, pad_receiver_ranges, pulse_samples,
     unused_band_knobs_notice,
-    resolve_interp_ssp, resolve_ray_box, resolve_ray_step, ray_step_origin,
+    resolve_cerveny_knobs, resolve_interp_ssp, resolve_ray_box,
+    resolve_ray_step, ray_step_origin,
 )
 from uacpy.models.bellhop._settings import BellhopSettings
 from uacpy.models.bellhop._synthesis import arrivals_run_settings, synthesise
 from uacpy.models.bellhop._tables import (
     _RUN_MODE_TO_INFLUENCE_LETTER, grid_is_paired,
 )
-from uacpy.models._knobs import whole_count
 from uacpy.models._notices import message_notice
-from uacpy.core.engine_defaults import BELLHOP_BEAM_SHIFT, BELLHOP_BEAM_TYPE, BELLHOP_GRID_TYPE, BELLHOP_INTERP_ALTIMETRY, BELLHOP_INTERP_BATHYMETRY, BELLHOP_LAUNCH_ANGLES, BELLHOP_N_BEAMS
+from uacpy.core.engine_defaults import BELLHOP_BEAM_SHIFT, BELLHOP_BEAM_TYPE, BELLHOP_GRID_TYPE, BELLHOP_INTERP_ALTIMETRY, BELLHOP_INTERP_BATHYMETRY, BELLHOP_LAUNCH_ANGLES_DEG, BELLHOP_N_BEAMS
 
 #: File root of every Bellhop deck and output.
 _BASE_NAME = 'model'
@@ -85,10 +86,13 @@ class Bellhop(PropagationModel):
     Michael B. Porter. Automatically detects and uses the fastest available
     version (bellhopcuda > bellhopcxx > Fortran).
 
-    Performance comparison:
-    - Fortran: Baseline single-threaded
-    - bellhopcxx (C++): 10-30x faster (CPU multithreaded)
-    - bellhopcuda (CUDA): 20-100x+ faster (GPU accelerated)
+    Performance comparison (``third_party/bellhopcuda/README.md``, "Speed"):
+    - Fortran: baseline, single-threaded
+    - bellhopcxx (C++): "the speedup in multithreaded mode roughly scales
+      with the number of logical CPU cores"
+    - bellhopcuda (CUDA): "typically about 10x-50x" on a consumer-grade GPU
+      "for large runs with few receivers", "about 20x-100x" on a
+      server-grade one
 
     The backends are not the same code. ``'fortran'`` is Porter's
     ``Acoustics-Toolbox`` BELLHOP; ``'cxx'`` and ``'cuda'`` are ports of
@@ -350,7 +354,8 @@ class Bellhop(PropagationModel):
         # Ray fan and trace bounding box
         beam_type: str = BELLHOP_BEAM_TYPE,
         n_beams: int = BELLHOP_N_BEAMS,
-        launch_angles: tuple = BELLHOP_LAUNCH_ANGLES,
+        single_beam: Optional[int] = None,
+        launch_angles_deg: tuple = BELLHOP_LAUNCH_ANGLES_DEG,
         ray_step: Optional[float] = None,
         z_box: Optional[float] = None,
         r_box: Optional[float] = None,
@@ -468,7 +473,18 @@ class Bellhop(PropagationModel):
             ray-trace run gets 50. Default ``0``, as ``doc/bellhop.htm``
             advises: "use 0 to have the program calculate a value
             automatically, but conservatively".
-        launch_angles : tuple, optional
+        single_beam : int, optional
+            Trace and sum only beam number ``single_beam`` (1 = the lowest
+            launch angle) of the ``n_beams`` fan: ``TopOpt(6:6) = 'I'`` with
+            the index after ``NBeams`` (``angleMod.f90:32-33``,
+            ``bellhop.f90:265``). The Bellhop User Guide §6.2, "Plotting a
+            single beam": "It is sometimes useful to be able to plot an
+            individual beam in the sum." The beam keeps the width it has in
+            the full fan, which ``n_beams=1`` does not give (a one-beam fan has
+            no angle step). ``None`` (default) sums every beam. Refused past a
+            pinned ``n_beams`` (``angleMod.f90:80-83`` stops on it); with
+            ``n_beams=0`` the binary checks it against the count it picks.
+        launch_angles_deg : tuple, optional
             Launch angle limits (min, max) in degrees, min < max.
             Default ``(-80, 80)``, uacpy guidance (no value in the manual:
             the Bellhop User Guide leaves the fan to "what part of the field
@@ -620,7 +636,8 @@ class Bellhop(PropagationModel):
 
         self.beam_type = beam_type
         self.n_beams = n_beams
-        self.launch_angles = launch_angles
+        self.single_beam = single_beam
+        self.launch_angles_deg = launch_angles_deg
         self.ray_step = ray_step
         self.z_box = z_box
         self.r_box = r_box
@@ -630,18 +647,8 @@ class Bellhop(PropagationModel):
         self.interp_altimetry = interp_altimetry
         self.beam_width_type = beam_width_type
         self.beam_curvature = beam_curvature
-        self.eps_multiplier = (float(eps_multiplier)
-                               if eps_multiplier is not None else None)
-        self.r_loop = float(r_loop) if r_loop is not None else None
-        # Bellhop reads both list-directed into INTEGERs
-        # (ReadEnvironmentBell.f90:217), so a fraction is not a value it
-        # can take.
-        if n_image is not None:
-            whole_count('Bellhop: n_image', n_image, 0)
-            n_image = int(n_image)
-        if ib_win is not None:
-            whole_count('Bellhop: ib_win', ib_win, 0)
-            ib_win = int(ib_win)
+        self.eps_multiplier = eps_multiplier
+        self.r_loop = r_loop
         self.n_image = n_image
         self.ib_win = ib_win
         self.component = component
@@ -761,10 +768,14 @@ class Bellhop(PropagationModel):
         check_knobs(
             beam_type=self.beam_type, beam_width_type=self.beam_width_type,
             beam_curvature=self.beam_curvature, component=self.component,
-            n_beams=self.n_beams, grid_type=self.grid_type, launch_angles=self.launch_angles,
+            eps_multiplier=self.eps_multiplier, r_loop=self.r_loop,
+            n_image=self.n_image, ib_win=self.ib_win,
+            n_beams=self.n_beams, grid_type=self.grid_type,
+            launch_angles_deg=self.launch_angles_deg,
             ray_step=self.ray_step, z_box=self.z_box, r_box=self.r_box,
             n_frequencies=self.n_frequencies,
-            bandwidth_factor=self.bandwidth_factor)
+            bandwidth_factor=self.bandwidth_factor,
+            single_beam=self.single_beam)
 
     def _validate_engine(self, env, source, receiver, run_mode, *,
                          request=None) -> None:
@@ -788,7 +799,7 @@ class Bellhop(PropagationModel):
         reject_unequal_paired_grid(receiver, grid_type=self.grid_type)
         if source.beam_pattern is not None:
             check_beam_pattern_spans_the_fan(source.beam_pattern,
-                                             launch_angles=self.launch_angles)
+                                             launch_angles_deg=self.launch_angles_deg)
 
     # ── stage 3: the settings of the deck ──────────────────────────────
 
@@ -810,7 +821,7 @@ class Bellhop(PropagationModel):
         z_box, z_box_origin, r_box, r_box_origin = resolve_ray_box(
             env, receiver, z_box=self.z_box, r_box=self.r_box)
         notices = geometry_notices(
-            env, source, receiver, mode, launch_angles=self.launch_angles,
+            env, source, receiver, mode, launch_angles_deg=self.launch_angles_deg,
             grid_type=self.grid_type, beam_type=self.beam_type,
             n_beams=self.n_beams,
             model_name=self.model_name, ray_step=step,
@@ -851,6 +862,11 @@ class Bellhop(PropagationModel):
             notices.extend(bounce_notices)
         interp_ssp = resolve_interp_ssp(
             env, interp_ssp=self.interp_ssp, log=self._log)
+        cerveny = resolve_cerveny_knobs(
+            beam_type=self.beam_type, beam_width_type=self.beam_width_type,
+            beam_curvature=self.beam_curvature,
+            eps_multiplier=self.eps_multiplier, r_loop=self.r_loop,
+            n_image=self.n_image, ib_win=self.ib_win)
         deck_ranges, range_trim, pad_notice = pad_receiver_ranges(
             receiver, run_type, beam_type=self.beam_type,
             grid_type=self.grid_type, model_name=self.model_name,
@@ -864,7 +880,7 @@ class Bellhop(PropagationModel):
             fc=fc,
             beam_type=self.beam_type,
             n_beams=self.n_beams,
-            launch_angles=tuple(self.launch_angles),
+            launch_angles_deg=tuple(self.launch_angles_deg),
             ray_step=float(step),
             ray_step_origin=ray_step_origin(step, ray_step=self.ray_step),
             z_box=float(z_box),
@@ -872,6 +888,7 @@ class Bellhop(PropagationModel):
             r_box=float(r_box),
             r_box_origin=r_box_origin,
             interp_ssp=interp_ssp,
+            **cerveny,
             deck_ranges=deck_ranges,
             range_trim=range_trim,
             band_origin=band,
@@ -880,7 +897,7 @@ class Bellhop(PropagationModel):
             bounce_origin=bounce_origin,
             bounce_c_low=knobs.c_low,
             bounce_c_high=knobs.c_high,
-            bounce_rmax_m=knobs.rmax_m,
+            bounce_rmax=knobs.rmax,
             notices=tuple(notices),
         )
 
@@ -907,14 +924,15 @@ class Bellhop(PropagationModel):
         if engine.bounce is None:
             return None
         return prepare_bounce_launch(env, self._bounce_producer(_BounceKnobs(
-            engine.bounce_c_low, engine.bounce_c_high, engine.bounce_rmax_m)))
+            engine.bounce_c_low, engine.bounce_c_high, engine.bounce_rmax)))
 
     def _write_input(self, inputs: StageInputs) -> Path:
         """Stage 4. For a routed seabed, launch 0 is BOUNCE's own deck,
         written by :meth:`Bounce._write_input`. The Bellhop deck
         (``model.env``, plus ``model.sbp`` for a source beam pattern) is
         written from the settings, its seabed replaced by BOUNCE's ``.brc``
-        table when routed."""
+        table when routed; the writer takes the source type and the beam
+        pattern from the Source and stages the ``.sbp``."""
         engine = inputs.settings.engine
         if is_bounce_launch(inputs):
             self._log("Running BOUNCE to compute reflection coefficients...")
@@ -927,12 +945,6 @@ class Bellhop(PropagationModel):
         source = launch_source(inputs)
         env_file = inputs.work_dir / f'{_BASE_NAME}.env'
         self._log(f"Writing environment file: {env_file}")
-        # Bellhop reads <base>.sbp when RunType position 3 is '*'.
-        use_sbp = source.beam_pattern is not None
-        if use_sbp:
-            sbp_dest = env_file.with_suffix('.sbp')
-            stage_source_beam_pattern(source.beam_pattern, sbp_dest)
-            self._log(f"Wrote source beam pattern: {sbp_dest}")
         write_bellhop_env_file(
             filepath=env_file,
             env=env,
@@ -940,28 +952,29 @@ class Bellhop(PropagationModel):
             receiver=deck_receiver(inputs.receiver, engine),
             run_type=engine.run_type,
             beam_type=engine.beam_type,
-            # Letter lands in RunType(4:4), ReadEnvironmentBell.f90:398-
-            # 406; spec.source_types keeps 'scaled' out of this deck.
-            source_type=_SOURCE_TYPE_CODE[source.source_type],
             grid_type=self.grid_type,
             verbose=self.verbose,
             n_beams=engine.n_beams,
-            launch_angles=engine.launch_angles,
+            single_beam=self.single_beam,
+            launch_angles_deg=engine.launch_angles_deg,
             ray_step=engine.ray_step,
             z_box=engine.z_box,
             r_box=engine.r_box,
-            source_beam_pattern=use_sbp,
-            beam_width_type=self.beam_width_type,
-            beam_curvature=self.beam_curvature,
-            eps_multiplier=self.eps_multiplier,
-            r_loop=self.r_loop,
-            n_image=self.n_image,
-            ib_win=self.ib_win,
+            beam_width_type=engine.beam_width_type,
+            beam_curvature=engine.beam_curvature,
+            eps_multiplier=engine.eps_multiplier,
+            r_loop=engine.r_loop,
+            n_image=engine.n_image,
+            ib_win=engine.ib_win,
             component=self.component,
             beam_shift=self.beam_shift,
             interp_ssp=engine.interp_ssp,
             interp_bathymetry=self.interp_bathymetry,
             interp_altimetry=self.interp_altimetry,
+            # The ports refuse a reflection table that repeats an angle
+            # (bellhopcuda src/module/reflcoef.hpp:135-141); the writer
+            # stages a copied table for the binary named here.
+            backend=engine.backend,
         )
         return env_file
 
@@ -1092,11 +1105,19 @@ class Bellhop(PropagationModel):
             self._stamp_run_settings(result, arrivals_run_settings(
                 inputs.settings, inputs.source,
                 output=self.outputs[RunMode.ARRIVALS]))
-            return synthesise(
+            result = synthesise(
                 inputs, result, model_name=self.model_name,
                 provenance=self.provenance, backend=self._resolved_backend,
                 grid_type=self.grid_type, beam_type=self.beam_type,
                 log=self._log)
+        # n_beams 0 leaves the count to the binary (angleMod.f90:38-51), so
+        # the record holds 0; the number it traced is read off its .prt.
+        chosen = (chosen_beam_count(inputs.work_dir, decks[-1].stem)
+                  if engine.n_beams == 0 else None)
+        if chosen is not None:
+            add_run_note(result, f"n_beams: 0, so the binary chose {chosen} "
+                                 f"beams (angleMod.f90:38-51), as its .prt "
+                                 f"reports")
         return result
 
     def _broadband_band_knobs(self):
@@ -1113,7 +1134,7 @@ class Bellhop(PropagationModel):
         run_mode: Optional[RunMode] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
-        rmax_m: Optional[float] = None,
+        rmax: Optional[float] = None,
         frequencies: Optional[np.ndarray] = None,
         source_waveform: Optional[np.ndarray] = None,
         sample_rate: Optional[float] = None,
@@ -1160,7 +1181,7 @@ class Bellhop(PropagationModel):
             angle ``acos(c_water / CMax)`` (``kMin = ω/CMax``, bounce.f90:45,
             and θ = ATAN2(kz, kx) from the horizontal, :195-200), and
             RefCoef.f90:144-149 then returns R = 0 for every steeper ray.
-        rmax_m : float, optional
+        rmax : float, optional
             Maximum range for angular resolution (m). ``None`` (default) is
             resolved by Bounce: ``receiver.range_max``, the range the table
             is propagated to (bounce.htm: "RMax should be the maximum range
@@ -1185,4 +1206,4 @@ class Bellhop(PropagationModel):
             output_duration=output_duration, t_start=t_start)
         return self._run_call(env, source, receiver, dataclasses.replace(
             call, engine_request=_BounceKnobs(
-                c_low=c_low, c_high=c_high, rmax_m=rmax_m)))
+                c_low=c_low, c_high=c_high, rmax=rmax)))

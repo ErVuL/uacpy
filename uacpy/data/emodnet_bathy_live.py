@@ -9,10 +9,10 @@ the European seas, with a separate Caribbean tile. Licence **CC-BY-4.0**
 Coverage is regional: a point outside the European/Caribbean tiles raises
 ``DataFetchError`` so a fallback source (GMRT, GEBCO) can take over. Elevation is
 referenced to **Lowest Astronomical Tide (LAT)** where the tide is significant,
-not mean sea level. LAT lies below MSL, so a returned depth is *shallower* than
-the MSL-referenced GEBCO/GMRT depth by the local MSL − LAT offset: nothing in
-the micro-tidal Mediterranean and Baltic, several metres on macrotidal Atlantic
-coasts — negligible offshore, not in shallow water.
+not mean sea level (EMODnet Bathymetry DTM product metadata). LAT,
+the lowest predicted tide, lies below MSL, so a returned depth is *shallower*
+than an MSL-referenced depth by the local MSL − LAT offset, which the local
+tide sets: it matters in shallow water on tidal coasts, not offshore.
 """
 
 import urllib.parse

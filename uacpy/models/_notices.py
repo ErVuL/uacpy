@@ -21,9 +21,10 @@ from uacpy.core.run_settings import Notice
 _WARNED_MODEL_PROVENANCE: set = set()
 
 
-#: dB of volume absorption that may go unmentioned. Below a decibel over the
-#: whole track the omission cannot change a level anyone acts on, and warning
-#: about it would only teach users to ignore the notice.
+#: dB of volume absorption that may go unmentioned, uacpy guidance. Below a
+#: decibel over the whole track the omission cannot change a level anyone
+#: acts on, and warning about it would only teach users to ignore the
+#: notice.
 _ABSORPTION_NOTICE_DB = 1.0
 
 #: True while a :meth:`PropagationModel.run` call is in progress in this
@@ -77,7 +78,7 @@ def _warn_if_volume_absorption_is_missing(env, source, receiver) -> None:
     if not (np.isfinite(freq_max) and np.isfinite(r_max)) or freq_max <= 0.0 \
             or r_max <= 0.0:
         return
-    alpha = float(np.atleast_1d(Thorp().alpha_dB_per_m(freq_max, 0.0))[0])
+    alpha = float(np.atleast_1d(Thorp()._alpha_dB_per_m_at_frequency(freq_max, 0.0))[0])
     omitted = alpha * r_max
     if not np.isfinite(omitted) or omitted < _ABSORPTION_NOTICE_DB:
         return

@@ -4,10 +4,15 @@ Stand-alone helpers used by tests, examples, and end-user comparison
 scripts. Keeps numeric-comparison logic out of plotting and IO modules.
 
 Public helpers: :func:`tl_rmse`, :func:`tl_max_error`, :func:`tl_bias`,
-:func:`tl_rmse_on_shared_ranges`. Every one takes ``(field, reference)``
-and every signed difference is ``field - reference``.
-:func:`tl_rmse_on_shared_ranges` takes two Fields read at one depth, or two
-``(ranges, tl_dB)`` curves (a measurement, another code's output).
+:func:`tl_rmse_on_shared_ranges`, :func:`tl_difference` (the difference map
+as a Field), :func:`field_statistics` (per-field statistics and the pairwise
+RMS table of several fields at one depth) and :func:`same_grid` (the one
+"same grid" rule they all apply). Every one takes ``(field, reference)``
+(``field_statistics`` a set of fields) and every signed difference is
+``field - reference``.
+:func:`tl_rmse_on_shared_ranges` takes two Fields, read at one depth or
+already cut there, or two ``(ranges, tl_dB)`` curves (a measurement, another
+code's output).
 
 :func:`tl_rmse`, :func:`tl_max_error` and :func:`tl_bias` take either two
 plain dB arrays of one shape (a measured TL curve, a table from another
@@ -28,6 +33,7 @@ depths are not the question.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import warnings
@@ -36,7 +42,10 @@ import numpy as np
 
 from uacpy.core.acoustics.levels import no_energy_mask
 from uacpy.core.results import Field
-from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core.exceptions import (ConfigurationError, FallbackWarning,
+                                   ValidityWarning)
+from uacpy.core._export import ExportRecord
+from uacpy.core._plotting import plotter
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 
@@ -60,6 +69,61 @@ def _resolve_window(
         return np.ones_like(coords, dtype=bool)
     lo, hi = window
     return (coords >= lo) & (coords <= hi)
+
+
+#: Fraction of an axis' own smallest cell within which two samples are one
+#: position (uacpy guidance): the sub-millimetre rounding two engines leave on
+#: one requested receiver grid agrees, while a shift of a whole fraction of a
+#: cell does not, whatever the coordinate's magnitude.
+_GRID_AGREEMENT_FRACTION = 1e-3
+
+
+def _axes_agree(a, b) -> bool:
+    """Whether two coordinate axes sample the same positions: one length,
+    and every pair of samples within :data:`_GRID_AGREEMENT_FRACTION` of the
+    axis' smallest cell. A length-1 axis has no cell and compares with
+    numpy's default tolerance."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.shape != b.shape:
+        return False
+    if a.size < 2:
+        return bool(np.allclose(a, b))
+    cell = float(np.min(np.abs(np.diff(a))))
+    return bool(np.allclose(a, b, rtol=0.0,
+                            atol=_GRID_AGREEMENT_FRACTION * cell))
+
+
+def same_grid(field, reference) -> bool:
+    """Whether two Fields sample the same positions: the same axes in the
+    same order, each of one length, and every coordinate within a thousandth
+    of that axis' smallest cell of the other's (uacpy guidance). A 0.4 mm
+    offset on a 40 m range grid is one grid; a 5 cm one is not.
+
+    The one rule the package applies: :func:`tl_rmse`, :func:`tl_max_error`,
+    :func:`tl_bias` and :func:`tl_difference` refuse a pair it rejects, and
+    :func:`uacpy.plot.compare_models` warns. Two fields on different grids
+    are compared with :func:`tl_rmse_on_shared_ranges`, or after
+    ``Field.resample_to``.
+
+    Parameters
+    ----------
+    field, reference : Field
+        The two fields.
+
+    Returns
+    -------
+    bool
+    """
+    for label, f in (('field', field), ('reference', reference)):
+        if not isinstance(f, Field):
+            raise ConfigurationError(
+                f"same_grid: {label} must be a Field; got "
+                f"{type(f).__name__}.")
+    if list(field.coords) != list(reference.coords):
+        return False
+    return all(_axes_agree(field.coords[name], reference.coords[name])
+               for name in field.coords)
 
 
 # The coordinate axes a TL metric compares over. A Field on any other axis
@@ -87,6 +151,39 @@ def _refuse_axes_beyond_tl(f, label: str, fname: str) -> None:
             if 'source_depth' in extra else
             f"Select one value of each other axis with field.at({others})."
             if others else "Pass a Field on depth and/or range axes."))
+
+
+def _refuse_unlike_tl_fields(field, reference, fname: str) -> None:
+    """Refuse two Fields that are not one TL quantity: an axis besides depth
+    and range, two different ``kind``s, or a real field not in dB. The one
+    check every Field form of the metrics makes, in one order."""
+    for label, f in (('field', field), ('reference', reference)):
+        _refuse_axes_beyond_tl(f, label, fname)
+    # Compare the QUANTITY, not the representation: complex pressure and real
+    # TL are the same quantity written two ways and ``.dB`` reconciles them,
+    # while reverberation shares TL's dB representation exactly and is a
+    # different quantity. Same rule ``compare_models`` applies before it puts
+    # two fields on one colour scale.
+    if field.kind != reference.kind:
+        raise ConfigurationError(
+            f"{fname}: field is a {field.kind!r} field but reference is "
+            f"{reference.kind!r} — these are different physical quantities "
+            f"and their difference is not an agreement metric.",
+            remediation="Compare like with like (two TL fields, or two "
+                        "reverberation fields).",
+        )
+    # ``Field.dB`` refuses a real field whose unit is not dB, and raises
+    # AttributeError doing it. Matching the kind above is not enough to make
+    # the pair a TL pair — a probability-of-detection field passes it — so the
+    # unit is checked here, before ``Field.dB`` is read.
+    for label, f in (('field', field), ('reference', reference)):
+        if not f.is_complex and f.unit != 'dB':
+            raise ConfigurationError(
+                f"{fname}: {label} is in {f.unit!r}, not dB, so its values "
+                f"are not a level and their difference is not a TL error.",
+                remediation="Compare two TL (or complex pressure) fields; "
+                            "read the raw values via field.data.",
+            )
 
 
 def _tl_difference(
@@ -146,37 +243,11 @@ def _tl_fields(field, reference, range_window, depth_window, fname):
             raise ConfigurationError(
                 f"{fname}: field and reference must both be Fields or both "
                 f"be dB arrays; {label} is a {type(f).__name__}.")
-        _refuse_axes_beyond_tl(f, label, fname)
+    _refuse_unlike_tl_fields(field, reference, fname)
     if list(field.coords) != list(reference.coords):
         raise ConfigurationError(
             f"{fname}: field is on axes {list(field.coords)} but reference "
             f"is on {list(reference.coords)}; the cells do not correspond.")
-    # Compare the QUANTITY, not the representation: complex pressure and real
-    # TL are the same quantity written two ways and ``.dB`` reconciles them,
-    # while reverberation shares TL's dB representation exactly and is a
-    # different quantity. Same rule ``compare_models`` applies before it puts
-    # two fields on one colour scale.
-    if field.kind != reference.kind:
-        raise ConfigurationError(
-            f"{fname}: field is a {field.kind!r} field but reference is "
-            f"{reference.kind!r} — these are different physical quantities "
-            f"and their difference is not an agreement metric.",
-            remediation="Compare like with like (two TL fields, or two "
-                        "reverberation fields).",
-        )
-
-    # ``Field.dB`` refuses a real field whose unit is not dB, and raises
-    # AttributeError doing it. Matching the kind above is not enough to make
-    # the pair a TL pair — a probability-of-detection field passes it — so the
-    # unit is checked here, before ``Field.dB`` is read.
-    for label, f in (('field', field), ('reference', reference)):
-        if not f.is_complex and f.unit != 'dB':
-            raise ConfigurationError(
-                f"{fname}: {label} is in {f.unit!r}, not dB, so its values "
-                f"are not a level and their difference is not a TL error.",
-                remediation="Compare two TL (or complex pressure) fields; "
-                            "read the raw values via field.data.",
-            )
 
     # dtype=float, not the field's own: ``Field.dB`` hands back the stored
     # dtype, and a ``.shd``-backed result is float32. The differences are
@@ -197,12 +268,7 @@ def _tl_fields(field, reference, range_window, depth_window, fname):
         if values.shape != values_ref.shape:
             raise ConfigurationError(
                 f"{fname}: {axis} axes must have matching shapes.")
-        # Two tolerance terms: atol=1e-3 admits sub-millimetre
-        # unit-conversion rounding near the origin, and rtol=1e-5 scales the
-        # allowance with the coordinate (it dominates beyond 100 m — 1 mm at
-        # 100 m, 1 m at 100 km). Genuinely different grids differ by whole
-        # grid steps and still raise.
-        if not np.allclose(values, values_ref, rtol=1e-5, atol=1e-3):
+        if not _axes_agree(values, values_ref):
             _refuse_different_grids(
                 f"{fname}: {axis} axes differ — sample-cells are not "
                 f"aligned.")
@@ -260,11 +326,11 @@ def tl_rmse(
 
     Takes two plain dB arrays of one shape, or two Fields on the same
     ``depth`` and/or ``range`` axes (a 2-D grid or a 1-D cut). Two Fields'
-    axes must agree within a mixed tolerance — 1 mm absolute plus 1e-5
-    relative, the latter dominating beyond 100 m (models interpolate onto
-    the requested receiver grid, so two runs of the same grid match within
-    it); grids differing by more raise — resample one onto the other first,
-    or use :func:`tl_rmse_on_shared_ranges`.
+    axes must be one grid by :func:`same_grid` — every coordinate within a
+    thousandth of its axis' smallest cell of the other's (models interpolate
+    onto the requested receiver grid, so two runs of the same grid match
+    within it); grids differing by more raise — resample one onto the other
+    first, or use :func:`tl_rmse_on_shared_ranges`.
 
     Parameters
     ----------
@@ -273,7 +339,7 @@ def tl_rmse(
         real dB arrays of one shape. A Field on a frequency or time axis
         raises; a Field and an array together raise.
     range_window : (float, float), optional
-        ``(rmin_m, rmax_m)`` inclusive. Defaults to all ranges. Fields only.
+        ``(rmin_m, rmax)`` inclusive. Defaults to all ranges. Fields only.
     depth_window : (float, float), optional
         ``(zmin_m, zmax_m)`` inclusive. Defaults to all depths. Fields only.
 
@@ -304,7 +370,7 @@ def tl_max_error(
         Two TL Fields of one ``kind``, or two real dB arrays of one shape
         (see :func:`tl_rmse`).
     range_window : (float, float), optional
-        ``(rmin_m, rmax_m)`` inclusive; Fields only.
+        ``(rmin_m, rmax)`` inclusive; Fields only.
     depth_window : (float, float), optional
         ``(zmin_m, zmax_m)`` inclusive; Fields only.
     """
@@ -332,7 +398,7 @@ def tl_bias(
         Two TL Fields of one ``kind``, or two real dB arrays of one shape
         (see :func:`tl_rmse`).
     range_window : (float, float), optional
-        ``(rmin_m, rmax_m)`` inclusive; Fields only.
+        ``(rmin_m, rmax)`` inclusive; Fields only.
     depth_window : (float, float), optional
         ``(zmin_m, zmax_m)`` inclusive; Fields only.
     """
@@ -399,8 +465,7 @@ def tl_rmse_on_shared_ranges(field, reference, *,
     would hide a grid mismatch that matters. It is the wrong answer when
     the question is "how far apart are these two models", because models
     run on different range axes by nature, and that comparison is the
-    whole point of the pairwise table
-    :func:`~uacpy.visualization.plots.plot_field_statistics` draws.
+    whole point of the pairwise table :func:`field_statistics` returns.
 
     Two functions rather than a flag on one: the refusal and the
     resampling answer different questions, and a caller who picks the
@@ -412,12 +477,14 @@ def tl_rmse_on_shared_ranges(field, reference, *,
     ``np.interp``'s flat extrapolation past the ends of its own domain out of
     the number. No-energy cells become NaN first and drop out with them.
 
-    Each field is read at its own depth sample nearest ``depth``; when the
-    two nearest samples differ, a ``FallbackWarning`` names both, because near a
-    null TL changes tens of dB over metres and the residual would then be a
-    depth offset rather than a model disagreement. A ``depth`` more than half
-    a depth step outside a field's depth axis is refused: its nearest sample
-    would be the axis end, a depth nobody asked for.
+    A Field on a depth axis is read at its own depth sample nearest
+    ``depth``; a range cut (``field.at(depth=z)``) is used as it is, at the
+    depth it was read at. When the two depths differ, a ``FallbackWarning``
+    names both, because near a null TL changes tens of dB over metres and the
+    residual would then be a depth offset rather than a model disagreement. A
+    ``depth`` more than half a depth step outside a field's depth axis is
+    refused: its nearest sample would be the axis end, a depth nobody asked
+    for.
 
     The same computation takes two ``(ranges, tl_dB)`` curves — a
     measured TL curve, a table from another code — with no Field built:
@@ -426,12 +493,14 @@ def tl_rmse_on_shared_ranges(field, reference, *,
     Parameters
     ----------
     field, reference : Field or (ranges, tl_dB) pair
-        TL-like fields with ``ranges`` and a ``dB`` view; or two pairs of
-        1-D arrays, ranges in metres (finite, strictly increasing) and TL in
-        dB. Both Fields or both pairs.
+        TL-like Fields on a range axis — a ``(depth, range)`` grid or a
+        range cut — with a ``dB`` view; or two pairs of 1-D arrays, ranges
+        in metres (finite, strictly increasing) and TL in dB. Both Fields or
+        both pairs.
     depth : float
-        The receiver depth to compare at, on both fields (m). Required for
-        Fields; a pair is one depth's curve already and takes none.
+        The receiver depth to compare at (m). Required when either Field has
+        a depth axis; two range cuts and two pairs are one depth's curve
+        already and take none.
 
     Returns
     -------
@@ -444,7 +513,8 @@ def tl_rmse_on_shared_ranges(field, reference, *,
     ConfigurationError
         The two fields are different physical quantities (``kind``), so
         their difference is not an agreement metric, a real field is not
-        in dB, a field has an axis besides depth and range (the
+        in dB, a Field has no range axis, a field has an axis besides depth
+        and range (the
         ``source_depth`` axis of a multi-depth run: pass one source,
         ``field.at(source_depth=…)``, or the sum, ``field.superpose()``), or
         ``depth`` lies outside a field's depth axis.
@@ -464,22 +534,24 @@ def tl_rmse_on_shared_ranges(field, reference, *,
         raise ConfigurationError(
             f"{fname}: field and reference must both be Fields or both be "
             f"(ranges, tl_dB) pairs.")
-    if depth is None:
-        raise ConfigurationError(
-            f"{fname}: two Fields are compared at one depth; pass depth= "
-            f"(m).")
+    _refuse_unlike_tl_fields(field, reference, fname)
     for label, f in (('field', field), ('reference', reference)):
-        _refuse_axes_beyond_tl(f, label, fname)
-        if not f.is_complex and f.unit != 'dB':
+        if 'range' not in f.coords:
             raise ConfigurationError(
-                f"{fname}: {label} is in {f.unit!r}, not dB, so its values "
-                f"are not a level and their difference is not a TL error.",
-                remediation="Compare two TL (or complex pressure) fields.")
-    if field.kind != reference.kind:
+                f"{fname}: {label} has no range axis (coords "
+                f"{list(f.coords)}); the RMS is taken over range.",
+                remediation="Pass a (depth, range) Field with depth=, or a "
+                            "range cut such as field.at(depth=z).")
+    with_depth = ['depth' in f.coords for f in (field, reference)]
+    if any(with_depth) and depth is None:
         raise ConfigurationError(
-            f"tl_rmse_on_shared_ranges: a {field.kind!r} field and a "
-            f"{reference.kind!r} field are different physical quantities, "
-            f"so their RMS difference is not an agreement metric.")
+            f"{fname}: a Field on a depth axis is compared at one depth; "
+            f"pass depth= (m).")
+    if not any(with_depth) and depth is not None:
+        raise ConfigurationError(
+            f"{fname}: depth= selects a depth of a Field; two range cuts "
+            f"are one depth's curve already.",
+            remediation="Drop depth=, or pass the (depth, range) Fields.")
     for label, f in (('field', field), ('reference', reference)):
         z = np.asarray(f.coords.get('depth', ()), dtype=float)
         if z.size < 2:
@@ -492,22 +564,236 @@ def tl_rmse_on_shared_ranges(field, reference, *,
                 f"be {z[np.argmin(np.abs(z - depth))]:g} m.",
                 remediation="Pass a depth inside both fields' depth axes "
                             "(in metres).")
-    cut_a, cut_b = field.at(depth=depth), reference.at(depth=depth)
-    z_a = float(cut_a.pinned.get('depth', depth))
-    z_b = float(cut_b.pinned.get('depth', depth))
-    if not np.isclose(z_a, z_b, rtol=1e-6, atol=1e-6):
+    # A range cut is used as it is: the depth it was read at, when it
+    # records one, is the depth it compares.
+    cut_a, cut_b = (f.at(depth=depth) if 'depth' in f.coords else f
+                    for f in (field, reference))
+    z_a = cut_a.pinned.get('depth', depth)
+    z_b = cut_b.pinned.get('depth', depth)
+    if (z_a is not None and z_b is not None
+            and not np.isclose(float(z_a), float(z_b), rtol=1e-6, atol=1e-6)):
         warnings.warn(
-            f"{fname}: depth={depth:g} m lands on {z_a:g} m in `field` and "
-            f"{z_b:g} m in `reference` (each field's nearest sample); the RMS "
-            f"compares those two depths. Put both on a common depth grid "
-            f"(Field.resample_to) to compare one depth.",
+            f"{fname}: the RMS compares {float(z_a):g} m in `field` and "
+            f"{float(z_b):g} m in `reference` (each field's nearest sample "
+            f"to the depth asked, or the depth its range cut was read at). "
+            f"Put both on a common depth grid (Field.resample_to) to compare "
+            f"one depth.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     return _rmse_on_coarser_shared_axis(
-        np.asarray(field.ranges, dtype=float),
+        np.asarray(cut_a.coords['range'], dtype=float),
         np.asarray(cut_a.dB, dtype=float),
-        np.asarray(reference.ranges, dtype=float),
+        np.asarray(cut_b.coords['range'], dtype=float),
         np.asarray(cut_b.dB, dtype=float), fname)
 
 
+def tl_difference(field, reference) -> Field:
+    """The signed difference ``field - reference`` in dB, cell by cell, as a
+    Field: the difference map of two models.
+
+    Same inputs and cell rules as :func:`tl_rmse`: two Fields of one quantity
+    (``kind``) on one grid (:func:`same_grid`), on ``depth`` and/or ``range``
+    axes, read through their ``dB`` view. A cell either field reports as
+    carrying no energy (the 600 dB marker) holds no level, so its difference
+    is NaN, as the metrics leave it out; a NaN cell of either field is NaN.
+    The map shows those cells blank, so no warning counts them (the scalar
+    metrics warn because their one number hides the cells it left out).
+
+    Parameters
+    ----------
+    field, reference : Field
+        The two fields; positive values are where ``field`` reads higher —
+        more loss for TL, a louder cell for a level.
+
+    Returns
+    -------
+    Field
+        ``kind='difference'``, ``unit='dB'``, on ``field``'s axes and pinned
+        coordinates. ``.plot()`` draws it with
+        :func:`uacpy.plot.plot_field_difference` (a diverging map
+        symmetric about zero).
+    """
+    fname = 'tl_difference'
+    for label, f in (('field', field), ('reference', reference)):
+        if not isinstance(f, Field):
+            raise ConfigurationError(
+                f"{fname}: field and reference must both be Fields; {label} "
+                f"is a {type(f).__name__}.",
+                remediation="For two dB arrays of one shape, subtract them: "
+                            "tl_field - tl_reference.")
+    tl_field, tl_reference, _region = _tl_fields(field, reference, None,
+                                                 None, fname)
+    marker = no_energy_mask(tl_field) | no_energy_mask(tl_reference)
+    return Field(data=np.where(marker, np.nan, tl_field - tl_reference),
+                 coords=dict(field.coords), pinned=dict(field.pinned or {}),
+                 kind='difference', unit='dB')
+
+
+@dataclass(frozen=True, eq=False)
+class FieldStatistics(ExportRecord):
+    """Several fields compared at one depth: each field's mean and standard
+    deviation of its dB view along range, and the pairwise RMS difference —
+    what :func:`field_statistics` returns.
+
+    ``.plot()`` draws it with :func:`uacpy.plot.plot_field_statistics`;
+    ``to_dict`` / ``to_xarray`` export it.
+
+    Attributes
+    ----------
+    labels : tuple of str
+        One name per field, in order.
+    mean_dB, std_dB : ndarray, shape ``(n,)``
+        Mean and standard deviation (dB) of each field's range cut, over
+        its finite cells that carry energy.
+    rms_dB : ndarray, shape ``(n, n)``
+        ``rms_dB[i, j]`` is :func:`tl_rmse_on_shared_ranges` of field ``i``
+        against field ``j`` (dB); ``0`` on the diagonal; NaN for a pair
+        sharing no range or of two different quantities.
+    depth : float
+        The depth (m) every field was cut at.
+    kinds : tuple of str
+        Each field's quantity (``Field.kind``), so the values are read as
+        what they are (``'pressure'``: transmission loss).
+    """
+
+    labels: Tuple[str, ...]
+    mean_dB: np.ndarray
+    std_dB: np.ndarray
+    rms_dB: np.ndarray
+    depth: float
+    kinds: Tuple[str, ...]
+
+    _ARRAY_FIELDS = ('mean_dB', 'std_dB', 'rms_dB')
+    _XARRAY_FIELDS = {'mean_dB': 'mean_dB', 'std_dB': 'std_dB',
+                      'rms_dB': 'rms_dB'}
+
+    def __post_init__(self):
+        object.__setattr__(self, 'labels', tuple(str(s) for s in self.labels))
+        object.__setattr__(self, 'kinds', tuple(str(s) for s in self.kinds))
+        object.__setattr__(self, 'depth', float(self.depth))
+        for name in self._ARRAY_FIELDS:
+            object.__setattr__(self, name,
+                               np.asarray(getattr(self, name), dtype=float))
+        n = len(self.labels)
+        if (self.mean_dB.shape != (n,) or self.std_dB.shape != (n,)
+                or self.rms_dB.shape != (n, n) or len(self.kinds) != n):
+            raise ConfigurationError(
+                f"FieldStatistics: {n} labels need mean_dB and std_dB of "
+                f"shape ({n},), rms_dB of shape ({n}, {n}) and {n} kinds; "
+                f"got {self.mean_dB.shape}, {self.std_dB.shape}, "
+                f"{self.rms_dB.shape} and {len(self.kinds)}.")
+        super().__post_init__()
+
+    def _payload(self):
+        return {'mean_dB': (self.mean_dB, ('field',), 'dB'),
+                'std_dB': (self.std_dB, ('field',), 'dB'),
+                'rms_dB': (self.rms_dB, ('field', 'other_field'), 'dB')}
+
+    def _coords(self):
+        return {'field': (np.asarray(self.labels), ''),
+                'other_field': (np.asarray(self.labels), '')}
+
+    def plot(self, **kwargs):
+        """Draw these statistics with
+        :func:`uacpy.plot.plot_field_statistics`; ``kwargs`` reach it.
+        Returns ``(fig, axes)``."""
+        return plotter('plot_field_statistics')(self, **kwargs)
+
+
+def field_statistics(fields, labels=None, *, depth: float) -> FieldStatistics:
+    """Several fields compared at one depth: each one's mean and standard
+    deviation along range, and the pairwise RMS difference between them.
+
+    Each field is cut at ``depth`` (``field.at(depth=depth)``); the mean
+    and standard deviation are over the cut's finite cells that carry
+    energy (a no-energy cell, the 600 dB marker, is no level). Each
+    off-diagonal entry is :func:`tl_rmse_on_shared_ranges` — over the ranges
+    both fields computed, on the coarser range axis — and is NaN for a pair
+    sharing no range. A pair of two different quantities (``kind``) has no
+    agreement number: its entry is NaN, with one ``ValidityWarning`` per
+    pair.
+
+    Parameters
+    ----------
+    fields : sequence of Field, or {label: Field} dict
+        The fields; a ``None`` entry (a model that did not run) is dropped
+        with its label.
+    labels : sequence of str, optional
+        One name per field; a dict's keys when it is one; otherwise each
+        field's ``model`` (``#i`` without one), numbered where two share it.
+    depth : float
+        The receiver depth (m) every field is cut at.
+
+    Returns
+    -------
+    FieldStatistics
+        ``.plot()`` draws the two panels.
+    """
+    fname = 'field_statistics'
+    if isinstance(fields, dict):
+        if labels is None:
+            labels = list(fields.keys())
+        fields = list(fields.values())
+    fields = list(fields)
+    if labels is not None and len(labels) != len(fields):
+        raise ConfigurationError(
+            f"{fname}: got {len(labels)} labels for {len(fields)} fields; "
+            f"one label per field.")
+    if labels is None:
+        labels = [getattr(f, 'model', '') or f"#{i}"
+                  for i, f in enumerate(fields)]
+        for name in set(labels):
+            group = [i for i, label in enumerate(labels) if label == name]
+            if len(group) > 1:
+                for n, i in enumerate(group, start=1):
+                    labels[i] = f"{name} ({n})"
+    kept = [(str(lbl), f) for lbl, f in zip(labels, fields) if f is not None]
+    if not kept:
+        raise ConfigurationError(
+            f"{fname}: no fields to compare — pass one Field per model, as a "
+            f"list or as a {{label: field}} dict.",
+            remediation="Pass at least one Field; entries that are None are "
+                        "dropped as models that did not run.")
+    for name, f in kept:
+        if not isinstance(f, Field):
+            raise ConfigurationError(
+                f"{fname}: {name!r} is a {type(f).__name__}, not a Field.")
+    means, stds = [], []
+    for name, f in kept:
+        cut = f.at(depth=depth)
+        spread = [axis for axis, values in cut.coords.items()
+                  if np.size(values) > 1 and axis != 'range']
+        if spread:
+            raise ConfigurationError(
+                f"{fname}: {name!r} cut at depth={depth:g} m spans {spread}; "
+                f"the statistics are over range only.",
+                remediation=f"Select one value of each first, e.g. "
+                            f"field.at({spread[0]}=...).")
+        level = np.asarray(cut.dB, dtype=float)
+        level = level[np.isfinite(level) & ~no_energy_mask(level)]
+        means.append(float(np.mean(level)) if level.size else float('nan'))
+        stds.append(float(np.std(level)) if level.size else float('nan'))
+    n = len(kept)
+    rms = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            (name_i, f_i), (name_j, f_j) = kept[i], kept[j]
+            if f_i.kind != f_j.kind:
+                warnings.warn(
+                    f"{fname}: {name_i!r} is a {f_i.kind!r} field and "
+                    f"{name_j!r} a {f_j.kind!r} field, different physical "
+                    f"quantities, so their RMS difference is not an "
+                    f"agreement metric; that entry is NaN.",
+                    ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+                rms[i, j] = rms[j, i] = np.nan
+                continue
+            rms[i, j] = rms[j, i] = tl_rmse_on_shared_ranges(
+                f_i, f_j, depth=depth)
+    return FieldStatistics(labels=tuple(name for name, _ in kept),
+                           mean_dB=np.array(means), std_dB=np.array(stds),
+                           rms_dB=rms, depth=float(depth),
+                           kinds=tuple(f.kind for _, f in kept))
+
+
 __all__ = ["tl_rmse", "tl_max_error", "tl_bias",
-           "tl_rmse_on_shared_ranges"]
+           "tl_rmse_on_shared_ranges", "tl_difference", "same_grid",
+           "field_statistics", "FieldStatistics"]

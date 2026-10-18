@@ -111,11 +111,7 @@ def _check_sources_weightable(field, weights, *, where: str) -> None:
     :meth:`Field.superpose` to judge against the sum actually asked for.
     """
     w = np.atleast_1d(np.asarray(weights, dtype=np.complex128))
-    if not np.any(w.imag != 0.0):
-        return
-    if 'time' in field.coords or not field.is_complex:
-        _check_field_weightable(field, w, where=where)
-    elif field.phase_reference is None:
+    if np.any(w.imag != 0.0):
         _check_field_weightable(field, w, where=where)
 
 
@@ -174,13 +170,13 @@ def superpose_field(field, weights=None, *, coherent: bool = True,
     id_kwargs = field.id_kwargs()
     id_kwargs['source_depths'] = depths
     id_kwargs['source_weights'] = None
-    meta = id_kwargs['metadata']
     if coherent:
         total, w = _weighted_sum(field, planes, w, where=who, sources=True)
-        meta['superposed_sources'] = {'depths': depths.tolist(),
-                                      'weights': w.tolist(),
-                                      'coherent': True}
-        return field.replace(data=total, coords=coords, **id_kwargs)
+        return field.replace(
+            data=total, coords=coords,
+            superposed_sources={'depths': depths.tolist(),
+                                'weights': w.tolist(), 'coherent': True},
+            **id_kwargs)
 
     # An intensity sum: √Σ|wᵢ·pᵢ|² as a real dB field. It reads magnitudes
     # only, so a dB-only field adds as well as a complex one.
@@ -226,13 +222,14 @@ def superpose_field(field, weights=None, *, coherent: bool = True,
     summed = sum_levels_dB(up, axis=0)
     level = sign * np.maximum(summed, 20.0 * np.log10(PRESSURE_FLOOR))
     id_kwargs['phase_reference'] = None
-    meta['superposed_sources'] = {'depths': depths.tolist(),
-                                  'weights': amp.tolist(),
-                                  'coherent': False}
     # An intensity sum is incoherent whatever run mode produced the fields;
     # the run mode it inherits would say otherwise.
-    return field.replace(data=np.asarray(level, dtype=float), coords=coords,
-                         unit='dB', coherent=False, **id_kwargs)
+    return field.replace(
+        data=np.asarray(level, dtype=float), coords=coords, unit='dB',
+        coherent=False,
+        superposed_sources={'depths': depths.tolist(),
+                            'weights': amp.tolist(), 'coherent': False},
+        **id_kwargs)
 
 
 # ── one Field from the fields of several sources ───────────────────────────
@@ -476,8 +473,9 @@ def _check_one_identity(slabs, coordinate_name: str, who: str) -> None:
                 remediation="Select every field at the same values first "
                             "(field.at(...) with the same labels), or stack "
                             "only fields pinned alike.")
-    for attr in ('speeds', 'band_hz', 'synthesis_window', 'no_mode_bins',
-                 'sonar_budget', 'sigma_dB', 'weighting', 'track_events'):
+    # The derivation record, every attribute of it (Field._DERIVATION).
+    from uacpy.core.results.field import Field
+    for attr in ('speeds', *Field._DERIVATION):
         ref = getattr(first, attr)
         for i, slab in enumerate(slabs[1:], start=1):
             if not _same_value(ref, getattr(slab, attr)):
@@ -491,12 +489,24 @@ def _check_one_identity(slabs, coordinate_name: str, who: str) -> None:
                                 f"ParallelResult.results).")
 
 
+#: The axes a stack places last, after the fields' own: the canonical
+#: order is ``source_depth → depth → range → frequency`` (or ``time``)
+#: (DOCUMENTATION §8), the layout the synthesis and every producer use.
+_TRAILING_AXES = ('frequency', 'time')
+
+
 def stack_fields(fields, coordinate, *,
                  coordinate_name: str = SOURCE_AXIS):
     """One :class:`~uacpy.core.results.Field` holding ``fields`` along a
-    new leading axis: the fields of several separately computed sources as
-    one multi-depth field, which :meth:`Field.superpose
+    new axis: the fields of several separately computed sources as one
+    multi-depth field, which :meth:`Field.superpose
     <uacpy.core.results.Field.superpose>` sums.
+
+    The new axis takes its place in the canonical order every producer
+    uses, ``source_depth → depth → range → frequency`` (or ``time``): a
+    ``frequency`` or ``time`` axis goes last, after the fields' own axes,
+    so a stack of single-frequency fields is the ``(depth, range,
+    frequency)`` grid the synthesis takes; any other axis goes first.
 
     It is how a run joins the field of each depth of a multi-depth
     ``Source``, and how the fields of sources run separately (two runs, a
@@ -529,7 +539,8 @@ def stack_fields(fields, coordinate, *,
     Returns
     -------
     Field
-        The fields over a leading ``coordinate_name`` axis.
+        The fields over a new ``coordinate_name`` axis: last for
+        ``frequency`` / ``time``, leading for any other.
 
     Raises
     ------
@@ -621,8 +632,12 @@ def _stack_fields(slabs, coordinate, *, coordinate_name: str = SOURCE_AXIS,
     _check_one_grid(slabs, who)
     _check_one_quantity(slabs, who)
     _check_one_identity(slabs, coordinate_name, who)
-    data = np.stack([np.asarray(s.data) for s in slabs], axis=0)
-    coords = {coordinate_name: coordinate, **first.coords}
+    if coordinate_name in _TRAILING_AXES:
+        data = np.stack([np.asarray(s.data) for s in slabs], axis=-1)
+        coords = {**first.coords, coordinate_name: coordinate}
+    else:
+        data = np.stack([np.asarray(s.data) for s in slabs], axis=0)
+        coords = {coordinate_name: coordinate, **first.coords}
     pinned = {k: v for k, v in first.pinned.items() if k != coordinate_name}
     floors = [s.synthesis_floor for s in slabs
               if s.synthesis_floor is not None]
@@ -640,30 +655,27 @@ def _stack_fields(slabs, coordinate, *, coordinate_name: str = SOURCE_AXIS,
     return first.replace(**changes)
 
 
-def _stacked_run_settings(slabs, coordinate,
-                          coordinate_name: str) -> Dict[str, Any]:
-    """The :meth:`Field.replace` changes that give the field stacking
-    ``slabs`` along ``coordinate_name`` its run record:
+def _stacked_record(slabs, coordinate, coordinate_name: str):
+    """The run record of the results ``slabs`` stacked along
+    ``coordinate_name`` (a Field's, a :class:`ResultStack`'s):
 
-    * none, when every slab holds the same record (the planes of one run,
-      split and joined again): the first slab's is that record;
+    * the first slab's, when every slab holds the same record (the planes
+      of one run, split and joined again);
     * the whole stack's record, when the records differ only in
       ``source_depths`` and the axis is ``source_depth`` — the one-depth runs
       of one multi-depth run (an OASSP mean-field sub-run per depth, a
       ``run_parallel`` sweep over source depths): ``source_depths`` the
       axis and ``depth_loop`` ``'per_depth'``, what the multi-depth run's
       own record states;
-    * ``run_settings=None`` otherwise — slabs that ran under different
-      settings (a sweep over a knob, an environment) have no one record,
-      and any one of them would misstate the other planes. Each plane's
-      record stays on the result it came from (``ParallelResult.results``).
-      The sound speeds the records stated, which every slab shares
-      (:func:`_check_one_identity`), are kept on :attr:`Field.speeds`.
+    * ``None`` otherwise — slabs that ran under different settings (a sweep
+      over a knob, an environment) have no one record, and any one of them
+      would misstate the other planes. Each plane's record stays on the
+      result it came from (``ParallelResult.results``).
     """
     records = [slab.run_settings for slab in slabs]
     first = records[0]
     if all(record == first for record in records[1:]):
-        return {}
+        return first
 
     def without_depths(record):
         return {k: v for k, v in record.to_dict().items()
@@ -673,9 +685,25 @@ def _stacked_run_settings(slabs, coordinate,
             and all(record is not None for record in records)
             and all(without_depths(record) == without_depths(first)
                     for record in records[1:])):
-        return {'run_settings': first._replace(
-            source_depths=coordinate.copy(), depth_loop='per_depth')}
-    return {'run_settings': None, 'speeds': slabs[0].speeds}
+        return first._replace(source_depths=coordinate.copy(),
+                              depth_loop='per_depth')
+    return None
+
+
+def _stacked_run_settings(slabs, coordinate,
+                          coordinate_name: str) -> Dict[str, Any]:
+    """The :meth:`Field.replace` changes that give the field stacking
+    ``slabs`` along ``coordinate_name`` its run record
+    (:func:`_stacked_record`): none when it is the first slab's, else that
+    record. Without one record the sound speeds the records stated, which
+    every slab shares (:func:`_check_one_identity`), are kept on
+    :attr:`Field.speeds`."""
+    record = _stacked_record(slabs, coordinate, coordinate_name)
+    if record is slabs[0].run_settings:
+        return {}
+    if record is None:
+        return {'run_settings': None, 'speeds': slabs[0].speeds}
+    return {'run_settings': record}
 
 
 def components_at_source_depths(components, depths, *,

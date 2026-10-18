@@ -52,13 +52,17 @@ of the window `W` with the signal's Fourier transform `X` ...
 de-emphasizing the data near the window edges has the effect of
 shortening the RMS duration and therefore broadening the RMS
 bandwidth" (Abraham, sect. 4.10 "Windowing and window functions") —
-which is why `'hann'` removes `None`'s skirt and attenuates a
+which is why `'hann'` removes `'boxcar'`'s skirt and attenuates a
 path part-way out instead. And the record must hold the response
 before any of this means anything: it "must be selected large enough
 that it contains the entire transient response at each receiver so as
 to eliminate the aliasing" (Jensen et al., sect. 8.2.1.3 "Time
-windowing and sampling"), which is what the wrap-around warning of
-`Field.truncate_response` measures.
+windowing and sampling"). The wrap-around warning of
+`Field.truncate_response` sees only a response still live in the half
+of the record furthest from the window (above 2 % of its energy, uacpy
+guidance): a path just past the record's end folds near the origin
+and is not seen, so its silence does not show that the record holds
+the response (see "A fold corrupts this" below).
 
 **How this relates to propagation loss.** Abraham defines the
 propagation loss of a pulse twice over (sect. 3.2.4.2 "Propagation
@@ -73,8 +77,8 @@ received pulse fits in the window.
 
 Measured on two paths of amplitude 1 and 0.7, the second `gap`
 behind the first at 0.1 s, over 25 Hz-4 kHz at `df` = 1 Hz, with a
-rectangular 20-cycle 1 kHz burst (`tone_burst(1000, 20, 48000,
-window=None)`, `T` = 20 ms) as the weight. Each column is the
+rectangular 20-cycle 1 kHz burst (`tone_burst(1000, 20,
+sample_rate=48000, window='boxcar')`, `T` = 20 ms) as the weight. Each column is the
 broadband propagation loss in dB (negative where the second path
 adds): the frequency form is `broadband_loss`; the gate is the
 received energy in `[0.1, 0.1 + T]` s against the pulse's own; the
@@ -83,7 +87,7 @@ origin=0.1, window=…)`, centred on the first path.
 
 ```text
 =======  ==========  ======  ======  ======
-gap      freq form   gate    none    hann
+gap      freq form   gate    boxcar  hann
 =======  ==========  ======  ======  ======
 5 ms     -4.048      -3.831  -4.049  -3.527
 10 ms    -3.405      -2.887  -3.407  -1.680
@@ -92,7 +96,7 @@ gap      freq form   gate    none    hann
 =======  ==========  ======  ======  ======
 ```
 
-`window=None` (rectangular) reproduces the frequency form while
+`window='boxcar'` (rectangular, the default) reproduces the frequency form while
 the copies can overlap, and the gate once they cannot — it is the
 criterion the other two only bracket. The frequency form never
 discards: at 30 ms it still adds the late path's energy, and
@@ -123,7 +127,7 @@ late puts there — is not something it can see. This method removes
 exactly that structure.
 
 **What it is not.** With paths in hand the exact receiver-side answer
-is `uacpy.core.results.Arrivals.channel_taps`, which applies
+is `uacpy.Arrivals.channel_taps`, which applies
 the receiver's own pulse at its decision instants and returns the
 far echoes as separate taps rather than discarding them. This is the
 version for a model that has no paths — a wave model returns a field,
@@ -186,7 +190,7 @@ length cannot stand in for one against the channel.
 It cannot be detected from `H(f)`: a folded arrival sitting on top
 of the direct one is signature-identical to a clean single arrival.
 The grid has to be sized before the run, from the arrivals, which is
-what `uacpy.core.results.Arrivals.synthesis_band` is for.
+what `uacpy.Arrivals.synthesis_band` is for.
 
 **The record must beat twice the delay spread, not once.** Keep
 `dtau * df < 0.5` for a path pair `dtau` apart — a record longer
@@ -255,7 +259,7 @@ multiple of `Δf` those ARE the model's frequencies and the round
 trip closes to rounding (4.7e-16 relative, measured on a two-path
 `H` over 25-999 Hz at `Δf = 1` Hz). When it did not — every
 default BROADBAND grid, `linspace(0.75 fc, 1.25 fc, 128)`, starts
-190.5 bins up — `to_time_trace` places the band with a common bin
+190.5 bins up — the synthesis places the band with a common bin
 offset, so its lines are not whole cycles per record and an
 `rfft` leaks each one into every bin (Jacobsen & Juhl,
 *Fundamentals of General Linear Acoustics*, App. B.7.2: a line
@@ -389,7 +393,7 @@ modal-evaluator prefactor `i·√(2π)·exp(iπ/4)`
 by an overall `−1`, which neither `−20·log10|P|` nor a phase
 *difference* across the grid can see.
 
-## The finite-difference group velocity (`Modes.group_velocity_between`)
+## The finite-difference group velocity (`Modes.group_speeds_between`)
 
 Two modal results at nearby frequencies give `v_g = Δω/Δk_r` mode by
 mode, second-order accurate at the midpoint frequency. That difference
@@ -414,5 +418,5 @@ visible from two frequencies, and a step chosen from the floor alone
 made the answer worse in 14 of 30 firings on five ideal waveguides, by
 up to 16x (measured). It gives the test instead: recompute at twice
 the separation and keep the wider answer only if v_g stays inside the
-floor. `uacpy.acoustic_signal.modal_group_velocity`, which is
+floor. `uacpy.acoustic_signal.modal_group_speeds`, which is
 handed a whole sweep, runs that test itself and names the step.

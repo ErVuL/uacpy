@@ -209,9 +209,9 @@ def test_every_benchmark_test_is_on_the_validation_page():
     ('| RAM | 0.230 dB | `test_benchmarks_published.py::test_no_such_test` |',
      'does not resolve'),
     ('RAM sits 0.230 dB from the reference.', '0.230 names no source'),
-    ('| RAM | 0.23 dB | `test_benchmarks_published.py::'
+    ('| RAM | 0.11 dB | `test_benchmarks_published.py::'
      'test_ram_matches_the_coupled_mode_reference_in_the_asa_wedge` |',
-     '0.23 is in none of'),
+     '0.11 is in none of'),
 ])
 def test_the_gate_reports_a_number_its_source_does_not_state(unit, problem):
     found = unbacked_numbers(unit)
@@ -219,7 +219,7 @@ def test_the_gate_reports_a_number_its_source_does_not_state(unit, problem):
 
 
 @pytest.mark.parametrize('unit', [
-    '| RAM | 0.230 dB, +4.35 dB | `test_benchmarks_published.py::'
+    '| RAM | 0.110 dB, +4.70 dB | `test_benchmarks_published.py::'
     'test_ram_matches_the_coupled_mode_reference_in_the_asa_wedge`, '
     '`test_benchmarks_published.py::'
     'test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference` |',

@@ -13,7 +13,7 @@ import numpy as np
 import uacpy
 from uacpy.core.boundary import SedimentLayer, BoundaryProperties
 from uacpy.core.bottom import SeabedColumn, Bottom
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core.materials import get_material, list_materials
 from uacpy.models.ram import _seabed as ram_seabed
 from uacpy.core.surface import Surface
@@ -455,6 +455,17 @@ class TestCollapse:
     def test_to_halfspace(self):
         b = Bottom.from_column(SeabedColumn(_layers(), _hs(cp=1800)))
         assert b.to_halfspace().sound_speed == 1800
+
+    def test_the_range_reductions_default_to_the_engines_median(self):
+        """Three half-spaces 1600 / 1700 / 2000 m/s: 'median' gives 1700,
+        where 'r0' would give 1600 and 'mean' 1766.7 — the method answers
+        as an engine's default collapse does."""
+        b = Bottom.from_halfspaces(
+            [0.0, 5000.0, 10000.0], sound_speed=[1600.0, 1700.0, 2000.0],
+            density=[1.9, 1.9, 1.9], attenuation=[0.3, 0.3, 0.3])
+        assert b.collapse_range().columns[0].halfspace.sound_speed == \
+            pytest.approx(1700.0)
+        assert b.to_halfspace().sound_speed == pytest.approx(1700.0)
 
 
 def test_from_grain_size_builds_halfspace():
@@ -1288,7 +1299,7 @@ class TestBottomDelegatedWritesReachTheHalfspaces:
             b.density = -3.0
         with pytest.raises(ConfigurationError, match='must be positive'):
             b.sound_speed = 0.0
-        with pytest.raises(ConfigurationError, match='exceeds'):
+        with pytest.warns(ValidityWarning, match='exceeds'):
             b.attenuation = 500.0
         with pytest.raises(ConfigurationError, match='non-negative'):
             b.roughness = -1.0

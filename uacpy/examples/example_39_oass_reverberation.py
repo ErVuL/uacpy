@@ -13,10 +13,8 @@ different quantity from TL in the same dB unit) · result.plot()
 """
 
 import os
-import sys
 import warnings
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -50,19 +48,14 @@ work_dir = OUT / 'example_39_work'
 # record leaves a POSITIVE RG there — an infinite correlation length, i.e. no
 # back-scatter at all, from a run that still exits 0.
 # A 0.5 m rms roughness at 250 Hz leaves perturbation theory above about
-# 73° grazing; OASS says where, and that notice is printed. Any other warning
-# is shown as usual.
+# 73° grazing; OASS says where, and that notice is printed.
 with warnings.catch_warnings(record=True) as caught:
     reverb = uacpy.OASS(interface=3, correlation_length=10.0,
                         rms_roughness=0.5,
                         work_dir=work_dir, cleanup=False).run(
         env, source, receiver, run_mode=uacpy.RunMode.REVERBERATION)
 for warning in caught:
-    if 'Rayleigh parameter' in str(warning.message):
-        print(f"  noted: {str(warning.message).split(' (JKPS')[0]}")
-    else:
-        warnings.showwarning(warning.message, warning.category,
-                             warning.filename, warning.lineno)
+    print(f"  noted: {str(warning.message).splitlines()[0]}")
 
 print(f"  kind={reverb.kind!r} unit={reverb.unit!r} grid={reverb.data.shape}")
 print("  both decks left on disk: "
@@ -80,7 +73,5 @@ fig.savefig(OUT / 'example_39_oass_reverberation.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 
-print("  c_low is physical here, not a tuning knob: it defaults to the mean "
-      "field's own\n  value, raising it truncates the scattering integral (a "
-      "measured case moved 30 dB),\n  and lowering it is inert because "
-      "REVINT/REVCOV bound their own buffer reads.")
+# OASS's c_low defaults to the mean field's own; why it is not a tuning knob is
+# measured in docs/models/oases.md §10 (constructor knobs).
