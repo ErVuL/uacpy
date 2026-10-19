@@ -298,6 +298,62 @@ class TestBounceReflectionCoefficients:
         assert np.all(above < 0.6)
 
 
+class TestTheClosedFormElasticCoefficientIsTheEngines:
+    """``acoustics.reflection_coeff(shear_speed=, shear_attenuation=)`` is
+    Brekhovskikh & Lysanov Eq. (3.4.22), the fluid-solid coefficient: BOUNCE
+    and OASR, solving the same half-space, give the same |R| and phase. The
+    fluid formula on the same seabed misses by up to 0.87 on rock (measured:
+    elastic within 4e-4 in |R| and 5e-4 rad over 1.4-89.5 deg)."""
+
+    ROCK = dict(sound_speed=3000.0, shear_speed=1400.0, density=2.2,
+                attenuation=0.1, shear_attenuation=0.2)
+    SEDIMENT = dict(sound_speed=1600.0, shear_speed=400.0, density=1.8,
+                    attenuation=0.2, shear_attenuation=0.5)
+
+    @staticmethod
+    def _env(props):
+        return Environment(name='refl', bathymetry=100.0,
+                           ssp=[(0.0, 1500.0), (100.0, 1500.0)],
+                           bottom=BoundaryProperties(acoustic_type='half-space',
+                                                     **props))
+
+    @staticmethod
+    def _compare(result, props, env, bound):
+        from uacpy.core.acoustics import reflection_coeff
+        angles = np.asarray(result.angles_deg, dtype=float)
+        pick = (angles > 0.5) & (angles < 89.5)
+        R = reflection_coeff(angles[pick], water_sound_speed=1500.0,
+                             water_density=env.water_density, **props)
+        magnitude = np.squeeze(np.asarray(result.magnitude))[pick]
+        phase = np.squeeze(np.asarray(result.phase))[pick]
+        assert np.max(np.abs(np.abs(R) - magnitude)) < bound
+        assert np.max(np.abs(np.angle(R * np.exp(-1j * phase)))) < bound
+        fluid = {k: props[k] for k in ('sound_speed', 'density', 'attenuation')}
+        return np.max(np.abs(np.abs(reflection_coeff(
+            angles[pick], water_sound_speed=1500.0,
+            water_density=env.water_density, **fluid)) - magnitude))
+
+    @pytest.mark.parametrize('name', ['ROCK', 'SEDIMENT'])
+    def test_bounce(self, name, tmp_path):
+        from uacpy.core import Source
+        props = getattr(self, name)
+        env = self._env(props)
+        result = Bounce(work_dir=tmp_path, verbose=False).run(
+            env, Source(depths=[50.0], frequencies=[500.0]),
+            Receiver(depths=[50.0], ranges=[10000.0]))
+        fluid_miss = self._compare(result, props, env, bound=2e-3)
+        assert fluid_miss > 0.05            # the shear term is what matches
+
+    def test_oasr(self, tmp_path):
+        import uacpy
+        from uacpy.core import Source
+        env = self._env(self.ROCK)
+        result = uacpy.OASR(work_dir=tmp_path, verbose=False).run(
+            env, Source(depths=[50.0], frequencies=[500.0]),
+            Receiver(depths=[50.0], ranges=[10000.0]))
+        assert self._compare(result, self.ROCK, env, bound=2e-3) > 0.5
+
+
 class TestBounceToScooterWorkflow:
     """Test BOUNCE → SCOOTER workflow using .brc files."""
 

@@ -359,14 +359,14 @@ class TestRDHalfspace:
         assert b.halfspace_at(range=8500 + eps).sound_speed == 1800
         assert b.halfspace_at(range=12000).sound_speed == 1800
         assert (b.halfspace_at(range=7000).sound_speed
-                == b.halfspace_at(range=7000, interp='nearest').sound_speed
+                == b.halfspace_at(range=7000, method='nearest').sound_speed
                 == 1700)
 
     def test_halfspace_at_linear_is_an_explicit_opt_in(self):
         b = self._b()
 
         def lin(r):
-            return b.halfspace_at(range=r, interp='linear')
+            return b.halfspace_at(range=r, method='linear')
         assert lin(0).sound_speed == pytest.approx(1600)
         assert lin(2500).sound_speed == pytest.approx(1650)   # midpoint
         assert lin(2500).density == pytest.approx(1.55)
@@ -747,12 +747,12 @@ class TestSingleNodeRangesSurvivesReduction:
         assert b.collapse(layers='halfspace').ranges is None
 
 
-def test_halfspace_at_rejects_bad_interp_on_range_independent_bottom():
-    """The ``interp`` guard runs before the range-independent shortcut, so a
+def test_halfspace_at_rejects_bad_method_on_range_independent_bottom():
+    """The ``method`` guard runs before the range-independent shortcut, so a
     typo cannot be silently accepted."""
     b = Bottom.from_halfspace(BoundaryProperties(sound_speed=1700.0))
-    with pytest.raises(ConfigurationError, match='interp'):
-        b.halfspace_at(range=0.0, interp='bogus')
+    with pytest.raises(ConfigurationError, match='method must be'):
+        b.halfspace_at(range=0.0, method='bogus')
 
 
 class TestBoundaryPropertiesRoughnessSign:
@@ -801,7 +801,7 @@ class TestBoundaryPropertiesRoughnessSign:
 def test_halfspace_at_mixed_types_defaults_to_nearest():
     """Mixed-type columns must not blend: the default reads the nearest
     column intact (its own type and values), and an explicit
-    interp='linear' is refused instead of averaging placeholders."""
+    method='linear' is refused instead of averaging placeholders."""
     bot = Bottom(
         columns=[
             SeabedColumn(layers=[], halfspace=BoundaryProperties(
@@ -816,7 +816,7 @@ def test_halfspace_at_mixed_types_defaults_to_nearest():
     near = bot.halfspace_at(range=0.0)
     assert near.acoustic_type == 'vacuum'
     with pytest.raises(ConfigurationError, match="linear"):
-        bot.halfspace_at(range=5_000.0, interp='linear')
+        bot.halfspace_at(range=5_000.0, method='linear')
 
 
 def test_collapse_range_mean_refuses_mixed_types():
@@ -1045,18 +1045,18 @@ class TestBoundaryCarrierLabelsMustBeFiniteScalars:
         with pytest.raises(ConfigurationError,
                            match='is not a finite label') as exc:
             _range_dependent_bottom().halfspace_at(range=np.nan,
-                                                   interp='linear')
+                                                   method='linear')
         assert "range=nan is not a finite label" in str(exc.value)
         assert "density must be finite" not in str(exc.value)
 
     def test_halfspace_at_nearest_nan_range_raises(self):
         with pytest.raises(ConfigurationError, match="not a finite label"):
             _range_dependent_bottom().halfspace_at(range=np.nan,
-                                                   interp='nearest')
+                                                   method='nearest')
 
     def test_halfspace_at_a_finite_range_blends_the_two_columns(self):
         bp = _range_dependent_bottom().halfspace_at(range=2500.0,
-                                                    interp='linear')
+                                                    method='linear')
         assert bp.sound_speed == pytest.approx(1700.0)
 
     def test_seabed_column_at_nan_depth_raises_a_typed_label_error(self):
@@ -1443,16 +1443,16 @@ class TestTheAttenuationCeilingAdvisesShearOnItsOwnScale:
 
     def test_both_fields_refuse_the_same_value_at_the_same_bound(self):
         # The remedy text branched; the threshold did not.
-        from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        from uacpy.core.deck_limits import MAX_ATTENUATION
         from uacpy.core._validate import require_attenuation_in_range
         for field in ('attenuation', 'shear_attenuation'):
             label = f"BoundaryProperties {field}"
             require_attenuation_in_range(
-                MAX_ATTENUATION_DB_PER_WAVELENGTH, label)
+                MAX_ATTENUATION, label)
             with pytest.raises(ConfigurationError,
                                match='dB/wavelength exceeds'):
                 require_attenuation_in_range(
-                    float(np.nextafter(MAX_ATTENUATION_DB_PER_WAVELENGTH,
+                    float(np.nextafter(MAX_ATTENUATION,
                                        np.inf)),
                     label)
 

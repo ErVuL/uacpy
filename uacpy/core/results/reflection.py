@@ -13,7 +13,7 @@ from uacpy.core.acoustics.boundaries import critical_angle, reflection_coeff
 from uacpy.core.acoustics.levels import transmission_loss_dB
 from uacpy.core.bottom import Bottom
 from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
-                                  DEFAULT_WATER_DENSITY_G_CM3)
+                                  DEFAULT_WATER_DENSITY)
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
@@ -73,7 +73,7 @@ class ReflectionCoefficient(Result):
     """
 
     #: The plotter that draws this result (``.plot()``).
-    _plotter = 'plot_reflection_coefficient'
+    _plotter = '_plot_reflection_coefficient'
 
     def __init__(
         self,
@@ -580,7 +580,7 @@ def bottom_loss_curve(
     *,
     grazing_angles_deg: Optional[np.ndarray] = None,
     water_sound_speed: float = DEFAULT_SOUND_SPEED,
-    water_density: float = DEFAULT_WATER_DENSITY_G_CM3,
+    water_density: float = DEFAULT_WATER_DENSITY,
 ) -> ReflectionCoefficient:
     """Plane-wave fluid–fluid reflection of a seabed against grazing angle,
     as a :class:`ReflectionCoefficient` whose loss view is the bottom loss.
@@ -599,8 +599,10 @@ def bottom_loss_curve(
     loses energy to shear waves (Jensen et al., *Computational Ocean
     Acoustics*, §1.6.2, Eq. 1.61), most between the shear and compressional
     critical angles: lossless basalt (c_p 5250, c_s 2500 m/s) loses 2.7-3.4 dB
-    per bounce at 55-70° grazing where this curve gives 0 dB. BOUNCE and
-    OASR compute the elastic coefficient.
+    per bounce at 55-70° grazing where this curve gives 0 dB. The elastic
+    coefficient is :func:`~uacpy.core.acoustics.reflection_coeff` with
+    ``shear_speed=`` (Brekhovskikh & Lysanov Eq. 3.4.22), as BOUNCE and OASR
+    compute it.
 
     Parameters
     ----------
@@ -622,7 +624,7 @@ def bottom_loss_curve(
         ``90`` = normal incidence). Default ``np.linspace(0, 90, 181)``.
     water_sound_speed, water_density : float
         Water-column reference values (m/s, g/cm³). ``water_density``
-        defaults to :data:`~uacpy.core.constants.DEFAULT_WATER_DENSITY_G_CM3`
+        defaults to :data:`~uacpy.core.constants.DEFAULT_WATER_DENSITY`
         (1.027 g/cm³), the value every deck writes for the water column, so
         the curve matches what the propagation models see; pass ``1.0`` to
         reproduce a textbook benchmark that takes ρ_w = 1 (on 'sand' the
@@ -710,8 +712,9 @@ def bottom_loss_curve(
             f"elastic seabed also loses energy to shear waves (Jensen et al., "
             f"Computational Ocean Acoustics, §1.6.2, Eq. 1.61), most between "
             f"the shear and compressional critical angles, where this curve "
-            f"can report total reflection. BOUNCE and OASR compute the "
-            f"elastic coefficient.",
+            f"can report total reflection. The elastic coefficient is "
+            f"acoustics.reflection_coeff(..., shear_speed=, "
+            f"shear_attenuation=), as BOUNCE and OASR compute it.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     R = reflection_coeff(
         grazing_angles_deg,

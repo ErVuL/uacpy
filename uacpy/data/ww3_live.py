@@ -31,19 +31,21 @@ _HS_VARS = ('Thgt', 'hs', 'htsgwsfc', 'significant_wave_height')
 _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
 
 
-def _griddap_url(var, when, lat, lon):
-    return erddap_griddap_url(ERDDAP_URL, DATASET, var, when, lat, lon,
-                              level=0.0)
+def _griddap_url(var, when, lat, lon, base_url=None):
+    return erddap_griddap_url(
+        ERDDAP_URL if base_url is None else str(base_url).rstrip('/'),
+        DATASET, var, when, lat, lon, level=0.0)
 
 
 def hs_at(point, *, date, timeout=60.0, verbose=False, max_distance_km=None,
-          who='fetch_waves'):
+          who='fetch_waves', base_url=None):
     """``(Hs in m, the 'ww3' DataProvenance of the grid node read)``.
 
     The field is read at 00:00 UTC of ``date`` (a time of day is ignored);
-    the provenance names the step read in its ``data_date``. The host is the
-    module constant :data:`ERDDAP_URL` (a third-party PacIOOS mirror);
-    reassign it to read another. The griddap selectors snap to the node
+    the provenance names the step read in its ``data_date``. The host is
+    ``base_url``, an ERDDAP griddap root serving ``ww3_global``; ``None``
+    reads the module constant :data:`ERDDAP_URL` (a third-party PacIOOS
+    mirror). The griddap selectors snap to the node
     nearest the query, so the node is the point's own cell by construction
     and only ``max_distance_km`` (checked by the caller) can refuse it.
     Raises ``DataFetchError`` where WW3 has no value (land, or a date outside
@@ -54,7 +56,8 @@ def hs_at(point, *, date, timeout=60.0, verbose=False, max_distance_km=None,
     outcomes = []
     for var in _HS_VARS:
         try:
-            body = http_get(_griddap_url(var, date, lat, lon), timeout=timeout,
+            body = http_get(_griddap_url(var, date, lat, lon, base_url),
+                            timeout=timeout,
                             verbose=verbose, source='waves',
                             user_agent=_USER_AGENT).decode('utf-8', 'replace')
         except DataFetchError as exc:

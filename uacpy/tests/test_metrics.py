@@ -1,4 +1,4 @@
-"""Tests for ``uacpy.core.metrics`` — TL-pair agreement helpers
+"""Tests for ``uacpy.core.results.metrics`` — TL-pair agreement helpers
 (``tl_rmse``, ``tl_max_error``, ``tl_bias``, ``tl_difference``,
 ``field_statistics``, ``same_grid``).
 
@@ -13,7 +13,7 @@ import pytest
 from uacpy.core.exceptions import ConfigurationError
 
 import uacpy
-from uacpy.core.metrics import tl_bias, tl_max_error, tl_rmse
+from uacpy.core.results.metrics import tl_bias, tl_max_error, tl_rmse
 from uacpy.core.results import Field
 from uacpy.tests.conftest import recorded_warnings
 
@@ -318,7 +318,7 @@ class TestNoEnergyCellsAreLeftOutOfEveryMetric:
         assert tl_max_error(a, b) > 200.0
 
     def test_shared_ranges_leaves_the_marker_out_too(self):
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         a, b = _complex_pair()
         clean = tl_rmse_on_shared_ranges(a, b, depth=10.0)
         a2, b2 = _complex_pair(zero_col=7)
@@ -336,7 +336,7 @@ class TestSharedRangesStatesWhatItCompares:
                      model='Synthetic')
 
     def test_two_different_nearest_depths_are_named(self):
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         a = self._field([10.0, 20.0], np.linspace(100, 1000, 10))
         b = self._field([12.0, 22.0], np.linspace(100, 1000, 10))
         with pytest.warns(UserWarning, match="10 m in `field` and 12 m"):
@@ -348,7 +348,7 @@ class TestSharedRangesStatesWhatItCompares:
         exactly at every node both fields hold, so the RMS is 0; read on the
         20 m axis, the coarse field is interpolated between its nodes and
         is not."""
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         fine = self._field([10.0], np.linspace(20.0, 1000.0, 50))
         coarse = self._field([10.0], np.linspace(100.0, 10000.0, 100))
         assert tl_rmse_on_shared_ranges(fine, coarse, depth=10.0) == \
@@ -363,7 +363,7 @@ class TestSharedRangesStatesWhatItCompares:
         """5..95 m every 10 m: a depth within half a step of an end reads
         that end, a depth past it (500 m, a km-for-m slip) is refused
         rather than compared at 95 m."""
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         z = np.linspace(5.0, 95.0, 10)
         a = self._field(z, np.linspace(100, 1000, 10))
         b = self._field(z, np.linspace(100, 1000, 10), scale=2.0)
@@ -379,7 +379,7 @@ class TestSharedRangesStatesWhatItCompares:
         """``field.at(depth=z)`` is a Field read at one depth: it compares
         with no depth=, to the number the grids give at that depth, and the
         depth it was cut at is the one the mismatch warning names."""
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         a = self._field([10.0, 20.0], np.linspace(100, 1000, 10))
         b = self._field([10.0, 20.0], np.linspace(100, 1000, 7), scale=2.0)
         on_grids = tl_rmse_on_shared_ranges(a, b, depth=10.0)
@@ -394,7 +394,7 @@ class TestSharedRangesStatesWhatItCompares:
             tl_rmse_on_shared_ranges(cut_a, cut_b, depth=10.0)
 
     def test_a_field_without_a_range_axis_is_a_typed_refusal(self):
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         a = self._field([10.0, 20.0], np.linspace(100, 1000, 10))
         with pytest.raises(ConfigurationError, match='has no range axis'):
             tl_rmse_on_shared_ranges(a.at(range=500.0), a.at(range=500.0),
@@ -405,7 +405,7 @@ class TestSharedRangesStatesWhatItCompares:
     def test_both_field_forms_name_the_same_first_defect(self, metric):
         """A pressure field against a probability-of-detection field is two
         defects (kind and unit): both forms report the kind first."""
-        import uacpy.core.metrics as metrics
+        import uacpy.core.results.metrics as metrics
         a = self._field([10.0], np.linspace(100, 1000, 10))
         pd = Field(data=np.full((1, 10), 0.5),
                    coords={'depth': np.array([10.0]),
@@ -418,7 +418,7 @@ class TestSharedRangesStatesWhatItCompares:
             getattr(metrics, metric)(a, pd, **kwargs)
 
     def test_a_real_field_not_in_dB_is_refused(self):
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         a = self._field([10.0], np.linspace(100, 1000, 10))
         pd = Field(data=np.full((1, 10), 0.5),
                    coords={'depth': np.array([10.0]),
@@ -434,7 +434,7 @@ class TestSharedRangesStatesWhatItCompares:
         """A field over source depths is one TL map per source: either
         side is refused typed, naming at(source_depth=...) and superpose();
         one plane compares."""
-        import uacpy.core.metrics as metrics
+        import uacpy.core.results.metrics as metrics
         call = getattr(metrics, metric)
         a = self._field([10.0, 20.0], np.linspace(100, 1000, 10))
         pair = Field(data=np.stack([a.data, 2.0 * a.data]),
@@ -472,7 +472,7 @@ class TestSharedRangesTakesTwoPlainCurves:
         return (self.R_FINE, tl_fine), (self.R_COARSE, tl_coarse)
 
     def test_two_curves_give_the_field_forms_number(self):
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         (r_a, tl_a), (r_b, tl_b) = self._curves()
         plain = tl_rmse_on_shared_ranges((r_a, tl_a), (r_b, tl_b))
         fields = [Field(data=tl[None, :], coords={'depth': np.array([50.0]),
@@ -484,12 +484,12 @@ class TestSharedRangesTakesTwoPlainCurves:
         assert np.isfinite(plain) and plain > 0.5
 
     def test_depth_with_two_curves_is_refused(self):
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         with pytest.raises(ConfigurationError, match='one depth'):
             tl_rmse_on_shared_ranges(*self._curves(), depth=50.0)
 
     def test_a_field_and_a_curve_together_are_refused(self):
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         (r_a, tl_a), curve = self._curves()
         field = Field(data=tl_a[None, :], coords={'depth': np.array([50.0]),
                                                   'range': r_a},
@@ -498,7 +498,7 @@ class TestSharedRangesTakesTwoPlainCurves:
             tl_rmse_on_shared_ranges(field, curve, depth=50.0)
 
     def test_two_fields_without_a_depth_are_refused(self):
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         (r, tl), _ = self._curves()
         field = Field(data=tl[None, :], coords={'depth': np.array([50.0]),
                                                 'range': r},
@@ -507,7 +507,7 @@ class TestSharedRangesTakesTwoPlainCurves:
             tl_rmse_on_shared_ranges(field, field)
 
     def test_ranges_that_do_not_increase_are_refused(self):
-        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        from uacpy.core.results.metrics import tl_rmse_on_shared_ranges
         (r, tl), other = self._curves()
         with pytest.raises(ConfigurationError, match='strictly increasing'):
             tl_rmse_on_shared_ranges((r[::-1], tl), other)

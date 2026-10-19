@@ -24,6 +24,8 @@ import pytest
 
 from uacpy.acoustic_signal import (
     FKResult,
+    RadonResult,
+    TauPResult,
     fk_transform,
     inverse_fk,
     inverse_radon,
@@ -59,19 +61,65 @@ def _hyperbolic_gather(v0, tau0):
     return g
 
 
+def _taup_result(panel, slownesses, fs, dx, nx, x0=0.0):
+    """A tau-p panel built by hand, with the geometry its inverse reads."""
+    panel = np.asarray(panel, dtype=float)
+    return TauPResult(np.asarray(slownesses, dtype=float),
+                      np.arange(panel.shape[1]) / fs, panel, sample_rate=fs,
+                      dx=dx, nx=nx, x0=x0)
+
+
+def _radon_result(panel, moveout, fs, dx, nx, kind, x0=0.0):
+    """A Radon panel built by hand, with the geometry its inverse reads."""
+    panel = np.asarray(panel, dtype=float)
+    return RadonResult(np.asarray(moveout, dtype=float),
+                       np.arange(panel.shape[1]) / fs, panel, kind=kind,
+                       sample_rate=fs, dx=dx, nx=nx, x0=x0)
+
+
 class TestTauP:
+    def test_axis_settings_given_with_the_axis_get_a_notice(self):
+        """``n_slownesses`` and ``p_max`` build the slowness axis; with
+        ``slownesses=`` given they are not used, so each given one is named
+        in a FallbackWarning and the panel is the given axis's. Unset, the
+        built axis is 201 slownesses over +/-1e-3 s/m."""
+        import warnings
+        from uacpy.core.exceptions import FallbackWarning
+        g = _linear_gather(1 / 1500.0, 0.05)
+        axis = np.linspace(-5e-4, 5e-4, 21)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            given = taup_transform(g, FS, DX, slownesses=axis)
+        with warnings.catch_warnings():
+            # The built +/-1e-3 s/m axis reaches past this gather's alias
+            # limit (a NumericsWarning); no FallbackWarning is the point.
+            warnings.simplefilter('error', FallbackWarning)
+            built = taup_transform(g, FS, DX)
+        assert built.slownesses.size == 201
+        assert built.slownesses[-1] == pytest.approx(1e-3, rel=1e-15)
+        for kwargs, named in (({'n_slownesses': 41}, r'n_slownesses=41'),
+                              ({'p_max': 2e-3}, r'p_max=0\.002'),
+                              ({'n_slownesses': 41, 'p_max': 2e-3},
+                               r'n_slownesses=41 and p_max=0\.002')):
+            with pytest.warns(FallbackWarning,
+                              match=rf"^taup_transform: slownesses= is the "
+                                    rf"axis itself, so {named}, which build "
+                                    rf"an axis"):
+                got = taup_transform(g, FS, DX, slownesses=axis, **kwargs)
+            np.testing.assert_array_equal(got.panel, given.panel)
+
     def test_focuses_linear_event(self):
         p0, tau0 = 1 / 1500.0, 0.05
         p, tau, U = taup_transform(_linear_gather(p0, tau0), FS, DX,
-                                   p_max=1 / 1000.0, n_slowness=241)
+                                   p_max=1 / 1000.0, n_slownesses=241)
         i, j = np.unravel_index(np.argmax(np.abs(U)), U.shape)
         assert p[i] == pytest.approx(p0, abs=p[1] - p[0])
         assert tau[j] == pytest.approx(tau0, abs=2 / FS)
 
     def test_compute_then_standalone_inverse(self):
         g = _linear_gather(1 / 1500.0, 0.05)
-        slow, tau, U = taup_transform(g, FS, DX, p_max=1 / 1000.0, n_slowness=241)
-        rec = inverse_taup(U, FS, DX, slow, NX)
+        rec = inverse_taup(taup_transform(g, FS, DX, p_max=1 / 1000.0,
+                                          n_slownesses=241))
         assert rec.shape == g.shape
         # inverse_taup is the adjoint slant stack, not an exact inverse: a
         # finite slowness fan and 48 traces leave amplitude taper and aliasing
@@ -87,7 +135,7 @@ class TestTauP:
     def test_zero_pad_and_window_focus(self):
         p0, tau0 = 1 / 1500.0, 0.05
         p, tau, U = taup_transform(_linear_gather(p0, tau0), FS, DX,
-                                   p_max=1 / 1000.0, n_slowness=241,
+                                   p_max=1 / 1000.0, n_slownesses=241,
                                    window="hann", nfft=1024)
         assert U.shape[1] == 1024 and tau.size == 1024
         i, j = np.unravel_index(np.argmax(np.abs(U)), U.shape)
@@ -121,8 +169,8 @@ class TestRadon:
     def test_inverse_reconstructs(self):
         g = _hyperbolic_gather(1500.0, 0.08)
         vels = np.linspace(1200, 2000, 81)
-        _, _, R = radon_transform(g, FS, DX, vels, kind='hyperbolic')
-        back = inverse_radon(R, FS, DX, vels, NX, kind='hyperbolic')
+        back = inverse_radon(radon_transform(g, FS, DX, vels,
+                                             kind='hyperbolic'))
         assert back.shape == g.shape
         assert np.corrcoef(g.ravel(), back.ravel())[0, 1] > 0.85
 
@@ -130,21 +178,21 @@ class TestRadon:
         with pytest.raises(ConfigurationError, match='kind must be one of'):
             radon_transform(np.zeros((NT, NX)), FS, DX, [1.0], kind='cubic')
         with pytest.raises(ConfigurationError, match='kind must be one of'):
-            inverse_radon(np.zeros((1, NT)), FS, DX, [1.0], NX, kind='cubic')
+            _radon_result(np.zeros((1, NT)), [1.0], FS, DX, NX, 'cubic')
 
     def test_the_linear_family_is_sent_to_the_slant_stack(self):
         """The linear moveout is taup_transform's, one implementation."""
         for call in (lambda: radon_transform(np.zeros((NT, NX)), FS, DX,
                                              [1e-4], kind='linear'),
-                     lambda: inverse_radon(np.zeros((1, NT)), FS, DX, [1e-4],
-                                           NX, kind='linear')):
+                     lambda: _radon_result(np.zeros((1, NT)), [1e-4], FS, DX,
+                                           NX, 'linear')):
             with pytest.raises(ConfigurationError,
                                match=r'(?s)slant stack.*taup_transform'):
                 call()
 
     def test_the_moveout_family_has_no_default(self):
         import inspect
-        for fn in (radon_transform, inverse_radon):
+        for fn in (radon_transform, RadonResult.__new__):
             kind = inspect.signature(fn).parameters['kind']
             assert kind.default is inspect.Parameter.empty
 
@@ -152,8 +200,7 @@ class TestRadon:
 class TestFKInverse:
     def test_exact_round_trip(self):
         g = _linear_gather(1 / 1500.0, 0.05)
-        _, _, _, spectrum = fk_transform(g, FS, DX)
-        assert np.max(np.abs(inverse_fk(spectrum) - g)) < 1e-9
+        assert np.max(np.abs(inverse_fk(fk_transform(g, FS, DX)) - g)) < 1e-9
 
     def test_calibrated_psd_parseval(self):
         rng = np.random.default_rng(0)
@@ -255,12 +302,17 @@ class TestBringYourOwn:
         # np.fft.fft2's exp(-i2πνx), so column ν holds -ν.
         F = np.fft.fft2(g)
         my_FK = np.fft.fftshift(np.roll(F[:, ::-1], 1, axis=1), axes=(0, 1))
-        assert np.max(np.abs(inverse_fk(my_FK) - g)) < 1e-9
+        frame = fk_transform(np.zeros_like(g), FS, DX)
+        assert np.max(np.abs(inverse_fk(frame._replace(spectrum=my_FK))
+                             - g)) < 1e-9
 
-    def test_inverse_taup_bad_shape_raises(self):
+    def test_a_panel_that_does_not_match_its_axis_is_refused(self):
+        r = _taup_result(np.zeros((2, 10)), [1.0, 2.0], FS, DX, NX)
         with pytest.raises(ConfigurationError,
-                           match='slownesses length .* must match taup rows'):
-            inverse_taup(np.zeros((3, 10)), FS, DX, np.array([1.0, 2.0]), NX)
+                           match=r'inverse_taup: the panel \(shape \(3, 10\)\) '
+                                 r'must be 2-D with one row per slowness '
+                                 r'value \(2\)'):
+            inverse_taup(r._replace(panel=np.zeros((3, 10))))
 
 
 class TestRadonHyperbolicMoveoutValidation:
@@ -271,8 +323,8 @@ class TestRadonHyperbolicMoveoutValidation:
 
     def test_inverse_rejects_nonpositive_velocity(self):
         with pytest.raises(ConfigurationError, match="> 0"):
-            inverse_radon(np.zeros((2, NT)), FS, DX, [-1.0, 1500.0], NX,
-                          kind='hyperbolic')
+            inverse_radon(_radon_result(np.zeros((2, NT)), [-1.0, 1500.0],
+                                        FS, DX, NX, 'hyperbolic'))
 
     @pytest.mark.parametrize('transform', [
         lambda d: radon_transform(d, FS, DX, [0.0, 1e-4], kind='parabolic'),
@@ -321,8 +373,9 @@ class TestRadonAdjointness:
         for j in range(nt * nm):
             e = np.zeros(nt * nm)
             e[j] = 1.0
-            A[:, j] = inverse_radon(e.reshape(nm, nt), self.FS_S, self.DX_S,
-                                    mv, nx, kind=kind).ravel()
+            A[:, j] = inverse_radon(_radon_result(
+                e.reshape(nm, nt), mv, self.FS_S, self.DX_S, nx,
+                kind)).ravel()
         return L, A
 
     @pytest.mark.parametrize("kind,mv", KINDS)
@@ -339,8 +392,8 @@ class TestRadonAdjointness:
         y = rng.standard_normal((mv.size, self.NT_S))
         lhs = np.sum(radon_transform(x, self.FS_S, self.DX_S, mv,
                                      kind=kind).panel * y)
-        rhs = np.sum(x * inverse_radon(y, self.FS_S, self.DX_S, mv,
-                                       self.NX_S, kind=kind))
+        rhs = np.sum(x * inverse_radon(_radon_result(
+            y, mv, self.FS_S, self.DX_S, self.NX_S, kind)))
         assert lhs == pytest.approx(rhs, rel=1e-12)
 
     def test_hyperbolic_column_sums_match_the_forward_weights(self):
@@ -363,59 +416,51 @@ class TestRadonAdjointness:
         assert np.sqrt((dx / 1.0) ** 2) > 3 / fs     # the ULP overshoot
         R = np.zeros((1, nt))
         R[0, 0] = 1.0                                # tau = 0 only
-        out = inverse_radon(R, fs, dx, np.array([1.0]), nx, kind='hyperbolic')
+        out = inverse_radon(_radon_result(R, [1.0], fs, dx, nx, 'hyperbolic'))
         assert out[3, 1] == pytest.approx(1.0, rel=1e-12)
 
 
-class TestInverseArgumentOrder:
-    """``inverse_taup`` and ``inverse_radon`` share one order — panel,
-    ``sample_rate``, ``dx``, parameter axis, ``nx`` — the forward transforms'
-    order. A call that puts the axis second is refused loudly by name."""
+class TestTheInversesTakeTheForwardResultWhole:
+    """Every gather inverse takes what its forward transform returned, which
+    carries the geometry (``sample_rate``, ``dx``, ``nx``, ``x0``; Radon's
+    ``kind``), so nothing is re-typed and a wrong ``dx`` or ``x0`` cannot
+    misplace the back-projection; a filtered panel goes back through
+    ``_replace``, which keeps the geometry. A bare array is refused."""
 
-    def test_both_inverses_take_the_axis_fourth(self):
-        import inspect
-        assert (list(inspect.signature(inverse_taup).parameters)[:5]
-                == ['taup', 'sample_rate', 'dx', 'slownesses', 'nx'])
-        assert (list(inspect.signature(inverse_radon).parameters)[:5]
-                == ['R', 'sample_rate', 'dx', 'moveout', 'nx'])
-
-    def test_the_axis_in_second_place_is_refused_by_both(self):
-        axis = np.array([-1e-3, 0.0, 1e-3])
+    @pytest.mark.parametrize('inverse, forward', [
+        (inverse_taup, 'taup_transform'), (inverse_radon, 'radon_transform'),
+        (inverse_fk, 'fk_transform')])
+    def test_a_bare_array_is_refused(self, inverse, forward):
         with pytest.raises(ConfigurationError,
-                           match=r"sample_rate must be a scalar.*"
-                                 r"inverse_taup\(taup, sample_rate, dx, "
-                                 r"slownesses, nx\)"):
-            inverse_taup(np.zeros((3, 64)), axis, FS, DX, NX)
-        with pytest.raises(ConfigurationError, match="must be a scalar"):
-            inverse_radon(np.zeros((3, 64)), axis, FS, DX, NX, 'parabolic')
+                           match=rf"^{inverse.__name__}: takes the \w+Result "
+                                 rf"{forward} returned") as e:
+            inverse(np.zeros((3, 64)))
+        assert '_replace(' in str(e.value)
 
-    def test_a_scalar_in_the_axis_slot_is_refused_even_on_a_one_row_panel(
-            self):
-        """With one row, a scalar axis lines up in size, so a misordered call
-        ``inverse_taup(panel, slowness, fs, dx, nx)`` whose scalars all sit
-        in scalar slots would run on the wrong numbers."""
-        panel = np.zeros((1, 64))
-        with pytest.raises(ConfigurationError,
-                           match=r"inverse_taup: slownesses must be a 1-D "
-                                 r"array.*got a scalar"):
-            inverse_taup(panel, 1e-4, 1000.0, 5.0, 16)
-        with pytest.raises(ConfigurationError,
-                           match=r"inverse_radon: moveout must be a 1-D "
-                                 r"array.*got a scalar"):
-            inverse_radon(panel, 1e-4, 1000.0, 5.0, 16, 'parabolic')
-        # The same one-row call with a length-1 axis runs.
-        assert inverse_taup(panel, FS, DX, np.array([1e-4]), 16).shape == (
-            64, 16)
-        assert inverse_radon(panel, FS, DX, np.array([1e-4]), 16,
-                             'parabolic').shape == (
-            64, 16)
+    def test_the_geometry_rides_on_the_result_and_survives_replace(self):
+        g = _linear_gather(1 / 1500.0, 0.05)
+        r = taup_transform(g, FS, DX, slownesses=[1e-4, 2e-4], x0=30.0)
+        assert (r.sample_rate, r.dx, r.nx, r.x0) == (FS, DX, NX, 30.0)
+        filtered = r._replace(panel=0.5 * r.panel)
+        assert (filtered.dx, filtered.nx, filtered.x0) == (DX, NX, 30.0)
+        np.testing.assert_allclose(inverse_taup(filtered),
+                                   0.5 * inverse_taup(r), rtol=1e-12)
+        R = radon_transform(g, FS, DX, [1e-6], kind='parabolic', x0=30.0)
+        assert (R.kind, R.sample_rate, R.dx, R.nx, R.x0) == (
+            'parabolic', FS, DX, NX, 30.0)
 
-    def test_mismatched_axis_length_names_the_signature(self):
-        with pytest.raises(ConfigurationError, match="comes fourth"):
-            inverse_taup(np.zeros((3, 10)), FS, DX, np.array([1.0, 2.0]), NX)
-        with pytest.raises(ConfigurationError, match="comes fourth"):
-            inverse_radon(np.zeros((3, 10)), FS, DX, np.array([1.0, 2.0]), NX,
-                          'parabolic')
+    def test_the_inverse_uses_the_forward_reference_offset(self):
+        """The forward ``x0`` reaches the inverse with the result: the
+        back-projection equals the hand-built one at that ``x0`` and differs
+        from the one at ``x0 = 0``."""
+        g = _linear_gather(1 / 1500.0, 0.05)
+        ps = np.linspace(-1e-3, 1e-3, 21)
+        r = taup_transform(g, FS, DX, slownesses=ps, x0=100.0)
+        np.testing.assert_array_equal(
+            inverse_taup(r), inverse_taup(_taup_result(r.panel, ps, FS, DX, NX,
+                                                       x0=100.0)))
+        assert not np.allclose(inverse_taup(r), inverse_taup(
+            _taup_result(r.panel, ps, FS, DX, NX)))
 
 
 class TestReferenceOffset:
@@ -436,7 +481,8 @@ class TestReferenceOffset:
         ps = np.linspace(-1e-3, 1e-3, 9)
         y = rng.standard_normal((ps.size, nt))
         lhs = np.sum(taup_transform(d, FS, DX, ps, x0=20.0).panel * y)
-        rhs = np.sum(d * inverse_taup(y, FS, DX, ps, nx, x0=20.0))
+        rhs = np.sum(d * inverse_taup(_taup_result(y, ps, FS, DX, nx,
+                                                   x0=20.0)))
         assert lhs == pytest.approx(rhs, rel=1e-10)
 
 
@@ -475,7 +521,7 @@ class TestTauPAbsoluteScale:
     scale passes it unchallenged. These two fix the adjoint's gain against the
     closed form above, and the adjointness test then carries that to the
     forward. A Parseval check would not do the job — the adjoint slant stack
-    sums ``n_slowness`` moveout lines into each trace and is not
+    sums ``n_slownesses`` moveout lines into each trace and is not
     energy-preserving.
     """
 
@@ -488,7 +534,8 @@ class TestTauPAbsoluteScale:
         nx, dx, x0, j0 = 3, 20.0, 20.0, 20
         u = np.zeros((1, self.NT_S))
         u[0, j0] = 1.0
-        out = inverse_taup(u, self.FS_S, dx, np.array([self.P]), nx, x0=x0)
+        out = inverse_taup(_taup_result(u, [self.P], self.FS_S, dx, nx,
+                                        x0=x0))
         for ix in range(nx):
             m = j0 + self.P * (ix * dx - x0) * self.FS_S
             assert m == round(m)                     # 0, 20, 40 samples
@@ -505,7 +552,8 @@ class TestTauPAbsoluteScale:
         nx, dx, x0, j0 = 4, 6.4, 1.6, 20
         u = np.zeros((1, self.NT_S))
         u[0, j0] = 1.0
-        out = inverse_taup(u, self.FS_S, dx, np.array([self.P]), nx, x0=x0)
+        out = inverse_taup(_taup_result(u, [self.P], self.FS_S, dx, nx,
+                                        x0=x0))
         for ix in range(nx):
             m = j0 + self.P * (ix * dx - x0) * self.FS_S
             assert m != round(m)                     # 18.4, 24.8, 31.2, 37.6
@@ -574,13 +622,12 @@ def test_fk_average_panel_not_invertible():
 
 def test_inverse_fk_roundtrip_and_none_guard():
     d = _gather()
-    _, _, _, spec = fk_transform(d, 1000.0, 5.0)
-    rec = inverse_fk(spec)
+    rec = inverse_fk(fk_transform(d, 1000.0, 5.0))
     # A single-segment forward/inverse FFT pair is algebraically exact, so
     # 1e-10 is float round-off headroom, not a physical tolerance.
     assert np.linalg.norm(rec - d) / np.linalg.norm(d) < 1e-10
     with pytest.raises(ConfigurationError, match='spectrum is None'):
-        inverse_fk(None)
+        inverse_fk(fk_transform(d, 1000.0, 5.0, nperseg=32))
 
 
 @pytest.mark.parametrize("kw", [dict(nperseg=999),
@@ -646,8 +693,7 @@ def test_inverse_fk_undoes_the_wavenumber_flip(nx, pad):
     nt = 33
     d = rng.standard_normal((nt, nx))
     nfft = (nt + 7, nx + 5) if pad else None
-    _, _, _, spec = fk_transform(d, 500.0, 2.0, nfft=nfft)
-    rec = inverse_fk(spec)
+    rec = inverse_fk(fk_transform(d, 500.0, 2.0, nfft=nfft))
     assert np.max(np.abs(rec[:nt, :nx] - d)) < 1e-10
 
 
@@ -906,20 +952,19 @@ class TestInverseRadonOffsetAxisOrigin:
         fs, dx, nx = 100.0, 10.0, 5
         R = np.zeros((3, 64))
         R[2, 20] = 1.0  # curvature q = +1e-5 s/m², tau index 20
-        out = inverse_radon(R, fs, dx, np.array([-1e-5, 0.0, 1e-5]), nx,
-                            kind="parabolic", x0=2 * dx)
+        out = inverse_radon(_radon_result(R, [-1e-5, 0.0, 1e-5], fs, dx, nx,
+                                          "parabolic", x0=2 * dx))
         col = out[:, 2]
         assert col.argmax() == 20
 
     def test_hyperbolic_guard_boundaries(self):
         from uacpy.acoustic_signal.gathers import inverse_radon
         R = np.zeros((1, 32))
-        inverse_radon(R, 100.0, 10.0, np.array([0.5]), 4,
-                      kind="hyperbolic")
+        inverse_radon(_radon_result(R, [0.5], 100.0, 10.0, 4, "hyperbolic"))
         with pytest.raises(ConfigurationError,
                            match='hyperbolic moveout is a velocity'):
-            inverse_radon(R, 100.0, 10.0, np.array([0.0]), 4,
-                          kind="hyperbolic")
+            inverse_radon(_radon_result(R, [0.0], 100.0, 10.0, 4,
+                                        "hyperbolic"))
 
 
 @pytest.mark.parametrize('name', ['fk_transform', 'taup_transform',
@@ -966,7 +1011,7 @@ class TestTheGatherTransformsTakeTheTimeAxis:
 
     @pytest.mark.parametrize('call', [
         lambda d, **k: fk_transform(d, FS, DX, **k).power,
-        lambda d, **k: taup_transform(d, FS, DX, n_slowness=21, **k).panel,
+        lambda d, **k: taup_transform(d, FS, DX, n_slownesses=21, **k).panel,
         lambda d, **k: radon_transform(d, FS, DX, np.linspace(0, 1e-6, 5),
                                        'parabolic', **k).panel,
     ])
@@ -987,7 +1032,7 @@ class TestTheGatherTransformsTakeTheTimeAxis:
     def test_a_window_of_none_is_the_boxcar_default(self):
         g = _linear_gather(1 / 1500.0, 0.05)
         for call in (lambda w: fk_transform(g, FS, DX, window=w).power,
-                     lambda w: taup_transform(g, FS, DX, n_slowness=21,
+                     lambda w: taup_transform(g, FS, DX, n_slownesses=21,
                                               window=w).panel,
                      lambda w: fk_transform(g, FS, DX,
                                             window=[w, 'hann']).power):

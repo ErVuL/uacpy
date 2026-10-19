@@ -276,9 +276,9 @@ _SWALLOW_MARKERS = ("! Warning: Could not", "✗ ", "Traceback (most recent call
 # CamelCase exception-class names out — example 20 prints
 # "→ UnsupportedFeatureError: ..." every run as a deliberate gap
 # demonstration, and that must not read as a marker. "skipped" is a marker
-# too: the "SKIPPED: {e}" / "{name} skipped: {e}" / "[skipped] {e}" handlers
-# of examples 19, 26 and 37 catch broad exceptions, and a precondition report
-# ("needs ./install.sh", "executable not found") carries no defect signature.
+# too: example 37's "[skipped] {e}" handlers print why a data fetch failed,
+# and a precondition report ("needs ./install.sh", "executable not found")
+# carries no defect signature.
 _ERRORISH_LINE = re.compile(
     r"(?i)(?<![a-z0-9_])error\s*:|\[error\]|\bskipped\b")
 
@@ -897,7 +897,12 @@ def test_example_10_band_power_window_holds_the_sweep():
     # ``constant_q(..., scaling='spectrum', ...)`` call.
     cq_call = _literal_kwargs(_first_call(tree, 'constant_q'), consts)
     cq = constant_q(lfm, chirp['sample_rate'], **cq_call)
-    window = _literal_kwargs(_first_call(tree, 'plot_constant_q_psd'), consts)
+    # The constant-Q panel's plot_psd call: the one handed ``cq_psd``.
+    cq_plot = next(node for node in ast.walk(tree)
+                   if isinstance(node, ast.Call)
+                   and getattr(node.func, 'attr', None) == 'plot_psd'
+                   and node.args and getattr(node.args[0], 'id', None) == 'cq_psd')
+    window = _literal_kwargs(cq_plot, consts)
     in_band = (cq.frequencies >= chirp['freq_start']) & (cq.frequencies <= chirp['freq_end'])
     levels = power_to_dB(cq.power, 1e-6)[in_band]     # as the plotter scales it
     q1, q3 = np.percentile(levels, [25, 75])
@@ -965,12 +970,12 @@ def test_the_examples_import_from_the_public_namespaces():
     namespace (``uacpy`` or ``uacpy.<package>``, plus
     ``uacpy.core.acoustics``) whose ``__all__`` exports ``name``. A defining
     module's own ``__all__`` does not count: ``core.exceptions`` and
-    ``core.metrics`` have one and are still not where a reader imports from.
+    ``core.results.metrics`` have one and are not where a reader imports from.
 
-    Fifteen examples reached into defining modules (``acoustic_signal.
-    generate``, ``core.exceptions``, ``core.metrics``, ``comms.constellations`` …)
-    for names the public namespaces export, teaching readers import paths
-    that move whenever the code is reorganised."""
+    An example that imports a name the public namespaces export from its
+    defining module (``acoustic_signal.generate``, ``core.exceptions``,
+    ``core.results.metrics``, ``comms.constellations`` …) teaches readers an
+    import path that moves whenever the code is reorganised."""
     import importlib
     offences = []
     for path in sorted(EXAMPLES_DIR.glob("example_*.py")):

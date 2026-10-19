@@ -167,7 +167,7 @@ class Covariance(Result):
     """
 
     #: The plotter that draws this result (``.plot()``).
-    _plotter = 'plot_covariance'
+    _plotter = '_plot_covariance'
 
     def __init__(
         self,
@@ -222,8 +222,11 @@ class Covariance(Result):
         }
 
     def _payload(self):
+        # A dimension name is not repeated in xarray: the rows run along
+        # 'receiver' (which carries the positions), the columns along
+        # 'receiver_column'.
         return {'covariance': (self.covariance,
-                               ('frequency', 'receiver', 'receiver_'),
+                               ('frequency', 'receiver', 'receiver_column'),
                                self.unit)}
 
     def _export_attrs(self):
@@ -412,7 +415,7 @@ class Replicas(Result):
     """
 
     #: The plotter that draws this result (``.plot()``).
-    _plotter = 'plot_replicas'
+    _plotter = '_plot_replicas'
 
     def __init__(
         self,

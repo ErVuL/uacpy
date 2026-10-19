@@ -53,7 +53,7 @@ def bathymetry_map():
         REGION_LAT, REGION_LON, n_lat=420, n_lon=420, source='local')
 
     fig, _ = uacpy.plot.plot_bathymetry_map(
-        grid.lats, grid.lons, grid.depths, transect=(A, B), source=A,
+        grid.lats, grid.lons, grid.depths, transect=(A, B), source_point=A,
         contours=[200.0, 1000.0, 2000.0, 3000.0, 4000.0],
         figsize=(8.0, 7.0), show_data_credit=[SOURCES['gebco']],
         title='GEBCO 2025 — Celtic shelf break to the Biscay abyssal plain')
@@ -79,8 +79,8 @@ def seasonal_ssp():
     styles = (('C0', '-'), ('C2', '--'), ('C3', '-.'), ('C1', ':'))
     for (label, ssp), (colour, dash) in zip(profiles, styles):
         for ax in (ax_full, ax_top):
-            ax.plot(ssp.sound_speed[:, 0], ssp.depths, color=colour, linestyle=dash,
-                    linewidth=1.6, label=label)
+            ssp.plot(ax=ax, label=label, color=colour, linestyle=dash,
+                     linewidth=1.6, show_legend=False)
     # WOA23's monthly fields stop at 1500 m; the annual mean is spliced on below,
     # so all four profiles are identical there (the dashes overlap).
     ax_full.axhline(1500.0, color='0.5', linewidth=0.9)
@@ -91,12 +91,6 @@ def seasonal_ssp():
     ax_top.set_title('Upper 300 m — the seasonal layer', fontweight='bold',
                      fontsize=11)
     ax_top.set_ylim(300.0, 0.0)
-
-    for ax in (ax_full, ax_top):
-        ax.set_xlabel('Sound speed (m/s)')
-        ax.set_ylabel('Depth (m)')
-        ax.grid(True, alpha=0.3)
-    ax_full.invert_yaxis()
     fig.suptitle(f'WOA23 climatology at {B[0]}°N, {abs(B[1])}°W',
                  fontweight='bold', fontsize=13)
     fig.tight_layout()
@@ -198,15 +192,12 @@ def crust1_column():
 
 def sea_ice():
     """The NSIDC ice climatology at its seasonal extremes, over one transect."""
-    from uacpy.data import seaice_local
-
     fram = ((81.0, -2.0), (76.5, 2.0))          # Fram Strait, marginal ice zone
 
     fig, axes = plt.subplots(1, 2, figsize=(10.0, 4.0))
     for ax, month, label in ((axes[0], 3, 'March — winter maximum'),
                              (axes[1], 9, 'September — summer minimum')):
-        uacpy.plot.plot_sea_ice_map(
-            seaice_local.sea_ice_grid(month, hemi='N'), hemi='N',
+        uacpy.data.sea_ice_grid(month, hemi='N').plot(
             transect=fram, ax=ax, title=label)
     fig.suptitle('NSIDC sea-ice concentration climatology — Fram Strait',
                  fontweight='bold', fontsize=13)

@@ -19,7 +19,8 @@ plane_wave_array_gain · matched_replica_gain · independent_beams(weights=) ·
 shading_taper · sonar.detection_threshold_energy · per_look_false_alarm ·
 passive_signal_excess_field(array_gain_dB=<grid>) ·
 transition_probability_field · detection_ranges_field ·
-plot_field / plot_detection_probability with env/receiver overlays
+plot_field / plot_detection_probability with env/receiver overlays ·
+draw_contours (a second field's contour over a map)
 """
 
 import os
@@ -28,7 +29,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.plot import plot_detection_probability, plot_field
+from uacpy.plot import draw_contours, plot_detection_probability, plot_field
 from uacpy.acoustic_signal import (beamform_field, independent_beams,
                                    matched_replica_gain,
                                    plane_wave_array_gain, shading_taper)
@@ -134,12 +135,9 @@ lo, hi = np.nanpercentile(tl_map, [1, 99])
 plot_field(tl, ax=axes[0, 0], env=env, receiver=array_at_origin,
            vmin=float(np.floor(lo / 5) * 5), vmax=float(np.ceil(hi / 5) * 5),
            title='1. Target-to-array loss, mean of 24 elements')
-axes[0, 0].contour(km, plane_depths, np.asarray(se['realised'].data),
-                   levels=[0.0], colors='k', linewidths=1.3)
-axes[0, 0].contour(km, plane_depths, np.asarray(se['constant'].data),
-                   levels=[0.0], colors='C3', linestyles='--', linewidths=1.4)
-axes[0, 0].plot([], [], 'k-', lw=1.3, label='SE = 0, realised AG')
-axes[0, 0].plot([], [], 'C3--', lw=1.4, label=f'SE = 0, AG = {ag_plane:.1f} dB')
+draw_contours(axes[0, 0], se['realised'], [0.0], label='SE = 0, realised AG')
+draw_contours(axes[0, 0], se['constant'], [0.0], color='C3', ls='--',
+              label=f'SE = 0, AG = {ag_plane:.1f} dB')
 axes[0, 0].legend(fontsize=7, loc='upper right', framealpha=0.85)
 
 row.plot(ax=axes[0, 1], at=int(np.argmin(np.abs(ranges - 5000.0))),
@@ -161,9 +159,8 @@ plot_detection_probability(pd_map['realised'], ax=axes[1, 1], env=env,
                            receiver=array_at_origin, contours=(0.5,),
                            title=f'4. Pd vs target position, realised AG '
                                  f'(scan Pf = {PF:g})')
-axes[1, 1].contour(km, plane_depths, np.asarray(pd_map['constant'].data),
-                   levels=[0.5], colors='C3', linestyles='--', linewidths=1.4)
-axes[1, 1].plot([], [], 'C3--', lw=1.4, label='Pd = 0.5 if AG were constant')
+draw_contours(axes[1, 1], pd_map['constant'], [0.5], color='C3', ls='--',
+              label='Pd = 0.5 if AG were constant')
 axes[1, 1].legend(fontsize=7, loc='upper right', framealpha=0.85)
 fig.tight_layout()
 fig.savefig(OUT / 'example_42_chain.png', dpi=140, bbox_inches='tight')

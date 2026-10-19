@@ -3386,11 +3386,11 @@ def test_every_documented_marker_expression_keeps_the_network_tests_out():
         f"{leaking}")
 
 
-def test_the_readme_mirror_sentence_names_only_fetchers_with_a_url():
-    """README's data-licence section said "UACPY exposes a ``base_url=`` on
-    each fetcher"; 23 of the ``uacpy.data`` callables take one. The sentence
-    names the families that do and the live fetchers that do not, and both
-    halves are checked against the signatures."""
+def test_the_readme_mirror_sentence_names_fetchers_that_take_a_url():
+    """README's data-licence section names the families that take a mirror
+    address: every ``download_*_db`` installer and every live fetcher, the
+    wind and wave fetchers among them. Each named family is checked against
+    the signatures."""
     import uacpy.data as data
 
     def takes_url(name):
@@ -3398,14 +3398,15 @@ def test_the_readme_mirror_sentence_names_only_fetchers_with_a_url():
                    inspect.signature(getattr(data, name)).parameters)
 
     text = _normalised(REPO_ROOT / "README.md")
-    assert "a `base_url=` on each fetcher" not in text
     downloads = [n for n in data.__all__ if n.startswith("download_")
                  and n.endswith("_db")]
     assert downloads and all(takes_url(n) for n in downloads)
     assert "every `download_*_db`" in text
+    assert "`base_url=` of every live fetcher" in text
     for name in ("fetch_wind", "fetch_waves"):
-        assert f"`{name}`" in text and not takes_url(name), name
-    for name in ("fetch_bathy", "fetch_ssp", "fetch_argo_profile",
+        assert f"`{name}`" in text and takes_url(name), name
+    for name in ("fetch_bathy", "fetch_bathy_transect", "fetch_bathy_grid",
+                 "fetch_wind_transect", "fetch_ssp", "fetch_argo_profile",
                  "fetch_emodnet_substrate", "fetch_mars_sediment"):
         assert takes_url(name), name
 

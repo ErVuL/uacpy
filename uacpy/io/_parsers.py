@@ -17,17 +17,19 @@ import numpy as np
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import (
-    FileFormatError, IOWarning, MissingFileError, UnsupportedFeatureError,
+    ConfigurationError, FileFormatError, IOWarning, MissingFileError,
+    UnsupportedFeatureError,
 )
+from uacpy.core.results import Field
 from uacpy.core.units import km_to_m
 from uacpy.io._fortran_helpers import (
     _bound_counts, detect_endian, read_fortran_record as _read_fortran_record,
-    typed_format_error,
+    require_model_output, typed_format_error,
 )
-from uacpy.io.ramsurf_reader import _read_grid
 
-__all__ = ['OastTlFields', 'parse_oast_tl', 'parse_oasp_trf',
-           'oasp_trf_pressure', 'parse_tl_grid', 'parse_pcomplex_grid']
+__all__ = ['OastTlFields', 'parse_oast_tl', 'oast_depth_average_field',
+           'parse_oasp_trf', 'oasp_trf_pressure', 'parse_tl_grid',
+           'parse_pcomplex_grid']
 
 
 def _decode_fortran_title(raw: bytes) -> str:
@@ -124,6 +126,14 @@ def _oast_curve_slots(plp_file: Path, tl_curves: list, receiver_depths):
             remediation="Pass receiver_depths= (the deck's receiver axis) "
                         "to attribute the curves by position.")
     n_depths = len(receiver_depths)
+    if n_depths == 0:
+        raise ConfigurationError(
+            f"receiver_depths is empty, and {plp_file}: {reason}, so the "
+            f"curves can only be attributed to depths by position on the "
+            f"deck's receiver axis.",
+            remediation="Pass receiver_depths= (the deck's receiver depths, "
+                        "m), or omit it for a .plp that carries the 'RD:' "
+                        "labels.")
     n_freq, remainder = divmod(len(tl_curves), n_depths)
     if remainder or n_freq == 0:
         raise FileFormatError(
@@ -177,6 +187,10 @@ def _match_label_depths(depth_labels: list, receiver_depths) -> np.ndarray:
 #: ``.plp`` curve tag PLTLOS writes for TL vs range: ``optpar(INR)//'TLRAN'``
 #: (oasfun22.f:330). PLDAV/PTLDEP/PLINTGR/PLSPECT use TLDAV/TLDEP/INTGR/SPECT.
 _OAST_TL_RANGE_TAG = 'TLRAN'
+
+#: ``.plp`` curve tag PLDAV writes for the depth-averaged TL option ``'A'``
+#: computes: ``optpar(INR)//'TLDAV'`` (oasfun22.f:403).
+_OAST_DEPTH_AVERAGE_TAG = 'TLDAV'
 
 #: Column at which PLPWRI's ``FORMAT(1H ,I8,10X,A40)`` / ``(1H ,G15.6,3X,A40)``
 #: put the field name; both leave the value in columns 0..18.
@@ -693,9 +707,63 @@ class OastTlFields(TypedDict):
     tl: np.ndarray
     depths: np.ndarray
     ranges: np.ndarray
+    depth_average: Optional[np.ndarray]
     metadata: Dict[str, Any]
 
 
+def _oast_depth_average(plp_file: Path, plt_file: Path, curves: list,
+                        blocks: list, param: str, freq_axis,
+                        grids: Dict[int, Tuple[float, float]],
+                        n_ranges: int) -> Optional[np.ndarray]:
+    """The depth-averaged TL curves option ``'A'`` adds, one per frequency
+    as ``(n_freq, n_ranges)``, or ``None`` for a ``.plp`` that carries none.
+
+    GETTLAV (oasfun22.f:209-242) averages ``|p|²`` over all the deck's
+    receivers with weight ``1/IR`` and writes ``-10·log10`` of the mean;
+    PLDAV writes it once per frequency, after the receiver loop
+    (unoast31.f:681-688), on the range grid of that frequency's TL curves
+    (``PLTWRI(LF,RMIN,RSTEP,…)``, oasfun22.f:433). Its labels are ``Freq:``
+    and ``SD:`` only (``NLAB=2``, oasfun22.f:406-408), so the curves are
+    attributed to frequencies in file order, and a ``Freq:`` label that
+    disagrees with the TL curves' is refused.
+    """
+    average_curves = [c for c in curves
+                      if c['tag'].endswith(_OAST_DEPTH_AVERAGE_TAG)
+                      and c['tag'][0] == param]
+    if not average_curves:
+        return None
+    n_freq = len(grids)
+    if len(average_curves) != n_freq:
+        raise FileFormatError(
+            f"{plp_file} carries {len(average_curves)} depth-averaged TL "
+            f"curve(s) ('*{_OAST_DEPTH_AVERAGE_TAG}') for {n_freq} "
+            f"frequenc{'y' if n_freq == 1 else 'ies'}; OAST writes one per "
+            f"frequency (unoast31.f:681-688).")
+    average = np.empty((n_freq, n_ranges), dtype=float)
+    for j, curve in enumerate(average_curves):
+        label = curve['labels'].get('Freq')
+        if (freq_axis is not None and label is not None
+                and label != freq_axis[j]):
+            raise FileFormatError(
+                f"{plp_file}: depth-averaged TL curve {j} is labelled "
+                f"{label} Hz where the TL curves' frequency {j} is "
+                f"{freq_axis[j]} Hz.")
+        if (curve['n'], (curve['xoff'], curve['dx'])) != (n_ranges, grids[j]):
+            raise FileFormatError(
+                f"{plp_file}: depth-averaged TL curve {j} has N={curve['n']} "
+                f"samples from XOFF={curve['xoff']} km in steps of "
+                f"DX={curve['dx']} km, not the TL curves' range grid of its "
+                f"frequency ({n_ranges} samples, {grids[j]}).")
+        if curve['index'] is None:
+            raise FileFormatError(
+                f"{plp_file}: depth-averaged TL curve {j} parameterises both "
+                f"axes, so PLTWRI wrote no {plt_file.suffix} block for it "
+                f"(oasgun21.f:658-660).")
+        average[j] = _curve_values(blocks[curve['index']], curve, plt_file)
+    return average
+
+
+@typed_format_error
 def parse_oast_tl(
     filepath: Union[str, Path],
     receiver_depths: Optional[np.ndarray] = None,
@@ -753,6 +821,14 @@ def parse_oast_tl(
           ``(n_freq, n_ranges_native)`` for a sweep**: OAST rebuilds the
           grid inside its frequency loop, so ``DX`` scales as ``1/f`` and
           the frequencies do not share one range axis.
+        - ``'depth_average'`` : ndarray or None — the depth-averaged TL
+          (dB) option ``'A'`` makes OAST write, ``-10·log10`` of ``|p|²``
+          averaged over every receiver of the deck (oasfun22.f:209-242;
+          "the averaging is performed over the specified number of
+          receivers", oast.tex:144-146), on the TL curves' range grid:
+          shape ``(n_ranges_native,)`` for a single frequency,
+          ``(n_freq, n_ranges_native)`` for a sweep. ``None`` when the file
+          carries no such curve.
         - ``'metadata'`` : dict — ``{'oast_grid_shape': …,
           'n_frequencies': n_f, 'plotted_frequencies': ndarray}``.
           ``'plotted_frequencies'`` comes from the ``Freq:`` labels (``F7.1``, oasfun22.f:368) and is
@@ -766,8 +842,10 @@ def parse_oast_tl(
         without it) or the TL data file is.
     FileFormatError
         If the ``.plp`` file cannot be parsed, if it carries no TL-vs-range
-        curve, if its ``Freq:``/``RD:`` labels do not form a full grid, or
-        if the receivers of one frequency disagree about the range axis.
+        curve, if its ``Freq:``/``RD:`` labels do not form a full grid, if
+        the receivers of one frequency disagree about the range axis, or if
+        its depth-averaged TL curves do not match the TL curves'
+        frequencies and range grids.
     """
     filepath = Path(filepath)
 
@@ -906,6 +984,9 @@ def parse_oast_tl(
             f"receiver."
         )
 
+    depth_average = _oast_depth_average(
+        plp_file, tl_data_file, curves, blocks, params[0], freq_axis, grids,
+        n_ranges_oast)
     range_rows = np.array([
         km_to_m(grids[j][0] + np.arange(n_ranges_oast) * grids[j][1])
         for j in range(n_freq)
@@ -913,6 +994,8 @@ def parse_oast_tl(
     if n_freq == 1:
         tl_oast = tl_oast[0]
         ranges_oast = range_rows[0]
+        if depth_average is not None:
+            depth_average = depth_average[0]
     else:
         ranges_oast = range_rows
 
@@ -926,6 +1009,7 @@ def parse_oast_tl(
         'tl': tl_oast,
         'depths': depths_oast,
         'ranges': ranges_oast,
+        'depth_average': depth_average,
         'metadata': metadata,
     }
 
@@ -1002,6 +1086,23 @@ def parse_oasp_trf(
         Path(filepath), np.atleast_1d(np.asarray(receiver_depths, dtype=float)))
 
 
+def oast_depth_average_field(depth_average: np.ndarray,
+                             ranges: np.ndarray, **identity) -> Field:
+    """The depth-averaged TL curve of an OAST run (option ``'A'``) as a
+    real dB :class:`~uacpy.core.results.Field` on ``{'range'}``.
+
+    The values are OAST's own: ``-10·log10`` of ``|p|²`` averaged with
+    equal weights over every receiver depth of the deck
+    (oasfun22.f:209-242, oast.tex:144-146), on the TL curves' native range
+    grid ``ranges`` (m). The sum is over intensities, so the Field is
+    ``coherent=False``, as a band average is. ``identity`` carries the
+    producer's result keywords (``model``, ``backend``, ``frequencies`` …).
+    """
+    return Field(data=np.asarray(depth_average, dtype=float),
+                 coords={'range': np.asarray(ranges, dtype=float)},
+                 kind='pressure', unit='dB', coherent=False, **identity)
+
+
 def oasp_trf_pressure(raw: Dict, who: str, filepath) -> np.ndarray:
     """The pressure a ``.trf`` holds, from :func:`parse_oasp_trf`'s
     ``raw``: complex128 on ``(depth, range, frequency)``.
@@ -1028,6 +1129,106 @@ def oasp_trf_pressure(raw: Dict, who: str, filepath) -> np.ndarray:
             f"(oasp.tex:185), into a pressure Field")
     return sign * np.transpose(raw['transfer_function'], (2, 1, 0)).astype(
         np.complex128)
+
+
+#: Double-precision kind → the single-precision kind a stock build writes.
+_SINGLE_PRECISION = {'f8': 'f4', 'c16': 'c8'}
+
+
+def _read_lz_records(
+    filepath: Union[str, Path], *, dtype: str
+) -> Tuple[int, np.ndarray]:
+    """
+    Read a Fortran-unformatted file whose record 1 is ``int32 lz`` and
+    records 2..N each hold ``lz`` samples of ``dtype``. Returns ``(lz,
+    matrix[lz, n_records])``.
+
+    ``dtype`` is an endian-agnostic kind string (``'f8'``, ``'c16'`` — the
+    Collins binaries are built with ``-fdefault-real-8``); this
+    helper owns byte order entirely. Byte order is auto-detected from the
+    first record marker and applied to ``dtype`` here, so callers must not
+    pass a ``<``/``>`` prefix (any prefix is stripped defensively). A
+    one-shot warning fires the first time a big-endian file is decoded.
+
+    ``dtype`` names the double-precision kind; a first data record of half
+    that length (``lz`` single-precision samples, a stock build) switches
+    the file to ``'f4'``/``'c8'``, returned upcast to ``dtype``. Bytes left
+    after the last whole record (a run cut short mid-write) warn with the
+    count of records kept.
+    """
+    path = Path(filepath)
+    with path.open('rb') as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+        f.seek(0)
+        # 12 bytes is the smallest possible file: the header record is a
+        # 4-byte marker, one int32 ``lz``, and a 4-byte trailing marker.
+        if file_size < 12:
+            raise FileFormatError(f"{path}: too short to contain the header record.")
+
+        probe = f.read(4)
+        f.seek(0)
+        endian = detect_endian(probe, source=f'Collins PE grid:{path.name}')
+        # Re-anchor the caller-supplied dtype on the detected byte order so
+        # the file decodes correctly regardless of host endianness.
+        base_dtype = dtype.lstrip('<>=|')
+        item_dtype = np.dtype(endian + base_dtype)
+
+        (lz,) = _read_fortran_record(f, 'i', endian=endian)
+        single = _SINGLE_PRECISION.get(base_dtype)
+        if single is not None and lz > 0 and file_size - f.tell() >= 4:
+            (first_len,) = np.frombuffer(f.read(4), dtype=endian + 'i4')
+            f.seek(-4, 1)
+            if first_len == lz * np.dtype(single).itemsize:
+                item_dtype = np.dtype(endian + single)
+        expected = lz * item_dtype.itemsize
+
+        columns = []
+        # Stop before a partial trailing record: each data record is its
+        # ``lz``-sample payload framed by a leading and trailing 4-byte marker.
+        while file_size - f.tell() >= 8 + expected:
+            payload = _read_fortran_record(f, raw=True, endian=endian)
+            if len(payload) != expected:
+                raise FileFormatError(
+                    f"{path}: expected {expected}-byte data record, "
+                    f"got {len(payload)}."
+                )
+            col = np.frombuffer(payload, dtype=item_dtype).astype(
+                base_dtype, copy=True
+            )
+            columns.append(col)
+        leftover = file_size - f.tell()
+
+    if not columns:
+        raise FileFormatError(f"{path}: no data records found.")
+    if leftover:
+        warnings.warn(
+            f"{path.name}: {leftover} byte(s) after the last whole "
+            f"{expected}-byte record are not a complete range step and were "
+            f"dropped; {len(columns)} range step(s) read. The run was cut "
+            f"short while writing.",
+            IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+    return lz, np.stack(columns, axis=1)
+
+
+def _grid_axes(lz, n_ranges, dr, ndr, dz, ndz, depth_index_offset):
+    """Range and depth axes (m) shared by ``tl.grid`` and ``pcomplex.bin``,
+    which are written on the same (z, r) grid."""
+    ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
+    depths = (depth_index_offset
+              + np.arange(1, lz + 1, dtype=float) * ndz - 1) * dz
+    return ranges, depths
+
+
+def _read_grid(filepath, reader, dtype, dr, ndr, dz, ndz, depth_index_offset):
+    """``(ranges, depths, field)`` of a ``tl.grid``-shaped file; the field is
+    native-endian ``dtype`` straight from :func:`_read_lz_records`."""
+    require_model_output(filepath, reader)
+    lz, field = _read_lz_records(filepath, dtype=dtype)
+    ranges, depths = _grid_axes(lz, field.shape[1], dr, ndr, dz, ndz,
+                                depth_index_offset)
+    return ranges, depths, field
 
 
 @typed_format_error

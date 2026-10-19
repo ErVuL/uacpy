@@ -109,6 +109,24 @@ _CELL_KEYS = ('amplitudes', 'phases', 'delays', 'delays_imag', 'source_angles_de
 _CELL_DEFAULTS = {'delays_imag': 0.0, 'source_angles_deg': 0.0, 'receiver_angles_deg': 0.0,
                   'n_top_bounces': 0, 'n_bot_bounces': 0}
 
+#: The bounce counts: a cell or ray that omits them leaves its multipath
+#: class unknown, so a bounce question is refused (:func:`_refuse_no_bounces`).
+_BOUNCE_KEYS = ('n_top_bounces', 'n_bot_bounces')
+
+
+def _refuse_no_bounces(who: str, n_missing: int, n_total: int,
+                       what: str) -> None:
+    """Refuse a bounce question (a class, a bounce filter) on ``what``
+    (``'rays'`` / ``'arrivals'``) of which ``n_missing`` of ``n_total``
+    carry no bounce counts."""
+    raise ConfigurationError(
+        f"{who}: {n_missing} of {n_total} {what} carry no bounce counts "
+        f"('n_top_bounces' / 'n_bot_bounces'), so their multipath class "
+        f"has no answer; 'direct' would be a class no data produced.",
+        remediation="A file read through uacpy.io (read_ray_file, "
+                    "read_arr_file) supplies them; give both per "
+                    f"{what[:-1]} when building one by hand.")
+
 
 def _columns_from_records(records) -> Dict[str, np.ndarray]:
     """The table of a record list: one column per :data:`_ARRIVAL_COLUMNS`
@@ -139,6 +157,9 @@ def _columns_from_cells(by_receiver):
     shape = _grid_shape_of(by_receiver)
     parts = {name: [] for name in (*_CELL_KEYS, 'src_idx', 'depth_idx',
                                    'range_idx')}
+    # A bounce count a cell does not state is unknown, not zero: its column
+    # is left out, and a bounce question is refused.
+    unstated = set()
     for s_idx, by_src in enumerate(by_receiver if isinstance(by_receiver, list) else []):
         for d_idx, by_depth in enumerate(by_src if isinstance(by_src, list) else []):
             for r_idx, cell in enumerate(by_depth if isinstance(by_depth, list) else []):
@@ -152,6 +173,8 @@ def _columns_from_cells(by_receiver):
                     if name in cell:
                         parts[name].append(np.asarray(cell[name]))
                     else:
+                        if name in _BOUNCE_KEYS:
+                            unstated.add(name)
                         fill = (np.zeros_like(delays) if name in ('amplitudes', 'phases')
                                 else np.full(n, _CELL_DEFAULTS[name]))
                         parts[name].append(fill)
@@ -161,7 +184,7 @@ def _columns_from_cells(by_receiver):
     dtypes = dict(_ARRIVAL_COLUMNS.values())
     columns = {name: (np.concatenate(chunks).astype(dtypes[name], copy=False)
                       if chunks else np.zeros(0, dtype=dtypes[name]))
-               for name, chunks in parts.items()}
+               for name, chunks in parts.items() if name not in unstated}
     return columns, shape
 
 
@@ -201,7 +224,8 @@ def _cells_from_columns(columns, shape):
     full = {name: (np.asarray(columns[name]) if name in columns
                    else np.full(n, _CELL_DEFAULTS.get(name, 0.0),
                                 dtype=dtypes[name]))
-            for name in _CELL_KEYS}
+            for name in _CELL_KEYS
+            if name in columns or name not in _BOUNCE_KEYS}
     flat = (src * n_depth + dep) * n_range + rng
     inside = (src < n_src) & (dep < n_depth) & (rng < n_range)
     order = np.argsort(np.where(inside, flat, -1), kind='stable')
@@ -215,8 +239,8 @@ def _cells_from_columns(columns, shape):
             for r in range(n_range):
                 k = (s * n_depth + d) * n_range + r
                 rows = order[bounds[k]:bounds[k + 1]]
-                cell = {name: read_only(full[name][rows])
-                        for name in _CELL_KEYS}
+                cell = {name: read_only(values[rows])
+                        for name, values in full.items()}
                 cell['n_arrivals'] = int(len(rows))
                 row.append(FrozenDict(cell))
             by_depth.append(FrozenList(row))
@@ -269,7 +293,7 @@ class Arrivals(Result):
     """
 
     #: The plotter that draws this result (``.plot()``).
-    _plotter = 'plot_arrivals'
+    _plotter = '_plot_arrivals'
 
     def __init__(
         self,
@@ -447,18 +471,23 @@ class Arrivals(Result):
         """Bottom reflections of every arrival."""
         return self._bounce_column('n_bot_bounces')
 
-    def _bounce_column(self, name: str) -> np.ndarray:
-        if name not in self._columns:
-            raise AttributeError(
-                f"Arrivals.{name}: these arrivals carry no '{name}'; an "
-                f"Arrivals built by hand without the column.")
-        return self._column(name)
+    def _bounce_column(self, name: str,
+                       who: Optional[str] = None) -> np.ndarray:
+        """Column ``name`` of the bounce counts, refused (naming ``who``,
+        else the column's accessor) when the arrivals carry none."""
+        if any(key not in self._columns for key in _BOUNCE_KEYS) and len(
+                self):
+            _refuse_no_bounces(who or f"Arrivals.{name}", len(self),
+                               len(self), 'arrivals')
+        return self._column(name, 0)
 
     @property
     def kinds(self) -> np.ndarray:
         """The multipath class of every arrival, from its bounce counts:
-        ``'direct'``, ``'surface'``, ``'bottom'`` or ``'both'``."""
-        top, bot = self.n_top_bounces, self.n_bot_bounces
+        ``'direct'``, ``'surface'``, ``'bottom'`` or ``'both'``; refused
+        when the arrivals carry no counts."""
+        top = self._bounce_column('n_top_bounces', 'Arrivals.kinds')
+        bot = self._bounce_column('n_bot_bounces', 'Arrivals.kinds')
         return read_only(np.array(
             [_arrival_kind(int(t), int(b)) for t, b in zip(top, bot)],
             dtype=object))
@@ -516,8 +545,28 @@ class Arrivals(Result):
         the band up to the Nyquist frequency).
         :meth:`_arrival_power` is its squared magnitude. On plain columns
         this is :func:`~uacpy.acoustic_signal.received_amplitudes`.
+
+        A result with no frequency (:attr:`f0` ``None``, an ``Arrivals``
+        built by hand) whose arrivals carry absorption (a non-zero
+        ``delays_imag``) is refused: ``Im tau`` states the loss at the
+        frequency the arrivals were traced at, as the receptions refuse it.
         """
+        if self._absorption_has_no_frequency():
+            raise ConfigurationError(
+                "Arrivals.received_amplitudes: the arrivals carry volume "
+                "absorption (a non-zero delays_imag), which Im tau states at "
+                "the frequency they were traced at, and this result has no "
+                "frequency (f0).",
+                remediation="Build the Arrivals with frequencies=[the trace "
+                            "frequency in Hz], as Bellhop records it.")
         return self._received_amplitudes_at(self.f0 or 0.0)
+
+    def _absorption_has_no_frequency(self) -> bool:
+        """Whether the arrivals carry absorption (a non-zero
+        ``delays_imag``) that no :attr:`f0` places: their received
+        amplitudes are then undefined."""
+        return (self.f0 is None
+                and bool(np.any(self._column('delays_imag', 0.0) != 0.0)))
 
     @property
     def absorption(self):
@@ -542,9 +591,13 @@ class Arrivals(Result):
         # arrival set assembled without one — Bellhop always writes it, but
         # callers building Arrivals by hand need not — must still be able to
         # ask what reaches the receiver, and :meth:`_arrival_power` goes
-        # through here. The stored phase is radians.
-        delays_imag = self._column('delays_imag', 0.0)
-        phase = self._column('phases', 0.0)
+        # through here. The stored phase is radians. A column the table does
+        # not hold is zeros, one per amplitude.
+        absent = np.zeros(np.size(amplitude))
+        delays_imag = (absent if self._columns.get('delays_imag') is None
+                       else self._column('delays_imag'))
+        phase = (absent if self._columns.get('phases') is None
+                 else self._column('phases'))
         # Deferred: acoustic_signal pulls scipy, and uacpy's public
         # surface is imported without it (test_lazy_imports).
         from uacpy.acoustic_signal.channel import received_amplitudes
@@ -615,7 +668,8 @@ class Arrivals(Result):
         ``amplitude``, ``phase`` rad, the bounce counts, ``source_angle`` /
         ``receiver_angle`` deg, the cell indices), ``kind``, the complex
         ``received_amplitude`` (:attr:`received_amplitudes`, the volume
-        absorption applied), and the receiver each arrival reaches,
+        absorption applied; left out where no :attr:`f0` places that
+        absorption), and the receiver each arrival reaches,
         ``receiver_depth`` and ``receiver_range`` (m). The bulk accessors
         and :meth:`to_dict` keep the plural column names."""
         record_key = {name: key for key, name in self._COLUMNS.items()}
@@ -623,7 +677,9 @@ class Arrivals(Result):
                  for name, values in self._columns.items()}
         if 'n_top_bounces' in table and 'n_bot_bounces' in table:
             table['kind'] = np.asarray(self.kinds).copy()
-        if 'amplitude' in table and 'phase' in table:
+        # Left out where it is undefined (absorption with no f0 to place it).
+        if ('amplitude' in table and 'phase' in table
+                and not self._absorption_has_no_frequency()):
             table['received_amplitude'] = np.asarray(
                 self.received_amplitudes).copy()
         table['receiver_depth'] = np.asarray(self.receiver_depth).copy()
@@ -778,9 +834,11 @@ class Arrivals(Result):
             with ``None`` for an open end; ``None`` is any count.
         """
         pred = _bounce_predicate(kind, top, bot)
+        who = 'Arrivals.filter_by_bounces'
         return self._rows(np.flatnonzero(np.asarray(
-            [pred(int(t), int(b)) for t, b in zip(self.n_top_bounces,
-                                                  self.n_bot_bounces)],
+            [pred(int(t), int(b)) for t, b in zip(
+                self._bounce_column('n_top_bounces', who),
+                self._bounce_column('n_bot_bounces', who))],
             dtype=bool)))
 
     def window(self, *, delay) -> 'Arrivals':
@@ -976,7 +1034,7 @@ class Arrivals(Result):
         fc: Optional[float] = None,
         output_duration: Optional[float] = None,
         energy_fraction: Optional[float] = None,
-        margin: float = 1.2,
+        margin: Optional[float] = None,
     ) -> np.ndarray:
         """Frequency grid wide enough to synthesise these arrivals un-aliased.
 
@@ -1022,7 +1080,7 @@ class Arrivals(Result):
             (default 0.999). Lower it for a shorter record and a coarser
             grid; whatever falls outside wraps, at a level this reports.
         margin : float, optional
-            Headroom on the derived span (default 1.2), so the last arrival
+            Headroom on the derived span (unset: 1.2), so the last arrival
             inside it lands within the record rather than on its final
             sample. It is also the number of frequency samples per
             interference fringe: two paths ``dtau`` apart beat in ``|H(f)|``
@@ -1032,7 +1090,16 @@ class Arrivals(Result):
             that the record hold the arrivals; it is not enough to LOOK at
             the transfer function, whose curve between samples is then the
             plotter's, not the model's. Raise it to 8 or so for a drawn
-            ``|H(f)|``. Not used when ``output_duration`` is given.
+            ``|H(f)|``. An energy product (:meth:`Field.broadband_loss`,
+            :meth:`Field.sound_exposure_level`) needs 2 or more, the record
+            beating twice the delay spread (``dtau·df < 0.5``,
+            ``docs/theory/broadband_products.md``), and enough samples
+            across the band: on two paths 5-50 ms apart the band loss was
+            off by up to 2.6 dB over 900-1100 Hz at 1.2 (0.34 dB over
+            25 Hz-4 kHz); at 2, 0.11 dB over 25 Hz-4 kHz, but 1.6 dB where
+            the 200 Hz band held 3 samples. Not used when
+            ``output_duration`` is given: a given one then gets a
+            ``FallbackWarning``.
 
         Returns
         -------
@@ -1081,19 +1148,17 @@ class Arrivals(Result):
         ``receiver=(depth, range)`` picks the cell by its coordinates on
         the result's receiver axes; ``None`` is accepted only when every
         arrival already sits in one cell. A multi-cell set without
-        ``receiver=``, a multi-source set and an empty cell are refused, as
-        the channel methods refuse them.
+        ``receiver=`` and a multi-source set are refused, as the channel
+        methods refuse them; a cell nothing reaches is an empty
+        ``Arrivals``.
 
         Parameters
         ----------
         receiver : (float, float), optional
             ``(depth, range)`` of the cell.
         """
-        return self._at_receiver(receiver, 'Arrivals.at_receiver')
-
-    def _at_receiver(self, receiver, who: str) -> 'Arrivals':
-        """:meth:`at_receiver` reporting its refusals as ``who``."""
-        return self._one_cell(receiver, who)
+        return self._one_cell(receiver, 'Arrivals.at_receiver',
+                              allow_empty=True)
 
     @property
     def _paired_grid(self) -> bool:
@@ -1104,14 +1169,17 @@ class Arrivals(Result):
                 and self.receiver_depths.size > 1
                 and self.receiver_depths.size == self.receiver_ranges.size)
 
-    def _one_cell(self, receiver, who: str) -> 'Arrivals':
+    def _one_cell(self, receiver, who: str, *,
+                  allow_empty: bool = False) -> 'Arrivals':
         """The arrivals of one receiver cell.
 
         ``receiver=None`` is accepted only when every arrival sits in one
         cell; otherwise ``receiver=(depth, range)`` picks a cell by the
         coordinates on the result's receiver axes (on an irregular grid,
-        the one receiver at that depth AND range), and an empty cell — a
-        shadow zone, where the channel is undefined — is refused too.
+        the one receiver at that depth AND range). An empty cell — a shadow
+        zone — is an empty ``Arrivals`` with ``allow_empty`` (the channel
+        products: the empty sum, a silent receiver) and refused without it
+        (the statistics, which have no value on an empty profile).
         """
         src = self._cell_index('src_idx')
         depth_index = self._cell_index('depth_idx')
@@ -1126,10 +1194,10 @@ class Arrivals(Result):
                     f"{self.receiver_ranges.size} ranges), and a channel "
                     f"is one receiver's. Pass receiver=(depth, range) "
                     f"to choose the cell, or filter to one first.")
-            if not cells:
+            if not cells and not allow_empty:
                 raise ConfigurationError(
-                    f"{who}: no arrivals — the channel of a cell nothing "
-                    f"reaches is undefined, not empty.")
+                    f"{who}: no arrivals — nothing reaches this cell, and "
+                    f"{who} has no value on an empty arrival list.")
             return self._rows(np.arange(self._n_rows))
         try:
             depth, rng = (float(v) for v in receiver)
@@ -1152,11 +1220,11 @@ class Arrivals(Result):
                 f"'src_idx' first: arr.filter(lambda a: a['src_idx'] == 0).")
         picked = np.flatnonzero((depth_index == d_idx)
                                 & (range_index == r_idx))
-        if not picked.size:
+        if not picked.size and not allow_empty:
             raise ConfigurationError(
                 f"{who}: no arrivals at receiver depth {depth:g} m, range "
-                f"{rng:g} m — the channel of a cell nothing reaches is "
-                f"undefined, not empty.")
+                f"{rng:g} m — nothing reaches this cell, and {who} has no "
+                f"value on an empty arrival list.")
         return self._rows(picked)
 
     def transfer_function(self, frequencies, *, receiver=None) -> "Field":
@@ -1195,8 +1263,8 @@ class Arrivals(Result):
             ``(depth, range)`` of the cell to take, on the result's
             receiver axes. ``None`` takes every cell of the per-receiver
             grid (``by_receiver``), zero where a cell's arrival list is
-            empty (the empty sum); a list with
-            no such grid must hold a single cell.
+            empty (the empty sum); a picked cell nothing reaches is zero
+            too; a list with no such grid must hold a single cell.
 
         Returns
         -------
@@ -1243,7 +1311,9 @@ class Arrivals(Result):
                 f"minimum of {freqs.min():g}.")
         if receiver is None and self.by_receiver is not None:
             return self._grid_transfer_function(freqs, who)
-        cell = self._one_cell(receiver, who)
+        # A picked cell nothing reaches is silent: zeros, the empty sum.
+        cell = self._one_cell(receiver, who,
+                              allow_empty=receiver is not None)
         delays = cell.delays
         if not np.all(np.isfinite(delays)):
             raise ConfigurationError(
@@ -1278,7 +1348,8 @@ class Arrivals(Result):
             coords={'depth': np.array([depth]),
                     'range': np.array([rng]),
                     'frequency': freqs},
-            speeds=_first_arrival_speeds([rng], [delays.min()]),
+            speeds=(_first_arrival_speeds([rng], [delays.min()])
+                    if delays.size else None),
             **id_kwargs,
         )
 
@@ -1333,9 +1404,9 @@ class Arrivals(Result):
                                      'frequency': freqs},
                      **id_kwargs)
 
-    def to_time_series(self, *, source_waveform, sample_rate: float,
-                       output_duration: Optional[float] = None,
-                       t_start: Optional[float] = None) -> "Field":
+    def synthesize_time_series(self, *, source_waveform, sample_rate: float,
+                               output_duration: Optional[float] = None,
+                               t_start: Optional[float] = None) -> "Field":
         """The waveform every receiver of these arrivals receives, on one
         clock, as a time-domain :class:`~uacpy.core.results.Field`
         (:func:`~uacpy.acoustic_signal.simulate_arrival_grid`, at
@@ -1375,13 +1446,13 @@ class Arrivals(Result):
         """
         t_vec, data = self._time_series(
             source_waveform, sample_rate, output_duration=output_duration,
-            t_start=t_start, who="Arrivals.to_time_series")
+            t_start=t_start, who="Arrivals.synthesize_time_series")
         return self._receiver_field(data, 'time', t_vec, kind='pressure',
                                     unit='Pa')
 
     def _time_series(self, source_waveform, sample_rate, *, output_duration,
                      t_start, who: str):
-        """``(time, traces)`` of :meth:`to_time_series`, the traces on
+        """``(time, traces)`` of :meth:`synthesize_time_series`, the traces on
         ``by_receiver``'s ``(depth block, range)`` grid, its refusals and
         window notice reported as ``who``."""
         from uacpy.acoustic_signal.channel import _simulate_arrival_grid
@@ -1396,8 +1467,10 @@ class Arrivals(Result):
                          output_duration: Optional[float] = None,
                          band=None, receiver=None) -> "Field":
         """The impulse response ``h(t)`` of every receiver these arrivals
-        reach, at exactly ``sample_rate``: the channel a signal of any
-        length is played through by :meth:`Field.apply
+        reach, at exactly ``sample_rate`` — it wraps
+        :func:`~uacpy.acoustic_signal.arrival_impulse_response`, not the comms
+        tap placer :func:`~uacpy.acoustic_signal.impulse_response`: the
+        channel a signal of any length is played through by :meth:`Field.apply
         <uacpy.core.results.Field.apply>`.
 
         Real passband taps of :meth:`transfer_function`
@@ -1428,7 +1501,7 @@ class Arrivals(Result):
         margin (188 Hz at 256 samples at 48 kHz) — a 4-cycle 50 Hz pulse
         played through a lone quarter-turn arrival this way is 0.55 of its
         peak off (:func:`~uacpy.acoustic_signal.arrival_impulse_response`).
-        For a waveform with content that low, :meth:`to_time_series` gives
+        For a waveform with content that low, :meth:`synthesize_time_series` gives
         the reception with the rotation taken on the waveform itself.
 
         Parameters
@@ -1465,7 +1538,10 @@ class Arrivals(Result):
         Field
             ``kind='impulse_response'`` in 1/s on ``(depth, range, time)``
             (a paired grid's receivers on ``'range'``), zeros in a cell
-            whose arrival list is empty.
+            whose arrival list is empty. A picked ``receiver=`` nothing
+            reaches, or a grid no cell of which is reached, is the array
+            function's empty sum: one zero tap at ``t_start`` (0 s when not
+            a number), or zeros over ``output_duration``.
 
         Raises
         ------
@@ -1496,7 +1572,8 @@ class Arrivals(Result):
                                               dtype=float))
             single = None
         else:
-            cell = self._one_cell(receiver, who)
+            cell = self._one_cell(receiver, who,
+                                  allow_empty=receiver is not None)
             depth, rng = self._cell_coordinates(cell, receiver)
             cells = [[{'n_arrivals': cell.n_arrivals,
                        'amplitudes': cell.amplitudes,
@@ -1519,10 +1596,6 @@ class Arrivals(Result):
                             f"its place on the record is undefined.")
                     first[i, j], last[i, j] = delays.min(), delays.max()
         reached = np.isfinite(first)
-        if not reached.any():
-            raise ConfigurationError(
-                f"{who}: no cell holds an arrival — the channel of a cell "
-                f"nothing reaches is undefined, not empty.")
         n_samples = None
         if output_duration is not None:
             record = require_positive_finite_scalar(
@@ -1534,8 +1607,8 @@ class Arrivals(Result):
             n_samples = int(np.ceil(record * fs * (1.0 - 1e-12)))
         # The margin either side of the arrivals is the plain function's;
         # the widest serves every range.
-        margin = max(arrival_ir_margin(span, fs)
-                     for span in (last - first)[reached])
+        margin = max((arrival_ir_margin(span, fs)
+                      for span in (last - first)[reached]), default=0.0)
         speeds = _first_arrival_speeds(cell_range[reached], first[reached])
         reduction = None
         stated = None
@@ -1560,7 +1633,12 @@ class Arrivals(Result):
                                 "shares, 'reduced' for each range its own "
                                 "record, or None to start at the earliest "
                                 "arrival less the margin.")
-        if t_start == 'reduced' and speeds is not None:
+        if not reached.any():
+            # Receivers no path reaches: the empty sum, as the array
+            # function returns it — zeros from t_start, 0 when not stated.
+            origin = 0.0 if stated is None else stated
+            starts = np.full((n_i, n_j), origin)
+        elif t_start == 'reduced' and speeds is not None:
             reduction = float(speeds.water_max)
             starts = np.abs(cell_range) / reduction - margin
             origin = -margin
@@ -1662,8 +1740,7 @@ class Arrivals(Result):
         at the earliest arrival (``first_arrival`` records it), but the
         rotation keeps the absolute ``tau_i``: the taps are what a receiver
         mixing with the transmitter's carrier sees, common phase
-        ``exp(-i 2 pi f_c tau_first)`` included, and that phase is what
-        makes the passband test in ``test_comms.py`` reproducible.
+        ``exp(-i 2 pi f_c tau_first)`` included.
 
         ``pulse`` names ``g``, and ``None`` (the default) infers it from
         ``sps``:
@@ -1808,7 +1885,7 @@ class Arrivals(Result):
         return ChannelTaps(taps=taps, delays=times, symbol_rate=symbol_rate,
                            fc=fc, sps=sps, first_arrival=first)
 
-    def coherence_bandwidth(self, *, convention: str = 'inverse_spread',
+    def coherence_bandwidth(self, *, convention: Optional[str] = None,
                             factor: Optional[float] = None,
                             receiver=None) -> float:
         """Bandwidth over which the channel's transfer function stays
@@ -1830,9 +1907,10 @@ class Arrivals(Result):
         Parameters
         ----------
         convention : {'inverse_spread', 'rappaport_0.5', 'rappaport_0.9'}
-            Which ``k`` to use. Default ``'inverse_spread'``.
+            Which ``k`` to use. Unset, ``'inverse_spread'``.
         factor : float, optional
-            Explicit ``k > 0``; overrides ``convention``.
+            Explicit ``k > 0``, in place of ``convention``; refused together
+            with a ``convention``.
         receiver : (float, float), optional
             ``(depth, range)`` of the cell whose channel this is. A
             channel is one receiver's: arrivals spanning several cells are
@@ -1852,7 +1930,7 @@ class Arrivals(Result):
             delays, powers, convention=convention, factor=factor, who=who)
 
     def channel_regime(self, symbol_rate: float, *,
-                       convention: str = 'inverse_spread',
+                       convention: Optional[str] = None,
                        factor: Optional[float] = None,
                        rolloff: float = 0.0,
                        receiver=None) -> ChannelRegime:
@@ -1983,7 +2061,7 @@ class Rays(Result):
     """
 
     #: The plotter that draws this result (``.plot()``).
-    _plotter = 'plot_rays'
+    _plotter = '_plot_rays'
 
     #: Its view takes ``env=`` and draws the environment under the rays.
     _draws_env = True
@@ -2131,7 +2209,9 @@ class Rays(Result):
     def kinds(self) -> np.ndarray:
         """The multipath class of every ray, from its bounce counts:
         ``'direct'``, ``'surface'``, ``'bottom'`` or ``'both'``, the rule
-        :attr:`Arrivals.kinds` and :meth:`filter_by_bounces` use."""
+        :attr:`Arrivals.kinds` and :meth:`filter_by_bounces` use; refused
+        when a ray carries no counts."""
+        self._require_bounces('Rays.kinds')
         top, bot = self.n_top_bounces, self.n_bot_bounces
         return read_only(np.array(
             [_arrival_kind(int(t), int(b)) for t, b in zip(top, bot)],
@@ -2260,23 +2340,18 @@ class Rays(Result):
             Surface / bottom bounce count: exact, or a closed ``(lo, hi)`` range
             with ``None`` for an open end; ``None`` is any count.
         """
-        if self.rays and not any(
-            'n_top_bounces' in r or 'n_bot_bounces' in r for r in self.rays
-        ):
-            warnings.warn(
-                "Rays.filter_by_bounces: rays carry no bounce counts, so "
-                "every ray classifies as 'direct'. A .ray file read through "
-                "uacpy.io.read_ray_file always supplies them; a hand-built "
-                "Rays must set 'n_top_bounces' / 'n_bot_bounces' per ray.",
-                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
-            )
+        self._require_bounces('Rays.filter_by_bounces')
         pred = _bounce_predicate(kind, top, bot)
         return self.filter(
-            lambda r: pred(
-                int(r.get('n_top_bounces', 0) or 0),
-                int(r.get('n_bot_bounces', 0) or 0),
-            )
-        )
+            lambda r: pred(int(r['n_top_bounces']), int(r['n_bot_bounces'])))
+
+    def _require_bounces(self, who: str) -> None:
+        """Refuse a bounce question on rays some of which carry no bounce
+        counts (:func:`_refuse_no_bounces`)."""
+        missing = sum(1 for ray in self.rays
+                      if any(key not in ray for key in _BOUNCE_KEYS))
+        if missing:
+            _refuse_no_bounces(who, missing, len(self.rays), 'rays')
 
     def window(self, *, launch_angle_deg) -> 'Rays':
         """Keep the rays whose launch angle ``launch_angle`` (degrees) falls inside

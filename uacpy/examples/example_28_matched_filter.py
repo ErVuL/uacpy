@@ -15,7 +15,6 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
 import uacpy
 from uacpy.acoustic_signal import (ambiguity_function, analytic_signal,
                                    lfm_chirp, processing_gain_dB,
@@ -52,29 +51,28 @@ print(f"  echoes at {delays[0] * 1e3:.0f} and {delays[1] * 1e3:.0f} ms; "
 # its analytic signal keeps the positive-frequency sweep alone, so the surface
 # shows the up-chirp's one tilted delay-Doppler ridge.
 lag_axis, doppler_axis, ambiguity = ambiguity_function(
-    analytic_signal(transmitted), fs, n_doppler=121)
+    analytic_signal(transmitted), fs, n_doppler_shifts=121)
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-uacpy.plot.plot_waveform(transmitted, fs, axes[0, 0], time_units='ms',
+uacpy.plot.plot_waveform(transmitted, fs, axes[0, 0], time_unit='ms',
                          color='b', lw=0.7, title='Transmitted LFM chirp')
 uacpy.plot.plot_waveform(received, fs, axes[0, 1], t0=float(t_rx[0]),
-                         time_units='ms', color='g', lw=0.6,
+                         time_unit='ms', color='g', lw=0.6,
                          title='Received (2 echoes + noise)')
 # The compressed output's envelope in dB re its peak; dashed lines at the
 # true echo delays.
 uacpy.plot.plot_waveform(compressed, fs, axes[1, 0], t0=float(lags[0]),
-                         value='envelope_dB', time_units='ms', color='r',
+                         value='envelope_dB', time_unit='ms', color='r',
                          lw=0.8,
                          title='Matched-filter output (pulse compression)')
 for delay in delays:
     axes[1, 0].axvline(delay * 1e3, color='k', ls='--', alpha=0.5)
 axes[1, 0].set_xlim(0, 100)
 
-# Log colour scale over |χ| from 1e-2 to 1 — the -40..0 dB window that shows
-# the sidelobe structure, not only the mainlobe.
+# In dB re the peak, whose 40 dB window shows the sidelobe structure, not
+# only the mainlobe.
 uacpy.plot.plot_ambiguity(lag_axis, doppler_axis, ambiguity, ax=axes[1, 1],
-                          cmap='viridis',
-                          norm=LogNorm(vmin=1e-2, vmax=1.0),
+                          value='dB', cmap='viridis',
                           title='Ambiguity function |χ(τ, ν)|')
 axes[1, 1].set_xlim(-5, 5)
 

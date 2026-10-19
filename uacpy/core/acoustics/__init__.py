@@ -8,8 +8,9 @@ One module per subject, each answering a different question:
                    depth <-> pressure conversion, density, and the Doppler
                    shift they set
 * ``boundaries`` — *what does the seabed do*: plane-wave reflection, the
-                   bottom loss it makes over grazing angle, and the Pekeris
-                   branch of the complex square root
+                   bottom loss it makes over grazing angle, the Scholte wave
+                   speed of a liquid on a solid, and the
+                   Pekeris branch of the complex square root
 * ``bubbles``    — *what does a bubble do*: Minnaert resonance, bubbly-water
                    sound speed, surface bubble loss
 * ``levels``     — *what does the recording read*: volts to pascals, pressure
@@ -75,6 +76,7 @@ from uacpy.core.acoustics.seawater import (
 from uacpy.core.acoustics.boundaries import (
     reflection_coeff,
     critical_angle,
+    scholte_wave_speed,
     pekeris_root,
 )
 from uacpy.core.acoustics.bubbles import (
@@ -83,10 +85,12 @@ from uacpy.core.acoustics.bubbles import (
     bubble_sound_speed,
 )
 from uacpy.core.acoustics.wavenumber import (
+    WavenumberSampling,
     alias_period,
     hankel_transform,
     ranges_fit_alias_period,
     snapshot_frequency_component,
+    wavenumber_sampling,
     wavenumber_taper,
     wavenumbers_from_phase_speeds,
 )
@@ -116,6 +120,7 @@ from uacpy.core.acoustics.weighting import (auditory_weighting,
                                             weighted_pressure)
 from uacpy.core.acoustics.levels import (
     pressure_from_recording,
+    recording_from_pressure,
     spl,
     power_to_dB,
     peak_level,
@@ -144,10 +149,12 @@ __all__ = [
     'doppler',
     'reflection_coeff',
     'critical_angle',
+    'scholte_wave_speed',
     'bubble_resonance',
     'bubble_surface_loss',
     'bubble_sound_speed',
     'pressure_from_recording',
+    'recording_from_pressure',
     'spl',
     'power_to_dB',
     'peak_level',
@@ -163,6 +170,8 @@ __all__ = [
     'snapshot_frequency_component',
     'wavenumber_taper',
     'wavenumbers_from_phase_speeds',
+    'wavenumber_sampling',
+    'WavenumberSampling',
     'polyline_miss_distance',
     'medium_density_at',
     'modal_attenuation',

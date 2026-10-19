@@ -7,7 +7,7 @@ The two axis tests answer different questions, so their tolerances differ
 on purpose. :func:`equally_spaced` asks whether a deck may write the axis
 as "N points from x0 to x1" and have the engine regenerate every value: an
 absolute question, since a deck prints in absolute units (1e-6 m,
-``DECK_DEPTH_RESOLUTION_M``), so its 1e-9 tolerance sits under the print
+``DECK_DEPTH_RESOLUTION``), so its 1e-9 tolerance sits under the print
 resolution at any axis length. :func:`steps_are_uniform` asks whether a
 transform may treat the steps as one: a relative question, answered against
 the step itself.
@@ -28,7 +28,7 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
+from uacpy.core.deck_limits import MAX_ATTENUATION
 
 #: Relative tolerance of "are these axis steps equal" (absolute tolerance 0):
 #: every step of a uniform axis lies within this fraction of the reference
@@ -40,11 +40,12 @@ from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
 #: before an FFT sits orders of magnitude above it.
 UNIFORM_STEP_RTOL = 1e-6
 
-#: g/cm³ above which a seabed density reads as kg/m³: no sediment or rock
+#: g/cm³ above which a density reads as kg/m³: no water, sediment or rock
 #: reaches it (Hamilton's tables top out below 3), and the smallest kg/m³
 #: value a user could plausibly type (fresh water, 1000) is fifty times over
-#: it. The one threshold the seabed carriers and reflection_coeff share.
-DENSITY_UNITS_SUSPECT_G_CM3 = 20.0
+#: it. The one threshold the seabed carriers, the environment's water
+#: column, reflection_coeff and bubble_resonance share.
+DENSITY_UNITS_SUSPECT = 20.0
 
 
 def _hint(hint: str) -> str:
@@ -305,15 +306,15 @@ def require_positive(values, label: str, *, hint: str = "") -> None:
 #: m/s below which a sound speed reads as km/s: the slowest medium a model
 #: is run over (bubbly water) is tens of m/s, and a km/s value typed for
 #: water (1.4-1.6) or a seabed (1.5-6) is under it.
-SPEED_UNITS_SUSPECT_M_S = 10.0
+SPEED_UNITS_SUSPECT = 10.0
 
 
 def warn_speed_typed_in_km_per_s(values, label: str) -> None:
     """``ValidityWarning`` when any sound speed in ``values`` is under
-    :data:`SPEED_UNITS_SUSPECT_M_S`, naming the slowest and the m/s it
+    :data:`SPEED_UNITS_SUSPECT`, naming the slowest and the m/s it
     means. A plausibility bound, so it warns and never raises."""
     arr = np.asarray(values, dtype=float)
-    if arr.size and np.nanmin(arr) < SPEED_UNITS_SUSPECT_M_S:
+    if arr.size and np.nanmin(arr) < SPEED_UNITS_SUSPECT:
         slowest = float(np.nanmin(arr))
         warnings.warn(
             f"{label}: {slowest:g} m/s looks like km/s; uacpy takes m/s "
@@ -344,20 +345,20 @@ def require_non_negative(values, label: str, *, hint: str = "") -> None:
 #: times the most lossy compressional entry of JKPS Table 1.3 (silt, 1.0) and
 #: four times its most lossy shear entry (sand, 2.5). A value in dB/km or dB/m
 #: typed as dB/wavelength lands here or past the solvers' ceiling.
-SEABED_ATTENUATION_SUSPECT_DB_PER_WAVELENGTH = 10.0
+SEABED_ATTENUATION_SUSPECT = 10.0
 
 
 def warn_attenuation_beyond_seabeds(value, label: str) -> None:
     """``ValidityWarning`` when a seabed attenuation (dB/wavelength) is over
-    :data:`SEABED_ATTENUATION_SUSPECT_DB_PER_WAVELENGTH`, naming the unit
+    :data:`SEABED_ATTENUATION_SUSPECT`, naming the unit
     and the converter. A plausibility bound, so it warns and never raises;
     past the Acoustics-Toolbox ceiling :func:`warn_attenuation_past_at_ceiling`
     speaks instead (one warning per value)."""
     if value is None:
         return
     alpha = float(value)
-    if (SEABED_ATTENUATION_SUSPECT_DB_PER_WAVELENGTH < alpha
-            <= MAX_ATTENUATION_DB_PER_WAVELENGTH):
+    if (SEABED_ATTENUATION_SUSPECT < alpha
+            <= MAX_ATTENUATION):
         warnings.warn(
             f"{label} = {alpha:g} dB/wavelength is far beyond any seabed in "
             f"JKPS Table 1.3 (0.1-1.0 dB/wavelength compressional, 0.2-2.5 "
@@ -370,7 +371,7 @@ def warn_attenuation_beyond_seabeds(value, label: str) -> None:
 def warn_attenuation_past_at_ceiling(value, label: str) -> None:
     """``ValidityWarning`` on a carrier for an attenuation past the
     Acoustics-Toolbox ceiling
-    (:data:`uacpy.core.deck_limits.MAX_ATTENUATION_DB_PER_WAVELENGTH`): the
+    (:data:`uacpy.core.deck_limits.MAX_ATTENUATION`): the
     carrier keeps it, because OASES and RAM take any attenuation
     (``oaseun31.f:1522-1523`` and ``ramgeo1.5.f:199`` turn it into an
     imaginary wavenumber), and the AT deck writers refuse it
@@ -378,10 +379,10 @@ def warn_attenuation_past_at_ceiling(value, label: str) -> None:
     if value is None:
         return
     alpha = float(value)
-    if alpha > MAX_ATTENUATION_DB_PER_WAVELENGTH:
+    if alpha > MAX_ATTENUATION:
         warnings.warn(
             f"{label} = {alpha:g} dB/wavelength exceeds "
-            f"{MAX_ATTENUATION_DB_PER_WAVELENGTH:.4f}, the ceiling of the "
+            f"{MAX_ATTENUATION:.4f}, the ceiling of the "
             f"Acoustics-Toolbox solvers (misc/AttenMod.f90's CRCI, :116): "
             f"Kraken, Scooter, SPARC, Bounce and Bellhop refuse it at run, "
             f"OASES and RAM take it. uacpy takes dB/wavelength, and a value "
@@ -392,7 +393,7 @@ def warn_attenuation_past_at_ceiling(value, label: str) -> None:
 
 def require_attenuation_in_range(value, label: str) -> None:
     """Raise ``ConfigurationError`` for an attenuation past the AT solvers' own
-    ceiling — see :data:`uacpy.core.deck_limits.MAX_ATTENUATION_DB_PER_WAVELENGTH`
+    ceiling — see :data:`uacpy.core.deck_limits.MAX_ATTENUATION`
     for the derivation. The Acoustics-Toolbox deck writers call it: above
     the ceiling the Fortran solvers (Kraken, Scooter, SPARC, Bounce,
     Bellhop's Fortran build) abort in ``CRCI``
@@ -405,7 +406,7 @@ def require_attenuation_in_range(value, label: str) -> None:
     if value is None:
         return
     alpha = float(value)
-    if alpha > MAX_ATTENUATION_DB_PER_WAVELENGTH:
+    if alpha > MAX_ATTENUATION:
         # The two attenuations this guard serves sit at different scales, so
         # each gets its own sentence. JKPS Table 1.3 runs α_p from 0.1
         # (basalt) to 1.0 dB/wavelength (silt) but α_s from 0.2 to 2.5, and
@@ -419,7 +420,7 @@ def require_attenuation_in_range(value, label: str) -> None:
         # sites precisely so the blind spot cannot grow.
         message = (
             f"{label} = {alpha:g} dB/wavelength exceeds "
-            f"{MAX_ATTENUATION_DB_PER_WAVELENGTH:.4f}, above which the imaginary "
+            f"{MAX_ATTENUATION:.4f}, above which the imaginary "
             f"part of the complex sound speed exceeds the real part and every AT "
             f"solver aborts in misc/AttenMod.f90's CRCI (:116). The bound is "
             f"independent of frequency and sound speed because uacpy writes "
@@ -459,7 +460,7 @@ def require_strictly_increasing(values: np.ndarray, label: str, *,
     ``min_step`` additionally requires neighbours to be separated by more than
     the resolution the solver decks print the axis at, since two samples closer
     than that collapse to a single token in the file. Pass
-    ``DECK_RANGE_RESOLUTION_M`` for a range axis or ``DECK_DEPTH_RESOLUTION_M``
+    ``DECK_RANGE_RESOLUTION`` for a range axis or ``DECK_DEPTH_RESOLUTION``
     for a depth axis (see those constants for the readers this protects), with
     ``unit`` naming what the step is measured in — the axes guarded this way
     are not all spatial (``SBP_ANGLE_RESOLUTION_DEG`` guards a degree axis).
@@ -467,7 +468,7 @@ def require_strictly_increasing(values: np.ndarray, label: str, *,
     A zero-length axis is refused here as well: every consumer reads the axis
     positionally (deck writers, ``np.interp``, ``min``/``max``), so an empty
     one would surface later as a bare IndexError naming no input. This is the
-    only ``_require_*`` guard that rejects an empty array — the value
+    only ``require_*`` guard that rejects an empty array — the value
     predicates above also serve ``Field.coords``, where an axis sliced to
     nothing is a supported state.
 

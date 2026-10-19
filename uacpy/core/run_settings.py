@@ -68,7 +68,7 @@ class RunMode(str, Enum):
     # Frequency-domain array products. COVARIANCE → C(f, i, j) hydrophone ×
     # hydrophone matrix, declared by two OASES sub-models: OASN builds it from
     # the noise sources, OASS from the reverberant field (REVCOV, product
-    # letter 'a'); OASES.for_mode picks between them on reverberation=.
+    # letter 'a').
     # REPLICA → OASN alone: Green's-function samples at the array elements per
     # candidate source position. See core/results.Covariance and
     # core/results.Replicas.

@@ -4,26 +4,24 @@ option-letter helpers, the auto-sampling offset notice and the rough-
 interface checks OASS and OASSP both make."""
 
 import re
-import warnings
 from typing import Optional
 
 import numpy as np
 
 from uacpy.models._launch import BinarySearch
-from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._spec import EngineTraits
 from uacpy.core.source import Source
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, UnsupportedFeatureError,
-    ValidityWarning,
+    ConfigurationError, FallbackWarning, ValidityWarning,
 )
 from uacpy.io.oalib_writer import writable_layers
 from uacpy.io.oases_writer import (
-    MIN_SPECTRAL_EXPONENT, oass_bottom_interfaces, _OASES_MAX_WAVENUMBERS,
+    oass_bottom_interfaces, _OASES_MAX_WAVENUMBERS,
+    refuse_unusable_integration_window,
 )
 from uacpy.core.absorption import _warn_if_band_absorption_frozen
 from uacpy.core.engine_defaults import OASSP_SPECTRAL_EXPONENT
-from uacpy.models._knobs import is_real_number, whole_count
+from uacpy.models._knobs import whole_count
 from uacpy.models._notices import message_notice
 
 
@@ -126,7 +124,7 @@ def _roughness_notice(model_name: str, env, interface: int,
 
 def _check_n_wavenumbers_knob(n_wavenumbers) -> None:
     """Refuse a pinned wavenumber count that is not a whole number >= 1 or
-    that exceeds OASES' wavenumber array bound NP (``compar.f:37-38``,
+    that exceeds OASES' wavenumber array bound NP (``oases/src/compar.f:37-38``,
     :data:`~uacpy.io.oases_writer._OASES_MAX_WAVENUMBERS`); ``None``
     (OASES' automatic sampling) passes."""
     if n_wavenumbers is None:
@@ -135,29 +133,41 @@ def _check_n_wavenumbers_knob(n_wavenumbers) -> None:
     if int(n_wavenumbers) > _OASES_MAX_WAVENUMBERS:
         raise ConfigurationError(
             f"n_wavenumbers={int(n_wavenumbers)} exceeds OASES' wavenumber "
-            f"array bound NP = {_OASES_MAX_WAVENUMBERS} (compar.f:37-38 "
+            f"array bound NP = {_OASES_MAX_WAVENUMBERS} (oases/src/compar.f:37-38 "
             f"`NPEXP = 16, NP = 2**NPEXP`).",
             remediation=(f"Pass n_wavenumbers <= {_OASES_MAX_WAVENUMBERS}, "
                          f"or None for OASES' automatic sampling."))
 
 
-def _refuse_volume_scattering(model_name: str, correlation_length) -> None:
-    """Refuse a negative ``correlation_length``: OASES reads a negative CL
-    as the switch to the twelve-token volume-scattering layer record
-    ``D CC CS AC AS RO RG CL SKW M RMS GAM`` (``oaseun31.f:76-90``), whose
-    last four fields have no home on any uacpy carrier. OASS and OASSP
-    refuse it alike."""
-    if is_real_number(correlation_length) and correlation_length < 0.0:
-        raise UnsupportedFeatureError(
-            model_name,
-            "volume scattering (correlation_length < 0 is OASES' switch "
-            "to the twelve-token layer record whose extra fields — SKW, "
-            "M, RMS, GAM — have no home on any uacpy carrier; "
-            "oaseun31.f:76-90)",
-            alternatives=["interface roughness scattering "
-                          "(correlation_length > 0)"],
-            alternatives_label='configurations',
-        )
+#: Each program's manual on a pinned wavenumber count: where ``NW`` places
+#: its samples (equidistantly over the window CMIN/CMAX set), and where the
+#: manual offers automatic sampling instead (OAST and OASP: "correct answers
+#: in the first attempt without the usual convergence testing"; OASSP: "as
+#: for the other OASES modules").
+_PINNED_COUNT_MANUAL = {
+    'OAST': ('oast.tex:522-526', 'oast.tex:543-546'),
+    'OASP': ('oasp.tex:642-650', 'oasp.tex:671-674'),
+    'OASSP': ('oassp.tex:479-488', 'oassp.tex:511-515, which refers to the '
+                                    'other modules\' oasp.tex:671-674'),
+}
+
+
+def _pinned_count_note(model_name, n_wavenumbers) -> Optional[str]:
+    """The info-level note a pinned ``n_wavenumbers`` gets on OAST, OASP
+    and OASSP (:data:`_PINNED_COUNT_MANUAL`), or ``None`` when the count is
+    OASES' automatic sampling; the value reaches the deck as given. OASN
+    gives its own note at the same level (:class:`~uacpy.models.OASN`: its
+    pinned count also sets the integration window)."""
+    if n_wavenumbers is None:
+        return None
+    placed, automatic = _PINNED_COUNT_MANUAL[model_name]
+    return (f"{model_name}(n_wavenumbers={n_wavenumbers}): a pinned count "
+            f"places its samples equidistantly over the wavenumber window "
+            f"c_low and c_high set ({placed}), where automatic sampling "
+            f"(n_wavenumbers=None) is what the manual offers to obtain "
+            f"correct answers \"without the usual convergence testing\" "
+            f"({automatic}): double n_wavenumbers until the field stops "
+            f"changing.")
 
 
 #: OASES output letters that are not a pressure: vertical and horizontal
@@ -311,11 +321,36 @@ def _reject_unreadable_trf_options(model_name: str, options,
             remediation="Add 'J', or pin n_wavenumbers >= 1.")
 
 
-def _warn_offset_ignored_under_auto_sampling(model_name, integration_offset,
-                                             n_wavenumbers, options=None,
-                                             offset_letters='J',
-                                             auto_sampling_zeroes_offset=True):
-    """Warn that a caller's contour offset never reaches the integration.
+def resolve_integration_window(model_name, window, n_wavenumbers, manual):
+    """``(pair, notice)`` for the deck's wavenumber line: ``pair`` is the
+    ``(IC1, IC2)`` it carries — the given ``window``
+    (:func:`~uacpy.io.oases_writer.refuse_unusable_integration_window`), else
+    the whole window ``(1, NW)`` under a pinned ``n_wavenumbers``, else
+    ``None`` (automatic sampling, where OASES sets the pair) — and
+    ``notice``, which says a given window has no effect under automatic
+    sampling (``manual``: the program's own line), else ``None``."""
+    pair = refuse_unusable_integration_window(model_name, window,
+                                              n_wavenumbers)
+    pinned = n_wavenumbers is not None and n_wavenumbers > 0
+    notice = None
+    if pair is not None and not pinned:
+        notice = message_notice(
+            f"{model_name}(integration_window={pair}) has no effect: with "
+            f"n_wavenumbers unset OASES samples automatically, where IC1 "
+            f"and IC2 have no effect ({manual}). Pin n_wavenumbers to "
+            f"integrate over the window.", FallbackWarning)
+    if pair is None and pinned:
+        pair = (1, int(n_wavenumbers))
+    return pair, notice
+
+
+def _offset_ignored_notice(model_name, integration_offset, n_wavenumbers,
+                           options, offset_letters='J',
+                           auto_sampling_zeroes_offset=True):
+    """The stage-3 notice that a caller's contour offset never reaches the
+    integration, or ``None``. ``options`` is the option line the run's deck
+    carries; every run's settings say it, since the knobs can be reassigned
+    between runs.
 
     Two independent ways the binary discards it, either of which is enough:
 
@@ -341,49 +376,25 @@ def _warn_offset_ignored_under_auto_sampling(model_name, integration_offset,
     ``ICNTIN > 0``, which only ``'J'``/``'j'`` sets (``:673-675``).
     """
     if not integration_offset:
-        return
+        return None
     reasons = []
     if auto_sampling_zeroes_offset and n_wavenumbers is None:
         reasons.append(
             f"automatic wavenumber sampling (n_wavenumbers=None) zeroes "
             f"the contour offset and applies the kernel's own default — pin "
             f"n_wavenumbers >= 1 to use the value")
-    if options is not None and not (set(str(options)) & set(offset_letters)):
+    if not set(str(options)) & set(offset_letters):
         reasons.append(
             f"the option line for this run ({str(options)!r}) carries none of "
             f"{sorted(offset_letters)}, so the binary zeroes the offset and "
             f"reads a frequency line without it — add 'J' (complex "
             f"integration contour) to use the value")
     if not reasons:
-        return
-    warnings.warn(
+        return None
+    return message_notice(
         f"{model_name}(integration_offset={integration_offset:g}) has no "
         f"effect: " + "; ".join(reasons) + ". Drop integration_offset to "
-        f"silence this.",
-        FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-
-
-def _reject_unintegrable_spectral_exponent(model_name, spectral_exponent):
-    """Refuse a roughness exponent whose power spectrum does not converge.
-
-    ``M <= 1.5`` leaves the spectrum unintegrable (``oassp.tex:356-362``; the
-    exponent reaches ``amod(m) = fac(3+…)`` at ``oaseun31.f:99``). The deck
-    writer refuses it too, but by then the scattering models have already
-    spent the mean-field binary — and this depends on a constructor argument
-    alone, so it belongs here.
-    """
-    if float(spectral_exponent) > MIN_SPECTRAL_EXPONENT:
-        return
-    raise ConfigurationError(
-        f"{model_name}(spectral_exponent={float(spectral_exponent)}) must "
-        f"exceed {MIN_SPECTRAL_EXPONENT:g}, or the roughness power spectrum "
-        f"is not integrable "
-        f"(oassp.tex:356-362; the exponent reaches amod(m)=fac(3+…) at "
-        f"oaseun31.f:99).",
-        remediation=f"Pass spectral_exponent > {MIN_SPECTRAL_EXPONENT:g}, "
-                    f"or leave it unset for "
-                    f"{OASSP_SPECTRAL_EXPONENT:g}.",
-    )
+        f"silence this.", FallbackWarning)
 
 
 #: The settings fields of OASS and OASSP that ``from_run_settings`` does not

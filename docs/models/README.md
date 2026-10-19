@@ -97,9 +97,8 @@ wave field needs Bellhop.
 
 `OASES` is an abstract base: instantiate **OAST** (TL), **OASN** (covariance,
 replicas), **OASR** (reflection), **OASP** (pulse/broadband), **OASS**
-(reverberation) or **OASSP** (scattered pulse) directly, or let
-`OASES.for_mode(run_mode=...)` pick. Its columns here are the union across the
-six.
+(reverberation) or **OASSP** (scattered pulse) directly. Its columns here are
+the union across the six.
 
 ## Run modes
 

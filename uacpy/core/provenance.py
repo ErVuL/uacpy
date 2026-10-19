@@ -264,6 +264,17 @@ def _fetch_summary_line(records: Sequence[DataProvenance]) -> Optional[str]:
         if values:
             bits.append(f"{'product' if name == 'product' else 'date'} "
                         f"{', '.join(values)}")
+    # A column continued below a split depth by another period says so, as
+    # the one-record line does, with how many of the points it concerns.
+    splits = [(r.split_depth, r.period_below) for r in records
+              if r.split_depth is not None]
+    if splits and any(r.data_date is not None for r in records):
+        counts = {pair: splits.count(pair) for pair in dict.fromkeys(splits)}
+        bits[-1] += " and".join(
+            f" above {depth:g} m, {period} below"
+            + ("" if n == len(records) else f" on {n} of {len(records)} "
+                                            f"points")
+            for (depth, period), n in counts.items())
     days = [abs(r.offset_days) for r in records if r.offset_days is not None]
     if days and bits:
         bits[-1] += f", {min(days)}–{max(days)} days from requested"

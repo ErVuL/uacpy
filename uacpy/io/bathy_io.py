@@ -27,7 +27,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from uacpy._log import log_message
 from uacpy.core._export import ExportRecord
 from uacpy.core.altimetry import Altimetry
 from uacpy.core.bathymetry import Bathymetry
@@ -41,19 +40,21 @@ from uacpy.io.at_codes import GEOMETRY_INTERP_CODES
 from uacpy.io.input_checks import _collapsed_pair_index
 from uacpy.io._fortran_helpers import (
     list_directed_int, read_list_directed_values, read_vector,
-    strip_fortran_quotes, summarize_axis as _summarize_axis,
+    strip_fortran_quotes,
     typed_format_error,
 )
 
 
 def _read_boundary_2d(
-    filepath: Union[str, Path], suffix: str, kind: str, verbose: Union[bool, str],
+    filepath: Union[str, Path], suffix: str, kind: str,
 ) -> Tuple[np.ndarray, str]:
     """Read a BELLHOP 2-D boundary file (``.bty`` or ``.ati``).
 
     ``ReadATI`` and ``ReadBTY`` (``bdryMod.f90:61-110`` / ``:161-215``) are the
     same parser on two units, down to the long-format branch, so one reader
-    serves both.
+    serves both. Returns ``(rows, interpolation)``: one row per file column
+    — range (m), depth (m, positive down, as the file carries it) and, on a
+    long-format file, the five geoacoustic columns — and ``TYPE(1:1)``.
     """
     # Use the path as given when it already exists (an explicit path is never
     # shadowed by a sibling .bty/.ati); the suffix is appended only as a
@@ -70,7 +71,6 @@ def _read_boundary_2d(
         )
 
     with open(filepath, "r") as fid:
-        log_message('bathy_io', f"Reading {kind} file", verbose=verbose)
 
         type_str = strip_fortran_quotes(fid.readline())
 
@@ -102,15 +102,9 @@ def _read_boundary_2d(
             )
         is_long = format_char == "L"
 
-        approx = "Piecewise-linear" if interp_type == "L" else "Curvilinear"
-        log_message('bathy_io', f"{approx} approximation to {kind}",
-                    verbose=verbose)
-
         # The count is a list-directed scalar READ (bdryMod.f90:71 / :171), so
         # '3, ! npts' and '3   ! number of points' are both valid records.
         n_pts = list_directed_int(fid.readline())
-        log_message('bathy_io', f"Number of {kind} points = {n_pts}",
-                    verbose=verbose)
         # Name the count here: without this the empty row list below indexes an
         # empty array and the typed_format_error wrapper reports a generic
         # IndexError, pointing the user at the data rows rather than the count
@@ -145,25 +139,8 @@ def _read_boundary_2d(
 
         data = np.array(rows).T
 
-        log_message('bathy_io', f"range (km): {_summarize_axis(data[0])}",
-                    verbose=verbose, level='debug')
-        log_message('bathy_io', f"depth (m): {_summarize_axis(data[1])}",
-                    verbose=verbose, level='debug')
-
     data[0, :] = km_to_m(data[0, :])
-
-    # Extend to ±infinity by holding every row constant. The ±1e50 sentinel is
-    # the one AT's own reader uses — "extend the bathymetry to +/- infinity in
-    # a piecewise constant fashion", Matlab/ReadWrite/readbty.m:66-71 — so a
-    # segment search over this array brackets any range without a special case.
-    out = np.zeros((n_cols, n_pts + 2))
-    out[:, 1:-1] = data
-    out[:, 0] = data[:, 0]
-    out[:, -1] = data[:, -1]
-    out[0, 0] = -1e50
-    out[0, -1] = 1e50
-
-    return out, interp_type
+    return data, interp_type
 
 
 #: The long-format columns of a 2-D boundary file (``bdryMod.f90:200-201``):
@@ -221,9 +198,9 @@ class BoundaryTable(ExportRecord):
 
     @classmethod
     def _from_parsed(cls, parsed, kind: str, path) -> 'BoundaryTable':
-        """The table of a parser's padded ``(rows, interpolation)``."""
+        """The table of :func:`_read_boundary_2d`'s ``(rows,
+        interpolation)``, one row per file column."""
         rows, interpolation = parsed
-        rows = rows[:, 1:-1]
         long_format = ({name: rows[column]
                         for column, name in _GEOACOUSTIC_COLUMNS.items()}
                        if rows.shape[0] > 2 else {})
@@ -321,27 +298,7 @@ class BoundaryTable(ExportRecord):
 
 
 @typed_format_error
-def _parse_bathymetry(filepath: Union[str, Path],
-                      verbose: Union[bool, str] = False) -> Tuple[np.ndarray, str]:
-    """The ``.bty`` as ``(rows, interpolation)``, in the layout of AT's
-    ``readbty.m`` that :func:`read_env` reads: one row per file column
-    (range in m, depth, and on a long-format file the five geoacoustic
-    columns), padded with a copy of the first and last point at ranges
-    ∓1e50 so a segment search brackets any range.
-    """
-    return _read_boundary_2d(filepath, ".bty", "bathymetry", verbose)
-
-
-@typed_format_error
-def _parse_altimetry(filepath: Union[str, Path],
-                     verbose: Union[bool, str] = False) -> Tuple[np.ndarray, str]:
-    """The ``.ati`` as :func:`_parse_bathymetry` lays out a ``.bty``; the
-    surface column positive down, as the file carries it."""
-    return _read_boundary_2d(filepath, ".ati", "altimetry", verbose)
-
-
-def read_bathymetry(filepath: Union[str, Path],
-                    verbose: Union[bool, str] = False) -> BoundaryTable:
+def read_bathymetry(filepath: Union[str, Path]) -> BoundaryTable:
     """
     Read bathymetry data from BELLHOP .bty file.
 
@@ -354,8 +311,6 @@ def read_bathymetry(filepath: Union[str, Path],
         Path to bathymetry file. An existing path is read exactly as
         given, whatever its extension; a bare root without an extension
         resolves to ``<root>.bty``.
-    verbose : bool or str, optional
-        If True, print bathymetry information. Default is False.
 
     Returns
     -------
@@ -382,11 +337,12 @@ def read_bathymetry(filepath: Union[str, Path],
     Based on BELLHOP/readbty.m
     """
     return BoundaryTable._from_parsed(
-        _parse_bathymetry(filepath, verbose), 'bathymetry', filepath)
+        _read_boundary_2d(filepath, ".bty", "bathymetry"),
+        'bathymetry', filepath)
 
 
-def read_altimetry(filepath: Union[str, Path],
-                   verbose: Union[bool, str] = False) -> BoundaryTable:
+@typed_format_error
+def read_altimetry(filepath: Union[str, Path]) -> BoundaryTable:
     """
     Read altimetry data from BELLHOP .ati file.
 
@@ -399,8 +355,6 @@ def read_altimetry(filepath: Union[str, Path],
         Path to altimetry file. An existing path is read exactly as
         given, whatever its extension; a bare root without an extension
         resolves to ``<root>.ati``.
-    verbose : bool or str, optional
-        If True, print altimetry information. Default is False.
 
     Returns
     -------
@@ -428,7 +382,8 @@ def read_altimetry(filepath: Union[str, Path],
     Based on BELLHOP/readati.m
     """
     return BoundaryTable._from_parsed(
-        _parse_altimetry(filepath, verbose), 'altimetry', filepath)
+        _read_boundary_2d(filepath, ".ati", "altimetry"),
+        'altimetry', filepath)
 
 
 @dataclass(frozen=True, eq=False)
@@ -479,7 +434,7 @@ class Boundary3dFile(ExportRecord):
 
 @typed_format_error
 def read_boundary_3d(
-    filepath: Union[str, Path], verbose: Union[bool, str] = False
+    filepath: Union[str, Path],
 ) -> Boundary3dFile:
     """
     Read a BELLHOP3D 3-D boundary grid (``.bty`` bathymetry / ``.ati``
@@ -501,8 +456,6 @@ def read_boundary_3d(
         ``bdry3DMod.f90:216`` and ``ReadATI3D`` at ``:54``). The path is
         used as given; no suffix is guessed, because the same grid is
         legal under either name.
-    verbose : bool or str, optional
-        Log the grid size and axis previews. Default False.
 
     Returns
     -------
@@ -580,7 +533,6 @@ def read_boundary_3d(
         )
 
     with open(filepath, "r") as fid:
-        log_message('bathy_io', "Reading 3-D boundary file", verbose=verbose)
 
         type_str = strip_fortran_quotes(fid.readline())
         interp_type = type_str[:1]
@@ -608,11 +560,6 @@ def read_boundary_3d(
                             "block when 3-D support lands.",
             )
 
-        approx = "Regular-grid" if interp_type == "R" else "Curvilinear"
-        log_message('bathy_io',
-                    f"{approx} approximation to 3-D boundary",
-                    verbose=verbose)
-
         # ReadVector semantics: count record, then a list-directed value
         # record expanded by SubTab (bdry3DMod.f90:270-271, :285-286).
         x_bot, n_x = read_vector(fid)
@@ -624,10 +571,6 @@ def read_boundary_3d(
                 remediation="Check the count line above the x axis — a "
                             "misaligned deck reads the wrong record as it.",
             )
-        log_message('bathy_io', f"Number of boundary points in x = {n_x}",
-                    verbose=verbose)
-        log_message('bathy_io', f"x (km): {_summarize_axis(x_bot)}",
-                    verbose=verbose, level='debug')
 
         y_bot, n_y = read_vector(fid)
         if n_y <= 0:
@@ -637,10 +580,6 @@ def read_boundary_3d(
                 remediation="Check the count line above the y axis — a "
                             "misaligned deck reads the wrong record as it.",
             )
-        log_message('bathy_io', f"Number of boundary points in y = {n_y}",
-                    verbose=verbose)
-        log_message('bathy_io', f"y (km): {_summarize_axis(y_bot)}",
-                    verbose=verbose, level='debug')
 
         # One whole-vector READ per y row (bdry3DMod.f90:300-301). Reading row
         # by row rather than flattening the rest of the file is what makes a
@@ -757,8 +696,9 @@ def _validate_boundary_axis(label: str, axis: np.ndarray) -> None:
         )
 
 
-def _check_km_column_resolves(label: str, ranges_km, *,
-                              engine_ref: str = "bdryMod.f90:230") -> None:
+def _check_km_column_resolves(
+        label: str, ranges_km, *,
+        engine_ref: str = "Bellhop/bdryMod.f90:230-231, ReadBTY") -> None:
     """Refuse ranges that collide once written to the km column.
 
     The axis is validated in METRES but written in km at ``%.6f``, so the
@@ -775,8 +715,10 @@ def _check_km_column_resolves(label: str, ranges_km, *,
     disagree with the format string it is protecting.
 
     ``engine_ref`` names the READ that aborts, because the caller knows which
-    one it is: the 2-D writers reach ``bdryMod.f90:230`` and
-    :func:`write_bty_3d` reaches ``bdry3DMod.f90:324,328``.
+    one it is: a 2-D ``.bty`` reaches ``Bellhop/bdryMod.f90:230-231``
+    (ReadBTY), a ``.ati`` ``:131-132`` (ReadATI, "Altimetry ranges are not
+    monotonically increasing"), and :func:`write_bty_3d`
+    ``bdry3DMod.f90:324,328``.
     """
     written = np.round(np.asarray(ranges_km, dtype=float), 6)
     i = _collapsed_pair_index(written)
@@ -832,7 +774,10 @@ def _write_boundary_2d(
                             rows[:, 0])
     rows[:, 0] = m_to_km(rows[:, 0])
     _check_km_column_resolves(
-        f"{filepath.suffix or '.bty/.ati'} range column", rows[:, 0])
+        f"{filepath.suffix or '.bty/.ati'} range column", rows[:, 0],
+        engine_ref=("Bellhop/bdryMod.f90:131-132, ReadATI"
+                    if filepath.suffix == '.ati'
+                    else "Bellhop/bdryMod.f90:230-231, ReadBTY"))
 
     with open(filepath, "w") as f:
         f.write(f"'{type_str}'\n")

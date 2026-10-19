@@ -421,7 +421,7 @@ def test_fetch_ssp_transect_passes_over_a_source_with_no_transect(cache):
         (30.5, -40.5), (31.5, -39.5), n_points=2, source='local')
     np.testing.assert_array_equal(chained.sound_speed, single.sound_speed)
     with pytest.raises(ConfigurationError,
-                       match="fetch_ssp_transect: source 'argo' has no transect"):
+                       match="fetch_ssp_transect: source='argo' has no transect"):
         sound_speed.fetch_ssp_transect((30.5, -40.5), (31.5, -39.5),
                                        n_points=2, source='argo',
                                        date='2024-06-01')
@@ -1145,6 +1145,97 @@ class TestCorruptNetcdfCacheRaisesTheTypedError:
         with pytest.raises(DataFetchError, match='unreadable'):
             _cache.cached_grid_at(bad, factory, 'test-grid')
         _cache.invalidate_grids()
+
+
+def test_an_uninstalled_quarter_degree_woa23_grid_names_the_live_route(
+        cache):
+    """``install.sh --data woa23`` fetches the 1° grids only, so "run the
+    install" cannot answer a missing 0.25° file: the refusal says so and
+    names the live read; a 0.25° file placed in the cache by hand is used."""
+    with pytest.raises(ConfigurationError,
+                       match='woa23_decav_t00_04.nc is not in') as info:
+        sound_speed.fetch_ssp((30.5, -40.5), source='local',
+                              resolution='0.25')
+    assert 'installs the 1.00° grids only' in info.value.message
+    assert "source='woa23'" in info.value.remediation
+    placed = cache / 'woa23' / 'woa23_decav_t00_04.nc'
+    placed.write_bytes(b'')
+    assert woa23_local._field(0, 't', resolution='0.25',
+                              decade='decav') == placed
+
+
+def _netcdf4_whose_import(monkeypatch, fail):
+    """Put a ``netCDF4`` in ``sys.modules`` whose ``from netCDF4 import
+    Dataset`` calls ``fail()``: the import-time failure of a netCDF4 built
+    against another numpy, which no cached file causes."""
+    import sys
+    import types
+    fake = types.ModuleType('netCDF4')
+    fake.__getattr__ = lambda name: fail()
+    monkeypatch.setitem(sys.modules, 'netCDF4', fake)
+
+
+def _abi_warning():
+    warnings.warn("numpy.ndarray size changed, may indicate binary "
+                  "incompatibility. Expected 16 from C header, got 96 from "
+                  "PyObject", RuntimeWarning)
+
+
+def _abi_error():
+    raise ValueError("numpy.dtype size changed, may indicate binary "
+                     "incompatibility")
+
+
+def _no_live_twin(monkeypatch):
+    from uacpy.data import bathymetry
+    monkeypatch.setattr(bathymetry, '_fetch_depths', lambda *a, **k: (
+        pytest.fail("the live GEBCO twin was asked")))
+    monkeypatch.setattr(sound_speed, 'http_get', lambda *a, **k: (
+        pytest.fail("the live WOA23 twin was asked")))
+
+
+_CACHED_READS = [lambda: data.fetch_bathy((12.0, 34.0)),
+                 lambda: sound_speed.fetch_ssp((30.5, -40.5))]
+
+
+def test_an_escalated_warning_in_a_cache_read_leaves_as_raised(tmp_path):
+    """A warning the caller's filter makes an exception is their request,
+    not a damaged file: no "present but unreadable … Delete" diagnosis."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        with pytest.raises(RuntimeWarning, match='size changed'):
+            with _cache.reading('gebco', tmp_path / 'GEBCO_2025.nc'):
+                _abi_warning()
+
+
+@pytest.mark.parametrize('read', _CACHED_READS, ids=['gebco', 'woa23'])
+def test_an_escalated_netcdf4_import_warning_asks_no_live_twin(
+        cache, monkeypatch, read):
+    """Under ``simplefilter('error', RuntimeWarning)`` after numpy is
+    imported, netCDF4's import warns about the numpy ABI; the cached file is
+    good, so it is neither blamed nor skipped for the network."""
+    _netcdf4_whose_import(monkeypatch, _abi_warning)
+    _no_live_twin(monkeypatch)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        with pytest.raises(RuntimeWarning, match='size changed'):
+            read()
+
+
+@pytest.mark.parametrize('read', _CACHED_READS, ids=['gebco', 'woa23'])
+def test_a_netcdf4_that_fails_to_import_is_named_not_the_file(
+        cache, monkeypatch, read):
+    """A netCDF4 built against another numpy fails at import: the error
+    names netCDF4 and its remedy, not the cached file, and no live twin is
+    asked in its place."""
+    _netcdf4_whose_import(monkeypatch, _abi_error)
+    _no_live_twin(monkeypatch)
+    with pytest.raises(DataFetchError,
+                       match='netCDF4 is installed but failed') as info:
+        read()
+    assert not isinstance(info.value, _cache.UnreadableCacheError)
+    assert 'netCDF4 is installed but failed to import' in str(info.value)
+    assert 'Delete' not in str(info.value)
 
 
 def test_the_per_layer_defaults_are_cache_first(cache, monkeypatch):

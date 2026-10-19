@@ -42,10 +42,9 @@ receiver = uacpy.Receiver(depths=np.linspace(1, 99, 30),
                           ranges=np.linspace(100, 3000, 40))
 
 # Only *layered* bottoms auto-route through BOUNCE, so this elastic half-space
-# runs natively either way — bellhop.f90 applies its exact acousto-elastic
-# reflection coefficient, shear included. auto_bounce=False makes that explicit.
-native = uacpy.Bellhop(backend='fortran', auto_bounce=False).run(
-    elastic_env, source, receiver)
+# runs natively — bellhop.f90 applies its exact acousto-elastic reflection
+# coefficient, shear included.
+native = uacpy.Bellhop(backend='fortran').run(elastic_env, source, receiver)
 bounced = uacpy.Bellhop(backend='fortran').run_with_bounce(
     elastic_env, source, receiver,
     c_low=1400.0, c_high=10000.0, rmax=10000.0)
@@ -59,7 +58,7 @@ uacpy.plot.plot_field(native, env=elastic_env, ax=axes[0], vmin=40, vmax=90,
 uacpy.plot.plot_field(bounced, env=elastic_env, ax=axes[1], vmin=40, vmax=90,
                  title='BOUNCE (with shear)')
 uacpy.metrics.tl_difference(bounced, native).plot(
-    ax=axes[2], env=elastic_env, diff_vmax=10, title='BOUNCE − half-space')
+    ax=axes[2], env=elastic_env, vmax=10, title='BOUNCE − half-space')
 fig.suptitle(f'Bellhop + BOUNCE at {source.frequencies[0]:.0f} Hz, elastic '
              f'sandy bottom (cp=1700, cs=400 m/s)', fontweight='bold')
 fig.tight_layout()

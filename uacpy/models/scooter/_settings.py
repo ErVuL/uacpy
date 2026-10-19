@@ -2,6 +2,7 @@
 resolves before it launches."""
 
 from dataclasses import dataclass
+from typing import Tuple, Union
 
 from uacpy.core.run_settings import EngineSettings
 
@@ -16,10 +17,10 @@ class ScooterSettings(EngineSettings):
     ----------
     c_low, c_high : float
         The phase-speed window (m/s) of the wavenumber integration, the
-        deck's ``cLow`` / ``cHigh``. Unpinned, ``c_low`` is the slowest
-        speed of every medium (shear speeds and half-spaces included) ×
-        0.85 over an elastic half-space, × 0.90 otherwise
-        (``scooter.f90:193-259``,
+        deck's ``cLow`` / ``cHigh``. Unpinned, ``c_low`` is 0.90 × the
+        slowest wave of the problem: every medium's compressional and shear
+        speed (half-spaces included) and every Scholte wave
+        (``scooter.f90:258``; Brekhovskikh & Lysanov eq. 3.4.29;
         :func:`~uacpy.core.engine_defaults.default_c_low`), and ``c_high``
         is the unbounded ``DEFAULT_C_MAX_UNBOUNDED`` (1e9 m/s, ``k_min = 0``,
         Jensen et al., ch. 4 App. 1) over every seabed.
@@ -33,9 +34,10 @@ class ScooterSettings(EngineSettings):
     rmax_factor_origin : str
         Where ``rmax_factor`` came from: the constructor, or the default
         (2.0 in every run mode, the toolbox's Scooter decks).
-    n_mesh : int
-        The mesh points per medium the deck asks for (``0``: the binary
-        sizes each medium itself).
+    n_mesh : int or tuple of int
+        The mesh points the deck asks for: one count for every medium, or
+        one per medium, water first (``0``: the binary sizes that medium
+        itself).
     mesh_reference_frequency : float
         The deck's header frequency ``freq0`` (Hz): AT checks the mesh
         floor at it, and ``scooter.f90:106-111`` scales the mesh of every
@@ -66,9 +68,17 @@ class ScooterSettings(EngineSettings):
     rmax: float
     rmax_factor: float
     rmax_factor_origin: str
-    n_mesh: int
+    n_mesh: Union[int, Tuple[int, ...]]
     mesh_reference_frequency: float
     deck_max_frequency: float
     n_wavenumbers: int
     taper: float
     peak_memory_bytes: int
+
+    def __post_init__(self):
+        # A list (the to_dict form) is stored as the tuple a frozen record
+        # holds.
+        if not isinstance(self.n_mesh, int):
+            object.__setattr__(self, 'n_mesh',
+                               tuple(int(n) for n in self.n_mesh))
+        super().__post_init__()

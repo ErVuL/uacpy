@@ -9,11 +9,15 @@ One question — *is my transmission in there, and where* — answered by
 from __future__ import annotations
 
 from collections import namedtuple
+from typing import Optional
+import warnings
 import numpy as np
 from scipy.signal import fftconvolve
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import require_positive_finite_scalar
 from uacpy.acoustic_signal._results import PlottedResult
+from uacpy.acoustic_signal.spectral import _time_axis_last
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -41,7 +45,8 @@ class AmbiguityResult(PlottedResult,
         return {"delays": "s", "doppler_shifts": "Hz", "amplitude": ""}
 
 
-def matched_filter(received, replica, *, mode: str = "full", normalize: bool = True):
+def matched_filter(received, replica, *, mode: str = "full", normalize: bool = True,
+                   axis=None):
     """Matched-filter (replica-correlation) output = pulse compression.
 
     The sonar operation: correlate against a known transmit waveform. The
@@ -56,25 +61,37 @@ def matched_filter(received, replica, *, mode: str = "full", normalize: bool = T
 
     Parameters
     ----------
-    received, replica : 1-D array
-        Received record and the transmitted replica.
+    received : array_like
+        Received record, time along ``axis``; every other axis is a channel
+        (an array recording), each filtered with the one replica.
+    replica : 1-D array
+        The transmitted replica.
     mode : {'full', 'same', 'valid'}
         Output length convention (see ``scipy.signal.fftconvolve``).
     normalize : bool
         Divide by the replica energy so a perfectly matched, unit-amplitude
         echo compresses to unit peak.
+    axis : int, optional
+        The time axis of a multichannel ``received``, as on
+        :func:`~uacpy.acoustic_signal.welch`: unset, the last axis, and a 2-D
+        record shaped like ``read_wav``'s ``(n_samples, n_channels)`` is
+        refused rather than filtered across its channels — pass ``axis=0``.
 
     Returns
     -------
     ndarray
-        Matched-filter output (complex if either input is complex).
+        Matched-filter output (complex if either input is complex): the
+        channel axes first, the lag axis last.
     """
-    r = np.asarray(received)
     h = np.asarray(replica)
-    if r.ndim != 1 or h.ndim != 1:
+    if h.ndim != 1:
         raise ConfigurationError(
-            "matched_filter: received and replica must be 1-D; got received "
-            f"shape {r.shape} and replica shape {h.shape}.")
+            f"matched_filter: replica must be 1-D; got replica shape "
+            f"{h.shape}.")
+    r = np.asarray(_time_axis_last(received, axis, "matched_filter"))
+    if r.ndim == 0:
+        raise ConfigurationError(
+            "matched_filter: received has no time axis; got a scalar.")
     if h.size == 0:
         raise ConfigurationError("matched_filter: replica must be non-empty.")
     energy = float(np.sum(np.abs(h) ** 2))
@@ -84,13 +101,15 @@ def matched_filter(received, replica, *, mode: str = "full", normalize: bool = T
             "normalisation divides by zero and every output sample is nan. "
             "Pass the transmitted waveform as the replica, or normalize=False "
             "for the un-normalised correlation.")
-    y = fftconvolve(r, np.conj(h[::-1]), mode=mode)
+    kernel = np.conj(h[::-1]).reshape((1,) * (r.ndim - 1) + (h.size,))
+    y = fftconvolve(r, kernel, mode=mode, axes=-1)
     if normalize:
         y = y / energy
     return y
 
 
-def pulse_compression(received, replica, sample_rate: float, *, normalize: bool = True):
+def pulse_compression(received, replica, sample_rate: float, *, normalize: bool = True,
+                      axis=None):
     """Matched filter returning a lag axis in seconds.
 
     Returns ``(lags, compressed)`` where ``lags`` is the echo-delay axis in
@@ -107,13 +126,17 @@ def pulse_compression(received, replica, sample_rate: float, *, normalize: bool 
     normalize : bool, optional
         Divide by the replica energy, so a matched unit-amplitude echo
         compresses to unit peak. Default True.
+    axis : int, optional
+        The time axis of a multichannel ``received``, as on
+        :func:`matched_filter`; ``compressed`` then carries the channel axes
+        first and the lag axis last.
     """
-    r = np.asarray(received)
     h = np.asarray(replica)
     fs = require_positive_finite_scalar(
         sample_rate, "pulse_compression", "sample_rate", " Hz")
-    comp = matched_filter(r, h, mode="full", normalize=normalize)
-    lags = (np.arange(comp.size) - (h.size - 1)) / fs
+    comp = matched_filter(received, h, mode="full", normalize=normalize,
+                          axis=axis)
+    lags = (np.arange(comp.shape[-1]) - (h.size - 1)) / fs
     return lags, comp
 
 
@@ -143,7 +166,7 @@ def processing_gain_dB(bandwidth: float, duration: float) -> float:
 
 
 # Largest ambiguity surface ``ambiguity_function`` will allocate:
-# n_doppler x (2N-1) float64 cells. 2**27 cells is 1 GiB, matching the 1 GiB
+# n_doppler_shifts x (2N-1) float64 cells. 2**27 cells is 1 GiB, matching the 1 GiB
 # ceiling ``channel._MAX_DEFAULT_TAPS`` sets for the same reason. A 10 s pulse
 # at 96 kHz on the default 101-Doppler grid asks for 1.44 GiB, and the Python
 # loop of full-length fftconvolves over it runs for minutes, so past this the
@@ -152,12 +175,20 @@ def processing_gain_dB(bandwidth: float, duration: float) -> float:
 _MAX_AMBIGUITY_CELLS = 1 << 27
 
 
+#: Doppler bins :func:`ambiguity_function` evaluates when ``n_doppler_shifts`` is
+#: unset, spanning ``+/- sample_rate / _AMBIGUITY_DOPPLER_SPAN_DIVISOR``
+#: (uacpy guidance).
+_AMBIGUITY_N_DOPPLER = 101
+_AMBIGUITY_DOPPLER_SPAN_DIVISOR = 20.0
+
+
 def ambiguity_function(waveform, sample_rate: float, *, doppler_shifts=None,
-                       n_doppler: int = 101):
+                       n_doppler_shifts: Optional[int] = None):
     """Narrowband range-Doppler ambiguity surface ``|chi(tau, nu)|``.
 
     ``chi(tau, nu) = sum_t s(t) conj(s(t - tau)) exp(j*2*pi*nu*t)``, normalised
-    so the matched peak at ``(0, 0)`` is 1.
+    so the matched peak at ``(0, 0)`` is 1: the narrowband ambiguity function
+    (Abraham, *Underwater Acoustic Signal Processing*, §8.3.2.1).
 
     Parameters
     ----------
@@ -166,17 +197,19 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_shifts=None,
     sample_rate : float
         Sample rate (Hz).
     doppler_shifts : array, optional
-        Doppler shifts (Hz) to evaluate. Default: ``n_doppler`` points spanning
-        ``+/- sample_rate/20``.
-    n_doppler : int
-        Number of Doppler bins when ``doppler_shifts`` is None.
+        Doppler shifts (Hz) to evaluate. Default: ``n_doppler_shifts`` points spanning
+        ``+/- sample_rate/20`` (uacpy guidance).
+    n_doppler_shifts : int, optional
+        Number of Doppler bins when ``doppler_shifts`` is None; unset, 101
+        (uacpy guidance). Given with ``doppler_shifts`` it is not used and
+        gets a ``FallbackWarning``.
 
     Returns
     -------
     AmbiguityResult
         Namedtuple ``(delays, doppler_shifts, amplitude)``: the delay axis (s,
         length ``2*N-1``), the Doppler axis (Hz), and ``|chi|`` with shape
-        ``(n_doppler, 2*N-1)``.
+        ``(n_doppler_shifts, 2*N-1)``.
     """
     s = np.asarray(waveform, dtype=complex)
     if s.ndim != 1 or s.size == 0:
@@ -188,8 +221,15 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_shifts=None,
         sample_rate, "ambiguity_function", "sample_rate", " Hz")
     t = np.arange(n) / fs
     if doppler_shifts is None:
-        fmax = fs / 20.0
-        doppler_shifts = np.linspace(-fmax, fmax, int(n_doppler))
+        fmax = fs / _AMBIGUITY_DOPPLER_SPAN_DIVISOR
+        doppler_shifts = np.linspace(
+            -fmax, fmax,
+            _AMBIGUITY_N_DOPPLER if n_doppler_shifts is None else int(n_doppler_shifts))
+    elif n_doppler_shifts is not None:
+        warnings.warn(
+            f"ambiguity_function: doppler_shifts= is the Doppler axis itself, "
+            f"so n_doppler_shifts={n_doppler_shifts!r}, which builds one, is not used.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     doppler_shifts = np.atleast_1d(np.asarray(doppler_shifts, dtype=float))
     cells = int(doppler_shifts.size) * (2 * n - 1)
     if cells > _MAX_AMBIGUITY_CELLS:
@@ -200,7 +240,7 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_shifts=None,
             f"{_MAX_AMBIGUITY_CELLS} cell cap "
             f"({_MAX_AMBIGUITY_CELLS * 8 / 2 ** 30:.2f} GiB). It also runs "
             f"one full-length FFT convolution per Doppler row. Shorten the "
-            f"waveform, decimate it, or pass fewer n_doppler / doppler_shifts "
+            f"waveform, decimate it, or pass fewer n_doppler_shifts / doppler_shifts "
             f"candidates.")
     energy = float(np.sum(np.abs(s) ** 2))
     if energy == 0.0:

@@ -170,7 +170,10 @@ def replica_bank(
         ``{'depth': candidate_depths, 'range': candidate_ranges}``, and
         ``replicas[0, i, j]`` the replica vector over ``array_depths`` for a
         source at ``(candidate_depths[i], candidate_ranges[j])``;
-        ``receiver_positions`` is the vertical array at the origin.
+        ``receiver_positions`` is the vertical array at the origin. The
+        bank carries the modes' ``model``, ``backend`` and engine
+        (``model_source``), which :func:`bartlett` and :func:`mvdr` hand on
+        to their surface.
     """
     from uacpy.core.results import Replicas
     z_arr = np.atleast_1d(np.asarray(array_depths, dtype=float))
@@ -183,7 +186,9 @@ def replica_bank(
     return Replicas(replicas=bank, candidates={'depth': cz, 'range': cr},
                     receiver_positions=_vertical_array(z_arr),
                     frequencies=getattr(modes, 'frequencies', None),
-                    model=getattr(modes, 'model', ''))
+                    model=getattr(modes, 'model', ''),
+                    backend=getattr(modes, 'backend', None),
+                    model_source=getattr(modes, 'model_source', None))
 
 
 def replica_bank_from_field(field, *, array_depths=None):
@@ -242,7 +247,8 @@ def replica_bank_from_field(field, *, array_depths=None):
         non-``depth`` axes in order (``{'depth', 'range'}`` for a
         source-depth sweep, ``{'range'}`` for one source depth), the
         element axis last, and ``receiver_positions`` the vertical array
-        at the field's ``depth`` axis.
+        at the field's ``depth`` axis. The bank carries the field's
+        ``model``, ``backend`` and engine (``model_source``).
     """
     from uacpy.core.results import Field, Replicas
     if not isinstance(field, Field):
@@ -294,7 +300,8 @@ def replica_bank_from_field(field, *, array_depths=None):
                   field.coords[name] for name in coords if name != 'depth'}
     return Replicas(replicas=bank[None], candidates=candidates,
                     receiver_positions=_vertical_array(field.coords['depth']),
-                    frequencies=field.frequencies, model=field.model)
+                    frequencies=field.frequencies, model=field.model,
+                    backend=field.backend, model_source=field.model_source)
 
 
 def csdm(snapshots: np.ndarray, *,
@@ -386,15 +393,18 @@ def bartlett(covariance: np.ndarray, replicas):
         ``kind='ambiguity'`` in dB re the surface's peak, on the replicas'
         candidate axes; ``.max()`` is the localization estimate.
         ``reference`` is the peak ``P_B`` (``reference_unit='1'``), so
-        ``reference * 10**(field.data / 10)`` is ``P_B`` itself.
+        ``reference * 10**(field.data / 10)`` is ``P_B`` itself. The surface
+        carries the replicas' ``model``, ``backend`` and engine
+        (``model_source``), so its figure credits that engine.
     """
     from uacpy.acoustic_signal.beamforming import bartlett as power
     from uacpy.core.results import ambiguity_field
     K, rows = _single_frequency_bank(covariance, replicas, 'bartlett')
-    return ambiguity_field(power(K, rows, normalize='trace'),
-                           replicas.candidates, reference_unit='1',
-                           frequencies=replicas.frequencies,
-                           model=replicas.model)
+    return ambiguity_field(
+        power(K, rows, normalize='trace'), replicas.candidates,
+        reference_unit='1', frequencies=replicas.frequencies,
+        model=replicas.model).replace(backend=replicas.backend,
+                                      model_source=replicas.model_source)
 
 
 def mvdr(
@@ -433,8 +443,8 @@ def mvdr(
     Returns
     -------
     Field
-        As :func:`bartlett`; ``reference`` is 1, the peak of the max-scaled
-        surface.
+        As :func:`bartlett` (the replicas' identity included); ``reference``
+        is 1, the peak of the max-scaled surface.
     """
     from uacpy.acoustic_signal.beamforming import mvdr as power
     from uacpy.core.results import ambiguity_field
@@ -442,4 +452,6 @@ def mvdr(
     return ambiguity_field(
         power(K, rows, diagonal_loading=diagonal_loading, normalize='max'),
         replicas.candidates, reference_unit='1',
-        frequencies=replicas.frequencies, model=replicas.model)
+        frequencies=replicas.frequencies,
+        model=replicas.model).replace(backend=replicas.backend,
+                                      model_source=replicas.model_source)

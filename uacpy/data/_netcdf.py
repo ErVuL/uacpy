@@ -5,7 +5,8 @@ import warnings
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
+                                   FallbackWarning)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
 from uacpy.data._geo import cell_half_diagonal_km, checked_offset
@@ -49,7 +50,11 @@ def open_netcdf(path, *, memory=None):
     name netCDF4 reports for it.
 
     netCDF4 ships with the default install (the offline grid backend); the typed
-    error only fires in a stripped-down environment that dropped it.
+    error only fires in a stripped-down environment that dropped it. A netCDF4
+    that is installed but fails to import (built against another numpy) is
+    named as such in a ``DataFetchError``, never blamed on the file being
+    read, and no live twin is asked in its place; a warning the caller's
+    filter escalates during the import leaves as raised.
 
     The open itself holds :data:`netcdf_lock`; concurrent opens of one file
     segfault the interpreter without it.
@@ -62,6 +67,16 @@ def open_netcdf(path, *, memory=None):
             remediation="netCDF4 ships with the default uacpy install; reinstall "
                         "with `pip install -e .`, or `pip install netCDF4`.",
         )
+    except Warning:
+        raise
+    except Exception as exc:
+        raise DataFetchError(
+            f"netCDF4 is installed but failed to import ({type(exc).__name__}: "
+            f"{exc}), so {path} was not read.",
+            remediation="Reinstall netCDF4 against the installed numpy "
+                        "(`pip install --force-reinstall netCDF4`); the file "
+                        "itself was not opened.",
+        ) from exc
     with netcdf_lock:
         return Dataset(str(path), memory=memory)
 
@@ -179,13 +194,16 @@ class NetcdfGrid:
         return (self._lat0 + row * self._dlat, ((lon + 180.0) % 360.0) - 180.0)
 
     def node_provenance(self, source_id, lat, lon, *, who,
-                        max_distance_km=None, **fields):
+                        max_distance_km=None, read_at=None, **fields):
         """The ``DataProvenance`` of the node a ``(lat, lon)`` read lands on,
         through the offset rule (:func:`uacpy.data._geo.checked_offset`): a
         warning once that node is not the requested point's own cell (a query
         clamped at the edge of a regional grid), a refusal past
-        ``max_distance_km``. ``fields`` go to the record as given."""
-        node = self.node(self.row(lat), self.col(lon))
+        ``max_distance_km``. ``read_at`` (a ``(lat, lon)``) is read instead of
+        the requested point, which the record and the offset still measure
+        from. ``fields`` go to the record as given."""
+        r_lat, r_lon = (lat, lon) if read_at is None else read_at
+        node = self.node(self.row(r_lat), self.col(r_lon))
         square = abs(abs(self._dlat) - abs(self._dlon)) < 1e-12
         prov = DataProvenance(source=SOURCES[source_id], data_point=node,
                               requested_point=(float(lat), float(lon)),

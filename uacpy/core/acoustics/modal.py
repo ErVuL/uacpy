@@ -16,7 +16,7 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.boundary import BoundaryProperties, BoundaryType
 from uacpy.core.bottom import Bottom
 from uacpy.core.constants import (
-    DEFAULT_WATER_DENSITY_G_CM3, NEPER_TO_DB,
+    DEFAULT_WATER_DENSITY, NEPER_TO_DB,
 )
 
 __all__ = [
@@ -505,7 +505,7 @@ def _halfspace_tail_term(bottom, phi_re, depths, seafloor_depth, kr,
 
 def modal_attenuation(k, phi, depths, alpha_dB_per_m, *, frequency,
                       sound_speed_z=None,
-                      density_z=DEFAULT_WATER_DENSITY_G_CM3, bottom=None,
+                      density_z=DEFAULT_WATER_DENSITY, bottom=None,
                       seafloor_depth=None):
     """First-order modal attenuation ``alpha_m`` (Np/m), one per mode.
 
@@ -517,9 +517,12 @@ def modal_attenuation(k, phi, depths, alpha_dB_per_m, *, frequency,
 
     (Jensen, Kuperman, Porter & Schmidt, *Computational Ocean Acoustics*,
     Eq. 5.176, with the normalisation of Eq. 5.169 written out as the
-    denominator), plus the closed-form evanescent-tail term (Eqs.
-    5.177-5.180) ``psi(D)^2 / (2 gamma_m rho_b)`` when a penetrable
-    ``bottom`` is given.
+    denominator). When a penetrable ``bottom`` is given, the half-space
+    below ``D`` adds the closed-form bottom term of Eq. 5.180,
+    ``delta_alpha_m = psi(D)^2 * alpha_b * omega / (2 k_rm gamma_m c_b rho_b)``
+    (``psi = psi(D) exp(-gamma_m (z - D))``, Eqs. 5.177-5.179), to the
+    numerator, and its tail ``integral_D^inf psi^2/rho_b dz =
+    psi(D)^2 / (2 gamma_m rho_b)`` to the normalisation.
 
     Parameters
     ----------
@@ -544,7 +547,7 @@ def modal_attenuation(k, phi, depths, alpha_dB_per_m, *, frequency,
         the profile on the tabulation.
     density_z : float or array_like
         Density (g/cm3), scalar or per depth. Default: the package's one
-        water density ``DEFAULT_WATER_DENSITY_G_CM3``.
+        water density ``DEFAULT_WATER_DENSITY``.
     bottom, seafloor_depth
         A penetrable half-space (a ``BoundaryProperties``, or a
         range-independent unlayered ``Bottom`` such as ``env.bottom``) and
@@ -579,7 +582,7 @@ def _modal_attenuation(
     *,
     frequency,
     sound_speed_z=None,
-    density_z=DEFAULT_WATER_DENSITY_G_CM3,
+    density_z=DEFAULT_WATER_DENSITY,
     bottom=None,
     seafloor_depth=None,
     who: str = "modal_attenuation",
@@ -710,7 +713,7 @@ def mode_shapes_at(phi, depths, at_depths, *, outside='raise'):
 
 
 def modal_field(k, phi_zs, phi_zr, ranges, *,
-                source_density=DEFAULT_WATER_DENSITY_G_CM3,
+                source_density=DEFAULT_WATER_DENSITY,
                 form: str = 'asymptotic'):
     """Coherent complex pressure from the modal sum.
 
@@ -748,7 +751,7 @@ def modal_field(k, phi_zs, phi_zr, ranges, *,
     ranges : array_like
         Ranges (m). ``r <= 0`` is outside the form's domain and comes back
         ``nan``, not a number within a few dB of the 1 m answer.
-    source_density : float, default ``DEFAULT_WATER_DENSITY_G_CM3``
+    source_density : float, default ``DEFAULT_WATER_DENSITY``
         Density at the source (**g/cm3** — the unit KRAKEN normalises its
         modes with, and the unit the ``.env`` file carries). The default is
         the package's one water density (1.027), the water every deck

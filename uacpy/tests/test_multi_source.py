@@ -139,14 +139,17 @@ def test_every_concrete_model_inherits_run_and_implements_the_stage_hooks():
     per-depth loop, the weight — and no wrapper redefines it, so a subclass
     that overrides it and delegates to ``super().run()`` passes through the
     template once. Every engine implements the four stage hooks of
-    :class:`PropagationModel`.
+    :class:`PropagationModel`, each on itself or on a base below it (OASS
+    and OASSP take three from the scattering chain's base,
+    ``_ScatteringPostProcessor``).
     """
     from uacpy.models._registry import engine_classes
     from uacpy.models.base import PropagationModel, _STAGE_HOOKS
     for cls in engine_classes().values():
         assert 'run' not in cls.__dict__, cls
         assert cls.run is PropagationModel.run, cls
-        assert all(hook in cls.__dict__ for hook in _STAGE_HOOKS), cls
+        assert all(getattr(cls, hook) is not getattr(PropagationModel, hook)
+                   for hook in _STAGE_HOOKS), cls
 
 
 def test_a_run_override_whose_run_mode_default_is_not_none_is_refused():
@@ -307,6 +310,42 @@ def test_a_one_depth_weight_on_a_db_mode_is_refused_before_the_engine_runs(
     else:
         _kraken().validate_inputs(_env(), source, _receiver(),
                                   run_mode=mode)
+
+
+@pytest.mark.requires_binary  # constructs RAM and Kraken
+@pytest.mark.parametrize('engine, mode, depths, weights, match', [
+    ('RAM', RunMode.TIME_SERIES, [30.0], [1j], 'real time-domain traces'),
+    ('RAM', RunMode.TIME_SERIES, [30.0, 50.0], [1.0, 1j],
+     'real time-domain traces'),
+    ('Kraken', RunMode.INCOHERENT_TL, [30.0, 50.0], [1.0, 1j],
+     'a weight cannot scale it'),
+])
+def test_a_weight_the_declared_output_cannot_take_is_refused_before_a_launch(
+        monkeypatch, engine, mode, depths, weights, match):
+    """``validate_inputs`` raises what ``run`` would raise before launching
+    (``PropagationModel.validate_inputs``): a complex weight on a real
+    trace, or on a dB field, is known from the declared output in stage 3,
+    one depth or several, and refused there by the rule the result would
+    meet (``_check_field_weightable``) — no binary is launched. A real
+    weight on the trace passes."""
+    import uacpy.models as models
+    cls = getattr(models, engine)
+    launched = []
+    monkeypatch.setattr(cls, '_launch',
+                        lambda self, *a, **k: launched.append(1))
+    kw = ({'source_waveform': np.hanning(40), 'sample_rate': 400.0}
+          if mode == RunMode.TIME_SERIES else {})
+    source = uacpy.Source(depths=depths, frequencies=F0, weights=weights)
+    for call in ('validate_inputs', 'run_settings', 'run'):
+        with pytest.raises(ConfigurationError, match=match):
+            getattr(cls(verbose=False), call)(
+                _env(), source, _receiver(), run_mode=mode, **kw)
+    assert launched == []
+    if mode == RunMode.TIME_SERIES:
+        cls(verbose=False).validate_inputs(
+            _env(), uacpy.Source(depths=depths, frequencies=F0,
+                                 weights=[-2.0] * len(depths)),
+            _receiver(), run_mode=mode, **kw)
 
 
 @pytest.mark.requires_binary
@@ -1448,6 +1487,7 @@ class TestTheFieldsOfSeveralSourcesJoinOnOneAxis:
     @pytest.mark.parametrize('attr,first,other', [
         ('reduction_speed', 1500.0, 1400.0),
         ('reduction_speed', None, 1500.0),
+        ('removed_delay', None, {'delay': 0.0, 'sound_speed': 1500.0}),
         ('band', (50.0, 400.0), (50.0, 300.0)),
         ('weighting', None, 'VHF'),
     ])
@@ -1561,3 +1601,138 @@ def test_the_zero_range_refusal_fires_before_any_per_depth_run():
     with pytest.raises(ConfigurationError, match='largest range is 0 m'):
         model.run(_env(), source,
                   uacpy.Receiver(depths=[50.0], ranges=[0.0]))
+
+
+# ── (g) the field of several sources saves and loads ────────────────────
+
+def _one_source_field(scale, *, complex_data=True):
+    data = np.arange(6, dtype=float).reshape(2, 3) * scale
+    if complex_data:
+        data = data * (1 - 0.5j)
+    return Field(data=data,
+                 coords={'depth': np.array([10.0, 20.0]),
+                         'range': np.array([100.0, 200.0, 300.0])},
+                 kind='pressure', unit='Pa', model='Kraken',
+                 frequencies=[50.0], source_depths=[scale],
+                 phase_reference='travelling_wave')
+
+
+def _two_source_field(**kw):
+    """What a two-depth run returns: one Field over ``source_depth``, with
+    the Source weights recorded and one scratch path per depth."""
+    a, b = _one_source_field(5.0, **kw), _one_source_field(15.0, **kw)
+    a.metadata['shd_file'] = '/run/source_depth_5m/x.shd'
+    b.metadata['shd_file'] = '/run/source_depth_15m/x.shd'
+    field = stack_fields([a, b], [5.0, 15.0])
+    field.source_weights = np.array([1.0, -1.0 + 0.5j])
+    return field
+
+
+def _same_fields(a, b, *, paths=True):
+    assert list(a.coords) == list(b.coords)
+    for name in a.coords:
+        np.testing.assert_array_equal(a.coords[name], b.coords[name])
+    np.testing.assert_array_equal(a.data, b.data)
+    np.testing.assert_array_equal(a.source_depths, b.source_depths)
+    np.testing.assert_array_equal(a.source_weights, b.source_weights)
+    if paths:
+        assert a.metadata['shd_file'] == b.metadata['shd_file']
+
+
+class TestTheFieldOfSeveralSourcesRoundTrips:
+    """A multi-depth run's Field — its ``source_depth`` axis, the Source
+    weights and the per-depth metadata — saves and loads as any Field."""
+
+    def test_from_dict_of_to_dict_is_the_field(self):
+        field = _two_source_field()
+        _same_fields(field, Field.from_dict(field.to_dict()))
+
+    def test_the_npz_round_trip_is_the_field(self, tmp_path):
+        field = _two_source_field()
+        np.savez(tmp_path / 'f.npz', **field.to_dict())
+        with np.load(tmp_path / 'f.npz', allow_pickle=True) as f:
+            _same_fields(field, Field.from_dict(dict(f)))
+
+    def test_from_xarray_of_to_xarray_is_the_field(self):
+        """Every depth's scratch path, a list of strings, crosses as a JSON
+        attribute and comes back as the same list, with no warning."""
+        pytest.importorskip('xarray')
+        field = _two_source_field()
+        with recorded_warnings() as caught:
+            da = field.to_xarray()
+        assert not [w for w in caught if 'cannot be held' in str(w.message)]
+        assert list(da.dims) == ['source_depth', 'depth', 'range']
+        back = Field.from_xarray(da)
+        _same_fields(field, back)
+        assert back.metadata['shd_file'] == list(field.metadata['shd_file'])
+
+    @pytest.mark.parametrize('complex_data', [True, False])
+    def test_from_netcdf_reads_back_what_to_netcdf_wrote(self, tmp_path,
+                                                         complex_data):
+        pytest.importorskip('xarray')
+        field = _two_source_field(complex_data=complex_data)
+        if not complex_data:
+            field.source_weights = np.array([1.0, -1.0])
+        field.to_netcdf(tmp_path / 'f.nc')
+        back = Field.from_netcdf(tmp_path / 'f.nc')
+        _same_fields(field, back)
+        assert back.metadata['shd_file'] == list(field.metadata['shd_file'])
+
+    def test_it_sums_the_same_after_the_round_trip(self, tmp_path):
+        pytest.importorskip('xarray')
+        field = _two_source_field()
+        del field.metadata['shd_file']
+        field.to_netcdf(tmp_path / 'f.nc')
+        back = Field.from_netcdf(tmp_path / 'f.nc')
+        np.testing.assert_array_equal(back.superpose().data,
+                                      field.superpose().data)
+
+
+def test_a_real_field_writes_to_netcdf_and_reads_back(tmp_path):
+    """A real-valued Field carries the boolean attribute ``coherent``, which
+    the netCDF4 backend refuses; the writer picks a backend that stores it,
+    as it does for complex values."""
+    xr = pytest.importorskip('xarray')
+    pytest.importorskip('h5netcdf')
+    pytest.importorskip('h5py')
+    field = _one_source_field(5.0, complex_data=False)
+    field.to_netcdf(tmp_path / 'f.nc')
+    with xr.open_dataarray(tmp_path / 'f.nc', engine='h5netcdf') as da:
+        back = Field.from_xarray(da.load())
+    np.testing.assert_array_equal(back.data, field.data)
+    assert back.coherent == field.coherent
+
+
+class TestAStackOfFieldSlabsIsNotRead:
+    """A ResultStack holds no Field, so a stack dict whose slabs are Fields
+    is refused on load, by the constructor's own rule. A class-less one-array NetCDF (a Field's own xarray form) reads
+    as that Field through ``Result`` and ``Field``, and ``ResultStack``
+    refuses it as a file of another class."""
+
+    def test_from_dict_refuses_field_slabs(self):
+        from uacpy.core._export import saved_class_path
+        saved = {'__class__': saved_class_path(ResultStack),
+                 'coordinate': np.array([5.0, 15.0]),
+                 'coordinate_name': 'source_depth',
+                 'slabs': [{'__class__': saved_class_path(Field),
+                            **slab.to_dict()}
+                           for slab in (_one_source_field(5.0),
+                                        _one_source_field(15.0))]}
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^ResultStack: a Field is not a slab.*"
+                                 r"stack_fields\(fields, depths\)"):
+            ResultStack.from_dict(saved)
+
+
+    def test_a_class_less_array_reads_as_the_field_it_holds(self, tmp_path):
+        pytest.importorskip('xarray')
+        from uacpy.core._export import write_netcdf
+        from uacpy.core.results import Result
+        field = _two_source_field()
+        write_netcdf(field.to_xarray(), tmp_path / 's.nc')
+        for loader in (Result.from_netcdf, Field.from_netcdf):
+            _same_fields(field, loader(tmp_path / 's.nc'))
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^ResultStack\.from_netcdf: .* holds "
+                                 r"one array.*not a ResultStack"):
+            ResultStack.from_netcdf(tmp_path / 's.nc')

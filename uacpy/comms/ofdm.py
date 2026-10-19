@@ -12,7 +12,9 @@ from uacpy.comms.channel import _channel_array
 from uacpy.comms.equalize import _regularizer
 from uacpy.core._validate import require_generator
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.exceptions import ConfigurationError, NumericsWarning
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, NumericsWarning,
+)
 
 
 # Smallest fraction of the peak pilot magnitude a subcarrier can carry and
@@ -25,7 +27,8 @@ _PILOT_REL_FLOOR = 1e-12
 
 
 # Fraction of the channel's total energy beyond the cyclic prefix above which
-# ofdm_demodulate warns of inter-block interference (ISI-to-signal ~ -20 dB).
+# ofdm_demodulate warns of inter-block interference (ISI-to-signal ~ -20 dB;
+# uacpy guidance).
 # Relative to the channel's own energy, so the verdict is independent of its
 # amplitude units and of its representation length: a full-length
 # np.fft.ifft(H_est) of a channel whose support fits the prefix carries only
@@ -156,7 +159,8 @@ def ofdm_demodulate(received, n_subcarriers, cp_len, channel=None, snr_linear=No
         The channel impulse response (see above).
     snr_linear : float, optional
         SNR at the equalizer input, a linear power ratio; set, it selects the
-        MMSE weight.
+        MMSE weight. Without ``channel`` or ``channel_response`` nothing is
+        equalized, and a given one gets a ``FallbackWarning``.
     channel_response : array_like, optional
         The channel frequency response on the subcarrier grid (see above).
     """
@@ -176,6 +180,13 @@ def ofdm_demodulate(received, n_subcarriers, cp_len, channel=None, snr_linear=No
         raise ConfigurationError(
             "ofdm_demodulate: pass channel= (impulse-response taps) or "
             "channel_response= (per-subcarrier H), not both.")
+    if snr_linear is not None and channel is None and channel_response is None:
+        warnings.warn(
+            f"ofdm_demodulate: snr_linear={snr_linear!r} selects the MMSE "
+            f"weight of the per-subcarrier equalizer, and with neither "
+            f"channel= nor channel_response= nothing is equalized, so it is "
+            f"not used.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if channel_response is not None:
         Hk = np.asarray(channel_response, dtype=complex).ravel()
         if Hk.size != nsc:
@@ -263,9 +274,9 @@ def equalize_subcarriers(spectra, H, snr_linear=None):
     zero-forcing with a floor, or the MMSE weight when ``snr_linear`` is
     given. A channel with no power anywhere returns zeros: every subcarrier
     is unrecoverable, which is what the epsilon form tends to. ``eps`` scales
-    with ``|H|^2`` so a pilot estimate at any receive amplitude is used: with
-    a fixed offset, 16-QAM over a 4-tap channel measured BER 0.24 at an
-    amplitude of 1e-12 (MMSE at 1e-9).
+    with ``|H|^2`` so a pilot estimate at any receive amplitude is used: a
+    fixed offset would give 16-QAM over a 4-tap channel a BER of 0.24 at an
+    amplitude of 1e-12 (MMSE at 1e-9), measured.
 
     Parameters
     ----------
@@ -406,11 +417,12 @@ def _schmidl_cox_terms(r, nsc):
     rr = _window_sums(energy[L:], L, n)
     metric = np.zeros(n)
     # The gate runs first and the division is done only where it passes, so
-    # the metric needs no epsilon. An absolute one is wrong here anyway:
-    # rr**2 scales as amplitude**4, so `rr**2 + 1e-12` made M(d) a function of
-    # the units the caller held the record in — a noise-free frame synced in
-    # µPa and returned (None, 0.0) in Pa, below ~5e-4 amplitude. The same
-    # reasoning is written out at `acoustic_signal.frf._etfe_divide`.
+    # the metric needs no epsilon. An absolute one would be wrong here anyway:
+    # rr**2 scales as amplitude**4, so `rr**2 + 1e-12` would make M(d) a
+    # function of the units the caller holds the record in — measured, a
+    # noise-free frame that syncs in µPa returns (None, 0.0) in Pa, below
+    # ~5e-4 amplitude. The same reasoning is written out at
+    # `acoustic_signal.frf._etfe_divide`.
     balanced = (rr > 0.0) & (rr >= _SC_HALF_ENERGY_RATIO * first)
     # Timing metric M(d) = |P(d)|^2 / R(d)^2, eq. (8).
     metric[balanced] = np.abs(p[balanced]) ** 2 / rr[balanced] ** 2
@@ -477,8 +489,8 @@ def schmidl_cox_sync(received, n_subcarriers, threshold=0.5):
 
     Noise lowers the plateau: with per-sample SNR ``g`` each half carries
     signal power ``g/(1+g)`` of its total, so the plateau sits near
-    ``(g/(1+g))**2``, 0.25 at 0 dB. The default ``threshold=0.5`` therefore
-    loses frames below a few dB; measured over 20 frames at 256
+    ``(g/(1+g))**2``, 0.25 at 0 dB. The default ``threshold=0.5`` (uacpy
+    guidance) therefore loses frames below a few dB; measured over 20 frames at 256
     subcarriers it found 0/20 at 0 dB, 11/20 at 2 dB and 20/20 at 4 dB. Lower
     it to sync a coded link that decodes below that, keeping it above the
     peak a noise-only record of the same length reaches: 0.093 at most over

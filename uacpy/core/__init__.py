@@ -43,16 +43,15 @@ _EXPORTS = {
     'BoundaryType': 'uacpy.core.boundary',
     # The package's one reference water: what every default describes.
     **{name: 'uacpy.core.constants' for name in (
-        'DEFAULT_SOUND_SPEED', 'DEFAULT_WATER_DENSITY_G_CM3',
-        'REFERENCE_TEMPERATURE_C', 'REFERENCE_SALINITY_PSU',
-        'REFERENCE_DEPTH_M', 'REFERENCE_PH',
+        'DEFAULT_SOUND_SPEED', 'DEFAULT_WATER_DENSITY',
+        'REFERENCE_TEMPERATURE', 'REFERENCE_SALINITY',
+        'REFERENCE_DEPTH', 'REFERENCE_PH',
     )},
 }
 
-#: The submodules ``__all__`` lists beside the names above.
-_LISTED_SUBMODULES = ('acoustics', 'materials', 'metrics', 'units')
-
-__all__ = [*_EXPORTS, *_LISTED_SUBMODULES]
+# Functions, classes and constants only: a submodule (``uacpy.core.units``)
+# is reached as an attribute, not listed (docs/DEV.md §10).
+__all__ = list(_EXPORTS)
 
 
 if _typing.TYPE_CHECKING:
@@ -60,10 +59,9 @@ if _typing.TYPE_CHECKING:
     # these imports instead of inferring ``Any`` from ``__getattr__``. The
     # body never runs, so nothing is imported eagerly. Kept in step with the
     # table by ``tests/test_lazy_imports.py``.
-    from uacpy.core import acoustics, materials, metrics, units  # noqa: F401
     from uacpy.core.constants import (  # noqa: F401
-        DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3, REFERENCE_DEPTH_M,
-        REFERENCE_PH, REFERENCE_SALINITY_PSU, REFERENCE_TEMPERATURE_C,
+        DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY, REFERENCE_DEPTH,
+        REFERENCE_PH, REFERENCE_SALINITY, REFERENCE_TEMPERATURE,
     )
     from uacpy.core.absorption import (  # noqa: F401
         Absorption, AbsorptionCoefficient, Biological, BiologicalLayer,

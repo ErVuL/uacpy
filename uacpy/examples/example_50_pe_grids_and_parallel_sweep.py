@@ -46,7 +46,7 @@ if __name__ == '__main__':
     # reaching the seabed's 1700 m/s (the Padé order is RAM's by default).
     c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=1700.0)
     medium = dict(c_min=1500.0, c_max=max(1500.0, c0), c_max_all=1700.0,
-                  x_max=5000.0, angle_max_deg=30.0)
+                  rmax=5000.0, angle_max_deg=30.0)
     plans = {f: optimize_grid(frequency=f, c0=c0, eps=1e-3, **medium)
              for f in frequencies}
 

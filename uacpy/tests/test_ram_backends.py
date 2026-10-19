@@ -639,6 +639,16 @@ class TestRamInWriter:
         # bath + 6 profile blocks (cw, cp, cs, rho, attnp, attns) = 7 terminators
         assert text.count('-1 -1') == 7
 
+    def test_the_rotation_defaults_are_the_ones_the_rams_model_writes(self):
+        """Left unset, the writer's (irot, theta) are RAM(backend='rams')'s
+        own unset values: rotation on, 45°."""
+        import inspect
+        from uacpy.models.ram._stability import (
+            DEFAULT_RAMS_ROTATION, RAMS_DEFAULT_THETA_DEG)
+        params = inspect.signature(write_ram_in).parameters
+        assert params['rams_rotation_angle_deg'].default == RAMS_DEFAULT_THETA_DEG
+        assert params['rams_rotation'].default == int(DEFAULT_RAMS_ROTATION)
+
     def test_ramgeo_kind_is_fluid_flat(self, tmp_path):
         """ramgeo = ramsurf format minus the surface block, no shear: row-5
         carries (ns, rs) and there are only 4 profile blocks per range."""
@@ -2910,8 +2920,8 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         # returned grid at each rung and require the warning to name one.
         candidates = [
             grid_error(dr=dr, dz=dz, frequency=self.FREQ, c_min=c_min,
-                       c_max=c_max, x_max=self.RMAX, c0=c0,
-                       angle_max_deg=theta, p=int(model.n_pade), alpha=0.0,
+                       c_max=c_max, rmax=self.RMAX, c0=c0,
+                       angle_max_deg=theta, n_pade=int(model.n_pade), alpha=0.0,
                        c_min_all=c_min_all, c_max_all=c_max_all)
             for theta in (30.0, 20.0, 15.0)
         ]
@@ -2945,8 +2955,8 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         c_min, c_max = ram_domain.water_speed_bounds(env)
         c_min, c_max = min(c_min, c0), max(c_max, c0)   # the scored band
         res = optimize_grid(frequency=self.FREQ, c_min=c_min, c_max=c_max,
-                            x_max=self.RMAX, c0=c0,
-                            angle_max_deg=30.0, eps=eps_used, p=int(model.n_pade),
+                            rmax=self.RMAX, c0=c0,
+                            angle_max_deg=30.0, eps=eps_used, n_pade=int(model.n_pade),
                             alpha=0.0, c_min_all=c_min_all,
                             c_max_all=c_max_all)
         assert res.dz < 1500.0 / (16.0 * self.FREQ), (
@@ -2957,8 +2967,8 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         assert res.dz <= dz < floor
         from uacpy.models.pe_grid import grid_error
         assert grid_error(dr=dr, dz=dz, frequency=self.FREQ, c_min=c_min,
-                          c_max=c_max, x_max=self.RMAX, c0=c0, angle_max_deg=30.0,
-                          p=int(model.n_pade), alpha=0.0,
+                          c_max=c_max, rmax=self.RMAX, c0=c0, angle_max_deg=30.0,
+                          n_pade=int(model.n_pade), alpha=0.0,
                           c_min_all=c_min_all, c_max_all=c_max_all) < 1.0
 
     def test_a_saturated_error_is_labelled_not_resolved(self, monkeypatch):
@@ -3063,7 +3073,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
                                        log=model._log)
         text = str(excinfo.value)
         assert 'f=10000.0 Hz' in text
-        assert f'x_max={self.RMAX:.0f} m' in text
+        assert f'rmax={self.RMAX:.0f} m' in text
         assert f'{1500.0 / (LAMBDA_PER_DZ_FLOOR * 10000.0):.4g} m' in text
 
     @pytest.mark.requires_binary
@@ -3154,8 +3164,8 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
             dr, _dz = ram_grid.compute_grid_lytaev(
                 env, 200.0, max_range=5000.0, kind='mpirams',
                 knobs=model._knob_record(), log=model._log)
-        kw = dict(frequency=200.0, x_max=5000.0, c0=c0, angle_max_deg=30.0, eps=1e-3,
-                  p=int(model.n_pade), alpha=0.0,
+        kw = dict(frequency=200.0, rmax=5000.0, c0=c0, angle_max_deg=30.0, eps=1e-3,
+                  n_pade=int(model.n_pade), alpha=0.0,
                   c_min_all=c_min_all, c_max_all=c_max_all)
         widened = optimize_grid(c_min=c_min, c_max=c0, **kw)
         water = optimize_grid(c_min=c_min, c_max=c_max, **kw)
@@ -4656,7 +4666,7 @@ class TestMpiramsSedimentRowsMustMatchNzsExactly:
     def _write_deck(tmp_path, **overrides):
         from uacpy.io.mpirams_writer import write_mpirams_inpe
         kwargs = dict(
-            fc=100.0, q_factor=1.0, record_duration=1.0, zsrc=10.0, dz=0.5, dr=10.0,
+            fc=100.0, q_factor=1.0, record_duration=1.0, zs=10.0, dz=0.5, dr=10.0,
             n_pade=6, n_stability=1, stability_range=0.0, depth_decimation=1, ssp_filename='S.ssp',
             earth_curvature=0, horizontal_interpolation=0, bathymetry_from_file=1, bth_filename='B.bth', n_sediment_points=4,
             cs=np.zeros(4), rho=np.full(4, 1.2), attn=np.full(4, 0.5),
@@ -4949,7 +4959,7 @@ def _vendored_text(path: Path) -> str:
 
 def _write_inpe_kwargs(nzs: int) -> dict:
     return dict(
-        fc=75.0, q_factor=75.0, record_duration=1.0, zsrc=500.0, dz=1.0, dr=100.0,
+        fc=75.0, q_factor=75.0, record_duration=1.0, zs=500.0, dz=1.0, dr=100.0,
         n_pade=4, n_stability=1, stability_range=1000.0, depth_decimation=10, ssp_filename='test.ssp',
         earth_curvature=0, horizontal_interpolation=0, bathymetry_from_file=1, bth_filename='test.bth', sedlayer=300.0,
         n_sediment_points=nzs, cs=np.zeros(nzs), rho=np.full(nzs, 1.2),

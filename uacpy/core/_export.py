@@ -50,6 +50,11 @@ __all__ = ['Exportable', 'CarrierExport', 'read_only', 'encode_attrs',
            'FrozenDict', 'saved_class_path']
 
 
+def _with_article(name: str) -> str:
+    """``'a Field'`` / ``'an Environment'``: a class name with its article."""
+    return f"{'an' if name[:1] in 'AEIOU' else 'a'} {name}"
+
+
 def read_only(array) -> np.ndarray:
     """A view of ``array`` that refuses writes; the stored array is untouched.
 
@@ -261,8 +266,9 @@ class Exportable:
         payload = self._payload()
         if not payload:
             raise ConfigurationError(
-                f"{type(self).__name__}.values: a {type(self).__name__} "
-                f"holds no array payload; its fields are attributes.",
+                f"{type(self).__name__}.values: "
+                f"{_with_article(type(self).__name__)} holds no array "
+                f"payload; its fields are attributes.",
                 remediation="Read the attribute you need directly, or "
                             "to_dict() for every field.")
         if name is None:
@@ -287,14 +293,24 @@ class Exportable:
         Raises
         ------
         ConfigurationError
-            A type whose data are gridded rather than tabular: its labelled
-            form is ``to_xarray``.
+            A type whose data are gridded rather than tabular (its labelled
+            form is ``to_xarray``), or one that holds no array at all (an
+            ``Environment``, a ``Source``: its fields are in ``to_dict``).
         """
         who = f"{type(self).__name__}.to_dataframe"
         table = self._table()
+        if table is None and not self._payload():
+            raise ConfigurationError(
+                f"{who}: {_with_article(type(self).__name__)} holds no "
+                f"array, so there is no table to give; its fields are "
+                f"attributes.",
+                remediation="Use to_dict() for its fields; a carrier it "
+                            "holds may give its own table "
+                            "(env.bottom.to_dataframe()).")
         if table is None:
             raise ConfigurationError(
-                f"{who}: a {type(self).__name__} is gridded, not a table.",
+                f"{who}: {_with_article(type(self).__name__)} is gridded, "
+                f"not a table.",
                 remediation="Use to_xarray() for the labelled form; "
                             "to_xarray().to_dataframe() flattens it.")
         pandas = require_extra('pandas', who)
@@ -433,12 +449,9 @@ def netcdf_holding(dataset) -> Tuple[str, str]:
     if len(variables) == 1 and 'uacpy_class' not in attrs:
         attrs.update({k: v for k, v in dataset[variables[0]].attrs.items()
                       if k == 'uacpy_class'})
-    def named(name):
-        return f"{'an' if name[:1] in 'AEIOU' else 'a'} {name}"
-
     if 'uacpy_class' in attrs:
         name = str(attrs['uacpy_class']).rpartition('.')[2]
-        return (named(name),
+        return (_with_article(name),
                 f"{name}.from_netcdf(path), or Result.from_netcdf(path)")
     if CarrierExport._FIELDS_ATTR in attrs:
         try:
@@ -449,7 +462,7 @@ def netcdf_holding(dataset) -> Tuple[str, str]:
         name = str(path or 'carrier').rpartition('.')[2]
         if name == 'carrier':
             return "a carrier", "the from_netcdf of the class that wrote it"
-        return named(name), f"{name}.from_netcdf(path)"
+        return _with_article(name), f"{name}.from_netcdf(path)"
     if 'uacpy_result_fields' in attrs:
         return (f"a signal result (fields {attrs['uacpy_result_fields']})",
                 "the from_xarray(xarray.open_dataset(path)) of its class")

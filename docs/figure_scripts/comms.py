@@ -22,7 +22,7 @@ from uacpy.plot import (
     plot_convergence,
     plot_doppler_ambiguity,
     plot_eye_diagram,
-    plot_scatter,
+    plot_received_symbols,
     plot_sync_metric,
 )
 
@@ -61,10 +61,10 @@ def equalization():
 
     ideal = comms.Modulator('qpsk').constellation
     fig, axes = plt.subplots(1, 3, figsize=ROW3)
-    plot_scatter(raw.rx_symbols[2000:], axes[0], ideal=ideal,
-                 title=f'No equalizer — BER {raw.ber:.1e}')
-    plot_scatter(rls.rx_symbols[2000:], axes[1], ideal=ideal,
-                 title=f'DFE, 16 ff / 8 fb — BER {rls.ber:.1e}')
+    plot_received_symbols(raw.rx_symbols[2000:], axes[0], ideal=ideal,
+                          title=f'No equalizer — BER {raw.ber:.1e}')
+    plot_received_symbols(rls.rx_symbols[2000:], axes[1], ideal=ideal,
+                          title=f'DFE, 16 ff / 8 fb — BER {rls.ber:.1e}')
     plot_convergence(_smooth(lms.mse), axes[2], label=f'LMS, step 0.005 '
                      f'(BER {lms.ber:.1e})', color='C1')
     plot_convergence(_smooth(rls.mse), axes[2], label='RLS, forget 0.997',
@@ -438,9 +438,9 @@ def bellhop_channel():
     plot_channel(channel, BAUD, axes[0],
                  title=f'{len(arrivals)} arrivals → {channel.size} taps at 1 kBd')
     channel_response(channel, BAUD).plot(ax=axes[1])
-    plot_scatter(link.rx_symbols[4000:], axes[2],
-                 ideal=comms.Modulator('qpsk').constellation,
-                 title=f'QPSK after the DFE — BER {link.ber:.1e}')
+    plot_received_symbols(link.rx_symbols[4000:], axes[2],
+                          ideal=comms.Modulator('qpsk').constellation,
+                          title=f'QPSK after the DFE — BER {link.ber:.1e}')
     fig.suptitle('A 1 kBd QPSK link over the modelled 3 km shallow-water '
                  'channel, Eb/N0 = 20 dB', fontweight='bold', fontsize=12)
     fig.tight_layout()

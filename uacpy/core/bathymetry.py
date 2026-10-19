@@ -130,7 +130,7 @@ class Bathymetry(_RangeProfile):
             f"would mean a {float(v):g} m deep seafloor."))
         if depth is not None:
             return cls(ranges=np.array([0.0]), depths=np.array([depth]))
-        # ``_scalar_or_none`` returned for every numeric scalar, so a 0-d
+        # ``scalar_or_none`` returned for every numeric scalar, so a 0-d
         # value here (None, a string, bytes, a 0-d string array) is not a
         # depth: ``arr`` stays None for it, as for a non-numeric sequence.
         try:

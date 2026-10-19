@@ -31,8 +31,10 @@ A pure ray field has zeros in shadow zones and infinities at caustics.
 `beam_type='G'` (the default, and BELLHOP's own) replaces each ray with a
 *geometric* **hat beam**: a finite width that follows the spreading of the
 ray tube, with no floor, so a caustic keeps its ray-theoretic singularity.
-`beam_type='B'` makes the cross-profile Gaussian and floors the width at `πλ`
-— the Weinberg–Keenan focal limit. That floor, not the Gaussian shape by
+`beam_type='B'` makes the cross-profile Gaussian and floors the width at
+`min(0.2·f·τ, πλ)` (`influence.f90:563`): `πλ`, the Weinberg–Keenan focal limit,
+once the travel time `τ` exceeds `5πλ/f`, below it nearer the source (in
+1500 m/s water ≈ 880 m out at 200 Hz, ≈ 14 km at 50 Hz). That floor, not the Gaussian shape by
 itself, is what keeps caustics finite, and it is also what biases a shallow
 duct: when `πλ` is a sizeable part of the water depth the floored beams read
 too much loss — +2.55 dB against a wavenumber integral on 100 m at 200 Hz,
@@ -199,14 +201,14 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | `single_beam` | `None` | Trace and sum one beam of the fan, by index (1 = lowest launch angle): `TopOpt(6:6) = 'I'` with the index after `NBeams` (`angleMod.f90:32-33`, `bellhop.f90:265`). Bellhop User Guide §6.2, "Plotting a single beam": "It is sometimes useful to be able to plot an individual beam in the sum." The beam keeps its width in the full fan, which `n_beams=1` does not give. Refused past a pinned `n_beams` (`angleMod.f90:80-83` stops on it). |
 | `launch_angles_deg` | `(-80, 80)` | Launch-angle fan, degrees. Narrow it to isolate paths. uacpy guidance (no value in the manual: the Bellhop User Guide leaves the fan to "what part of the field the user is interested in seeing"); a receiver whose direct path needs a steeper launch is warned about. |
 | `beam_type` | `'G'` | Cross-beam profile. `'G'` geometric hat and `'B'` geometric Gaussian, both Cartesian; `'g'` the ray-centred hat; `'S'` Bucker simple Gaussian; `'C'`/`'R'` Červený beams in Cartesian / ray-centred coordinates. `'G'` is BELLHOP's own default too (`ReadEnvironmentBell.f90:393-395`); pass `'B'` for finite caustics. The Bellhop User Guide finds `'B'` "In general ... more accurate TL plots" and keeps `'G'` the default "since people are usually most familiar with that approach"; uacpy keeps `'G'` for ducts and reciprocity (measured, `Bellhop.beam_type`). |
-| `ray_step` | `None` | Ray step (m), written to the deck as given. `None` → `env.depth / 50` (uacpy guidance: BELLHOP's own `depth/10` under-resolves a near-horizontal refracted ray); `0` asks BELLHOP for that `depth/10` (`bellhop.f90:170-174`). |
+| `ray_step` | `None` | Ray step (m), written to the deck as given. `None` → `env.depth / 50` (uacpy guidance: BELLHOP's own `depth/10` under-resolves a near-horizontal refracted ray), or `2 × r_box / MaxN` when that is coarser (the factor 2 is uacpy guidance): each build stores at most `MaxN` steps per ray — 100 000 on bellhopcuda / cxx (`bhc/structs.hpp:66`), 1 000 000 on the Fortran build (`bellhopMod.f90:4`) — and cuts a longer ray short, and the manual ties the step to the "range of receivers" (`doc/bellhop.htm`, STEP). Measured: 50 m of water to 150 km at 125 Hz, depth/50 (1 m) left bellhopcuda reading the 600 dB no-energy marker from 100 km on; the derived 3.6 m reads the Fortran build's 75.7 / 80.5 / 81.8 / 83.4 dB at 50 / 100 / 120 / 150 km. A pinned step whose rays run out of storage gets the engine's `BHC_WARN_ONERAY_OUTOFMEMORY` as an `IOWarning`, followed by the step that fits and `backend='fortran'`. `0` asks BELLHOP for its `depth/10` (`bellhop.f90:170-174`). |
 | `z_box`, `r_box` | `None` | Ray-trace bounding box (m); BELLHOP drops a ray once it leaves it (`bellhop.f90:571-572`). `None` → `1.2 × env.depth` and `1.2 ×` the farthest receiver range (10 km when that is 0), uacpy guidance, measured: paths that turn back from beyond the farthest receiver need room to turn (on the ASA ideal wedge at 25 Hz, receivers to 3 km, 0.57 dB median from the analytic field against 3.06 dB with the manual's "say 1%" margin). A pinned box that stops short of the seafloor or of the farthest receiver runs as given, with a `ValidityWarning` naming the paths it drops, on every mode but `RAYS`, where the box sets the extent of the trace. |
 
 **Numerics and environment**
 
 | Name | Default | Meaning |
 |---|---|---|
-| `grid_type` | `'R'` | Receiver grid: `'R'` rectilinear (every depth × every range; BELLHOP's default, `doc/bellhop.htm` OPTION(5:5)); `'I'` irregular — the i-th depth pairs with the i-th range (equal lengths). BELLHOP sorts both lists before pairing (`SourceReceiverPositions.f90:224`), so an `'I'` grid is always a monotone diagonal, shallow-near to deep-far; for arbitrary (depth, range) points run `'R'` and sample with `Field.at`. |
+| `grid_type` | `'R'` | Receiver grid: `'R'` rectilinear (every depth × every range; BELLHOP's default, `doc/bellhop.htm` OPTION(5:5)); `'I'` irregular — the i-th depth pairs with the i-th range (equal lengths). BELLHOP sorts both lists before pairing (`SourceReceiverPositions.f90:224` depths, `:268` ranges), so an `'I'` grid is always a monotone diagonal, shallow-near to deep-far; for arbitrary (depth, range) points run `'R'` and sample with `Field.at`. |
 | `interp_ssp` | `None` | SSP connection scheme: `'linear'` (AT `C`), `'pchip'`, `'spline'`, `'quad'` (2-D `.ssp`), `'n2linear'`. `None` auto-picks `'quad'` for a range-dependent `env.ssp`, `'linear'` otherwise; `'quad'` on a range-independent `env.ssp` runs as `'Q'`, its `.ssp` written from the one profile. `'analytic'` (AT's `'A'`, a hard-coded Munk curve that ignores `env.ssp`) raises `ConfigurationError`. |
 | `interp_bathymetry` | `'linear'` | `'linear'` or `'curvilinear'`. Linear as `doc/ATI_BTY_File.htm` advises: "Generally the piecewise linear option should be selected." |
 | `interp_altimetry` | `'linear'` | as above, for the sea surface. |
@@ -254,10 +256,13 @@ synthesis with it).
 
 **Broadband synthesis**
 
-| Name | Default | Meaning |
-|---|---|---|
-| `n_frequencies` | `None` | Frequency bins synthesised from one arrivals run; `None` is 128. uacpy guidance (no value in the manuals): the bins are `1/T` apart, `T` the alias-free time window (Jensen et al., *Computational Ocean Acoustics*, Sect. 8.2.1.2). |
-| `bandwidth_factor` | `None` | Band width as a fraction of centre frequency (`None` is 0.5): the band `fc·(1 ± bandwidth_factor/2)` is built as given, so the value must lie in (0, 2) — from 2 up its lower edge reaches 0 Hz and it is refused. uacpy guidance: the Bellhop User Guide §9 asks for sub-bands "so that the appropriate attenuation is used in each sub-band" and names no width. Both are read only by a `BROADBAND` run of a one-frequency `Source` without `frequencies=`; set on any other run, the run says it does not use them. |
+A BROADBAND run takes its band from `run(..., frequencies=)` or a
+multi-frequency `Source`, as on every engine; a one-frequency `Source` without
+`frequencies=` expands to 128 bins over `fc·(1 ± 0.25)`. Both values are uacpy
+guidance: the bins are `1/T` apart, `T` the alias-free time window (Jensen et
+al., *Computational Ocean Acoustics*, Sect. 8.2.1.2), and the Bellhop User
+Guide §9 asks for sub-bands "so that the appropriate attenuation is used in
+each sub-band" and names no width.
 
 The TIME_SERIES record is placed per call, as on every engine:
 `run(..., output_duration=, t_start=)`. Each receiver's trace is the source
@@ -265,7 +270,7 @@ waveform through that receiver's arrivals, every path's phase and its
 absorption across the band included: the pulse and its Hilbert transform
 through the arrivals' in-phase and quadrature taps at the waveform's sample
 rate, convolved and placed on the one window every receiver shares
-(`Arrivals.to_time_series`, `simulate_arrival_reception` per receiver).
+(`Arrivals.synthesize_time_series`, `simulate_arrival_reception` per receiver).
 Measured against the exact product `X·H` on a lossy shallow-water run (four
 receivers, 24 kHz): a 20 ms 3 kHz pulse within 1e-8 of its peak, 0.2 s of
 white noise up to the Nyquist frequency within 2.4e-3; a 4-cycle 100 Hz
@@ -283,11 +288,11 @@ margin (188 Hz at 48 kHz for a lone arrival).
 |---|---|---|
 | `backend` | `None` | `'fortran'`, `'cxx'`, `'cuda'`; `None` auto-picks in the order cuda → cxx → fortran, silently (uacpy guidance: fastest first, after the speed-ups `bellhopcuda/README.md` reports under "Speed"). The auto-pick's usual winner, `cuda`, is not run-to-run reproducible — §7. |
 | `dimensionality` | `'2D'` | Only `'2D'`; `'3D'` raises. It is passed to the cxx/cuda CLIs as `--2D` (accepted, not required: without a flag they assume 2D, `cmdline.cpp:186-191`); the Fortran binary takes none. |
-| `executable` | `None` | Path to the Bellhop binary; auto-detected. |
+| `executable` | `None` | Path to the Bellhop binary; auto-detected. The run record names the build (`run_settings.engine.backend`) and, for a binary whose name matches no build (`'custom'`), its file name in `engine.executable`; it never holds the path, so a saved result carries no machine path. |
 | `work_dir` | `None` | Pin the scratch dir to keep `.env`/`.shd`/`.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
 | `use_tmpfs` | `False` | Stage scratch files in RAM. |
-| `timeout` | `600.0` | Subprocess timeout (s). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
+| `timeout` | `600.0` | Subprocess timeout (s), positive and finite, or `None` for no limit (anything else is refused at construction). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`. |
 | `collapse` | `None` | Per-feature collapse overrides, forwarded to an auto-BOUNCE run. |
 
@@ -476,7 +481,7 @@ from the one trace at the band centre `fc`:
   width, and their bins equal a trace run at each frequency: 0.04–0.06 dB
   median |ΔTL| at every bin of a 50–1950 Hz band (`fc` = 1 kHz, ±95 %) on a
   30 m sand guide, 0.01 dB on a 5 km Munk profile at 25–475 Hz (±90 %). A
-  Gaussian beam (`'B'`) is floored at `π·c/fc` (`influence.f90:561-563`), so
+  Gaussian beam (`'B'`) is floored at `min(0.2·fc·τ, π·c/fc)` (`influence.f90:563`), so
   its bins are first-order away from `fc`: on the sand guide the mean energy
   is off by +0.74 / −0.40 dB at ±25 % and +1.41 / −0.88 dB at ±50 %, on the
   Munk profile ±0.13 dB at ±50 %; a `'B'` band reaching more than 50 % of `fc`

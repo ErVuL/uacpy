@@ -9,7 +9,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.environment import (
     BoundaryProperties, SedimentLayer, SeabedColumn,
 )
-from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_WATER_DENSITY
 from uacpy.core.materials import MATERIALS, list_materials, get_material
 
 
@@ -19,7 +19,7 @@ class TestMaterialsCatalog:
         sand = get_material('sand')
         assert sand['sound_speed'] == 1650.0
         # Table 1.3's ratio 1.9 against the package's one water density.
-        assert sand['density'] / DEFAULT_WATER_DENSITY_G_CM3 == pytest.approx(1.9)
+        assert sand['density'] / DEFAULT_WATER_DENSITY == pytest.approx(1.9)
         assert sand['attenuation'] == 0.8
         assert sand['shear_speed'] == 110.0
         assert sand['porosity'] == 45.0
@@ -61,7 +61,7 @@ class TestMaterialsCatalog:
         assert m['sound_speed'] == cp
         # Table 1.3 rows tabulate rho_b/rho_w; they are stored against the
         # package's one water density. Granite (Ainslie) is absolute.
-        want = rho if name == 'granite' else rho * DEFAULT_WATER_DENSITY_G_CM3
+        want = rho if name == 'granite' else rho * DEFAULT_WATER_DENSITY
         assert m['density'] == pytest.approx(want, rel=1e-12)
         assert m['attenuation'] == ap
         assert m['shear_speed'] == cs
@@ -91,9 +91,9 @@ class TestMaterialsCatalog:
         copy = get_material('sand')
         copy['density'] = 3.0
         assert MATERIALS['sand']['density'] == pytest.approx(
-            1.9 * DEFAULT_WATER_DENSITY_G_CM3)
+            1.9 * DEFAULT_WATER_DENSITY)
         assert BoundaryProperties.from_preset('sand').density == \
-            pytest.approx(1.9 * DEFAULT_WATER_DENSITY_G_CM3)
+            pytest.approx(1.9 * DEFAULT_WATER_DENSITY)
 
     def test_materials_table_is_the_catalogue_row_by_row(self):
         pytest.importorskip('pandas')
@@ -198,7 +198,7 @@ class TestBoundaryPropertiesFromPreset:
         bp = BoundaryProperties.from_preset('sand')
         assert bp.acoustic_type == 'half-space'
         assert bp.sound_speed == 1650.0
-        assert bp.density == pytest.approx(1.9 * DEFAULT_WATER_DENSITY_G_CM3)
+        assert bp.density == pytest.approx(1.9 * DEFAULT_WATER_DENSITY)
         assert bp.attenuation == 0.8
         assert bp.shear_speed == 0.0
         assert bp.shear_attenuation == 0.0
@@ -217,7 +217,7 @@ class TestBoundaryPropertiesFromPreset:
         bp = BoundaryProperties.from_preset('sand', sound_speed=1700.0, roughness=0.05)
         assert bp.sound_speed == 1700.0
         assert bp.roughness == 0.05
-        assert bp.density == pytest.approx(1.9 * DEFAULT_WATER_DENSITY_G_CM3)
+        assert bp.density == pytest.approx(1.9 * DEFAULT_WATER_DENSITY)
 
 
 class TestSedimentLayerFromPreset:
@@ -225,7 +225,7 @@ class TestSedimentLayerFromPreset:
         layer = SedimentLayer.from_preset('silt', thickness=15.0)
         assert layer.thickness == 15.0
         assert layer.sound_speed == 1575.0
-        assert layer.density == pytest.approx(1.7 * DEFAULT_WATER_DENSITY_G_CM3)
+        assert layer.density == pytest.approx(1.7 * DEFAULT_WATER_DENSITY)
 
     def test_thickness_kwarg_only(self):
         with pytest.raises(

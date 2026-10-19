@@ -38,8 +38,8 @@ class SparcSettings(EngineSettings):
     time_max : float
         The end (s) of the ``[0, time_max]`` output window.
     time_max_origin : str
-        Where ``time_max`` came from: the constructor, ``run(output_duration=)``,
-        or 2.5 direct travel times to the farthest receiver.
+        Where ``time_max`` came from: ``run(output_duration=)``, or 2.5
+        direct travel times to the farthest receiver.
     n_time_samples : int
         The output time samples over ``[0, time_max]``: the constructor's,
         or the least count with more than eight per period at ``freq_max``
@@ -61,8 +61,8 @@ class SparcSettings(EngineSettings):
     n_wavenumbers : int
         The wavenumbers ``sparc.f90:116`` marches.
     n_mesh : tuple of int
-        The mesh the deck asks for, one count per medium: the pinned count
-        on every medium, or each sized at 20 points per wavelength at
+        The mesh the deck asks for, one count per medium: the pinned
+        count(s), or each sized at 20 points per wavelength at
         ``freq_max``.
     output_mode : str
         ``'R'``, ``'D'`` or ``'S'``.

@@ -116,6 +116,25 @@ def test_bottom_uses_measured_density(graw_cache):
         ('graw', (30.5, -40.5))]
 
 
+def test_an_apl_uw_graw_bottom_takes_every_input_from_the_grain_size(
+        graw_cache):
+    """APL-UW TR 9407 §IV.A.5 (p. IV-12 to IV-13): a bulk density ratio gives
+    the mean grain size through the inverted Hamilton-Bachman regression, its
+    Eq. (12), and the APL-UW inputs then all follow from that grain size —
+    the density too, APL-UW's surficial 1.44 g/cm³ at 2.70 ϕ, not the
+    drill-core 1.962 the grain size came from."""
+    from uacpy.core.sediment import grain_size_to_geoacoustics
+    bp = graw_local.fetch_bottom_graw((30.5, -40.5), model='apl-uw')
+    ratio = 1.962 / 1.027
+    eq12 = 10.937 - np.sqrt(128.25 * ratio - 177.12)
+    assert bp.grain_size_phi == pytest.approx(eq12, abs=2e-3)
+    apl = grain_size_to_geoacoustics(bp.grain_size_phi, model='apl-uw')
+    assert bp.density == pytest.approx(apl['density'], rel=1e-12)
+    assert bp.density == pytest.approx(1.439, abs=1e-3)
+    assert bp.sound_speed == pytest.approx(apl['sound_speed'], rel=1e-12)
+    assert bp.attenuation == pytest.approx(apl['attenuation'], rel=1e-12)
+
+
 def test_bottom_scales_to_water_sound_speed(graw_cache):
     ref = graw_local.fetch_bottom_graw((30.5, -40.5))
     warm = graw_local.fetch_bottom_graw((30.5, -40.5), water_sound_speed=1540.0)

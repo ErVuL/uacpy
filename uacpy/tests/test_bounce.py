@@ -18,7 +18,7 @@ from uacpy.core import (
 )
 from uacpy.core.boundary import SedimentLayer
 from uacpy.core.bottom import Bottom, SeabedColumn
-from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_WATER_DENSITY
 from uacpy.models._window import DEFAULT_C_MAX_UNBOUNDED
 from uacpy.models._defaults import DEFAULT_C_MIN
 from uacpy.core.environment import SoundSpeedProfile
@@ -473,7 +473,7 @@ class TestLosslessSandRayleighAnalytics:
     def test_normal_incidence_is_the_impedance_ratio(self, rc):
         # BOUNCE references R to a unit density and gets the seabed as a
         # ratio, so the water's real density enters the contrast.
-        z1 = DEFAULT_WATER_DENSITY_G_CM3 * 1500.0
+        z1 = DEFAULT_WATER_DENSITY * 1500.0
         z2 = 1.9 * 1650.0
         expected = (z2 - z1) / (z2 + z1)      # 0.3410
         i = int(np.argmax(rc.angles_deg))
@@ -1195,6 +1195,24 @@ class TestBounceMeshFollowsItsOwnManual:
         assert [n.message for n in notices] == [
             "Bounce: n_mesh=300 is not used: the seabed is a bare "
             "half-space, and BOUNCE meshes the sediment layers only."]
+
+    def test_a_pinned_interp_ssp_over_a_bare_half_space_is_noticed(self):
+        """The BOUNCE deck omits the water column, so over a bare half-space
+        it carries no medium whose speeds ``interp_ssp`` interpolates; over a
+        sediment layer the letter is read, and nothing is said."""
+        import uacpy
+        src = uacpy.Source(depths=50.0, frequencies=200.0)
+        notices = Bounce(verbose=False, rmax=5000.0,
+                         interp_ssp='linear').run_settings(
+            _halfspace_env(), src, None).engine.notices
+        assert [n.message for n in notices] == [
+            "Bounce: interp_ssp='linear' is not used: the seabed is a bare "
+            "half-space, so the BOUNCE deck carries no sediment medium whose "
+            "speeds it interpolates (the deck omits the water column)."]
+        layered = Bounce(verbose=False, rmax=5000.0,
+                         interp_ssp='linear').run_settings(
+            self._layered(), src, None).engine.notices
+        assert not [n for n in layered if 'interp_ssp' in n.message]
 
     @pytest.mark.requires_binary
     def test_a_mesh_past_twenty_thousand_points_runs(self, tmp_path):

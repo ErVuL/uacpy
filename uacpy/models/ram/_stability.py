@@ -140,7 +140,7 @@ def rams_stability_params(env: Environment, freq: float,
     """
     if not knobs.rams_rotation:
         return None
-    theta_deg = (float(theta) if theta is not None
+    rams_rotation_angle_deg = (float(theta) if theta is not None
                  else theta_for_freq(freq, knobs=knobs))
     c0 = resolve_c0(env, knobs=knobs)
     _, water_c = water_speed_bounds(env)
@@ -154,13 +154,13 @@ def rams_stability_params(env: Environment, freq: float,
             frequency=float(freq), c0=float(c0),
             water_sound_speed=float(water_c),
             water_density=float(env.water_density),
-            seabed_speed=float(top.sound_speed),
+            seabed_sound_speed=float(top.sound_speed),
             seabed_density=float(top.density if top.density is not None
                                  else 1.0),
             seabed_attenuation=float(
                 top.attenuation if top.attenuation is not None else 0.0),
             depth=depth, n_pade=int(knobs.n_pade),
-            theta_deg=theta_deg,
+            rams_rotation_angle_deg=rams_rotation_angle_deg,
         ))
     return params or None
 
@@ -186,7 +186,7 @@ def rams_stability(env: Environment, freq: float,
     theta_stable = (None if any(th is None for th in thetas)
                     else min(thetas))
     return {'margin': worst, 'dr': dr_stable, 'theta': theta_stable,
-            'theta_requested': params[0]['theta_deg']}
+            'theta_requested': params[0]['rams_rotation_angle_deg']}
 
 
 def rams_rotation_remedy(stab: dict, *, knobs) -> str:

@@ -224,8 +224,8 @@ def default_band_knobs(fc: float) -> Tuple[float, float]:
     """``(Q, T)`` of the default band every engine expands a lone ``fc``
     to — ``DEFAULT_BROADBAND_N_FREQUENCIES`` bins over
     ``fc·(1 ± DEFAULT_BROADBAND_BANDWIDTH_FACTOR/2)``: the half-width
-    ``fc/Q`` is ``fc·bandwidth_factor/2`` and the spacing ``1/T`` that of
-    the default grid, ``fc·bandwidth_factor/(n_frequencies - 1)``."""
+    ``fc/Q`` is ``fc·b/2`` and the spacing ``1/T`` that of the default
+    grid, ``fc·b/(N - 1)`` (``b`` the bandwidth factor, ``N`` the bins)."""
     Q = 2.0 / DEFAULT_BROADBAND_BANDWIDTH_FACTOR
     T = ((DEFAULT_BROADBAND_N_FREQUENCIES - 1)
          / (float(fc) * DEFAULT_BROADBAND_BANDWIDTH_FACTOR))
@@ -296,7 +296,8 @@ def requested_broadband_bins(source: Source, *, knobs):
 
 #: Depth points past which a band grid whose absorbing layer holds most of
 #: them is worth a warning rather than a log line: a wide band meshes metres
-#: of sponge at the finest ``dz`` (:func:`report_band_grid_cost`).
+#: of sponge at the finest ``dz`` (:func:`report_band_grid_cost`). uacpy
+#: guidance.
 ABSORBER_COST_NOTICE_POINTS = 10000
 
 

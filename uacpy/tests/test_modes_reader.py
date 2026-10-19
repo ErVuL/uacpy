@@ -515,6 +515,25 @@ class TestAModeFileReadsAsTheModesCarrier:
         np.testing.assert_array_equal(again.k, run.k)
         np.testing.assert_array_equal(again.phi, run.phi)
 
+    def test_whole_mode_numbers_given_as_floats_select_those_modes(
+            self, tmp_path):
+        _run_kraken(tmp_path, 'nb', _isovelocity_deck('NB'))
+        mod = str(tmp_path / 'nb.mod')
+        by_int = read_modes(mod, modes=[1, 2])
+        for modes in ([1.0, 2.0], np.arange(1.0, 3.0)):
+            by_float = read_modes(mod, modes=modes)
+            np.testing.assert_array_equal(by_float.k, by_int.k)
+            np.testing.assert_array_equal(by_float.phi, by_int.phi)
+
+    @pytest.mark.parametrize('modes', [[1.5], [True], ['1'], [np.nan]])
+    def test_a_selection_that_names_no_mode_is_refused_by_name(
+            self, tmp_path, modes):
+        """A good file must not be called malformed: the selection is
+        refused as the argument it is, naming ``modes=``."""
+        _run_kraken(tmp_path, 'nb', _isovelocity_deck('NB'))
+        with pytest.raises(ConfigurationError, match='modes='):
+            read_modes(str(tmp_path / 'nb.mod'), modes=modes)
+
 
 class TestTheSeabedAttenuationLeavesTheVolumeLawOut:
     """``_seabed_attenuation`` inverts CRCI's ``cp = c + i·alphaT·c²/ω``

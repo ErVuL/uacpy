@@ -178,6 +178,52 @@ class TestOASNWavenumberSampling:
         assert lines[-1].split() == ['256', '1', '256']
 
 
+class TestTheIntegrationWindowReachesTheDeck:
+    """``integration_window=(IC1, IC2)`` is the wavenumber line's pair on
+    every OASES writer that integrates (oast.tex:528-538, oasp.tex:652-660,
+    oasn.tex:103-105); ``None`` keeps the whole window, and a pair outside
+    the manuals' bounds is refused rather than clamped by the binary."""
+
+    @staticmethod
+    def _carriers():
+        return (uacpy.Environment(bathymetry=100.0, ssp=1500.0),
+                uacpy.Source(depths=50.0, frequencies=100.0),
+                uacpy.Receiver(depths=[30.0, 50.0, 70.0],
+                               ranges=[500.0, 1000.0]))
+
+    def _lines(self, tmp_path, writer, **kw):
+        import warnings
+        from uacpy.io import oases_writer
+        path = tmp_path / f'{writer}.dat'
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            getattr(oases_writer, writer)(path, *self._carriers(), **kw)
+        return [ln.split() for ln in path.read_text().splitlines()]
+
+    @pytest.mark.parametrize('writer, extra', [
+        ('write_oast_input', {}), ('write_oasp_input', {}),
+        ('write_oasn_input', dict(options='N R J', noise=OasnNoise(
+            discrete_sources=[dict(depth=40.0, x=1000.0, level_dB=60.0)]))),
+    ])
+    def test_the_pair_is_written_and_none_is_the_whole_window(
+            self, tmp_path, writer, extra):
+        windowed = self._lines(tmp_path, writer, n_wavenumbers=1024,
+                               integration_window=(10, 900), **extra)
+        whole = self._lines(tmp_path, writer, n_wavenumbers=1024, **extra)
+        lines = [ln[:3] for ln in windowed if ln[:1] == ['1024']]
+        assert lines and all(ln == ['1024', '10', '900'] for ln in lines)
+        assert [ln[:3] for ln in whole if ln[:1] == ['1024']] == (
+            [['1024', '1', '1024']] * len(lines))
+
+    @pytest.mark.parametrize('window', [(0, 5), (6, 5), (1.0, 5), (1, 2048),
+                                        (3,)])
+    def test_a_pair_outside_the_bounds_is_refused(self, tmp_path, window):
+        with pytest.raises(ConfigurationError,
+                           match=r'write_oast_input\(integration_window='):
+            self._lines(tmp_path, 'write_oast_input', n_wavenumbers=1024,
+                        integration_window=window)
+
+
 class TestOASESWriterKnobsReachTheDeck:
     """Every OASES writer takes ``**kwargs``, so a knob no block reads would be
     dropped without a trace and the run would quietly use the default."""
@@ -249,8 +295,8 @@ class TestOASNNoiseWavenumberCounts:
         return path.read_text().splitlines()[-1]
 
     @pytest.mark.parametrize('block', [
-        {'noise': OasnNoise(surface_level=70.0)},
-        {'noise': OasnNoise(deep_level=70.0)},
+        {'noise': OasnNoise(surface_noise_level_dB=70.0)},
+        {'noise': OasnNoise(deep_noise_level_dB=70.0)},
     ])
     @pytest.mark.parametrize('nw', [-1, 0, None])
     def test_automatic_falls_back_to_positive_counts(self, tmp_path, block, nw):
@@ -260,8 +306,8 @@ class TestOASNNoiseWavenumberCounts:
         assert sum(counts) > 0, "a non-positive total integrates nothing"
 
     @pytest.mark.parametrize('block', [
-        {'noise': OasnNoise(surface_level=70.0)},
-        {'noise': OasnNoise(deep_level=70.0)},
+        {'noise': OasnNoise(surface_noise_level_dB=70.0)},
+        {'noise': OasnNoise(deep_noise_level_dB=70.0)},
     ])
     def test_pinned_count_reaches_the_block(self, tmp_path, block):
         line = self._last_line(tmp_path, n_wavenumbers=800, **block)
@@ -271,14 +317,14 @@ class TestOASNNoiseWavenumberCounts:
     def test_an_unpinned_surface_block_takes_the_measured_counts(
             self, tmp_path, nw):
         line = self._last_line(tmp_path, n_wavenumbers=nw,
-                               noise=OasnNoise(surface_level=70.0))
+                               noise=OasnNoise(surface_noise_level_dB=70.0))
         assert line.split() == ['1600', '63836', '100']
 
     @pytest.mark.parametrize('nw', [-1, 0, None])
     def test_an_unpinned_deep_block_takes_the_manuals_counts(
             self, tmp_path, nw):
         line = self._last_line(tmp_path, n_wavenumbers=nw,
-                               noise=OasnNoise(deep_level=70.0))
+                               noise=OasnNoise(deep_noise_level_dB=70.0))
         assert line.split() == ['400', '400', '100']
 
     def test_each_block_takes_its_own_counts_when_both_are_written(
@@ -292,8 +338,8 @@ class TestOASNNoiseWavenumberCounts:
             write_oasn_input(path, env, uacpy.Source(frequencies=100, depths=50),
                              uacpy.Receiver(depths=np.array([30.0, 70.0]),
                                             ranges=np.array([0.0])),
-                             options='N J', noise=OasnNoise(surface_level=70.0,
-                                                            deep_level=70.0))
+                             options='N J', noise=OasnNoise(surface_noise_level_dB=70.0,
+                                                            deep_noise_level_dB=70.0))
         lines = path.read_text().splitlines()
         counts = [line for line in lines
                   if line in ('1600 63836 100', '400 400 100')]
@@ -651,7 +697,7 @@ class TestOasnReplicaGridDeckDefaults:
 
     def test_deep_sheet_defaults_to_half_the_water_depth(self, tmp_path):
         lines = self._deck(tmp_path, 'N J',
-                           noise=OasnNoise(deep_level=60.0))
+                           noise=OasnNoise(deep_noise_level_dB=60.0))
         # DPSD (oasnun22.f:325) is a bare one-value record; 100 m water
         # puts the default sheet at 50 m.
         assert '50.00' in lines

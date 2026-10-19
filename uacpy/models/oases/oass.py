@@ -8,10 +8,8 @@ from typing import Dict, Optional, Union
 
 import numpy as np
 
-from uacpy.models.base import (
-    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
-)
-from uacpy.models._knobs import is_real_number, whole_count
+from uacpy.models.base import DEFAULT_RUN_TIMEOUT, _host_options
+from uacpy.models._knobs import whole_count
 from uacpy.models._spec import ModelSpec
 from uacpy.models._window import (
     check_pinned_window, refuse_inverted_window,
@@ -28,27 +26,24 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.oases_writer import (
     write_oass_input, oass_bottom_interfaces, oases_wavenumber_bounds,
-    refuse_non_equispaced_oass_ranges, _OASES_MAX_WAVENUMBERS,
-    _check_oass_range_count, _OASS_REVERB_OPTIONS,
+    refuse_non_equispaced_oass_ranges, refuse_unintegrable_spectral_exponent,
+    refuse_unusable_correlation_length, _OASES_MAX_WAVENUMBERS, _check_oass_range_count, _OASS_REVERB_OPTIONS,
 )
 from uacpy.io._parsers import parse_oast_tl
-from uacpy.io.oases_reader import (
-    read_oasn_covariance, read_oases_rhs_header,
-)
+from uacpy.io.oases_reader import read_oasn_covariance
 from uacpy.models.oases._common import (
     C_LOW_MATCH_RTOL,
     _OASES_TRAITS, _OASS_MIN_MEAN_FIELD_ROUGHNESS, _OASS_SPECTRA,
     _OASS_SURFACE_INTERFACE, _geometry_options, _oases_binary,
     _reject_plane_geometry_letter_on_a_point_source,
-    _refuse_volume_scattering,
-    _reject_unintegrable_spectral_exponent, _require_mean_field_rhs,
+    _require_mean_field_rhs,
     _roughness_notice, SCATTERING_UNPINNED_FIELDS, resolve_spectral_exponent,
 )
 from uacpy.core.engine_defaults import OASES_PRESSURE_LETTER
 from uacpy.models.oases._base import OASES
 from uacpy.models.oases.oast import OAST, _oast_options
 from uacpy.models.oases.oasr import OASR
-from uacpy.models.oases._mean_field import _MeanFieldRun, _mean_field_inputs
+from uacpy.models.oases._mean_field import _ScatteringPostProcessor
 from uacpy.models._notices import message_notice
 from uacpy.models._extract import (
     attach_output_paths, mask_source_axis, result_kwargs,
@@ -93,16 +88,6 @@ def _oass_wavenumber_echo(process) -> Optional[int]:
     return None
 
 
-@dataclass
-class _ScatteringChain:
-    """What the launches of one OASS call share, built once by
-    :meth:`OASS._prepare_launches`: the mean-field producer, and the oass2
-    process its launch leaves — its stdout is the only record of the
-    wavenumber count the binary used (:func:`_oass_wavenumber_echo`)."""
-    producer: PropagationModel
-    process: object = None
-
-
 #: File root of the deck and outputs of the scattering half of an OASS run.
 _OASS_BASE_NAME = 'oass_run'
 
@@ -139,8 +124,11 @@ class OASSSettings(EngineSettings):
     c_low_origin : str
         Where ``c_low`` came from: the constructor, or the mean field's own
         bound.
-    c_high : float or None
-        Block VII's ``CMAX`` (m/s); ``None`` takes the writer's.
+    c_high : float
+        Block VII's ``CMAX`` (m/s).
+    c_high_origin : str
+        Where ``c_high`` came from: the constructor, or OASES' "no upper
+        limit" 1e8 (:func:`~uacpy.io.oases_writer.oases_wavenumber_bounds`).
     receiver_gains_dB : ndarray or None
         Block VI column 5, per element (dB).
     mean_field : RunSettings
@@ -159,7 +147,8 @@ class OASSSettings(EngineSettings):
     frequency: float
     c_low: float
     c_low_origin: str
-    c_high: Optional[float]
+    c_high: float
+    c_high_origin: str
     receiver_gains_dB: Optional[np.ndarray]
     mean_field: RunSettings
 
@@ -189,18 +178,11 @@ def _check_oass_knobs(*, correlation_length, spectral_exponent,
             remediation=("Pass the interface correlation length in "
                          "metres, e.g. OASS(correlation_length=10.0)."),
         )
-    # A negative length is OASES' volume-scattering switch, refused as on
-    # OASSP; zero is a degenerate roughness spectrum the deck writer refuses.
-    _refuse_volume_scattering('OASS', correlation_length)
-    if not (is_real_number(correlation_length)
-            and np.isfinite(correlation_length) and correlation_length > 0):
-        raise ConfigurationError(
-            f"OASS(correlation_length={correlation_length!r}) must be a "
-            f"positive length in metres: zero is a degenerate roughness "
-            f"spectrum.",
-            remediation="Pass correlation_length > 0 (metres).")
+    # A negative length is OASES' volume-scattering switch; zero and a
+    # non-finite value are no length. The deck writer refuses the same.
+    refuse_unusable_correlation_length('OASS', correlation_length)
     if spectral_exponent is not None:
-        _reject_unintegrable_spectral_exponent('OASS', spectral_exponent)
+        refuse_unintegrable_spectral_exponent('OASS', spectral_exponent)
     if str(roughness_spectrum).lower() not in _OASS_SPECTRA:
         raise ConfigurationError(
             f"OASS(roughness_spectrum={roughness_spectrum!r}) is not "
@@ -307,9 +289,8 @@ def _reject_unreadable_oass_options(options: str,
             'OASS',
             f"option(s) {kernels} (scattering kernels for one incident "
             f"plane wave) — their curves carry the INTGR / SPECT plot "
-            f"tags, and read_oast_tl selects on the TLRAN tag "
-            f"(io/oases_reader.py, _OAST_TL_RANGE_TAG), so nothing would "
-            f"be found in the .plt",
+            f"tags, and read_oast_tl reads only the TL-vs-range curves "
+            f"(tag TLRAN), so nothing would be found in the .plt",
         )
     if 'Z' in chars:
         raise UnsupportedFeatureError(
@@ -418,33 +399,31 @@ def _oass_interface(env: Environment, interface) -> int:
 def _reject_unusable_mean_field_options(mean_field) -> None:
     """Refuse a producer whose option line cannot feed OASS, before it
     is run: without ``'s'`` it writes no ``.rhs``, and without ``'T'``
-    its own wrapper fails on the table ``'T'`` writes."""
+    its own wrapper has no TL table to read (OAST refuses such a line at
+    construction; this catches one assigned afterwards)."""
     mean = mean_field if mean_field is not None else OAST(
         options=_OASS_MEAN_FIELD_OPTIONS)
     # The option line the producer (an OAST: the constructor refuses
     # every other) will write, derived from its typed flags or its raw
     # string by _oast_options.
     mean_options = _oast_options(mean.options, mean.complex_contour,
-                                 mean.compute_contour,
                                  mean.compute_depth_average)
     chars = set(mean_options) - set(' \t\n')
     # SCTOUT gates the whole boundary-operator dump.
     _require_mean_field_rhs(
         'OASS', mean, mean_options, 'oaseun31.f:1899-1900',
         f"OAST(options={_OASS_MEAN_FIELD_OPTIONS!r})")
-    # The producer runs through its own stage hooks, which require its
-    # own primary table: OAST's .plt (FOR020) is written under 'T'.
-    # Without it the producer leaves the .rhs OASS actually needs and
-    # then fails on a table nothing here reads, so name the real
-    # requirement instead.
+    # The producer runs through its own stage hooks, which read its own
+    # primary table: OAST's .plt (FOR020), written under 'T'. Its own
+    # knob check refuses a line without 'T' only when the producer
+    # runs, so OASS names its requirement before anything runs.
     if 'T' not in chars:
         raise ConfigurationError(
             f"OASS(mean_field={type(mean).__name__}(options="
             f"{mean_options!r})): the producer's option line must also "
             f"contain 'T'. OASS consumes only the .rhs, but the mean field "
-            f"is run through its own wrapper, which requires the table 'T' "
-            f"writes (OAST's FOR020 .plt) and fails "
-            f"without it — after the binary has already run.",
+            f"is run through its own wrapper, which reads the table 'T' "
+            f"writes (OAST's FOR020 .plt) and refuses a line without it.",
             remediation=(f"e.g. OASS(mean_field=OAST(options="
                          f"{_OASS_MEAN_FIELD_OPTIONS!r}))."),
         )
@@ -500,7 +479,11 @@ def _oass_settings(name: str, mean_settings, projection_notices, *,
         notice = _c_low_mismatch_notice(c_low_pinned, mean_c_low)
         if notice is not None:
             notices.append(message_notice(notice, ValidityWarning))
-    cmax = oases_wavenumber_bounds(env)[1] if c_high is None else c_high
+    if c_high is None:
+        cmax = oases_wavenumber_bounds(env)[1]
+        c_high_origin = "1e8, OASES' no upper limit (oast.tex:487, :568)"
+    else:
+        cmax, c_high_origin = c_high, f'{name}(c_high=…)'
     refuse_inverted_window(name, float(c_low), float(cmax),
                            c_low=c_low_pinned, c_high=c_high)
     options = _geometry_options(options, source)
@@ -522,14 +505,15 @@ def _oass_settings(name: str, mean_settings, projection_notices, *,
         frequency=frequency,
         c_low=float(c_low),
         c_low_origin=origin,
-        c_high=c_high,
+        c_high=float(cmax),
+        c_high_origin=c_high_origin,
         receiver_gains_dB=receiver_gains_dB,
         mean_field=mean_settings,
         notices=tuple(n for n in notices if n is not None),
     )
 
 
-class OASS(OASES):
+class OASS(_ScatteringPostProcessor):
     """
     OASS — OASES Scattering and Reverberation Module.
 
@@ -545,14 +529,18 @@ class OASS(OASES):
 
     **Covariance unit.** The ``COVARIANCE`` matrix is ``E[p_i p_j*]`` of the
     scattered pressure for a source of unit level — Pa² for a 1 Pa source
-    (a hydrophone records ``σ_zz = -p`` "in Pa for source level 1 Pa",
-    ``oass.tex:216-218``; the sign cancels in every product) — times each
+    (a hydrophone records the normal stress ``σ_zz``, "negative of
+    pressure in water", "in Pa for source level 1 Pa", ``oass.tex:216-218``;
+    the sign cancels in every product) — times each
     receiver's gain (Block VI, dB). It is the variance of a deterministic
     source's scattered field, not a power spectral density: OASN's noise
     covariance is a power spectral density in Pa²/Hz. It is
     computed at zero range offset (``oass.tex:255-258``) for the array the
     deck carries on the z axis (``X = Y = 0``), i.e. a vertical array at the
-    source's range: ``receiver.ranges`` place no receiver. They size the
+    source's range: ``receiver.ranges`` place no receiver. For a receiver
+    inside an elastic layer ``σ_zz`` is built from both the compressional
+    and the shear potentials (``oasaun31.f:1489-1491``) and is not ``-p``:
+    there the covariance is that of the normal stress. They size the
     mean field's run, whose wavenumber sampling the integral reuses (2 %
     between a 0.2-2 km and a 0.5-0.9 km axis, 100 m Pekeris, 100 Hz).
 
@@ -573,7 +561,11 @@ class OASS(OASES):
         ``CL`` (m), the roughness correlation length of the scattering
         interface. **Required**: ``oass.tex:182-183`` — the rms roughness,
         correlation length and spectral exponent "must be specified. These
-        are not adopted from OASR or OAST."
+        are not adopted from OASR or OAST." A positive finite length:
+        zero, NaN and infinity are refused (``ConfigurationError``), a
+        negative one is OASES' volume-scattering switch
+        (``UnsupportedFeatureError``; :func:`~uacpy.io.oases_writer.
+        refuse_unusable_correlation_length`).
     spectral_exponent : float
         ``M``, the roughness power-spectrum exponent. Must exceed 1.5 or the
         spectrum is not integrable. ``None`` (default) is 2.5, OASES' own
@@ -721,7 +713,7 @@ class OASS(OASES):
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         super().__init__(**_host_options(locals()))
@@ -756,19 +748,21 @@ class OASS(OASES):
         # option line outright, so the two ways of specifying it are
         # exclusive.
         self.options = options
-        # OASS takes no integration_offset or n_wavenumbers (OAST/OASN/OASP
-        # do): Block III's COFF is read only when ICNTIN > 0, which OASS's
-        # GETOPT never sets (unoass21.f:596, :557-698), and under every
-        # option OASS supports the binary recomputes NWVNO from the .rhs
-        # file's own wavenumber step (unoass21.f:209-215; a deck asking for
-        # 2048 ran 2778). Both are set on the mean-field model instead.
+        # OASS takes no integration_offset, n_wavenumbers or
+        # integration_window (OAST/OASN/OASP do): Block III's COFF is read
+        # only when ICNTIN > 0, which OASS's GETOPT never sets
+        # (unoass21.f:596, :557-698), and under every option OASS supports
+        # the binary recomputes NWVNO from the .rhs file's own wavenumber
+        # step (unoass21.f:209-215; a deck asking for 2048 ran 2778); "NW,
+        # IC1, IC2 are only used for kernel computations" (oass.tex:238-243).
+        # They are set on the mean-field model instead.
         self._check_knobs()
         self.roughness_spectrum = str(roughness_spectrum).lower()
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        # install.sh:1157 copies the raw executable; bin/oases carries
-        # symlinks for oasn/oasp/oasr/oast but none for oass.
+        # install.sh's ``POSSIBLE_OASES_BINS`` loop copies the raw executable;
+        # its compatibility symlinks cover oasn/oasp/oasr/oast but none for oass.
         self._exe = self._resolve_executable(
             executable, lambda: self._find_binary('oass'),
         )
@@ -848,43 +842,25 @@ class OASS(OASES):
             rms_roughness=self.rms_roughness,
             receiver_gains_dB=self.receiver_gains_dB, env=env, source=source)
 
-    def _announce_engine_settings(self, env, source, receiver,
-                                  settings) -> None:
-        """Stage 3 (run and run_settings): the mean field's notices, then
-        OASS's own (a ``c_low`` off the mean field's, the small-roughness
-        bound of the scattering interface at the run's frequency)."""
-        self._build_mean_field()._announce_engine_settings(
-            env, source.at_depth(0), receiver, settings.engine.mean_field)
-        super()._announce_engine_settings(env, source, receiver, settings)
+    #: Why a missing .rhs means what it means, for the refusal.
+    _RHS_HINT = ("The producer ran but left no boundary operators; check "
+                 "that the scattering interface is rough.")
 
-    # ── stage 4: the mean field, then oass2 ────────────────────────────
+    def _producer_for(self, settings) -> 'OAST':
+        """The mean-field producer (:meth:`_build_mean_field`)."""
+        return self._build_mean_field()
 
-    def _n_launches(self, settings) -> int:
-        """Two: the mean-field producer, then oass2 on its ``.rhs``."""
-        return 2
+    def _mean_field_source(self, source):
+        """The Source the producer runs on: the call's at its first
+        depth."""
+        return source.at_depth(0)
 
-    def _prepare_launches(self, env, settings):
-        """The mean-field producer both launches' hooks call, and the slot
-        the oass2 launch leaves its process in (its stdout carries the
-        wavenumber count, :func:`_oass_wavenumber_echo`)."""
-        return _ScatteringChain(producer=self._build_mean_field())
+    # ── stage 4: oass2 on the mean field's .rhs ────────────────────────
 
-    def _mean_field_stage_inputs(self, inputs):
-        """The producer's stage inputs for this launch's source depth."""
-        return _mean_field_inputs(inputs, inputs.settings.engine.mean_field,
-                                  inputs.source.at_depth(0))
-
-    def _write_input(self, inputs) -> Path:
-        """Stage 4. Launch 0: the mean field's deck, written by the
-        producer's own :meth:`OAST._write_input`. Launch 1: the OASS deck,
-        written by :func:`~uacpy.io.oases_writer.write_oass_input` from the
+    def _write_scattering_deck(self, inputs) -> Path:
+        """Stage 4, launch 1: the OASS deck, written by
+        :func:`~uacpy.io.oases_writer.write_oass_input` from the
         settings."""
-        if inputs.launch == 0:
-            producer = inputs.prepared.producer
-            self._log(f"Running {producer.model_name} for the mean field "
-                      f"(option 's')")
-            return producer._write_producer_deck(
-                self._mean_field_stage_inputs(inputs))
         engine = inputs.settings.engine
         deck = inputs.work_dir / f'{_OASS_BASE_NAME}.dat'
         self._log(f"Writing OASS input file: {deck} "
@@ -905,16 +881,11 @@ class OASS(OASES):
         )
         return deck
 
-    def _launch(self, inputs, deck: Path) -> None:
-        """Stage 4. Launch 0: the producer's own :meth:`OAST._launch`.
-        Launch 1: ``oass2`` on the deck, its FOR045 pointed at the mean
-        field's ``.rhs`` (named after that run's stem, see
+    def _launch_scattering(self, inputs, deck: Path) -> None:
+        """Stage 4, launch 1: ``oass2`` on the deck, its FOR045 pointed at
+        the mean field's ``.rhs`` (named after that run's stem, see
         :meth:`OASES._execute`), and a run past OASES' wavenumber bound
         refused."""
-        if inputs.launch == 0:
-            inputs.prepared.producer._launch_producer(
-                self._mean_field_stage_inputs(inputs), deck)
-            return
         proc = self._execute(deck.stem, inputs.work_dir, extra_env={
             'FOR045': f'{inputs.earlier[0].stem}.045'})
         inputs.prepared.process = proc
@@ -936,15 +907,10 @@ class OASS(OASES):
                             "shorten receiver.ranges.",
             )
 
-    def _read_output(self, inputs, deck: Path):
-        """Stage 4. Launch 0: the mean field's own result (the producer's
-        stages 4-6, :meth:`~PropagationModel._run_producer_launch`) and the
-        header of the ``.rhs`` it wrote, checked against this run's
-        frequency. Launch 1: the product the run mode asks for, as the io reader
-        returns it — the reverberation table (FOR020 ``.plt``) or the
-        covariance (``.xsm``)."""
-        if inputs.launch == 0:
-            return self._read_mean_field(inputs, deck)
+    def _read_scattering_output(self, inputs, deck: Path):
+        """Stage 4, launch 1: the product the run mode asks for, as the io
+        reader returns it — the reverberation table (FOR020 ``.plt``) or the
+        covariance (``.xsm``) — with the wavenumber count oass2 echoed."""
         proc = inputs.prepared.process
         if inputs.settings.mode == RunMode.COVARIANCE:
             cov_path = require_output(
@@ -964,9 +930,9 @@ class OASS(OASES):
                                    receiver_depths=inputs.receiver.depths)
         return _oass_wavenumber_echo(proc), product
 
-    def _read_mean_field(self, inputs, deck: Path) -> _MeanFieldRun:
-        """The mean-field launch's output: the producer's own result and
-        the ``.rhs`` header, read off the bytes the consumer will see.
+    def _check_mean_field_header(self, inputs, header) -> None:
+        """Refuse a ``.rhs`` written at another frequency than this run's,
+        read off the bytes the consumer will see.
 
         A mismatch is not an abort in the binary: unoass21.f:128-135 prints
         '>>> WARNING: Frequency sampling mismatch' to stdout and then
@@ -981,15 +947,6 @@ class OASS(OASES):
         ``1/(nfreq*dlfreq)`` into DT (unoast31.f:164-165) — the same four
         fields OASS reads back as nx_in_file/fr1_in_file (unoass21.f:126).
         """
-        result = inputs.prepared.producer._run_producer_launch(
-            self._mean_field_stage_inputs(inputs), deck)
-        rhs = require_output(
-            self.model_name, [inputs.work_dir / f'{deck.stem}.045'],
-            what="a mean-field .rhs (option 's')",
-            hint=("The producer ran but left no boundary operators; check "
-                  "that the scattering interface is rough."),
-        )
-        header = read_oases_rhs_header(rhs)
         frequency = inputs.settings.engine.frequency
         nfreq = header.n_time_samples
         rhs_frequency = header.freq_min
@@ -1003,8 +960,6 @@ class OASS(OASES):
                 remediation=("Give the mean-field model the same single-"
                              "frequency Source this run uses."),
             )
-        return _MeanFieldRun(result=result, rhs_header=header,
-                             stem=deck.stem)
 
     def _to_result(self, inputs, deck, raw) -> Result:
         """Stage 5: the reverberation :class:`Field` or the

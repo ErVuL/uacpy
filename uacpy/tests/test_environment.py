@@ -31,7 +31,7 @@ from uacpy.core.bottom import Bottom
 from uacpy.core.bottom import SeabedColumn
 from uacpy.io.at_codes import AttenuationUnits
 from uacpy.core.boundary import BoundaryType
-from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_WATER_DENSITY
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
@@ -164,7 +164,7 @@ class TestEnvironmentWaterDensity:
     Kraken's single-profile reduction; the wrong unit refused."""
 
     def test_default_is_sea_water_not_one(self):
-        assert DEFAULT_WATER_DENSITY_G_CM3 == 1.027
+        assert DEFAULT_WATER_DENSITY == 1.027
         assert water_density_env().water_density == 1.027
 
     def test_an_explicit_value_is_kept(self):
@@ -1304,6 +1304,23 @@ class TestTheEnvironmentKeepsItsOwnCarriers:
                                 + self._prov('gebco')))
         assert ([p.source.id for p in env.data_sources]
                 == ['gebco', 'woa23', 'waverys'])
+
+    def test_the_absorption_records_follow_the_surface(self):
+        """A law's own records (a fetched water's T, S and pH) sit with the
+        carriers', after the surface and before the extra records."""
+        from uacpy.core.absorption import FrancoisGarrison
+        env = Environment(
+            bathymetry=Bathymetry(ranges=np.array([0.0]),
+                                  depths=np.array([100.0]),
+                                  data_sources=self._prov('gebco')),
+            absorption=FrancoisGarrison(10.0, 35.0, 8.0,
+                                        data_sources=self._prov('woa23')),
+            altimetry=Altimetry(ranges=np.array([0.0, 1000.0]),
+                                heights=np.array([0.0, 1.0]),
+                                data_sources=self._prov('waverys')),
+            extra_data_sources=self._prov('glodap'))
+        assert ([p.source.id for p in env.data_sources]
+                == ['gebco', 'woa23', 'glodap', 'waverys'])
 
     def test_a_derived_location_follows_a_reassigned_transect(self):
         from uacpy.core.geo import great_circle_midpoint

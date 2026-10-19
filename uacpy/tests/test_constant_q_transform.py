@@ -17,8 +17,8 @@ from uacpy.acoustic_signal import (  # noqa: E402
     ProbabilisticSpectralEstimate)
 from uacpy.acoustic_signal.cqt import _cq_quality, _cq_frequencies
 from uacpy.plot import (  # noqa: E402
-    plot_constant_q_transform, plot_constant_q_spectrogram,
-    plot_constant_q_psd, plot_constant_q_ppsd)
+    plot_constant_q_transform, plot_constant_q_spectrogram, plot_ppsd,
+    plot_psd)
 from uacpy.core.exceptions import ConfigurationError  # noqa: E402
 from uacpy.tests.conftest import recorded_warnings
 
@@ -133,11 +133,11 @@ class TestConstantQPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
         prefix check misses, since a reorder moves one of the six.
         """
         r = self._run()
-        assert r._fields == ('frequencies', 'level_edges', 'pdf')
+        assert r._fields == ('frequencies', 'level_edges_dB', 'pdf')
         assert (r.ref, r.scaling, r.method) == (r.ref, 'spectrum',
                                                 'constant_q')
         built = ProbabilisticSpectralEstimate(
-            r.frequencies, r.level_edges, r.pdf, ref=r.ref,
+            r.frequencies, r.level_edges_dB, r.pdf, ref=r.ref,
             scaling='spectrum', method='constant_q')
         assert built.ref == r.ref
         assert built.scaling == 'spectrum'
@@ -148,7 +148,7 @@ def test_probabilistic_constant_q():
                                   bins_per_octave=12, level_step_dB=1.0)
     assert isinstance(pp, ProbabilisticSpectralEstimate)
     assert (pp.method, pp.segment_duration) == ('constant_q', None)
-    assert pp.pdf.shape == (pp.level_edges.size - 1, pp.frequencies.size)
+    assert pp.pdf.shape == (pp.level_edges_dB.size - 1, pp.frequencies.size)
     assert pp.mean_dB.shape == pp.frequencies.shape
     # each frequency column integrates to ~1 over the level axis (density)
     col = pp.pdf[:, np.nanargmax(pp.mean_dB)]
@@ -367,7 +367,7 @@ class TestEveryBinReadsEverySample:
         pp = _cq_probabilistic_spectrum(x, self.fs, freq_max=self.freq_max)
         # The burst peaks at 0.5 Pa² band power, 117 dB re 1 µPa²; the
         # background sits near 43 dB.
-        loud = pp.level_edges[:-1] >= 110.0
+        loud = pp.level_edges_dB[:-1] >= 110.0
         assert np.isfinite(pp.pdf[loud, k]).any()
 
     def test_a_burst_shorter_than_the_kernel_reads_the_same_at_every_offset(
@@ -433,8 +433,8 @@ def test_plotters_smoke():
     cqt = constant_q_transform(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12)
     for fig, ax in (plot_constant_q_transform(cqt.frequencies, cqt.coefficients),
                     plot_constant_q_spectrogram(sg.frequencies, sg.times, sg.power),
-                    plot_constant_q_psd(p.frequencies, p.power),
-                    plot_constant_q_ppsd(pp)):
+                    plot_psd(p.frequencies, p.power),
+                    plot_ppsd(pp)):
         assert fig is not None and ax is not None
     plt.close("all")
 
@@ -472,10 +472,10 @@ def test_plotter_unit_label_switches_with_scaling():
     x = _tone(440.0, dur=1.0)
     p = _cq_spectrum(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12,
                        scaling="density")
-    _, ax = plot_constant_q_psd(p.frequencies, p.power, scaling="density")
+    _, ax = plot_psd(p.frequencies, p.power, scaling="density")
     assert "Pa²/Hz" in ax.get_ylabel()
     plt.close("all")
-    _, ax = plot_constant_q_psd(p.frequencies, p.power, scaling="spectrum")
+    _, ax = plot_psd(p.frequencies, p.power, scaling="spectrum")
     lbl = ax.get_ylabel()
     assert "Pa²" in lbl and "/Hz" not in lbl
     plt.close("all")
@@ -483,13 +483,35 @@ def test_plotter_unit_label_switches_with_scaling():
 
 def test_the_psd_plotter_labels_bare_arrays_with_the_estimators_default_scaling():
     """``constant_q`` returns a density by default, so the bare-array call
-    made from its output labels a density, not band power."""
+    made from its output labels a density, not band power; the estimate
+    passed whole names its constant-Q bins in the title, on a log axis."""
     p = constant_q(_tone(440.0, dur=1.0), FS, freq_min=100, freq_max=2000,
                    bins_per_octave=12)
     assert p.scaling == "density"
-    _, ax = plot_constant_q_psd(p.frequencies, p.power)
+    _, ax = plot_psd(p.frequencies, p.power)
     assert ax.get_ylabel().endswith("Pa²/Hz)"), ax.get_ylabel()
-    assert ax.get_title() == "Constant-Q PSD"
+    plt.close("all")
+    _, ax = plot_psd(p)
+    assert ax.get_title() == "Constant-Q power spectral density"
+    assert ax.get_xscale() == "log"
+    plt.close("all")
+
+
+def test_one_histogram_plotter_draws_a_constant_q_estimate():
+    """``plot_ppsd`` draws every histogram estimator, as ``plot_psd`` draws
+    every spectrum: a constant-Q histogram on a log frequency axis with a
+    constant-Q title, the same picture as its ``.plot()``; no
+    constant-Q-only plotter exists."""
+    import uacpy.plot as up
+    pp = _cq_probabilistic_spectrum(_tone(440.0, dur=1.0), FS, freq_min=100,
+                                    freq_max=2000, bins_per_octave=12)
+    _, ax = plot_ppsd(pp)
+    _, ax_method = pp.plot()
+    for drawn in (ax, ax_method):
+        assert drawn.get_xscale() == "log"
+        assert drawn.get_title().startswith("Constant-Q ")
+    assert not hasattr(up, 'plot_constant_q_psd')
+    assert not hasattr(up, 'plot_constant_q_ppsd')
     plt.close("all")
 
 
@@ -499,7 +521,7 @@ def test_the_psd_plotter_reads_the_scaling_off_an_estimate_passed_whole(
         scaling, unit):
     p = constant_q(_tone(440.0, dur=1.0), FS, freq_min=100, freq_max=2000,
                    bins_per_octave=12, scaling=scaling)
-    _, ax = plot_constant_q_psd(p)
+    _, ax = plot_psd(p)
     assert ax.get_ylabel().endswith(unit), ax.get_ylabel()
     np.testing.assert_allclose(ax.lines[0].get_ydata(),
                                10.0 * np.log10(p.power / 1e-12))
@@ -510,7 +532,7 @@ def test_the_psd_plotter_refuses_a_scaling_that_contradicts_the_estimate():
     p = constant_q(_tone(440.0, dur=1.0), FS, freq_min=100, freq_max=2000,
                    bins_per_octave=12)
     with pytest.raises(ConfigurationError, match="contradicts the SpectralEstimate"):
-        plot_constant_q_psd(p, scaling="spectrum")
+        plot_psd(p, scaling="spectrum")
     plt.close("all")
 
 
@@ -977,9 +999,9 @@ class TestProbabilisticConstantQContracts:
         x, fs, freq_min, B, n_lowest = self._one_frame_case()
         r = probabilistic_constant_q(x, fs, scaling='spectrum', freq_min=freq_min, bins_per_octave=B,
                                      level_step_dB=1.0, level_min_dB=0, level_max_dB=150)
-        assert r.level_edges[0] == 0.0
-        assert r.level_edges[-1] == 150.0
-        assert r.level_edges.size == 151
+        assert r.level_edges_dB[0] == 0.0
+        assert r.level_edges_dB[-1] == 150.0
+        assert r.level_edges_dB.size == 151
 
     def test_single_valid_frame_is_data(self):
         from uacpy.acoustic_signal import (constant_q,
@@ -1001,8 +1023,8 @@ class TestProbabilisticConstantQDefaultLevels:
         x = np.sin(2 * np.pi * 100.0 * np.arange(4096) / 1000.0)
         r = probabilistic_constant_q(x, 1000.0, scaling='spectrum', freq_min=100.0,
                                      bins_per_octave=2)
-        assert r.level_edges[0] == 0.0
-        assert r.level_edges[-1] == 150.0
+        assert r.level_edges_dB[0] == 0.0
+        assert r.level_edges_dB[-1] == 150.0
 
 
 class TestConstantQHopInnerFloor:

@@ -2475,6 +2475,9 @@ _CROSS_PACKAGE_PRIVATES = {
      '_truncate_response'),
     ('core/results/field.py', 'uacpy.acoustic_signal.channel',
      '_transfer_function_from_impulse_response'),
+    # labelled twin of impulse_response_from_transfer_function
+    ('core/results/_field_synthesis.py', 'uacpy.acoustic_signal.channel',
+     '_impulse_response_from_transfer_function'),
     ('core/results/field.py', 'uacpy.acoustic_signal.spectrum_at',
      '_tone_phasor'),
     ('core/results/rays.py', 'uacpy.acoustic_signal.channel',
@@ -2516,7 +2519,7 @@ _CROSS_PACKAGE_PRIVATES = {
     # different sets.
     ('plot.py', 'uacpy.visualization.plots', '__all__'),
     ('acoustics.py', 'uacpy.core.acoustics', '__all__'),
-    ('metrics.py', 'uacpy.core.metrics', '__all__'),
+    ('metrics.py', 'uacpy.core.results.metrics', '__all__'),
     ('materials.py', 'uacpy.core.materials', '__all__'),
     ('units.py', 'uacpy.core.units', '__all__'),
     # An in-place edit of BOUNCE's .irc file format (the ``g`` column's
@@ -2526,11 +2529,6 @@ _CROSS_PACKAGE_PRIVATES = {
     # BOUNCE's .irc is rescaled to the absolute density scale once, where the
     # file is made; the fixed-width row layout belongs to the reader module.
     ('models/bounce/_model.py', 'uacpy.io.refl_io', '_scale_irc_impedance'),
-    # The (FREQ1, FREQ2, NFREQ) an OAST/OASN deck carries, and its refusal of
-    # a sweep that is not uniform: the settings stage records and refuses
-    # with the one rule the writer applies.
-    ('models/oases/oast.py', 'uacpy.io.oases_writer', '_resolve_freq_sweep'),
-    ('models/oases/oasn.py', 'uacpy.io.oases_writer', '_resolve_freq_sweep'),
     # The noise-record and replica-grid rules the OASN deck is written
     # under: OASN refuses its own knobs with them at stage 2, by name.
     ('models/oases/oasn.py', 'uacpy.io.oases_writer',

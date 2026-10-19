@@ -133,12 +133,10 @@ print(f"chirp at {LOOK_DEPTH:.0f} m, {LOOK_RANGE / 1e3:.1f} km: "
       f"{clock[np.argmax(np.abs(received.data))] * 1e3:.2f} ms")
 
 fig, axes = plt.subplots(2, 1, figsize=(11, 7))
-plot_waveform(chirp, RATE, axes[0], time_units='ms',
+plot_waveform(chirp, RATE, axes[0],
               title=f'Transmitted: 200 Hz chirp, '
                     f'{chirp.size / RATE * 1e3:.0f} ms')
-plot_waveform(np.asarray(received.data).real.ravel(),
-              1.0 / float(np.diff(clock)[0]), axes[1], t0=float(clock[0]),
-              time_units='ms',
+received.plot(ax=axes[1],
               title=f'Received at {LOOK_DEPTH:.0f} m, '
                     f'{LOOK_RANGE / 1e3:.1f} km — the direct path and its '
                     f'surface image')

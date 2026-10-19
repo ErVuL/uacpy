@@ -598,7 +598,8 @@ def _report_sample_substitutions(phis, who, *, model, hamilton_fit,
 def bottom_from_samples(lats, lons, phis, start, end, *, n_points='auto',
                         max_points=None, max_distance_km=None,
                         model=DEFAULT_GRAIN_SIZE_MODEL, hamilton_fit=None,
-                        water_sound_speed=None, roughness=0.0):
+                        water_sound_speed=None, water_density=None,
+                        roughness=0.0):
     """A range-dependent bottom along the geodesic ``start`` → ``end`` from
     seabed samples of your own (cores, grabs, a survey's mean grain sizes).
 
@@ -650,6 +651,13 @@ def bottom_from_samples(lats, lons, phis, start, end, *, n_points='auto',
         The near-seabed water speed (m/s) the velocity ratios scale by, or a
         ``(lat, lon) -> m/s`` callable evaluated at each waypoint. ``None``
         uses the relations' reference water.
+    water_density : float or callable, optional
+        The near-seabed water density (g/cm³) the density ratios are carried
+        against, or a ``(lat, lon) -> g/cm³`` callable evaluated at each
+        waypoint, as every other grain-size converter takes it (a deck's
+        site water: ``env.water_density`` of a
+        ``fetch_environment(with_absorption=True)``). ``None`` uses the
+        package's one water (1.027 g/cm³).
     roughness : float, optional
         RMS interface roughness (m) of every column. Default 0.
 
@@ -703,7 +711,9 @@ def bottom_from_samples(lats, lons, phis, start, end, *, n_points='auto',
                 f"{dist_km:.1f} km away, past max_distance_km={limit:g}.")
         offsets.append(dist_km)
         speed = water_sound_speed_at(water_sound_speed, lat, lon)
-        if (phi, speed) not in converted:
+        rho_w = (water_density(lat, lon) if callable(water_density)
+                 else water_density)
+        if (phi, speed, rho_w) not in converted:
             # Reported once for every sample above, under this function's
             # name, so each sample converts through the twin that returns
             # its report rather than warning it again per ϕ; the half-space
@@ -711,12 +721,12 @@ def bottom_from_samples(lats, lons, phis, start, end, *, n_points='auto',
             g, _report = _grain_size_to_geoacoustics(
                 phi, model=model,
                 hamilton_fit=hamilton_fit or DEFAULT_GRAIN_SIZE_ENVIRONMENT,
-                water_sound_speed=speed, water_density=None, who=who)
-            converted[phi, speed] = BoundaryProperties(
+                water_sound_speed=speed, water_density=rho_w, who=who)
+            converted[phi, speed, rho_w] = BoundaryProperties(
                 acoustic_type='half-space', grain_size_phi=float(phi),
                 sound_speed=g['sound_speed'], density=g['density'],
                 attenuation=g['attenuation'], roughness=roughness)
-        return converted[phi, speed]
+        return converted[phi, speed, rho_w]
 
     try:
         bottom = range_dependent_bottom_along(

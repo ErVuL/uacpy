@@ -25,7 +25,6 @@ from uacpy.io.mpirams_writer import (
 )
 from uacpy.models.ram._settings import RamGrid
 from uacpy.models.ram._seabed import sample_at_depths
-from uacpy.core._grid import resample_depth_range
 from uacpy.models.ram._domain import (
     absorber_floor_attenuation,
     absorber_span,
@@ -74,7 +73,8 @@ DEFAULT_N_SEDIMENT_POINTS = 1000
 
 # Ceiling on the number of mpiramS sediment profiles written for a
 # range-independent bottom whose seafloor water speed varies with range, and
-# the speed spread (m/s) below which that range dependence is ignored.
+# the speed spread (m/s) below which that range dependence is ignored. Both
+# are uacpy guidance.
 _MAX_SED_PROFILES = 128
 _CWG_RANGE_TOL = 0.01
 #: Relative precision of the sweep mpiramS writes to ``psif.dat``
@@ -111,7 +111,7 @@ _MPIRAMS_FIELD_BYTES_PER_SAMPLE = 16
 #: Beyond it, ``rout[-1]`` is not the requested range under another name; it is
 #: a different position, and reading the field there under the requested
 #: label would be a substitution rather than a rounding.
-MPIRAMS_RANGE_TOL_M = 0.1
+MPIRAMS_RANGE_TOL = 0.1
 
 
 def mpirams_zmax(env: Environment, freq: float, dz: float, *,
@@ -818,7 +818,7 @@ def check_mpirams_output_range_spacing(receiver: Receiver) -> None:
     positions than it has entries.
 
     The march steps toward each requested range until it is within
-    ``MPIRAMS_RANGE_TOL_M`` of it and then records the position it
+    ``MPIRAMS_RANGE_TOL`` of it and then records the position it
     stopped at as that range's ``rout`` entry. A pair of requested ranges
     closer together than the tolerance therefore shares one entry: the
     COHERENT_TL range axis stops being strictly increasing and the
@@ -829,7 +829,7 @@ def check_mpirams_output_range_spacing(receiver: Receiver) -> None:
     """
     ranges = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
     gaps = np.diff(ranges)
-    tight = np.flatnonzero(gaps < MPIRAMS_RANGE_TOL_M)
+    tight = np.flatnonzero(gaps < MPIRAMS_RANGE_TOL)
     if tight.size == 0:
         return
     i = int(tight[0])
@@ -837,13 +837,13 @@ def check_mpirams_output_range_spacing(receiver: Receiver) -> None:
         f"RAM:mpirams: receiver.ranges[{i}]={ranges[i]:.6g} m and "
         f"receiver.ranges[{i + 1}]={ranges[i + 1]:.6g} m are "
         f"{float(gaps[i]):.6g} m apart — closer than the "
-        f"{MPIRAMS_RANGE_TOL_M} m the mpiramS march resolves. It stops "
+        f"{MPIRAMS_RANGE_TOL} m the mpiramS march resolves. It stops "
         f"stepping once it is within that distance of a requested range "
         f"and reports the position it stopped at, so the two would come "
         f"back as one output range. {int(tight.size)} pair(s) in this "
         f"grid are that close.",
         remediation=(
-            f"Space receiver.ranges at least {MPIRAMS_RANGE_TOL_M} m "
+            f"Space receiver.ranges at least {MPIRAMS_RANGE_TOL} m "
             f"apart, or pass RAM(backend='ramgeo'), whose output grid is "
             f"the binary's own uniform range axis and is interpolated "
             f"onto receiver.ranges at any spacing."
@@ -1002,7 +1002,7 @@ def write_mpirams_deck(inputs, *, knobs, log) -> Path:
     # divide-by-zero and a SIGABRT (exit -6); for rmax < 15 km it
     # collapses range dependence to 1-2 coarse 10-km samples. Always use
     # ihorz=0 so mpiramS steps directly between the per-range profiles
-    # uacpy already builds in _prepare_ssp (_ssp_range_axis) — both
+    # uacpy already builds in prepare_ssp (_domain.ssp_range_axis) — both
     # crash-free and more faithful than the buggy 10-km resample.
     deck = work_dir / 'in.pe'
     write_mpirams_inpe(
@@ -1010,7 +1010,7 @@ def write_mpirams_deck(inputs, *, knobs, log) -> Path:
         fc=freq,
         q_factor=Q,
         record_duration=T,
-        zsrc=float(source.depths[0]),
+        zs=float(source.depths[0]),
         dz=dz,
         dr=grid.dr,
         n_pade=knobs.n_pade,
@@ -1078,9 +1078,9 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
                        engine, grid, *, knobs, model_name, provenance,
                        cleanup):
     """Stage 5 of an mpiramS COHERENT_TL run: the TL :class:`Field` from a
-    finished ``psif`` result — pick the centre-frequency bin, interpolate
-    complex pressure to the receiver grid (NaN-safe), convert to
-    travelling-wave pressure and mask the absorbing layer
+    finished ``psif`` result — pick the centre-frequency bin, convert it to
+    travelling-wave pressure on the march's grid, take it onto the receiver
+    grid (:func:`_psif_on_receiver_grid`) and mask the absorbing layer
     (:func:`_domain.mask_absorbing_layer`). ``grid`` is the one grid the
     run marched (``engine.grids[0]``); a receiver at r = 0 is scaled at its
     ``dr``."""
@@ -1105,51 +1105,10 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
     # not undersampled in range. The Collins backends need the
     # modulus/phasor split instead (interp_envelope_to_receiver_grid).
 
-    rcv_depths = receiver.depths
-    # uacpy writes receiver.ranges themselves into ranges.dat, so rout is
-    # the receiver grid back again and the two normally agree to the bit.
-    # Where they do not, only ``MPIRAMS_RANGE_TOL_M`` of the difference is
-    # the march calling a range reached; the rest is a range it did not
-    # reach. Snap the first kind onto rout[-1] so the outermost receiver
-    # still interpolates, and leave the second kind alone so it lands
-    # off-grid and comes back NaN from resample_depth_range. A
-    # tolerance of half the RECEIVER spacing would say nothing about the
-    # march: on a short rout it stretches wide enough to pull unmarched
-    # receivers onto rout[-1] and hand back that position's field under
-    # their own range labels.
-    rcv_ranges = np.asarray(receiver.ranges, dtype=float)
-    beyond = rcv_ranges > rout[-1] + MPIRAMS_RANGE_TOL_M
-    if np.any(beyond):
-        warnings.warn(
-            f"{knobs.model_name}: receiver ranges {rcv_ranges[beyond]} "
-            f"exceed the PE marched range {rout[-1]}; those columns are "
-            f"returned as NaN.",
-            NumericsWarning,
-            skip_file_prefixes=USER_FRAME_SKIP
-        )
-    # The near side needs no tolerance of its own, and its silence is not
-    # the asymmetry it looks like. ``rout[-1]`` can fall arbitrarily short
-    # of the last requested range when the march stops early, which is why
-    # that side has to separate "reached" from "not reached". ``rout[0]``
-    # cannot: the march starts at ``rnow=0``, runs to each requested range
-    # in turn under ``ram.f90:169``'s exit test, and records that ``rnow``
-    # as ``rout(irr)`` (``:271``); and write_mpirams_ranges
-    # writes ``receiver.ranges`` verbatim and in order, so ``rout[0]`` is
-    # the first receiver's *own* achieved range. Receiver.ranges is
-    # strictly increasing, so no receiver can sit below ``rout[0]`` by more
-    # than the march's own 10 cm exit test — the same band the far side
-    # snaps. This clip is therefore a no-op outside that band, and inside
-    # it does what MPIRAMS_RANGE_TOL_M does out there. Pinned by the test
-    # asserting every near-side receiver already lies within the march's
-    # exit tolerance of ``rout[0]``, so the clip moves none of them.
-    rcv_ranges = np.clip(rcv_ranges, rout[0], None)
-    rcv_ranges = np.where(np.logical_and(~beyond, rcv_ranges > rout[-1]),
-                          rout[-1], rcv_ranges)
-
-    # Interpolate real and imaginary parts separately. A NaN sample in
-    # the centre-frequency slice (PE divergence, or a depth the march did
-    # not resolve) stays NaN through the interpolation and reaches the
-    # user as no data, together with the receiver cells that read it.
+    # A NaN sample in the centre-frequency slice (PE divergence, or a depth
+    # the march did not resolve) stays NaN through the interpolation and
+    # reaches the user as no data, together with the receiver cells that
+    # read it.
     n_nan_p = int(np.count_nonzero(~np.isfinite(pressure)))
     if n_nan_p > 0:
         # expected; not in filterwarnings — emerges to user
@@ -1160,14 +1119,7 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
             f"interpolates one, rather than as a level.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP
         )
-    # Receivers outside the PE output domain return NaN pressure
-    # so the resulting TL row is NaN (transparent in pcolormesh)
-    # instead of saturating to the PRESSURE_FLOOR no-energy level.
-    pressure_rcv = resample_depth_range(
-        pressure, zg, rout, rcv_depths, rcv_ranges)
 
-    # Compute TL from interpolated pressure.
-    #
     # Collins' RAM convention (ram1.5.f, User Guide eq 4):
     #   psi = uu * f3 has r^{-1/2} removed from the actual pressure.
     #   TL = -20*log10(|psi|) + 10*log10(r)
@@ -1175,22 +1127,24 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
     # In mpiramS, psif = psi * exp(i*(k0*r + pi/4)) / (4*pi),
     # so |psi| = |psif| * 4*pi.
     #
-    # A receiver at r = 0 is scaled at dr so the rest of the row still
-    # computes; mask_source_axis NaNs that column after assembly.
-    log_ranges = rcv_ranges.astype(np.float64).copy()
-    log_ranges[log_ranges <= 0.0] = dr
-
-    # Convert the mpiramS .psif output to engineering travelling-
-    # wave pressure (see ``models/ram/_pe_phase.py``). ``Field.dB``
-    # only needs |p|, but downstream consumers that do coherent
-    # integration get a meaningful phase.
+    # Convert the mpiramS .psif output to engineering travelling-wave
+    # pressure on the ranges the march recorded (see
+    # ``models/ram/_pe_phase.py``), as the band path does. ``Field.dB`` only
+    # needs |p|, but downstream consumers that do coherent integration get
+    # a meaningful phase. A receiver at r = 0 is scaled at dr so the rest of
+    # the row still computes; mask_source_axis NaNs that column after
+    # assembly.
+    rout_safe = np.asarray(rout, dtype=np.float64).copy()
+    rout_safe[rout_safe <= 0.0] = dr
     with np.errstate(divide='ignore', invalid='ignore'):
-        pressure_field = psi_to_travelling_wave(
-            pressure_rcv,
+        pressure = psi_to_travelling_wave(
+            pressure,
             convention='mpirams',
-            ranges=log_ranges,
+            ranges=rout_safe,
             range_axis=1,
         ).astype(np.complex128)
+    pressure_field = _psif_on_receiver_grid(pressure, zg, rout, receiver,
+                                            model_name=knobs.model_name)
     # An exactly-zero sample is the pressure-release surface node (z = 0,
     # where mpiramS's field is identically zero). It is left at zero: the
     # shared ``transmission_loss_dB`` floors it to the one no-energy level every
@@ -1220,7 +1174,7 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
 def _on_requested_ranges(pressure, rout, rcv_ranges):
     """``(pressure, reached)``: the march's ``(.., n_rout)`` columns taken
     onto the requested ``rcv_ranges`` (last axis), each from the recorded
-    range nearest it when that lies within :data:`MPIRAMS_RANGE_TOL_M`,
+    range nearest it when that lies within :data:`MPIRAMS_RANGE_TOL`,
     NaN where none does; ``reached`` marks the requested ranges found."""
     rout = np.asarray(rout, dtype=np.float64)
     pos = np.searchsorted(rout, rcv_ranges)
@@ -1228,10 +1182,60 @@ def _on_requested_ranges(pressure, rout, rcv_ranges):
     right = np.clip(pos, 0, rout.size - 1)
     nearest = np.where(np.abs(rout[left] - rcv_ranges)
                        <= np.abs(rout[right] - rcv_ranges), left, right)
-    reached = np.abs(rout[nearest] - rcv_ranges) <= MPIRAMS_RANGE_TOL_M
+    reached = np.abs(rout[nearest] - rcv_ranges) <= MPIRAMS_RANGE_TOL
     out = np.array(pressure[..., nearest], dtype=np.complex128)
     out[..., ~reached] = np.nan
     return out, reached
+
+
+def _psif_on_receiver_grid(pressure, zg, rout, receiver, *, model_name):
+    """``pressure`` on the march's grid (depth ``zg`` on axis 0, range
+    ``rout`` on the last axis) taken onto ``receiver``'s grid: the one rule
+    both mpiramS assemblies use.
+
+    Range: each requested range takes the recorded column nearest it within
+    :data:`MPIRAMS_RANGE_TOL` (:func:`_on_requested_ranges`). uacpy writes
+    ``receiver.ranges`` into ``ranges.dat`` verbatim and in order, so
+    ``rout`` is that grid handed back, each range recorded where the march
+    stopped stepping toward it (``ram.f90:169``, ``:271``) — on the near
+    side too, since the march starts at ``rnow = 0`` and a receiver axis is
+    strictly increasing. A requested range with no recorded range within
+    that tolerance is one the march did not reach: NaN, with one warning. A
+    tolerance of half the receiver spacing would say nothing about the
+    march: on a short ``rout`` it pulled unmarched receivers onto
+    ``rout[-1]`` and handed back that position's field under their labels.
+
+    Depth: linear between the two ``zg`` samples around each receiver
+    depth, NaN outside ``zg`` (never an edge extrapolation). ``zg`` is
+    monotone but not uniform: with ``earth_curvature=1`` peramx
+    un-transforms it by ``zg/(1 + eps/2 + eps²/3)``, ``eps = zg/Re``
+    (``peramx.f90:444-449``). Depth is interpolated alone, after the range
+    columns are taken: :func:`~uacpy.acoustics.resample_depth_range`
+    interpolates both axes, and its range stencil reaches the neighbouring
+    column even at a weight of 0, where a NaN (an unreached range) still
+    makes the product NaN."""
+    rcv_ranges = np.asarray(receiver.ranges, dtype=np.float64)
+    pressure, reached = _on_requested_ranges(pressure, rout, rcv_ranges)
+    if not reached.all():
+        warnings.warn(
+            f"{model_name}: receiver ranges {rcv_ranges[~reached]} "
+            f"exceed the PE marched range {rout[-1]}; those columns are "
+            f"returned as NaN.",
+            NumericsWarning,
+            skip_file_prefixes=USER_FRAME_SKIP
+        )
+    out_depths = np.asarray(receiver.depths, dtype=np.float64)
+    if np.array_equal(zg, out_depths):
+        return pressure
+    idx_lo = np.clip(np.searchsorted(zg, out_depths, side='right') - 1,
+                     0, len(zg) - 2)
+    span = zg[idx_lo + 1] - zg[idx_lo]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        w = np.where(span > 0.0, (out_depths - zg[idx_lo]) / span, 0.0)
+    w = np.clip(w, 0.0, 1.0).reshape((-1,) + (1,) * (pressure.ndim - 1))
+    pressure = pressure[idx_lo] * (1.0 - w) + pressure[idx_lo + 1] * w
+    pressure[(out_depths < zg[0]) | (out_depths > zg[-1])] = np.nan
+    return pressure
 
 
 def assemble_broadband_field(result, env, source, receiver,
@@ -1239,9 +1243,10 @@ def assemble_broadband_field(result, env, source, receiver,
                               provenance, cleanup, knobs):
     """Stage 5 of an mpiramS BROADBAND / TIME_SERIES run: the
     transfer-function :class:`Field` from a finished ``psif`` result —
-    convert to travelling-wave pressure, interpolate onto the receiver
-    depth grid, trim the marched band onto the bins the settings ask for
-    (``engine.requested_frequencies``), mask the absorbing layer
+    convert to travelling-wave pressure, trim the marched band onto the
+    bins the settings ask for (``engine.requested_frequencies``), take it
+    onto the receiver grid (:func:`_psif_on_receiver_grid`), mask the
+    absorbing layer
     (:func:`_domain.mask_absorbing_layer`), and tag with the sweep and the
     grid marched.
     """
@@ -1276,33 +1281,6 @@ def assemble_broadband_field(result, env, source, receiver,
     # zero for the shared ``transmission_loss_dB`` floor to report, so no
     # wrapper writes a no-energy level of its own.
 
-    # Map to receiver depth grid. PE domain extends below the
-    # seafloor; output only the requested receiver depths.
-    out_depths = receiver.depths
-    if not np.array_equal(zg, out_depths):
-        # zg is monotone but NOT uniform: with earth_curvature=1 peramx
-        # un-transforms it by zg/(1 + eps/2 + eps²/3), eps = zg/Re
-        # (peramx.f90:444-449), a quadratic map that stretches by
-        # metres over a deep column. Bracket against the real axis.
-        idx_lo = np.clip(
-            np.searchsorted(zg, out_depths, side='right') - 1,
-            0, len(zg) - 2)
-        span = zg[idx_lo + 1] - zg[idx_lo]
-        with np.errstate(divide='ignore', invalid='ignore'):
-            w = np.where(span > 0.0,
-                         (out_depths - zg[idx_lo]) / span, 0.0)
-        w = np.clip(w, 0.0, 1.0)
-        # Vectorized interpolation: (n_out, nf, nr)
-        pressure = (pressure[idx_lo, :, :] * (1.0 - w[:, None, None]) +
-                    pressure[idx_lo + 1, :, :] * w[:, None, None])
-        # Depths outside the PE grid are NaN, matching the
-        # COHERENT_TL below-domain convention — never a
-        # plausible-looking edge extrapolation.
-        outside = (out_depths < zg[0]) | (out_depths > zg[-1])
-        pressure[outside, :, :] = np.nan
-    else:
-        out_depths = zg
-
     # Trim the marched (fc, Q, T) superset onto the caller's exact
     # frequency grid: pick the nearest marched bin for each requested
     # one and label the axis with the requested values, so H(f)
@@ -1332,23 +1310,13 @@ def assemble_broadband_field(result, env, source, receiver,
         pressure = pressure[:, idx, :]
         frq_out = np.asarray(target, dtype=float)
 
-    # Label the range axis with the ranges the call asked for, as the TL
-    # path does (assemble_tl_field): rout is receiver.ranges handed back,
-    # each recorded within MPIRAMS_RANGE_TOL_M of the requested range
-    # (ram.f90:169, :271), and a march that stopped short records fewer.
-    # A requested range with no recorded range within that tolerance is
-    # NaN, with the TL path's warning.
+    # The requested depths and ranges: the PE domain extends below the
+    # seafloor, and the march records each range where it stopped
+    # (_psif_on_receiver_grid, the TL path's rule).
+    pressure = _psif_on_receiver_grid(pressure, zg, rout, receiver,
+                                      model_name=model_name)
+    out_depths = np.asarray(receiver.depths, dtype=np.float64)
     rcv_ranges = np.asarray(receiver.ranges, dtype=np.float64)
-    pressure, reached = _on_requested_ranges(pressure, rout, rcv_ranges)
-    if not reached.all():
-        warnings.warn(
-            f"{model_name}: receiver ranges {rcv_ranges[~reached]} "
-            f"exceed the PE marched range {rout[-1]}; those columns are "
-            f"returned as NaN.",
-            NumericsWarning,
-            skip_file_prefixes=USER_FRAME_SKIP
-        )
-
     log(f"Output: {len(out_depths)} depths x {frq_out.size} "
               f"freqs x {rcv_ranges.size} ranges")
 

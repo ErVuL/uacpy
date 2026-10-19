@@ -40,8 +40,10 @@ PARSE_ERRORS = (ValueError, IndexError, KeyError, StopIteration, EOFError,
 def _bound_counts(filepath, file_size, min_item_bytes, **counts):
     """Reject header counts that cannot be satisfied by ``file_size``.
 
-    Binary OASES readers size NumPy allocations directly off integer
-    header fields (``n_rcv``, ``n_freq``, grid extents). A corrupt or
+    The binary readers (OASES, the shade/arrival readers of
+    ``oalib_reader``, ``grn_reader``, ``refl_io`` and ``_parsers``) size
+    NumPy allocations directly off integer header fields (``n_rcv``,
+    ``n_freq``, grid extents). A corrupt or
     hostile file with a garbage count (e.g. ``n_rcv = 0x7fffffff``) would
     otherwise drive a multi-GB/TB ``np.zeros`` before any data record is
     validated. The smallest a single data item can occupy on disk is
@@ -246,7 +248,7 @@ def typed_format_error(reader):
         try:
             return reader(*args, **kwargs)
         except PARSE_ERRORS as exc:
-            target = args[0] if args else '<stream>'
+            target = args[0] if args else kwargs.get('filepath', '<stream>')
             raise FileFormatError(
                 f"{reader.__name__}: could not parse {target} — the file is "
                 f"malformed, truncated, or not the expected format "
@@ -256,16 +258,6 @@ def typed_format_error(reader):
                             "file or a wrong format triggers this.",
             ) from exc
     return wrapper
-
-
-def summarize_axis(arr, head: int = 10, fmt: str = "{:9.5g}") -> str:
-    """Compact one-line preview of a numeric axis for debug logging."""
-    n = len(arr)
-    if n <= head + 1:
-        return "[" + ", ".join(fmt.format(v).strip() for v in arr) + f"] ({n} pts)"
-    body = ", ".join(fmt.format(v).strip() for v in arr[:head])
-    tail = fmt.format(arr[-1]).strip()
-    return f"[{body}, …, {tail}] ({n} pts)"
 
 
 def require_model_output(filepath, reader: str) -> None:

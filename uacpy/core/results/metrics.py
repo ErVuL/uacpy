@@ -41,7 +41,7 @@ import warnings
 import numpy as np
 
 from uacpy.core.acoustics.levels import no_energy_mask
-from uacpy.core.results import Field
+from uacpy.core.results.field import Field
 from uacpy.core.exceptions import (ConfigurationError, FallbackWarning,
                                    ValidityWarning)
 from uacpy.core._export import ExportRecord
@@ -339,9 +339,9 @@ def tl_rmse(
         real dB arrays of one shape. A Field on a frequency or time axis
         raises; a Field and an array together raise.
     range_window : (float, float), optional
-        ``(rmin_m, rmax)`` inclusive. Defaults to all ranges. Fields only.
+        ``(rmin, rmax)`` (m) inclusive. Defaults to all ranges. Fields only.
     depth_window : (float, float), optional
-        ``(zmin_m, zmax_m)`` inclusive. Defaults to all depths. Fields only.
+        ``(zmin, zmax)`` (m) inclusive. Defaults to all depths. Fields only.
 
     Returns
     -------
@@ -370,9 +370,9 @@ def tl_max_error(
         Two TL Fields of one ``kind``, or two real dB arrays of one shape
         (see :func:`tl_rmse`).
     range_window : (float, float), optional
-        ``(rmin_m, rmax)`` inclusive; Fields only.
+        ``(rmin, rmax)`` (m) inclusive; Fields only.
     depth_window : (float, float), optional
-        ``(zmin_m, zmax_m)`` inclusive; Fields only.
+        ``(zmin, zmax)`` (m) inclusive; Fields only.
     """
     diff, kept = _tl_pair(field, reference, range_window, depth_window,
                           fname='tl_max_error')
@@ -398,9 +398,9 @@ def tl_bias(
         Two TL Fields of one ``kind``, or two real dB arrays of one shape
         (see :func:`tl_rmse`).
     range_window : (float, float), optional
-        ``(rmin_m, rmax)`` inclusive; Fields only.
+        ``(rmin, rmax)`` (m) inclusive; Fields only.
     depth_window : (float, float), optional
-        ``(zmin_m, zmax_m)`` inclusive; Fields only.
+        ``(zmin, zmax)`` (m) inclusive; Fields only.
     """
     diff, kept = _tl_pair(field, reference, range_window, depth_window,
                           fname='tl_bias')

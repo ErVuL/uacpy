@@ -14,7 +14,7 @@ from uacpy.acoustic_signal._results import PlottedResult
 from uacpy.comms.channel import (
     ChannelTaps, apply_channel, awgn, ebn0_to_snr_dB,
 )
-from uacpy.comms.constellations import Modulator
+from uacpy.comms.constellations import SCHEMES, Modulator
 from uacpy.comms.coding import _encoded
 from uacpy.comms.equalize import complex_gain
 from uacpy.comms.metrics import bit_error_rate, evm
@@ -62,6 +62,18 @@ class LinkResult(FieldsRepr, CarrierExport):
                                np.asarray(other.tx_symbols))
                 and np.array_equal(np.asarray(self.rx_symbols),
                                    np.asarray(other.rx_symbols)))
+
+
+def _require_link_scheme(scheme, who):
+    """Refuse a scheme the single-carrier link harness cannot run, naming
+    the harness's schemes and the OFDM pair for a multicarrier link."""
+    if not isinstance(scheme, str) or scheme.lower() not in SCHEMES:
+        raise ConfigurationError(
+            f"{who}: unknown scheme {scheme!r}; this harness runs the "
+            f"single-carrier constellations {sorted(SCHEMES)}.",
+            remediation="For OFDM, run OFDMTransmitter / OFDMReceiver (or "
+                        "ofdm_modulate / ofdm_demodulate) over the channel "
+                        "instead.")
 
 
 def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
@@ -136,6 +148,7 @@ def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
         BER, EVM, the transmitted and received symbols, and the equaliser's
         learning curve when one was used.
     """
+    _require_link_scheme(scheme, "simulate_link")
     rng = require_generator(rng, "simulate_link")
     if isinstance(channel, ChannelTaps):
         if int(channel.sps) != 1:
@@ -292,6 +305,7 @@ def ber_sweep(scheme, ebn0_dB, n_bits=50000, *, channel=None,
         one per entry of ``ebn0_dB``, with the sweep's settings as
         attributes.
     """
+    _require_link_scheme(scheme, "ber_sweep")
     rng = require_generator(rng, "ber_sweep")
     ber = np.array([
         simulate_link(scheme, e, n_bits, channel=channel, equalizer=equalizer,
@@ -301,3 +315,139 @@ def ber_sweep(scheme, ebn0_dB, n_bits=50000, *, channel=None,
     return BerCurve(np.atleast_1d(np.asarray(ebn0_dB, dtype=float)),
                     ber, scheme=scheme, n_bits=n_bits, channel=channel,
                     equalizer=equalizer, code=code, n_train=n_train)
+
+
+#: Information bits per OFDM frame :func:`ofdm_ber_sweep` sends (uacpy
+#: guidance). The receiver corrects each block's common phase on its own
+#: decisions, so a residual CFO error rotates the later blocks of a long frame
+#: past a decision boundary: measured on QPSK at 256 subcarriers, cp 32,
+#: Eb/N0 8 dB, BER 0.006-0.008 for frames of 512 and 2048 bits, 0.06 at 8192
+#: and 0.20 at 32768.
+_OFDM_FRAME_BITS = 2048
+
+
+def _ofdm_frame_errors(tx, rx, info, ebn0_dB, channel, rng):
+    """Bit errors of one OFDM frame carrying ``info``, sent by ``tx``
+    through ``channel`` and AWGN at ``ebn0_dB`` and decoded by ``rx``.
+
+    The frame is preceded by one block of silence, as a capture holds
+    samples before the frame the receiver synchronises on. The noise is
+    :func:`awgn` at the Eb/N0 conversion :func:`ebn0_to_snr_dB` makes, with
+    each block of ``n_subcarriers + cp_len`` samples carrying
+    ``n_subcarriers`` symbols — the cyclic prefix is energy spent, as
+    simulate_link's symbols are. ``awgn`` scales its noise off the mean
+    power of the whole record, which the silence, the preamble, the pilot
+    and the zero guard block do not share with the payload, so the SNR
+    passed to it is referred to the received power of the payload blocks
+    (all but the last, whose unused subcarriers are zero-padded)."""
+    nsc, cp = tx.n_subcarriers, tx.cp_len
+    block = nsc + cp
+    frame = np.concatenate([np.zeros(block, dtype=complex),
+                            tx.transmit(info)])
+    received = frame if channel is None else apply_channel(frame, channel)
+    n_data = frame.size // block - 4        # silence, preamble, pilot, guard
+    payload = received[3 * block: (3 + max(n_data - 1, 1)) * block]
+    rate = float(getattr(tx.code, 'rate', 1.0) or 1.0) if tx.code else 1.0
+    snr_dB = float(ebn0_to_snr_dB(
+        ebn0_dB, bits_per_symbol=tx.modulator.bits_per_symbol,
+        symbol_rate=nsc, sample_rate=block, code_rate=rate))
+    p_payload = float(np.mean(np.abs(payload) ** 2))
+    p_record = float(np.mean(np.abs(received) ** 2))
+    if p_payload > 0.0 and np.isfinite(snr_dB):
+        snr_dB += 10.0 * np.log10(p_record / p_payload)
+    bits = rx.receive(awgn(received, snr_dB, rng=rng))
+    return bit_error_rate(reference=info,
+                          received=bits[: info.size]) * info.size
+
+
+def ofdm_ber_sweep(tx, rx, ebn0_dB, n_bits=50000, *, channel=None,
+                   frame_bits=_OFDM_FRAME_BITS, rng=None):
+    """Measured BER of an OFDM link over a list of Eb/N0 values, as a
+    :class:`BerCurve`: :func:`ber_sweep` for the multicarrier pair.
+
+    At each Eb/N0, ``n_bits`` random information bits go in frames of
+    ``frame_bits`` through ``tx`` (:meth:`OFDMTransmitter.transmit`,
+    baseband), the static FIR ``channel``, AWGN, and ``rx``
+    (:meth:`OFDMReceiver.receive`: sync, CFO, pilot channel estimate,
+    per-subcarrier equalisation, decoding), and the decoded bits are
+    compared with the sent ones. Eb/N0 is per
+    information bit, with the cyclic prefix counted as energy spent and the
+    noise referred to the received payload power. All points draw from the
+    same ``rng``, so they are independent realisations.
+
+    Parameters
+    ----------
+    tx : OFDMTransmitter
+        The transmitter (constellation, subcarriers, cyclic prefix, code).
+    rx : OFDMReceiver
+        The matching receiver; its constellation, ``n_subcarriers``,
+        ``cp_len`` and code presence must be the transmitter's.
+    ebn0_dB : array_like
+        Information-bit Eb/N0 values in dB, one BER measured at each.
+    n_bits : int, optional
+        Information bits per point. Defaults to ``50000``, as
+        :func:`ber_sweep`.
+    channel : array_like or ChannelTaps, optional
+        Static FIR channel at the baseband sample rate, applied to the
+        whole frame (:func:`apply_channel`). ``None`` is AWGN alone.
+    frame_bits : int, optional
+        Information bits per frame. Default 2048 (uacpy guidance): the
+        receiver corrects each block's common phase on its own decisions,
+        so a residual CFO error loses the later blocks of a long frame
+        (measured on QPSK, 256 subcarriers, 8 dB: BER 0.006 at 2048 bits,
+        0.06 at 8192, 0.20 at 32768).
+    rng : numpy.random.Generator, optional
+        Random generator shared by every point. Pass a seeded generator for
+        a reproducible result.
+
+    Returns
+    -------
+    BerCurve
+        ``(ebn0_dB, ber)``, with ``scheme='OFDM <constellation>'``,
+        ``n_bits``, ``channel`` and ``code`` (the transmitter's) as
+        attributes; ``.plot()`` draws it.
+    """
+    who = "ofdm_ber_sweep"
+    mismatch = [name for name, a, b in (
+        ("modulation", tx.modulation, rx.modulation),
+        ("n_subcarriers", tx.n_subcarriers, rx.n_subcarriers),
+        ("cp_len", tx.cp_len, rx.cp_len),
+        ("code", tx.code is None, rx.code is None)) if a != b]
+    if mismatch:
+        raise ConfigurationError(
+            f"{who}: the transmitter and the receiver differ in "
+            f"{', '.join(mismatch)}, so the receiver cannot decode the "
+            f"frames.",
+            remediation="Build both from the same constellation, "
+                        "n_subcarriers, cp_len and code.")
+    n_bits = int(n_bits)
+    frame_bits = int(frame_bits)
+    if n_bits < 1 or frame_bits < 1:
+        raise ConfigurationError(
+            f"{who}: n_bits={n_bits} and frame_bits={frame_bits} must both "
+            f"be at least 1.")
+    rng = require_generator(rng, who)
+    sizes = [frame_bits] * (n_bits // frame_bits)
+    if n_bits % frame_bits:
+        sizes.append(n_bits % frame_bits)
+
+    def point(ebn0):
+        try:
+            return sum(_ofdm_frame_errors(tx, rx, rng.integers(0, 2, size),
+                                          ebn0, channel, rng)
+                       for size in sizes) / n_bits
+        except ConfigurationError as exc:
+            # The receiver refuses a frame its sync placed too late to hold
+            # the pilot and a data block; say at which point of the sweep.
+            raise ConfigurationError(
+                f"{who}: at Eb/N0 = {float(ebn0):g} dB the receiver could "
+                f"not decode a frame ({str(exc).splitlines()[0]})",
+                remediation="Start the sweep at a higher Eb/N0, where the "
+                            "receiver's Schmidl-Cox sync holds (see "
+                            "schmidl_cox_sync), or use more subcarriers."
+            ) from exc
+
+    ber = np.array([point(e) for e in np.atleast_1d(ebn0_dB)])
+    return BerCurve(np.atleast_1d(np.asarray(ebn0_dB, dtype=float)), ber,
+                    scheme=f"OFDM {tx.modulation}", n_bits=n_bits,
+                    channel=channel, code=tx.code, n_train=None)

@@ -201,13 +201,24 @@ class TestGuards:
         with pytest.raises(ConfigurationError, match='one type'):
             _write(tmp_path, receiver_types=[1, 1, 4, 1, 1])
 
-    def test_non_integrable_spectral_exponent_refused(self, tmp_path):
+    @pytest.mark.parametrize('exponent', [1.5, float('inf')])
+    def test_non_integrable_spectral_exponent_refused(self, tmp_path,
+                                                      exponent):
         with pytest.raises(ConfigurationError, match='1.5'):
-            _write(tmp_path, spectral_exponent=1.5)
+            _write(tmp_path, spectral_exponent=exponent)
 
     def test_interface_must_be_at_least_two(self, tmp_path):
         with pytest.raises(ConfigurationError, match='interface must be'):
             _write(tmp_path, interface=1)
+
+    @pytest.mark.parametrize('length', [0.0, float('nan'), float('inf')])
+    def test_a_correlation_length_that_is_no_length_is_refused(
+            self, tmp_path, length):
+        # OASSP's twin forms r_l = |CLEN(INTFCE)| for PV
+        # (unoassp30.f:606-614): zero is degenerate, nan/inf no length.
+        with pytest.raises(ConfigurationError,
+                           match='must be a positive length'):
+            _write(tmp_path, correlation_length=length)
 
     def test_a_kernel_deck_needs_a_positive_phase_speed(self, tmp_path):
         # unoass21.f:342-344 takes the `IF (.not.REVERB)` branch and forms
@@ -511,13 +522,6 @@ class TestOptionLine:
         with pytest.raises(ConfigurationError, match='product letter'):
             _oass(options='a').run(_env(), _CLASS_SRC, _CLASS_RCV,
                                    run_mode=RunMode.REVERBERATION)
-
-    def test_for_mode_routes_reverberation_here(self):
-        assert OASES.for_mode(RunMode.REVERBERATION,
-                              correlation_length=10.0).__class__ is OASS
-        assert OASES.for_mode(RunMode.COVARIANCE, reverberation=True,
-                              correlation_length=10.0).__class__ is OASS
-        assert OASES.for_mode(RunMode.COVARIANCE).__class__ is OASN
 
 
 @pytest.mark.requires_oases
@@ -976,14 +980,16 @@ class TestRhsContract:
         # ``freq=fr1_in_file``, so a mismatch silently moves the run to the
         # .rhs's frequency while the Field would still be labelled with the
         # deck's.
-        import uacpy.models.oases.oass as oases_module
+        # The mean-field launch is the shared chain's (_mean_field).
+        import uacpy.models.oases._mean_field as oases_module
         monkeypatch.setattr(oases_module, 'read_oases_rhs_header',
                             lambda path: _rhs_header(1, 137.0))
         with pytest.raises(ConfigurationError, match='137'):
             _oass(work_dir=tmp_path).run(_env(), _CLASS_SRC, _CLASS_RCV)
 
     def test_a_multi_frequency_rhs_is_refused(self, tmp_path, monkeypatch):
-        import uacpy.models.oases.oass as oases_module
+        # The mean-field launch is the shared chain's (_mean_field).
+        import uacpy.models.oases._mean_field as oases_module
         monkeypatch.setattr(oases_module, 'read_oases_rhs_header',
                             lambda path: _rhs_header(4, 100.0))
         with pytest.raises(ConfigurationError, match='frequency block'):
@@ -994,7 +1000,8 @@ class TestRhsContract:
         """G2's boundary at 100 Hz: |Δf| > 0.1 Hz refuses, |Δf| ≤ 0.1 Hz
         passes the guard (the producer's real .rhs carries the exact
         frequency, so the passing chain then completes normally)."""
-        import uacpy.models.oases.oass as oases_module
+        # The mean-field launch is the shared chain's (_mean_field).
+        import uacpy.models.oases._mean_field as oases_module
         monkeypatch.setattr(oases_module, 'read_oases_rhs_header',
                             lambda path: _rhs_header(1, 100.11))
         with pytest.raises(ConfigurationError, match='100.11'):
@@ -1043,6 +1050,19 @@ class TestCLowDirectionOfHarm:
         with recorded_warnings() as caught:
             self._settings(_oass(c_low=mean))
         assert not [w for w in caught if 'differs' in str(w.message)]
+
+    def test_the_record_carries_the_c_high_the_deck_carries(self, tmp_path):
+        """An unset ``c_high`` is resolved in stage 3 to OASES' "no upper
+        limit", the value the OASS deck's Block VII then carries."""
+        engine = self._settings(_oass()).engine
+        assert engine.c_high == 1e8
+        assert engine.c_high_origin == (
+            "1e8, OASES' no upper limit (oast.tex:487, :568)")
+        pinned = self._settings(_oass(c_high=5000.0)).engine
+        assert (pinned.c_high, pinned.c_high_origin) == (
+            5000.0, 'OASS(c_high=…)')
+        lines = _write(tmp_path, c_low=engine.c_low, c_high=engine.c_high)
+        assert f"{engine.c_low!r} {engine.c_high!r}" in lines
 
 
 @pytest.mark.requires_oases
@@ -1541,13 +1561,16 @@ class TestOassMeanFieldOptionLine:
     ``.rco``/``.trc``). ``options='N J s'`` is documented as legal and does
     write the ``.rhs``, so the run died on a missing table nothing here reads,
     after the binary had already been spent. Both letters are refused by the
-    checking stage, before any deck is written."""
+    checking stage, before any deck is written. OAST's constructor refuses a
+    line without 'T' itself, so the line is assigned after construction —
+    the path OASS's own check is left to catch."""
 
     @staticmethod
     def _rig(tmp_path, options):
+        producer = OAST(verbose=False)
+        producer.options = options
         model = OASS(correlation_length=10.0, verbose=False,
-                     work_dir=tmp_path, cleanup=False,
-                     mean_field=OAST(options=options, verbose=False))
+                     work_dir=tmp_path, cleanup=False, mean_field=producer)
         env = Environment(
             name='rough', bathymetry=100.0, ssp=1500.0,
             bottom=BoundaryProperties(acoustic_type='half-space',
@@ -1581,7 +1604,6 @@ class TestOassMeanFieldOptionLine:
         from uacpy.models.oases.oast import _oast_options
         producer = _oass()._build_mean_field()
         chars = set(_oast_options(producer.options, producer.complex_contour,
-                                  producer.compute_contour,
                                   producer.compute_depth_average))
         assert {'s', 'T'} <= chars
 

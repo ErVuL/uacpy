@@ -36,7 +36,6 @@ import numpy as np
 from pathlib import Path
 from typing import Union, Tuple, Dict, Any, NamedTuple, Optional
 
-from uacpy._log import log_message
 from uacpy.core._export import ExportRecord
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import (
@@ -58,7 +57,7 @@ from uacpy.io._fortran_helpers import (
     list_directed_int,
     read_list_directed_values, split_fortran_tokens, take_tokens,
     strip_fortran_comment as _strip_fortran_comment,
-    strip_fortran_quotes as _strip_fortran_quotes, summarize_axis)
+    strip_fortran_quotes as _strip_fortran_quotes)
 from uacpy.core.units import km_to_m
 
 
@@ -766,8 +765,9 @@ def read_shd_asc(filepath: Union[str, Path]) -> ShdFile:
 
     No program in the vendored Acoustics-Toolbox writes this format — every
     ``SHDFile`` OPEN is ``FORM = 'UNFORMATTED'`` (``misc/RWSHDFile.f90:39,
-    45, 102, 119``). It is read here for shade files exported by the AT
-    Matlab tools or produced by other OALIB-family codes.
+    45, 102, 119``), and no script under ``Matlab/`` writes one either (they
+    only read it, ``read_shd_asc.m``). It is read here for a shade file
+    another program produced in this layout.
 
     References
     ----------
@@ -1513,41 +1513,6 @@ class SspTable(ExportRecord):
 
 
 @typed_format_error
-def _parse_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
-    """The ``.ssp`` as ``{'n_prof', 'r_prof' (m), 'c_mat' (n_depth,
-    n_prof), 'n_depth'}``, what :func:`read_env` reads."""
-    filepath = Path(filepath)
-    require_user_input(filepath, 'read_ssp_2d')
-    # Canonical AT/Bellhop layout (Bellhop/sspMod.f90:407,417,428):
-    #   READ 1 : NProf (integer)
-    #   READ 2 : NProf range values (one whole-vector list-directed READ)
-    #   then one whole-vector READ of NProf speeds per depth row.
-    # Each whole-vector READ consumes records until its count is satisfied,
-    # so a row may wrap across lines; the remainder of a READ's final line
-    # is discarded, exactly as the Fortran does.
-    with open(filepath, "r") as fid:
-        n_prof = list_directed_int(fid.readline())
-        r_prof = read_list_directed_values(
-            fid, n_prof, f"{n_prof} profile ranges", filepath)
-        # The number of depth rows isn't stored here (it lives in the .env
-        # file) so we read rows until the file ends and infer NSSP.
-        rows = []
-        while True:
-            line = fid.readline()
-            if line == '':
-                break
-            if not _strip_fortran_comment(line).replace(',', ' ').split():
-                continue
-            rows.append(read_list_directed_values(
-                fid, n_prof, f"SSP depth row {len(rows) + 1} "
-                f"({n_prof} values)", filepath, first_line=line))
-        c_mat = np.array(rows)  # shape (n_depth, n_prof)
-        n_depth = c_mat.shape[0]
-
-    return {"n_prof": n_prof, "r_prof": km_to_m(r_prof), "c_mat": c_mat,
-            "n_depth": n_depth}
-
-
 def read_ssp_2d(filepath: Union[str, Path]) -> SspTable:
     """
     Read 2D sound speed profile file used by BELLHOP.
@@ -1595,9 +1560,35 @@ def read_ssp_2d(filepath: Union[str, Path]) -> SspTable:
         # Sound speed at depth index 10, range index 5
         c = ssp.sound_speed[10, 5]
     """
-    parsed = _parse_ssp_2d(filepath)
-    return SspTable(path=str(filepath), ranges=parsed['r_prof'],
-                    sound_speed=parsed['c_mat'])
+    filepath = Path(filepath)
+    require_user_input(filepath, 'read_ssp_2d')
+    # Canonical AT/Bellhop layout (Bellhop/sspMod.f90:407,417,428):
+    #   READ 1 : NProf (integer)
+    #   READ 2 : NProf range values (one whole-vector list-directed READ)
+    #   then one whole-vector READ of NProf speeds per depth row.
+    # Each whole-vector READ consumes records until its count is satisfied,
+    # so a row may wrap across lines; the remainder of a READ's final line
+    # is discarded, exactly as the Fortran does.
+    with open(filepath, "r") as fid:
+        n_prof = list_directed_int(fid.readline())
+        r_prof = read_list_directed_values(
+            fid, n_prof, f"{n_prof} profile ranges", filepath)
+        # The number of depth rows isn't stored here (it lives in the .env
+        # file) so we read rows until the file ends and infer NSSP.
+        rows = []
+        while True:
+            line = fid.readline()
+            if line == '':
+                break
+            if not _strip_fortran_comment(line).replace(',', ' ').split():
+                continue
+            rows.append(read_list_directed_values(
+                fid, n_prof, f"SSP depth row {len(rows) + 1} "
+                f"({n_prof} values)", filepath, first_line=line))
+        c_mat = np.array(rows)  # shape (n_depth, n_prof)
+
+    return SspTable(path=str(filepath), ranges=km_to_m(r_prof),
+                    sound_speed=c_mat)
 
 
 @dataclass(frozen=True, eq=False)
@@ -1611,7 +1602,7 @@ class Ssp3dFile(ExportRecord):
         The grid sizes the file declares.
     x, y : ndarray
         The horizontal axes in metres (km on disk; the engine scales them
-        by 1000, ``sspMod.f90:621-622``).
+        by 1000, ``Bellhop/sspMod.f90:621-622``).
     z : ndarray
         The depth axis in metres, as the file holds it.
     sound_speed : ndarray
@@ -1690,7 +1681,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Ssp3dFile:
     4. ``Nz * Ny`` rows of ``Nx`` sound speeds, depth-outermost:
        ``DO iz … DO iy … READ cMat3( :, iy, iz )`` (``:610-612``).
 
-    Every axis needs at least two points — ``sspMod.f90:600-602`` ERROUTs
+    Every axis needs at least two points — ``Bellhop/sspMod.f90:600-602`` ERROUTs
     with "You must have a least two points in x, y, z directions" otherwise, and
     ``misc/FatalError.f90:30`` is ``STOP '<string>'``, so a one-point axis
     ends the run at exit 0 with no field. That is refused here.
@@ -1730,7 +1721,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Ssp3dFile:
                 raise FileFormatError(
                     f"read_ssp_3d: {filepath} declares {n} point(s) in "
                     f"{label}; the hexahedral SSP needs at least two on every "
-                    f"axis (sspMod.f90:600-601 ERROUTs, which is STOP at exit "
+                    f"axis (Bellhop/sspMod.f90:600-601 ERROUTs, which is STOP at exit "
                     f"0 with no field written).",
                     remediation=f"Give the {label} axis at least two "
                                 f"coordinates bracketing the run.",
@@ -1743,7 +1734,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Ssp3dFile:
         Nz, Segz = _axis("z")
 
         # Depth-outermost, then y, one record of Nx speeds
-        # (sspMod.f90:610-612).
+        # (Bellhop/sspMod.f90:610-612).
         c_mat = np.array([
             [read_list_directed_values(
                 fid, Nx,
@@ -1753,7 +1744,7 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Ssp3dFile:
             for iz in range(Nz)
         ])
 
-    # x and y are km on disk; z is already metres (sspMod.f90:621-622
+    # x and y are km on disk; z is already metres (Bellhop/sspMod.f90:621-622
     # scales only the two horizontal axes).
     return Ssp3dFile(n_x=Nx, n_y=Ny, n_z=Nz, x=km_to_m(Segx),
                      y=km_to_m(Segy), z=Segz, sound_speed=c_mat)
@@ -1824,113 +1815,7 @@ def _is_fields_exe_flp(second_record: str) -> bool:
 
 
 @typed_format_error
-def _parse_flp(filepath: Union[str, Path], verbose: Union[bool, str] = False) -> Dict[str, Any]:
-    """The ``.flp`` as the dict ``read_flp.m`` builds (``title``, ``opt``, ``comp``,
-    ``M_limit``, ``N_prof``, ``r_prof``, ``pos``), what :func:`read_env` reads."""
-    filepath = Path(filepath)
-    if not filepath.suffix:
-        filepath = filepath.with_suffix(".flp")
-    require_user_input(filepath, 'read_flp')
-
-    # The title record holds bytes the engine cut to width, so undecodable
-    # bytes are replaced.
-    with open(filepath, "r", encoding='utf-8', errors='replace') as f:
-        title = _strip_fortran_quotes(f.readline())
-        log_message('oalib_reader', f"Title: {title}", verbose=verbose)
-        option_record = f.readline()
-        # field.exe's .flp carries its option on the second record
-        # (KrakenField/field.f90:64-152); Scooter's fields.exe .flp opens
-        # with the option and follows it with a range count
-        # (Scooter/fields.f90:61-97).
-        if _is_fields_exe_flp(option_record):
-            raise FileFormatError(
-                f"read_flp: {filepath} is in the Scooter fields.exe layout "
-                f"(option, then the receiver ranges in km; Scooter/"
-                f"fields.f90:61-97), not the field.exe layout this reads "
-                f"(title, quoted option, MLimit, profiles, receivers).",
-                remediation="read_env reads it beside its Scooter .env, and "
-                            "a Scooter run's ranges are applied by "
-                            "GreensFunction.to_field.")
-        opt = _strip_fortran_quotes(option_record)
-        log_message('oalib_reader', f"Options: {opt}", verbose=verbose)
-
-        # Fill missing option columns with reasonable placeholders:
-        # positions 2-3 (coupling override, elastic component) default to
-        # ' ' and position 4 to 'C' (coherent). Pad to three columns FIRST
-        # so a one-letter option never lands the 'C' in the component
-        # column (padding in two steps instead turns 'R' into 'R C', i.e.
-        # comp = 'C').
-        opt = opt.ljust(3)
-        if len(opt) <= 3:
-            opt += "C"
-
-        # Component selector lives in option column 3 (AT
-        # ReadModes.f90:315-324). If the file didn't specify one, return
-        # it verbatim rather than inventing a "P" default that wasn't in
-        # the file — downstream code can distinguish ' ' vs 'P'.
-        comp = opt[2]
-        M_limit = list_directed_int(f.readline())
-        log_message('oalib_reader', f"MLimit = {M_limit}", verbose=verbose)
-        # ReadVector Sorts every vector it returns
-        # (misc/SourceReceiverPositions.f90); rProf included (field.f90:106).
-        r_prof, N_prof = _read_vector(f)
-        r_prof = np.sort(r_prof)
-        log_message('oalib_reader', f"Number of profiles, NProf = {N_prof}",
-                    verbose=verbose)
-        # `verbose` is public and off by default, so this preview is work
-        # every read would otherwise do for a message no one asked for.
-        # Python evaluates the argument before log_message can decline it,
-        # so the guard has to be here rather than inside the logger.
-        if verbose:
-            log_message('oalib_reader',
-                        f"profile ranges rProf (km): {summarize_axis(r_prof)}",
-                        verbose=verbose, level='debug')
-
-        # Receiver ranges pass through Sort in the Fortran
-        # (misc/SourceReceiverPositions.f90:268).
-        r_rcv, _ = _read_vector(f)
-        r_rcv = np.sort(km_to_m(r_rcv))
-        pos_temp = _read_sz_rz(f)
-        # Rro is read by AT with Units='m' (KrakenField/field.f90:147), so the
-        # column is already metres on disk — no conversion.
-        # Rro passes through the same Sort (field.f90:147).
-        r_offsets, N_offsets = _read_vector(f)
-        r_offsets = np.sort(r_offsets)
-
-        log_message('oalib_reader',
-                    f"Number of receiver range offsets = {N_offsets}",
-                    verbose=verbose)
-        # Built only when it can print — see the rProf preview above.
-        if verbose:
-            log_message('oalib_reader',
-                        "receiver range offsets Rro (m): "
-                        f"{summarize_axis(r_offsets)}",
-                        verbose=verbose, level='debug')
-
-        if np.max(np.abs(r_offsets)) > 0.0:
-            warnings.warn(
-                "read_flp: receiver range offsets are not zero — "
-                "result includes array-tilt geometry.",
-                IOWarning, skip_file_prefixes=USER_FRAME_SKIP,
-            )
-
-    return {
-        "title": title,
-        "opt": opt,
-        "comp": comp,
-        "M_limit": M_limit,
-        "N_prof": N_prof,
-        "r_prof": km_to_m(r_prof),
-        "pos": {
-            "s": {"z": pos_temp["sz"]},
-            "r": {"z": pos_temp["rz"], "r": r_rcv, "ro": r_offsets},
-            "Nro": N_offsets,
-        },
-    }
-
-
-def read_flp(filepath: Union[str, Path],
-             verbose: Union[bool, str] = False) -> FlpFile:
+def read_flp(filepath: Union[str, Path]) -> FlpFile:
     """
     Read field parameters file (.flp) for KRAKEN/FIELD programs.
 
@@ -1942,9 +1827,6 @@ def read_flp(filepath: Union[str, Path],
     filepath : str or Path
         The ``.flp`` file, or its root: ``.flp`` is appended only when the
         path has no suffix.
-    verbose : bool or str, optional
-        Logging gate passed through to ``log_message``. Default False.
-
     Returns
     -------
     flp : FlpFile
@@ -1986,13 +1868,68 @@ def read_flp(filepath: Union[str, Path],
     --------
     write_fieldflp : Write field parameters file
     """
-    d = _parse_flp(filepath, verbose=verbose)
-    return FlpFile(title=d['title'], option=d['opt'], component=d['comp'],
-                   n_modes=d['M_limit'], profile_ranges=d['r_prof'],
-                   source_depths=d['pos']['s']['z'],
-                   receiver_depths=d['pos']['r']['z'],
-                   receiver_ranges=d['pos']['r']['r'],
-                   receiver_range_offsets=d['pos']['r']['ro'])
+    filepath = Path(filepath)
+    if not filepath.suffix:
+        filepath = filepath.with_suffix(".flp")
+    require_user_input(filepath, 'read_flp')
+
+    # The title record holds bytes the engine cut to width, so undecodable
+    # bytes are replaced.
+    with open(filepath, "r", encoding='utf-8', errors='replace') as f:
+        title = _strip_fortran_quotes(f.readline())
+        option_record = f.readline()
+        # field.exe's .flp carries its option on the second record
+        # (KrakenField/field.f90:64-152); Scooter's fields.exe .flp opens
+        # with the option and follows it with a range count
+        # (Scooter/fields.f90:61-97).
+        if _is_fields_exe_flp(option_record):
+            raise FileFormatError(
+                f"read_flp: {filepath} is in the Scooter fields.exe layout "
+                f"(option, then the receiver ranges in km; Scooter/"
+                f"fields.f90:61-97), not the field.exe layout this reads "
+                f"(title, quoted option, MLimit, profiles, receivers).",
+                remediation="read_env reads it beside its Scooter .env, and "
+                            "a Scooter run's ranges are applied by "
+                            "GreensFunction.to_field.")
+        opt = _strip_fortran_quotes(option_record)
+
+        # Fill missing option columns with reasonable placeholders:
+        # positions 2-3 (coupling override, elastic component) default to
+        # ' ' and position 4 to 'C' (coherent). Pad to three columns FIRST
+        # so a one-letter option never lands the 'C' in the component
+        # column (padding in two steps instead turns 'R' into 'R C', i.e.
+        # comp = 'C').
+        opt = opt.ljust(3)
+        if len(opt) <= 3:
+            opt += "C"
+
+        # Component selector lives in option column 3 (AT
+        # ReadModes.f90:315-324). If the file didn't specify one, return
+        # it verbatim rather than inventing a "P" default that wasn't in
+        # the file — downstream code can distinguish ' ' vs 'P'.
+        comp = opt[2]
+        M_limit = list_directed_int(f.readline())
+        # ReadVector Sorts every vector it returns
+        # (misc/SourceReceiverPositions.f90); rProf included (field.f90:106).
+        r_prof, _ = _read_vector(f)
+        r_prof = np.sort(r_prof)
+
+        # Receiver ranges pass through Sort in the Fortran
+        # (misc/SourceReceiverPositions.f90:268).
+        r_rcv, _ = _read_vector(f)
+        r_rcv = np.sort(km_to_m(r_rcv))
+        pos_temp = _read_sz_rz(f)
+        # Rro is read by AT with Units='m' (KrakenField/field.f90:147), so the
+        # column is already metres on disk — no conversion.
+        # Rro passes through the same Sort (field.f90:147).
+        r_offsets, _ = _read_vector(f)
+        r_offsets = np.sort(r_offsets)
+
+    return FlpFile(title=title, option=opt, component=comp, n_modes=M_limit,
+                   profile_ranges=km_to_m(r_prof),
+                   source_depths=pos_temp["sz"],
+                   receiver_depths=pos_temp["rz"], receiver_ranges=r_rcv,
+                   receiver_range_offsets=r_offsets)
 
 
 def _read_sz_rz(fid) -> Dict[str, np.ndarray]:

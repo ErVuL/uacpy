@@ -287,6 +287,27 @@ class TestResultStackLabelsMustBeFinite:
         with pytest.raises(ConfigurationError, match='same distance'):
             self._stack().at(source_depth=label)
 
+    @pytest.mark.parametrize('labels, match', [
+        ([np.nan, 10.0], r"the source_depth labels \[nan, 10\.0\] hold a "
+                         r"non-finite value"),
+        ([10.0, 10.0], r"the source_depth labels \[10\.0, 10\.0\] repeat "
+                       r"\[10\.0\]; each slab"),
+        ([20.0, 10.0], r"slabs\[0\] is the slab of source_depth 10 but is "
+                       r"labelled 20")])
+    def test_a_label_stack_fields_refuses_is_refused(self, labels, match):
+        """A NaN label captures every nearest-label lookup (argmin meets the
+        NaN first), a repeated one hides a slab, and a slab of one source
+        depth labelled another is found under the wrong one: the labels
+        follow stack_fields' rule."""
+        slabs = [_rays(source_depth=10.0), _rays(source_depth=20.0)]
+        with pytest.raises(ConfigurationError, match=f"^ResultStack: {match}"):
+            ResultStack(slabs, labels, coordinate_name='source_depth')
+        # A sweep over another coordinate repeats nothing and has no
+        # identity to contradict.
+        same = [_rays(source_depth=10.0), _rays(source_depth=10.0)]
+        swept = ResultStack(same, [1.0, 2.0], coordinate_name='trial')
+        assert swept.at(trial=2.0) is same[1]
+
 
 class TestAResultStackIsAnExportableResult:
     """The stack is a :class:`Result` and saves and loads as every result
@@ -367,4 +388,65 @@ class TestAResultStackIsAnExportableResult:
         del d[key]
         with pytest.raises(ConfigurationError,
                            match=rf"^ResultStack\.from_dict: .*{key}"):
+            ResultStack.from_dict(d)
+
+
+def _arrival_stack():
+    return ResultStack([_arrivals(5.0), _arrivals(15.0)], [5.0, 15.0],
+                       coordinate_name='source_depth')
+
+
+def _same_stacks(a, b):
+    assert type(a) is type(b)
+    assert a.coordinate_name == b.coordinate_name
+    np.testing.assert_array_equal(a.coordinate, b.coordinate)
+    assert len(a.slabs) == len(b.slabs)
+    for x, y in zip(a.slabs, b.slabs):
+        assert type(x) is type(y)
+        dx, dy = x.to_dict(), y.to_dict()
+        assert dx.keys() == dy.keys()
+        for key in dx:
+            if isinstance(dx[key], np.ndarray):
+                np.testing.assert_array_equal(dx[key], dy[key], err_msg=key)
+                assert dx[key].dtype == np.asarray(dy[key]).dtype, key
+
+
+class TestAResultStackRoundTrips:
+    """Every save form reads back the stack it saved, each slab by its own
+    class."""
+
+    def test_from_dict_of_to_dict_is_the_stack(self):
+        stack = _arrival_stack()
+        _same_stacks(stack, ResultStack.from_dict(stack.to_dict()))
+
+    def test_each_slab_is_saved_under_its_class_path(self):
+        d = _arrival_stack().to_dict()
+        assert d['__class__'] == 'uacpy.core.results.ResultStack'
+        assert [s['__class__'] for s in d['slabs']] == \
+            ['uacpy.core.results.Arrivals'] * 2
+
+    def test_a_stack_over_another_coordinate_round_trips(self):
+        stack = ResultStack([_arrivals(5.0), _arrivals(5.0)], [1.0, 2.0],
+                            coordinate_name='case')
+        back = ResultStack.from_dict(stack.to_dict())
+        assert all(isinstance(s, Arrivals) for s in back.slabs)
+        assert back.coordinate_name == 'case'
+        _same_stacks(stack, back)
+
+    def test_the_npz_round_trip_is_the_stack(self, tmp_path):
+        stack = _arrival_stack()
+        np.savez(tmp_path / 's.npz', **stack.to_dict())
+        with np.load(tmp_path / 's.npz', allow_pickle=True) as f:
+            _same_stacks(stack, ResultStack.from_dict(dict(f)))
+
+    def test_from_netcdf_reads_back_what_to_netcdf_wrote(self, tmp_path):
+        pytest.importorskip('xarray')
+        stack = _arrival_stack()
+        stack.to_netcdf(tmp_path / 's.nc')
+        _same_stacks(stack, ResultStack.from_netcdf(tmp_path / 's.nc'))
+
+    def test_a_foreign_class_path_is_refused(self):
+        d = _arrival_stack().to_dict()
+        d['slabs'][0]['__class__'] = 'os.path.join'
+        with pytest.raises(ConfigurationError, match='not a uacpy class'):
             ResultStack.from_dict(d)

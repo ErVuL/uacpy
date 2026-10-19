@@ -22,6 +22,7 @@ reprojection needs ``pyproj`` (both default uacpy dependencies).
 
 import dataclasses
 import datetime as _dt
+import functools
 import io
 import warnings
 from typing import Optional
@@ -29,6 +30,8 @@ from typing import Optional
 import numpy as np
 
 from uacpy._log import log_message
+from uacpy.core._export import ExportRecord, read_only
+from uacpy.core._plotting import plotter
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import (
     ConfigurationError, DataFetchError, FallbackWarning, IOWarning,
@@ -49,9 +52,9 @@ from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.data._provenance_notice import one_provenance_notice
 
 __all__ = ['download_seaice_db', 'fetch_sea_ice_concentration',
-           'fetch_sea_ice_concentration_transect', 'sea_ice_grid',
+           'fetch_sea_ice_concentration_transect', 'SeaIceGrid', 'sea_ice_grid',
            'sea_ice_pixel', 'sea_ice_surface', 'fetch_sea_ice_surface',
-           'sea_ice_surface_transect', 'SEA_ICE_TYPICAL_ROUGHNESS_M',
+           'sea_ice_surface_transect', 'SEA_ICE_TYPICAL_ROUGHNESS',
            'climatology_period']
 
 # Sea-ice canopy as a homogeneous elastic surface. Canonical Arctic pack-ice
@@ -84,13 +87,17 @@ _MONTHS = ['01_Jan', '02_Feb', '03_Mar', '04_Apr', '05_May', '06_Jun',
 # Fixed NSIDC Sea Ice Polar Stereographic grids, 25 km pixels. ``x0``/``y0`` are
 # the outer corner of cell (0, 0) in projected metres — x0 the western edge and
 # y0 the *northern* (maximum-y) edge, so rows count southward as y decreases.
-# The cached grids are 448 x 304 (N) and 332 x 316 (S); under these origins the
+# ``shape`` is the (rows, columns) of the cached grids, 448 x 304 (N) and
+# 332 x 316 (S) (external: NSIDC Polar Stereographic grid definitions, 304 x 448
+# cells north and 316 x 332 south); under these origins the
 # pole projects to (0, 0) and lands mid-grid, at cell (234, 154) and (174, 158).
 # Both origins are whole multiples of the 25 km pixel, so the pole sits exactly
 # on a cell *corner* and _rowcol's floor() picks the cell south-east of it.
 _GRID = {
-    'N': {'epsg': 'EPSG:3411', 'x0': -3850000.0, 'y0': 5850000.0, 'px': 25000.0},
-    'S': {'epsg': 'EPSG:3412', 'x0': -3950000.0, 'y0': 4350000.0, 'px': 25000.0},
+    'N': {'epsg': 'EPSG:3411', 'x0': -3850000.0, 'y0': 5850000.0, 'px': 25000.0,
+          'shape': (448, 304)},
+    'S': {'epsg': 'EPSG:3412', 'x0': -3950000.0, 'y0': 4350000.0, 'px': 25000.0,
+          'shape': (332, 316)},
 }
 # The unobserved cap near the pole; uacpy guidance fills it as full cover.
 _POLE_HOLE = 2510
@@ -489,7 +496,7 @@ def fetch_sea_ice_concentration(point: Coordinate, *, date=None,
 #: starting point to vary, not a measured or published value. Site estimates
 #: of the under-ice roughness (standard deviation of the ice depth) are charted
 #: in Etter §5.4.4.2, Fig. 5.11 (from Buck 1985).
-SEA_ICE_TYPICAL_ROUGHNESS_M = 1.0
+SEA_ICE_TYPICAL_ROUGHNESS = 1.0
 
 
 def sea_ice_surface(
@@ -530,7 +537,7 @@ def sea_ice_surface(
     low ... the ice cover is extremely inhomogeneous ... characterized by
     significant roughness as well as many discrete features such as ridges with
     keels". The default is kept at 0 so the returned properties stay the
-    published ones; pass :data:`SEA_ICE_TYPICAL_ROUGHNESS_M` (or a site value)
+    published ones; pass :data:`SEA_ICE_TYPICAL_ROUGHNESS` (or a site value)
     to have the solvers scatter off the canopy.
 
     A non-finite concentration (``NaN`` land/coast/out-of-grid cell) is treated
@@ -629,11 +636,148 @@ def _provenance(requested_point=None):
                           requested_point=requested_point)
 
 
-def sea_ice_grid(month: int, *, hemi: str = 'N') -> np.ndarray:
-    """Monthly climatology concentration grid (0-1, ``NaN`` = land) for mapping.
+@dataclasses.dataclass(frozen=True, eq=False)
+class SeaIceGrid(ExportRecord):
+    """Sea-ice concentration on an NSIDC polar-stereographic grid, as
+    :func:`sea_ice_grid` returns it.
 
-    ``hemi`` is ``'N'`` / ``'S'``; the array is on the NSIDC polar-stereographic
-    grid (North EPSG:3411, South EPSG:3412, 25 km).
+    The grid's coordinates follow from ``hemi`` (the fixed 25 km NSIDC grid
+    of that hemisphere): :attr:`x` and :attr:`y`, the projected position of
+    each cell centre, :attr:`lats` and :attr:`lons`, its latitude and
+    longitude, and :attr:`crs`, the projection. ``np.asarray(grid)`` is the
+    concentration; ``.plot()`` draws the map
+    (:func:`uacpy.plot.plot_sea_ice_map`).
+
+    Attributes
+    ----------
+    concentration : ndarray
+        Concentration (0-1; ``NaN`` is land or coast), shape ``(rows,
+        columns)``: 448 x 304 north, 332 x 316 south. Row 0 is the grid's
+        northernmost (largest-``y``) row.
+    hemi : {'N', 'S'}
+        The hemisphere whose grid it is.
+    month : int
+        The calendar month (1-12) of the climatology.
+    provenance : DataProvenance or None
+        The catalogue record of the climatology (its reference period in
+        ``data_date``), which :func:`sea_ice_grid` always sets. ``None`` is
+        user-supplied data: no catalogue source, so no credit is drawn.
+
+    Raises
+    ------
+    ConfigurationError
+        ``hemi`` is not ``'N'`` / ``'S'``, ``month`` is not 1-12, or the
+        concentration is not that hemisphere's grid shape.
+    """
+
+    concentration: np.ndarray
+    hemi: str
+    month: int
+    provenance: Optional[DataProvenance] = None
+
+    _ARRAY_FIELDS = ('concentration',)
+    _XARRAY_FIELDS = {'concentration': 'concentration'}
+
+    #: The plotter that draws this record (``.plot()``).
+    _plotter = 'plot_sea_ice_map'
+
+    def __post_init__(self):
+        if self.hemi not in _GRID:
+            raise ConfigurationError(
+                f"SeaIceGrid: hemi={self.hemi!r} is not a hemisphere of the "
+                f"NSIDC grid; pass one of {tuple(_GRID)}.")
+        object.__setattr__(self, 'month', require_month(self.month,
+                                                        'SeaIceGrid'))
+        concentration = np.asarray(self.concentration)
+        shape = _GRID[self.hemi]['shape']
+        if concentration.shape != shape:
+            other = [h for h, g in _GRID.items()
+                     if g['shape'] == concentration.shape]
+            raise ConfigurationError(
+                f"SeaIceGrid: the hemi={self.hemi!r} NSIDC grid is "
+                f"{shape[0]} x {shape[1]} cells; got an array of shape "
+                f"{concentration.shape}"
+                + (f", the hemi={other[0]!r} grid." if other else "."),
+                remediation=(f"Pass hemi={other[0]!r}." if other else
+                             "Pass the concentration on that hemisphere's "
+                             "grid, as sea_ice_grid(month, hemi=...) "
+                             "returns it."))
+        object.__setattr__(self, 'concentration', concentration)
+        super().__post_init__()
+
+    def __array__(self, dtype=None, copy=None):
+        """The concentration array, so numpy functions take the record."""
+        return np.array(self.concentration, dtype=dtype, copy=copy)
+
+    @property
+    def crs(self) -> str:
+        """The grid's projection: ``'EPSG:3411'`` north, ``'EPSG:3412'``
+        south (NSIDC Sea Ice Polar Stereographic)."""
+        return _GRID[self.hemi]['epsg']
+
+    @property
+    def x(self) -> np.ndarray:
+        """Projected easting (m) of each column's cell centres, shape
+        ``(columns,)``."""
+        g = _GRID[self.hemi]
+        return read_only(g['x0'] + (np.arange(g['shape'][1]) + 0.5) * g['px'])
+
+    @property
+    def y(self) -> np.ndarray:
+        """Projected northing (m) of each row's cell centres, shape
+        ``(rows,)``, decreasing: row 0 is the northernmost."""
+        g = _GRID[self.hemi]
+        return read_only(g['y0'] - (np.arange(g['shape'][0]) + 0.5) * g['px'])
+
+    @functools.cached_property
+    def _cell_lat_lon(self):
+        """``(lats, lons)`` of every cell centre, unprojected once."""
+        xx, yy = np.meshgrid(self.x, self.y)
+        lon, lat = _pyproj_transformer(self.crs).transform(
+            xx, yy, direction='INVERSE')
+        return read_only(lat), read_only(lon)
+
+    @property
+    def lats(self) -> np.ndarray:
+        """Latitude (decimal degrees) of each cell centre, the
+        concentration's shape."""
+        return self._cell_lat_lon[0]
+
+    @property
+    def lons(self) -> np.ndarray:
+        """Longitude (decimal degrees, -180 to 180) of each cell centre,
+        the concentration's shape."""
+        return self._cell_lat_lon[1]
+
+    def plot(self, ax=None, **kwargs):
+        """Draw the grid as a polar map; returns ``(fig, ax)``.
+
+        The record's own view, :func:`uacpy.plot.plot_sea_ice_map` handed
+        the record whole (its hemisphere places the graticule, transect and
+        zoom; its credit names ``provenance``). ``ax`` draws into an
+        existing Axes; the remaining ``kwargs`` are that plotter's
+        (``transect=``, ``source_point=``, ``contours=`` …).
+        """
+        return plotter('plot_carrier')(self, ax=ax, **kwargs)
+
+    def _payload(self):
+        return {'concentration': (self.concentration, ('y', 'x'), '')}
+
+    def _coords(self):
+        return {'y': (self.y, 'm'), 'x': (self.x, 'm'),
+                'lat': (self.lats, 'degrees_north', ('y', 'x')),
+                'lon': (self.lons, 'degrees_east', ('y', 'x'))}
+
+
+def sea_ice_grid(month: int, *, hemi: str = 'N') -> SeaIceGrid:
+    """Monthly climatology concentration (0-1, ``NaN`` = land) of a whole
+    hemisphere, for mapping: a :class:`SeaIceGrid` on the NSIDC
+    polar-stereographic grid (North EPSG:3411, South EPSG:3412, 25 km), with
+    its coordinates and the climatology's provenance; ``.plot()`` draws it.
+
+    The record holds its own copy of the month's grid, read-only:
+    ``np.array(grid)`` is a writeable copy to mask or edit, which leaves the
+    climatology every later fetch reads untouched.
 
     Parameters
     ----------
@@ -646,7 +790,8 @@ def sea_ice_grid(month: int, *, hemi: str = 'N') -> np.ndarray:
     if hemi not in _GRID:
         raise ConfigurationError(
             f"sea_ice_grid: hemi must be 'N'/'S'; got {hemi!r}.")
-    return _model()[hemi][month - 1]
+    return SeaIceGrid(concentration=_model()[hemi][month - 1].copy(),
+                      hemi=hemi, month=month, provenance=_provenance())
 
 
 def sea_ice_pixel(point: Coordinate, *, hemi: str = 'N'):

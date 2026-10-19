@@ -13,6 +13,9 @@ not mean sea level (EMODnet Bathymetry DTM product metadata). LAT,
 the lowest predicted tide, lies below MSL, so a returned depth is *shallower*
 than an MSL-referenced depth by the local MSL − LAT offset, which the local
 tide sets: it matters in shallow water on tidal coasts, not offshore.
+
+Every fetch takes ``base_url=``, the griddap root the datasets hang under (a
+mirror); ``None`` reads the module constant :data:`ERDDAP_URL`.
 """
 
 import urllib.parse
@@ -37,39 +40,49 @@ _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
 EMODNET_NATIVE_DEG = 1.0 / 960.0
 
 
-def _griddap_url(dataset, constraint):
-    """ERDDAP griddap CSV URL for a variable ``constraint`` expression."""
+def _griddap_url(dataset, constraint, base_url=None):
+    """ERDDAP griddap CSV URL for a variable ``constraint`` expression,
+    under ``base_url`` (``None``: :data:`ERDDAP_URL`)."""
     query = urllib.parse.quote(f"elevation{constraint}", safe='[]():.,-')
-    return f"{ERDDAP_URL}/{dataset}.csv?{query}"
+    root = ERDDAP_URL if base_url is None else str(base_url).rstrip('/')
+    return f"{root}/{dataset}.csv?{query}"
 
 
-def _elevation(lat, lon, dataset, *, timeout, verbose):
-    """Elevation (m, +up, LAT datum) at one cell of ``dataset``, or ``NaN``.
+def _elevation(lat, lon, dataset, *, timeout, verbose, base_url=None):
+    """The griddap reading at one cell of ``dataset``: its elevation (m,
+    +up, LAT datum; ``NaN`` where the service reports no value) and the
+    node the service selected, which its reply names.
 
-    Returns ``NaN`` where the service reports no value; raises
-    ``DataFetchError`` (out-of-range coordinate) via :func:`http_get` when the
-    point lies outside the tile — the caller treats both as "no coverage here".
+    Raises ``DataFetchError`` (out-of-range coordinate) via :func:`http_get`
+    when the point lies outside the tile — the caller treats both as "no
+    coverage here".
     """
-    url = _griddap_url(dataset, f"[({lat})][({normalize_lon(lon)})]")
+    url = _griddap_url(dataset, f"[({lat})][({normalize_lon(lon)})]",
+                       base_url)
     body = http_get(url, timeout=timeout, verbose=verbose, source='bathymetry',
                     user_agent=_USER_AGENT).decode('utf-8', 'replace')
-    return erddap_point(body).value
+    return erddap_point(body)
 
 
-def _elevation_any(lat, lon, *, timeout, verbose):
-    """First finite elevation across the DTM tiles, or raise naming what
-    each tile answered — a land/unsurveyed cell (the service returns NaN
-    there), an out-of-range rejection, and a transport failure are three
-    different situations, and the caller's error reports which occurred."""
+def _elevation_any(lat, lon, *, timeout, verbose, base_url=None):
+    """``(elevation, node)``: the first finite elevation across the DTM
+    tiles and the ``(lat, lon)`` of the node read (``None`` when the reply
+    names none), or raise naming what each tile answered — a
+    land/unsurveyed cell (the service returns NaN there), an out-of-range
+    rejection, and a transport failure are three different situations, and
+    the caller's error reports which occurred."""
     outcomes = []
     for dataset in DATASETS:
         try:
-            elev = _elevation(lat, lon, dataset, timeout=timeout, verbose=verbose)
+            reading = _elevation(lat, lon, dataset, timeout=timeout,
+                                 verbose=verbose, base_url=base_url)
         except DataFetchError as exc:
             outcomes.append(f"{dataset}: {exc.message}")
             continue
-        if np.isfinite(elev):
-            return elev
+        if np.isfinite(reading.value):
+            node = (None if reading.lat is None
+                    else (reading.lat, reading.lon))
+            return reading.value, node
         outcomes.append(
             f"{dataset}: no value at the nearest cell (land, or unsurveyed)")
     raise DataFetchError(
@@ -80,26 +93,40 @@ def _elevation_any(lat, lon, *, timeout, verbose):
     )
 
 
-def point_depth(point, *, timeout=30.0, verbose=False):
+def point_depth(point, *, timeout=30.0, verbose=False, base_url=None):
     """Water depth (m, positive down) at a single point from the EMODnet DTM."""
+    return _depth_and_node(point, timeout=timeout, verbose=verbose,
+                           base_url=base_url)[0]
+
+
+def _depth_and_node(point, *, timeout, verbose, base_url=None):
+    """:func:`point_depth` and the ``(lat, lon)`` of the DTM node read
+    (``None`` when the reply names none)."""
     lat, lon = as_coordinate(point)
-    return depth_from_elevation(
-        _elevation_any(lat, lon, timeout=timeout, verbose=verbose), lat, lon,
-        dataset='EMODnet DTM')
+    elev, node = _elevation_any(lat, lon, timeout=timeout, verbose=verbose,
+                                base_url=base_url)
+    return depth_from_elevation(elev, lat, lon, dataset='EMODnet DTM'), node
 
 
-def depths_along(lats, lons, *, timeout=30.0, verbose=False):
+def depths_along(lats, lons, *, timeout=30.0, verbose=False, base_url=None):
     """Depths (m) at paired ``lats``/``lons`` waypoints (one griddap call each)."""
-    out = np.empty(len(lats))
+    return _depths_and_nodes_along(lats, lons, timeout=timeout,
+                                   verbose=verbose, base_url=base_url)[0]
+
+
+def _depths_and_nodes_along(lats, lons, *, timeout, verbose, base_url=None):
+    """:func:`depths_along` and the DTM node each waypoint read."""
+    out, nodes = np.empty(len(lats)), []
     for k, (la, lo) in enumerate(zip(lats, lons)):
-        out[k] = depth_from_elevation(
-            _elevation_any(la, lo, timeout=timeout, verbose=verbose), la, lo,
-            dataset='EMODnet DTM')
-    return out
+        elev, node = _elevation_any(la, lo, timeout=timeout, verbose=verbose,
+                                    base_url=base_url)
+        out[k] = depth_from_elevation(elev, la, lo, dataset='EMODnet DTM')
+        nodes.append(node)
+    return out, nodes
 
 
 def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0,
-                verbose=False):
+                verbose=False, base_url=None):
     """``(lats, lons, depth)`` over a region; land / uncovered cells are NaN.
 
     Requests a strided ERDDAP griddap subset (sized so the native DTM is
@@ -121,7 +148,8 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0,
     stride_lon = _stride(lo1 - lo0, n_lon)
     constraint = (f"[({la0}):{stride_lat}:({la1})]"
                   f"[({lo0}):{stride_lon}:({lo1})]")
-    glat, glon, gz = _subset(constraint, timeout=timeout, verbose=verbose)
+    glat, glon, gz = _subset(constraint, timeout=timeout, verbose=verbose,
+                             base_url=base_url)
 
     lats = np.linspace(la0, la1, n_lat)
     lons = np.linspace(lo0, lo1, n_lon)
@@ -138,7 +166,7 @@ def _stride(span_deg, n):
     return max(1, int(round(native_nodes / max(int(n) - 1, 1))))
 
 
-def _subset(constraint, *, timeout, verbose):
+def _subset(constraint, *, timeout, verbose, base_url=None):
     """Fetch a griddap subset and pivot it to ``(lats, lons, elev_2d)``.
 
     Tries each DTM tile in turn; the first that returns a grid wins, so a region
@@ -148,7 +176,7 @@ def _subset(constraint, *, timeout, verbose):
     """
     outcomes = []
     for dataset in DATASETS:
-        url = _griddap_url(dataset, constraint)
+        url = _griddap_url(dataset, constraint, base_url)
         try:
             body = http_get(url, timeout=timeout, verbose=verbose,
                             source='bathymetry', user_agent=_USER_AGENT)

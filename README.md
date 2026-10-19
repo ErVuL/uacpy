@@ -415,8 +415,8 @@ cases, bounds, null controls and known limits.
 
 | Benchmark (reference) | Metric | Measured |
 |---|---|---|
-| Pekeris waveguide, 50 Hz (KRAKEN manual eq. 2.19) | median \|ΔTL\| | Kraken 0.02 dB · Scooter 0.03 dB · OAST 0.02 dB (strong-field cells) · OASP 0.0068 dB · RAM 0.55 dB |
-| Ideal (pressure-release) waveguide | median \|ΔTL\| | Kraken 0.014 dB · RAM 0.012 dB |
+| Pekeris waveguide, 50 Hz (KRAKEN manual eq. 2.19) | median \|ΔTL\| | Kraken 0.015 dB · Scooter 0.017 dB · OAST 0.02 dB (strong-field cells) · OASP 0.0068 dB · RAM 0.52 dB |
+| Ideal (pressure-release) waveguide | median \|ΔTL\| | Kraken 0.014 dB · RAM 0.0085 dB |
 | Rigid-bottom waveguide | median \|ΔTL\| | SPARC 0.17 dB |
 | Ideal wedge, 25 Hz (ASA Problem I, Buckingham & Tolstoy) | median \|ΔTL\| at 30 m / 150 m | Bellhop (line source) 0.47 / 0.384 dB |
 | Rayleigh reflection, fluid half-space | largest \|R\| difference | Bounce 3.3e-16 · OASR about 1e-6 |
@@ -603,8 +603,9 @@ Henrik Schmidt (Massachusetts Institute of Technology) --- https://acoustics.mit
 
 Mandar Chitre (Acoustic Research Lab, National University of Singapore) --- https://github.com/org-arl/arlpy
 
-Utility functions adapted into `uacpy/core/acoustics/` preserve Mandar
-Chitre's 2016 copyright header and cite arlpy as the source.
+Utility functions adapted into `uacpy/core/acoustics/` keep arlpy's
+copyright header ("Copyright (c) 2016-2020, Acoustic Research Laboratory") and
+cite arlpy as the source.
 
 
 ## 📄 Licensing
@@ -623,7 +624,7 @@ when redistributing or modifying UACPY or its outputs.
 | mpiramS (Dushaw)           | `uacpy/third_party/mpiramS/`             | vendored Fortran sources, **modified** (see `MODIFICATIONS.md`) | Creative Commons Attribution 4.0 International   |
 | ramsurf (Calvo / Quiet Oceans) | `uacpy/third_party/ramsurf/`         | vendored Fortran sources, **modified** (see `MODIFICATIONS.md`) | BSD-3-Clause |
 | ramgeo (Collins, NRL)      | `uacpy/third_party/ramgeo/`              | vendored Fortran source, **modified** (see `MODIFICATIONS.md`) | Public domain (U.S. Government work, no explicit licence) |
-| arlpy utilities (Chitre)   | `uacpy/core/`                      | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
+| arlpy utilities (Chitre)   | `uacpy/core/acoustics/`            | adapted (ported into UACPY sources, unmodified scientifically) | BSD-3-Clause                    |
 | OASES (Schmidt, MIT)       | `uacpy/third_party/oases/` (gitignored)  | **optional** download at install time, **not redistributed**| Academic license --- see Henrik Schmidt's terms  |
 
 
@@ -659,13 +660,14 @@ These datasets are **fetched on demand - not redistributed** with UACPY.
 Their licences (CC-BY, public domain, the Copernicus Marine licence, …) impose: whoever fetches 
 the data is its licensee and is responsible for honouring the licence and 
 citing the source. Heavy users can point at their own mirror through the
-`base_url=` of the bathymetry, WOA, Argo, EMODnet-substrate and MARS
-fetchers, and through the `url=`/`base_url=` of every `download_*_db`
-installer (which feeds the fetchers that read an installed dataset). The
-live ERDDAP requests of `fetch_wind` (NOAA NBS) and `fetch_waves`
-(PacIOOS WaveWatch III) take no URL, and the Copernicus fetchers
-(`*_operational`, `fetch_waves`' WAVERYS source) go through the
-`copernicusmarine` client.
+`base_url=` of every live fetcher — bathymetry (OpenTopoData, GMRT or the
+EMODnet DTM, whichever `source=` reads), WOA, Argo, EMODnet-substrate, MARS,
+`fetch_wind` (NOAA NBS) and `fetch_waves` (PacIOOS WaveWatch III) — and
+through the `url=`/`base_url=` of every `download_*_db` installer (which
+feeds the fetchers that read an installed dataset). Left at its default, a
+fetcher reads the service's module constant, as the composites
+(`fetch_environment`, `fetch_sea_surface`) always do. The Copernicus fetchers (`*_operational`,
+`fetch_waves`' WAVERYS source) go through the `copernicusmarine` client.
 
 | Source | Used for | License | Required attribution / citation |
 |--------|----------|---------|---------------------------------|

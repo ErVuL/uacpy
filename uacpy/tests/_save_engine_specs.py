@@ -88,8 +88,8 @@ def multi_depth_source_in_default_mode(key, model) -> str:
     mode, where ``run()`` loops over the depths (or the deck carries them)
     and returns one ``Field`` over ``source_depth``; ``'ignored'`` — the
     call is accepted in a mode with no per-source sum, because the engine
-    reads no source geometry (Bounce, whose ``_validate_geometry`` is a
-    no-op) and the extra depth reaches no deck; ``'refused'`` — the default
+    reads no source geometry (a REFLECTION run: Bounce, OASR) and the
+    extra depth reaches no deck; ``'refused'`` — the default
     mode has no per-source sum and the depths are refused."""
     from uacpy.core.exceptions import ConfigurationError
     try:

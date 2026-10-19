@@ -37,7 +37,8 @@ local data (see ``install.sh --data``).
 import datetime as _dt
 import warnings
 from dataclasses import dataclass
-from typing import Callable, NamedTuple, Optional, Sequence, Union
+from functools import partial
+from typing import Callable, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -55,13 +56,16 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.geo import Coordinate, as_coordinate, great_circle_km
 from uacpy.data._geo import (
     checked_explicit_n_points, checked_max_days, checked_max_distance,
-    checked_max_points, checked_n_points, checked_offset, mid_depth,
+    checked_max_points, checked_n_points, mid_depth,
+    point_along_track,
 )
 from uacpy.core.acoustics.seawater import pressure_dbar_to_depth
-from uacpy.data._chain import (MissingPrerequisiteError, first_answer,
-                               lower_source_spec, source_tuple)
+from uacpy.data._chain import (CACHE_BACKEND, MissingPrerequisiteError,
+                               SourceChain, SourceProvider, first_answer,
+                               lower_source_spec, source_tuple,
+                               unused_setting_notices)
 from uacpy.data.bathymetry import (
-    _refuse_a_dry_point, _bathymetry_vintage,
+    _refuse_a_dry_point,
     _BATHY_CHAIN, transect_length,
 )
 from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
@@ -69,7 +73,8 @@ from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
 from uacpy.data.sediment import transect_fetcher
 from uacpy.data.seaice_local import SEA_ICE_EDGE_CONCENTRATION
 from uacpy.data.sound_speed import (
-    DEFAULT_SOUND_SPEED_FORMULA, _SSP_CHAIN, _fetch_ts_profile_backend,
+    DEFAULT_SOUND_SPEED_FORMULA, _DEFAULT_RESOLUTION, _SSP_CHAIN,
+    _checked_optional_resolution, _fetch_ts_profile_backend,
     extend_ssp_below_data, fetch_ssp, fetch_ts_profile,
 )
 from uacpy.data.sources import SOURCES, DataProvenance
@@ -137,7 +142,7 @@ def fetch_environment(
     bottom: Union[float, str, BoundaryProperties, SeabedColumn, Bottom,
                   None] = None,
     bottom_sources: Union[str, Sequence[str], None] = None,
-    bottom_model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    bottom_model: Optional[str] = None,
     bottom_hamilton_fit: Optional[str] = None,
     surface: Optional[BoundaryProperties] = None,
     surface_sources: Union[str, Sequence[str], None] = None,
@@ -150,16 +155,16 @@ def fetch_environment(
     n_points: Union[int, str, None] = None,
     max_points: Optional[int] = None,
     range_dependent_ssp: Optional[bool] = None,
-    ssp_n_points: Union[int, str] = 'auto',
+    ssp_n_points: Union[int, str, None] = None,
     range_dependent_bottom: Optional[bool] = None,
     bottom_n_points: Union[int, str, None] = None,
     range_dependent_surface: Optional[bool] = None,
-    surface_n_points: Union[int, str] = 'auto',
+    surface_n_points: Union[int, str, None] = None,
     with_absorption: bool = False,
     max_distance_km: Optional[float] = None,
     max_days: Optional[int] = None,
     formula: str = DEFAULT_SOUND_SPEED_FORMULA,
-    resolution: str = '1.00',
+    resolution: Optional[str] = None,
     timeout: float = 120.0,
     verbose: Union[bool, str] = False,
 ) -> Environment:
@@ -268,7 +273,8 @@ def fetch_environment(
         The grain-size → geoacoustics relations behind every seabed that
         arrives as a mean grain size ϕ — the fetched sources above (all but
         ``'crust1'``) and a ϕ ``bottom=`` literal alike. ``'hamilton'``
-        (default) is the low-frequency Hamilton & Bachman table;
+        (``None``, the default, is :data:`~uacpy.core.sediment.DEFAULT_GRAIN_SIZE_MODEL`,
+        ``'hamilton'``) is the low-frequency Hamilton & Bachman table;
         ``'apl-uw'`` the APL-UW TR 9407 relations for 10-100 kHz work, the
         same seabed the high-frequency scattering models in
         :mod:`uacpy.sonar` are built on (``BottomParameters.from_environment``
@@ -276,10 +282,13 @@ def fetch_environment(
         water at the seafloor and carry the DENSITY ratio against the water
         density the deck carries: the site's IES-80 value when
         ``with_absorption`` fetches the T/S column, else
-        ``DEFAULT_WATER_DENSITY_G_CM3`` (1.027 g/cm³). A
+        ``DEFAULT_WATER_DENSITY`` (1.027 g/cm³). A
         class-name literal, a ``BoundaryProperties`` and the hard-substrate
         presets some sources return (EMODnet rock, DECK41 ``'rock'``) carry
-        their own numbers and are not affected. See
+        their own numbers and are not affected. A value set when no grain
+        size is converted (the default seabed, a literal carrier or class
+        name, a CRUST1.0 answer) gives a ``FallbackWarning`` that it was not
+        used, as does ``bottom_hamilton_fit``. See
         :func:`uacpy.core.sediment.grain_size_to_geoacoustics`.
     transect_to : (lat, lon), optional
         If given, bathymetry is sampled along the great-circle path from
@@ -308,10 +317,12 @@ def fetch_environment(
         cast is a single profile, so a chain containing it falls through to the
         next source on a transect.
     ssp_n_points : int or 'auto', optional
-        SSP columns along the transect when ``range_dependent_ssp``. Default
-        ``'auto'``: the transect is sampled at the **distinct grid cells** it
-        crosses (one column per cell — the source's native range resolution,
-        so no duplicate column is fetched), probing ``max_points`` waypoints:
+        SSP columns along the transect when ``range_dependent_ssp``.
+        ``None`` (default) is ``'auto'``: the transect is sampled at the
+        **distinct grid cells** it
+        crosses (one column per crossed cell — the source's native range
+        resolution; a dry WOA23 cell takes its nearest wet cell, which two
+        crossed cells may share), probing ``max_points`` waypoints:
         the WOA23 cells found analytically, the Copernicus 1/12° cells from
         the dataset's own axes (each column one remote read). Pass an int for
         exactly that many evenly-spaced columns.
@@ -346,7 +357,8 @@ def fetch_environment(
         warning) — the range-dependent surface is for inspecting/plotting.
     surface_n_points : int or 'auto', optional
         Sea-ice samples along the transect when ``range_dependent_surface``.
-        Default ``'auto'``: probe the local NSIDC grid (cheap) and collapse
+        ``None`` (default) is ``'auto'``: probe the local NSIDC grid (cheap)
+        and collapse
         each run of identical ice/open-water zones to the samples bracketing
         its edges (the marginal ice zone at native scale, each edge within one
         probe step, no staircase), probing ``max_points`` waypoints. Pass an
@@ -369,8 +381,10 @@ def fetch_environment(
         **half-space**, not a plate of finite thickness: the model writers emit
         the top boundary as an upper half-space line, with no thickness field to
         give it, so concentration decides *whether* there is ice, never how
-        thick. Default ``None`` (no surface fetch). Point classification only
-        (the carrier's surface is one boundary). The half-space is the
+        thick. Default ``None`` (no surface fetch). At a point, one
+        classification; on a transect, one per waypoint (see
+        ``range_dependent_surface``), which the solvers collapse to their one
+        top boundary. The half-space is the
         thick-ice limit of the 4 m plate the parameters are tabulated for, so
         it holds well above c_s/h, about 450 Hz for 4 m of ice. The fetched
         canopy is smooth (roughness 0), which
@@ -432,11 +446,19 @@ def fetch_environment(
         each depth with the water there
         (:meth:`~uacpy.core.absorption.FrancoisGarrison.from_temperature_salinity`).
         pH is the cached GLODAP column, as ``(depth, pH)`` pairs on its own
-        levels, when installed (``install.sh --data glodap``); one value at
+        levels, when installed (``install.sh --data glodap``) — at a coastal
+        point whose own GLODAP cell holds none, the column of the cell the
+        T/S came from; one value at
         the column's mid-depth from Copernicus BGC on that branch; else the
         reference-water default (8.0). The water density is the mid-depth
         row's, and every grain-size seabed (fetched or a ϕ literal) is
-        converted against it.
+        converted against it. The column is read at ``point``; on a
+        transect whose deepest seafloor sample lies below that column's
+        deepest level, the column read at that sample (same dataset, one
+        more request) continues it below — its T/S rows, and its GLODAP pH
+        levels when the start's pH is a GLODAP column — so deep water is
+        not given the start's deepest row. The added column is in
+        ``env.data_sources``; the water density stays the start column's.
         Default ``False``: ``env.absorption`` is ``None``, lossless water.
     max_distance_km : float, optional
         Largest offset (km) between ``point`` (each waypoint, on a transect)
@@ -452,17 +474,25 @@ def fetch_environment(
         provenance notice instead, and the nearest-sample sources search their own
         radius (Argo and grain-size 250 km, MARS 100 km).
     max_days : int, optional
-        Maximum days the data used may differ from ``date`` for the **time-
-        specific** SSP sources — ``ssp_sources`` ``'argo'`` (nearest float
-        profile) and ``'copernicus'`` (nearest model time step). A source whose
-        nearest match is staler raises ``DataFetchError`` and the chain falls
-        through (e.g. ``'auto'`` → WOA23). Ignored by WOA23 (a climatology
-        keyed on month only) and by the bottom/bathymetry sources. Default
-        ``None`` → each source's own default (Argo 15, Copernicus 31).
+        Maximum days the data used may differ from ``date`` for every
+        **time-specific** read: the SSP sources ``'argo'`` (nearest float
+        profile) and ``'copernicus'`` (nearest model time step), the
+        ``with_absorption`` T/S column and Copernicus BGC pH read on those
+        branches, and the WAVERYS sea state ``altimetry_sources`` reads. A
+        source whose nearest match is staler raises ``DataFetchError`` and
+        the chain falls through (e.g. ``'auto'`` → WOA23; a refused BGC pH →
+        GLODAP). A monthly Copernicus product stamps its step once per
+        month, so a value shorter than the date's distance to that stamp
+        refuses the date's own month. Ignored by WOA23, GLODAP and the
+        NBS wind climatology (climatologies keyed on month only), by
+        WaveWatch III and the live NBS wind (which take no time tolerance),
+        and by the bottom/bathymetry sources. Default ``None`` → each source's own
+        default (Argo 15, Copernicus 31).
     formula, resolution, timeout, verbose
         Forwarded to the sound-speed / bathymetry fetchers. ``formula`` is the
         sound-speed equation, ``{'teos10', 'unesco', 'delgrosso', 'mackenzie'}``; ``resolution`` is the
-        WOA23 grid spacing in degrees, ``{'1.00', '0.25'}``, and also selects the
+        WOA23 grid spacing in degrees, ``{'1.00', '0.25'}`` (``None``, the
+        default, is ``'1.00'``), and also selects the
         grid the ``with_absorption`` T/S column is drawn from, so the SSP and the
         absorption come from one cell; ``timeout`` is the network timeout in
         seconds of each attempt of each request (a failed attempt may be
@@ -479,6 +509,14 @@ def fetch_environment(
 
     Warns
     -----
+    FallbackWarning
+        For each setting given that the run did not use: a transect count
+        (``n_points``, ``ssp_n_points``, ``bottom_n_points``,
+        ``surface_n_points``, ``max_points``) with no transect along that
+        axis, ``altimetry_n_points`` / ``altimetry_rng`` with no sea surface
+        fetched, ``bottom_model`` / ``bottom_hamilton_fit`` with no grain size
+        converted, ``resolution`` with no WOA23 grid read, ``max_days`` with
+        no time-specific source read (a fetched sea surface reports its own).
     ProvenanceWarning
         Once per call, when any fetched value is not the requested point's
         own measurement: one notice listing each source that stands far or
@@ -489,6 +527,8 @@ def fetch_environment(
     """
     from uacpy.core.acoustics.seawater import canonical_formula
     formula = canonical_formula(formula, 'fetch_environment')
+    _checked_optional_resolution(resolution, 'fetch_environment')
+    woa_resolution = resolution or _DEFAULT_RESOLUTION
     lat, lon = as_coordinate(point)
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_environment')
     if max_days is not None:
@@ -501,8 +541,11 @@ def fetch_environment(
     ssp_sources, bathymetry_sources, bottom_sources, surface_sources = (
         _checked_source_specs(ssp=ssp_sources, bathymetry=bathymetry_sources,
                               bottom=bottom_sources, surface=surface_sources))
+    # The values as given, for the notice when no grain size is converted.
+    given_model, given_fit = bottom_model, bottom_hamilton_fit
     bottom_model, bottom_hamilton_fit = _canonical_grain_size_selection(
-        bottom_model, bottom_hamilton_fit, who='fetch_environment',
+        DEFAULT_GRAIN_SIZE_MODEL if bottom_model is None else bottom_model,
+        bottom_hamilton_fit, who='fetch_environment',
         model_argument='bottom_model',
         environment_argument='bottom_hamilton_fit')
     _check_bottom_literal(bottom)
@@ -528,7 +571,8 @@ def fetch_environment(
         default=_DEFAULT_BATHY_SOURCES,
         where=(point,) if transect_to is None else (point, transect_to),
         request=dict(n_points=n_points, max_points=max_points,
-                     timeout=timeout, verbose=verbose),
+                     max_distance_km=max_distance_km, timeout=timeout,
+                     verbose=verbose),
         fallback_warning=(
             "fetch_environment: bathymetry fetch failed ({exc}); falling "
             "back to the supplied bathymetry= literal." + (
@@ -543,16 +587,19 @@ def fetch_environment(
 
     # ── SSP ──
     # The seafloor the SSP transect columns extend to, and later the carrier
-    # the environment gets, provenance stamped.
+    # the environment gets (a fetched one stamped by its fetcher).
     seafloor = Bathymetry.coerce(bathy.value)
+    ssp_asked = (ssp_sources is not None or ssp is None
+                 or range_dependent_ssp is True)
     fetched_ssp = _fetch_chain_axis(
         _SSP_CHAIN, ssp_sources, ssp,
         default=_DEFAULT_SSP_SOURCES,
         force_default=range_dependent_ssp is True,
         where=(point, transect_to) if plan.rd_ssp else (point,),
-        request=dict(date=date, formula=formula, resolution=resolution,
+        request=dict(date=date, formula=formula, resolution=woa_resolution,
                      max_distance_km=max_distance_km, max_days=max_days,
-                     n_points=ssp_n_points, max_points=max_points,
+                     n_points='auto' if ssp_n_points is None else ssp_n_points,
+                     max_points=max_points,
                      seafloor=seafloor, timeout=timeout, verbose=verbose),
         fallback_warning=(
             "fetch_environment: SSP fetch failed ({exc}); falling back to the "
@@ -561,20 +608,18 @@ def fetch_environment(
                 " A single-profile literal reduces the transect to "
                 "range-independent.")))
     ssp = _reconcile_ssp(
-        fetched_ssp, seafloor, bathy, point, date=date, formula=formula,
-        resolution=resolution, max_distance_km=max_distance_km,
-        timeout=timeout, verbose=verbose)
+        fetched_ssp, seafloor, point, date=date, formula=formula,
+        resolution=woa_resolution, timeout=timeout, verbose=verbose)
 
     # ── Absorption (optional): the site's T/S column, whose water density
     # the grain-size seabed is converted against, so it precedes the bottom ──
-    absorption = (_fetch_absorption(
+    law, absorption_sources, water_density = (_fetch_absorption(
         point, date=date, ssp_source=fetched_ssp.source,
         ssp_backend=fetched_ssp.backend,
-        cache_only=fetched_ssp.cache_only, resolution=resolution,
+        cache_only=fetched_ssp.cache_only, resolution=woa_resolution,
         max_distance_km=max_distance_km, max_days=max_days,
-        timeout=timeout, verbose=verbose) if with_absorption
-        else (None, None, None))
-    water_density = _site_water_density(absorption[0])
+        timeout=timeout, verbose=verbose, transect_to=transect_to,
+        seafloor=seafloor) if with_absorption else (None, (), None))
 
     # ── Bottom (optional): fetch from bottom_sources / 'auto', else literal ──
     bottom_props, bottom_kw = _fetch_bottom_axis(
@@ -587,7 +632,8 @@ def fetch_environment(
     # ── Surface (top boundary, optional): fetch sea ice, else literal ──
     surface_props, surface_src = _fetch_surface_axis(
         plan, surface, surface_sources, point, transect_to, date=date,
-        n_points=surface_n_points, max_points=max_points,
+        n_points='auto' if surface_n_points is None else surface_n_points,
+        max_points=max_points,
         threshold=surface_threshold, max_distance_km=max_distance_km)
 
     # ── Altimetry (sea surface, optional): fetch a wave/wind-driven surface ──
@@ -596,13 +642,25 @@ def fetch_environment(
         n_points=altimetry_n_points, rng=altimetry_rng, max_days=max_days,
         max_distance_km=max_distance_km, timeout=timeout, verbose=verbose)
 
+    unused_setting_notices('fetch_environment', _unused_environment_settings(
+        transect_to=transect_to, plan=plan,
+        bathy_fetched=bathymetry_sources is not None or bathymetry is None,
+        ssp_fetched=ssp_asked, ssp=ssp, fetched_ssp=fetched_ssp,
+        absorption_sources=absorption_sources, bottom=bottom,
+        bottom_props=bottom_props, bottom_kw=bottom_kw,
+        altimetry_fetched=altimetry_sources is not None,
+        n_points=n_points, max_points=max_points, ssp_n_points=ssp_n_points,
+        bottom_n_points=bottom_n_points, surface_n_points=surface_n_points,
+        altimetry_n_points=altimetry_n_points, altimetry_rng=altimetry_rng,
+        bottom_model=given_model, bottom_hamilton_fit=given_fit,
+        resolution=resolution, max_days=max_days))
     return _assemble(
         point, transect_to, name=name, date=date, seafloor=seafloor, ssp=ssp,
         bottom_props=bottom_props, bottom_kw=bottom_kw,
         surface_props=surface_props, surface_src=surface_src,
         altimetry=altimetry_result, bathy_src=bathy.source,
-        ssp_src=fetched_ssp.source, absorption=absorption,
-        water_density=water_density)
+        ssp_src=fetched_ssp.source, absorption=law,
+        absorption_sources=absorption_sources, water_density=water_density)
 
 
 def _checked_surface_threshold(threshold, surface_sources,
@@ -628,6 +686,73 @@ def _checked_surface_threshold(threshold, surface_sources,
             f"fetch one, or drop the argument.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     return float(threshold)
+
+
+def _unused_environment_settings(
+        *, transect_to, plan, bathy_fetched, ssp_fetched, ssp, fetched_ssp,
+        absorption_sources, bottom, bottom_props, bottom_kw,
+        altimetry_fetched, n_points, max_points, ssp_n_points,
+        bottom_n_points, surface_n_points, altimetry_n_points, altimetry_rng,
+        bottom_model, bottom_hamilton_fit, resolution, max_days):
+    """The ``(name, value, why)`` of each ``fetch_environment`` setting the
+    run did not use, for :func:`~uacpy.data._chain.unused_setting_notices`
+    (a value left unset gives no notice). A fetched sea surface reports an
+    unused ``max_days`` itself, so none is listed when one was asked for."""
+    unused = []
+    if transect_to is None:
+        why = "no transect_to is given, so nothing is sampled along a transect"
+        unused += [(name, value, why) for name, value in (
+            ('n_points', n_points), ('max_points', max_points),
+            ('ssp_n_points', ssp_n_points),
+            ('bottom_n_points', bottom_n_points),
+            ('surface_n_points', surface_n_points))]
+    else:
+        if not bathy_fetched:
+            unused.append(('n_points', n_points,
+                           "the bathymetry= literal is used as given, so no "
+                           "bathymetry transect is fetched"))
+        if not (plan.rd_ssp and ssp_fetched):
+            unused.append(('ssp_n_points', ssp_n_points,
+                           "no range-dependent SSP is fetched"))
+        if not plan.rd_bottom:
+            unused.append(('bottom_n_points', bottom_n_points,
+                           "no range-dependent seabed is fetched"))
+        if not plan.rd_surface:
+            unused.append(('surface_n_points', surface_n_points,
+                           "no range-dependent sea-ice surface is fetched"))
+    if not altimetry_fetched:
+        why = "no altimetry_sources is given, so no sea surface is fetched"
+        unused += [('altimetry_n_points', altimetry_n_points, why),
+                   ('altimetry_rng', altimetry_rng, why)]
+    if bottom_kw is not None:
+        converted = _converts_a_grain_size(bottom_props)
+        why = (f"source {bottom_kw!r} answered, and it carries measured "
+               f"layer properties rather than converting a grain size")
+    elif bottom_props is None:
+        converted = False
+        why = ("no seabed is fetched or given, so the generic default "
+               "half-space stands and no grain size is converted")
+    else:
+        converted = not isinstance(bottom, (str, BoundaryProperties,
+                                            SeabedColumn, Bottom))
+        why = ("the bottom= literal carries its own numbers, so no grain "
+               "size is converted")
+    if not converted:
+        unused += [('bottom_model', bottom_model, why),
+                   ('bottom_hamilton_fit', bottom_hamilton_fit, why)]
+    absorption_ids = {getattr(getattr(s, 'source', None), 'id', s)
+                      for s in absorption_sources}
+    ssp_ids = ({p.source.id for p in getattr(ssp, 'data_sources', ())}
+               if fetched_ssp.fetched else set())
+    if fetched_ssp.source != 'woa23' and 'woa23' not in ssp_ids | absorption_ids:
+        unused.append(('resolution', resolution, "no WOA23 grid is read"))
+    if (fetched_ssp.source not in ('argo', 'copernicus')
+            and not altimetry_fetched):
+        came = ('the ssp= literal is used' if fetched_ssp.source is None
+                else 'the SSP came from WOA23, a climatology keyed on month')
+        unused.append(('max_days', max_days,
+                       f"{came}, and no other time-specific source is read"))
+    return unused
 
 
 def _check_transect_counts(max_points, **counts):
@@ -670,21 +795,12 @@ class _AxisFetch(NamedTuple):
 def _chain_call(chain, where, request):
     """``call(token)`` fetching one ``(source, backend)`` of ``chain``: the
     point fetch at ``where = (point,)``, or the transect when ``where`` holds
-    both ends."""
+    both ends (:meth:`~uacpy.data._chain.SourceChain.fetch`)."""
     def call(token):
         src, backend = token
-        provider = chain.provider(src)
-        if len(where) == 1:
-            return provider.point(backend, *where, **request)
-        if provider.transect is None:
-            usable = ' or '.join(repr(p.id) for p in chain.providers
-                                 if p.transect is not None)
-            raise ConfigurationError(
-                f"fetch_environment: range_dependent_{chain.axis} not "
-                f"supported for {chain.axis}_sources={src!r}.",
-                remediation=f"Use {usable}.",
-            )
-        return provider.transect(backend, *where, **request)
+        return chain.fetch(src, backend, where, request,
+                           who='fetch_environment',
+                           keyword=f'{chain.axis}_sources=')
     return call
 
 
@@ -763,10 +879,9 @@ def _resolve_range_dependence(transect_to, *, ssp, bottom, surface,
     )
 
 
-def _reconcile_ssp(fetched_ssp, seafloor, bathy, point, *, date, formula,
-                   resolution, timeout, verbose, max_distance_km=None):
-    """The SSP reconciled to the seafloor, with the seafloor's provenance
-    stamped.
+def _reconcile_ssp(fetched_ssp, seafloor, point, *, date, formula,
+                   resolution, timeout, verbose):
+    """The SSP reconciled to the seafloor.
 
     Bathymetry (GEBCO) and SSP (WOA/Copernicus) come from independent
     products, so their deepest points rarely coincide. A fetched profile is
@@ -781,9 +896,6 @@ def _reconcile_ssp(fetched_ssp, seafloor, bathy, point, *, date, formula,
     ``Environment``, which coerces a scalar / pairs / SoundSpeedProfile and
     reconciles its depth to the bathymetry.
     """
-    if bathy.source is not None and not seafloor.data_sources:
-        seafloor.data_sources = (_bathymetry_provenance(
-            bathy, point, max_distance_km=max_distance_km),)
     ssp = fetched_ssp.value
     if not fetched_ssp.fetched:
         return ssp
@@ -869,6 +981,36 @@ def _fetch_bottom_axis(plan, bottom, bottom_sources, ssp, seafloor, point,
             model=model, hamilton_fit=hamilton_fit), None
 
 
+def _seaice_surface_point(_backend, point, *, date, threshold,
+                          max_distance_km, **_request):
+    """A :data:`_SURFACE_CHAIN` point fetch: the NSIDC ice canopy at
+    ``point``, or ``None`` over open water."""
+    from uacpy.data.seaice_local import fetch_sea_ice_surface
+    return fetch_sea_ice_surface(point, date=date, threshold=threshold,
+                                 max_distance_km=max_distance_km)
+
+
+def _seaice_surface_transect(_backend, start, end, *, date, n_points,
+                             max_points, threshold, max_distance_km,
+                             **_request):
+    """A :data:`_SURFACE_CHAIN` transect fetch: the range-dependent NSIDC
+    sea-ice surface along ``start`` → ``end``."""
+    from uacpy.data.seaice_local import sea_ice_surface_transect
+    return sea_ice_surface_transect(start, end, date=date, n_points=n_points,
+                                    max_points=max_points,
+                                    threshold=threshold,
+                                    max_distance_km=max_distance_km)
+
+
+#: The top-boundary sources: the cached NSIDC sea-ice climatology alone.
+_SURFACE_CHAIN = SourceChain(
+    'surface',
+    providers=(SourceProvider('seaice', (CACHE_BACKEND,),
+                              _seaice_surface_point,
+                              _seaice_surface_transect),),
+    auto=('seaice',))
+
+
 def _fetch_surface_axis(plan, surface, surface_sources, point, transect_to,
                         *, date, n_points, max_points, threshold,
                         max_distance_km=None):
@@ -884,15 +1026,13 @@ def _fetch_surface_axis(plan, surface, surface_sources, point, transect_to,
     if not plan.want_surface:
         return surface, None
     # The only surface source is the cached sea-ice climatology, so 'auto'
-    # and 'local' (and the implied default) are identical here.
-    srcs = (('seaice',) if surface_sources in ('auto', 'local', None)
-            else source_tuple(surface_sources))
-    for s in srcs:
-        if s != 'seaice':
-            raise ConfigurationError(
-                f"fetch_environment: unknown surface source {s!r}.",
-                remediation="Use 'seaice' or 'auto'.",
-            )
+    # and 'local' (and the implied default) are identical here. An unknown
+    # name is refused before the date is asked for.
+    spec = 'auto' if surface_sources is None else surface_sources
+    sources, cache_only = _SURFACE_CHAIN.resolve(spec)
+    _SURFACE_CHAIN.attempts(sources, cache_only=cache_only,
+                            who='fetch_environment',
+                            keyword='surface_sources=')
     # A missing date is the caller's input, not a failed fetch: no
     # surface= literal stands in for it.
     if date is None:
@@ -902,24 +1042,21 @@ def _fetch_surface_axis(plan, surface, surface_sources, point, transect_to,
             remediation="Pass date='YYYY-MM-DD', or drop surface_sources= "
                         "(a surface= literal is then used as given).",
         )
+    where = (point, transect_to) if plan.rd_surface else (point,)
+    request = dict(date=date, n_points=n_points, max_points=max_points,
+                   threshold=threshold, max_distance_km=max_distance_km)
     try:
-        if plan.rd_surface:
-            from uacpy.data.seaice_local import sea_ice_surface_transect
-            fetched = sea_ice_surface_transect(
-                point, transect_to, date=date,
-                n_points=n_points, max_points=max_points,
-                threshold=threshold, max_distance_km=max_distance_km)
-            # A transect that is open water everywhere → leave the default
-            # free surface (no provenance), matching the point case.
-            if fetched.is_elastic:
-                return fetched, 'seaice'
-        else:
-            from uacpy.data.seaice_local import fetch_sea_ice_surface
-            fetched = fetch_sea_ice_surface(point, date=date,
-                                            threshold=threshold,
-                                            max_distance_km=max_distance_km)
-            if fetched is not None:                 # None = open water
-                return fetched, 'seaice'
+        fetched, (src, _backend) = _SURFACE_CHAIN.answer(
+            spec,
+            lambda src, backend: _SURFACE_CHAIN.fetch(
+                src, backend, where, request, who='fetch_environment',
+                keyword='surface_sources='),
+            who='fetch_environment', keyword='surface_sources=')
+        # Open water (a point's None, a transect with no ice anywhere)
+        # leaves the default free surface, with no provenance.
+        if fetched is not None and (not plan.rd_surface
+                                    or fetched.is_elastic):
+            return fetched, src
     except (DataFetchError, ConfigurationError) as exc:
         if surface is None:
             raise
@@ -987,10 +1124,10 @@ def _site_water_density(absorption):
 
 def _assemble(point, transect_to, *, name, date, seafloor, ssp, bottom_props,
               bottom_kw, surface_props, surface_src, altimetry, bathy_src,
-              ssp_src, absorption, water_density):
+              ssp_src, absorption, absorption_sources, water_density):
     """The ``Environment`` of the resolved axes, with the site's absorption
-    ``(law, T/S source, pH source)`` and its ``water_density`` when fetched,
-    and its provenance."""
+    law, the ``absorption_sources`` its T/S and pH came from and its
+    ``water_density`` when fetched, and its provenance."""
     lat, lon = as_coordinate(point)
     kwargs = dict(
         name=name or f"{lat:.3f}, {lon:.3f}",
@@ -1011,15 +1148,14 @@ def _assemble(point, transect_to, *, name, date, seafloor, ssp, bottom_props,
         kwargs['surface'] = surface_props
     if altimetry is not None:
         kwargs['altimetry'] = altimetry
-    law, ts_src, ph_src = absorption
-    if law is not None:
-        kwargs['absorption'] = law
+    if absorption is not None:
+        kwargs['absorption'] = absorption
     if water_density is not None:
         kwargs['water_density'] = water_density
     env = Environment(**kwargs)
 
     _record_provenance(env, bathy_src, ssp_src, bottom_kw,
-                       bottom_props, surface_src, ph_src, ts_src)
+                       bottom_props, surface_src, absorption_sources)
     return env
 
 
@@ -1036,23 +1172,25 @@ def _water_at(absorption, depth: float):
 
 
 def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
-                       surface_src, ph_src=None, ts_src=None):
+                       surface_src, absorption_sources=()):
     """Complete the provenance ``env.data_sources`` reads, so it lists the
     datasets in axis order
     (bathymetry → ssp → bottom → surface → absorption T/S → pH → altimetry),
     exact repeats removed. The ``*_src`` are catalogue ids; the fetched
     altimetry carries its own record, as every fetched carrier does.
-    ``ts_src`` is the dataset the absorption's T/S row came from, which is
-    WOA23 beside a literal ``ssp=``.
+    ``absorption_sources`` are the datasets the absorption's T/S column (WOA23
+    beside a literal ``ssp=``) and pH came from, as :func:`_fetch_absorption`
+    returns them.
 
     Each fetched carrier carries its own ``data_sources`` — a tuple of
     :class:`~uacpy.data.sources.DataProvenance` records holding the dataset plus
     the **actual** date/coordinates it returned (which can differ from what was
     requested). A carrier that wasn't stamped — a literal axis, or a fetcher
     that reports no date/coords — is stamped here with the bare catalogue id,
-    so attribution is never lost. The T/S row and the pH describe no carrier:
-    they go to ``env.extra_data_sources``. Warns on any non-commercial
-    licence used."""
+    so attribution is never lost. The T/S column and the pH are the
+    absorption law's water: they go to ``env.absorption.data_sources``, so
+    the law and its tables carry them. Warns on any non-commercial licence
+    used."""
     def catalogue(ids):
         # The bare catalogue id in a DataProvenance, so env.data_sources is
         # uniformly DataProvenance — no date/coords, just the source, for a
@@ -1078,9 +1216,8 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
     if not env.surface.data_sources and surface_src is not None:
         for node in env.surface.nodes:
             node.data_sources = catalogue([surface_src])
-    extra = catalogue([ts_src, ph_src])
-    if extra:
-        env.extra_data_sources = extra
+    if absorption_sources:
+        env.absorption.data_sources = catalogue(absorption_sources)
     # A licence-restricted source must never enter a result silently: warn at
     # fetch time for any non-commercial dataset used (e.g. CRUST1.0). Driven off
     # the catalogue flag so future non-commercial sources are covered too.
@@ -1090,42 +1227,17 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
             provenance_notice(licence_notice_text(src))
 
 
-def _bathymetry_provenance(bathy, point, *, max_distance_km=None):
-    """The ``DataProvenance`` of the depth read at ``point``, through the
-    offset rule. It names the backend and vintage that answered (the GEBCO
-    DOI is per release, and a local GEBCO_2025.nc is not the OpenTopoData
-    service). The local GEBCO grid records the centre of the cell read; the
-    live services are point queries that report no node, so they record
-    the point itself."""
-    lat, lon = (float(v) for v in as_coordinate(point))
-    vintage = _bathymetry_vintage(bathy.source, bathy.backend)
-    if bathy.backend == 'local' and bathy.source == 'gebco':
-        from uacpy.data import gebco_local
-        try:
-            grid = gebco_local._grid()
-        except (ConfigurationError, DataFetchError):
-            grid = None             # no readable grid to read the node from
-        if grid is not None:
-            return grid.node_provenance(
-                'gebco', lat, lon, who='fetch_environment',
-                max_distance_km=max_distance_km, data_date=vintage)
-        data_point = None
-    else:
-        data_point = (lat, lon)
-    return checked_offset(
-        DataProvenance(source=SOURCES[bathy.source], data_date=vintage,
-                       data_point=data_point, requested_point=(lat, lon)),
-        who='fetch_environment', warn_km=0.0, max_distance_km=max_distance_km)
-
-
 def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
                       resolution, max_distance_km=None, max_days=None,
-                      timeout, verbose):
+                      timeout, verbose, transect_to=None, seafloor=None):
     """Francois-Garrison absorption from the site's fetched T/S column.
 
-    Returns ``(absorption, ts_source, ph_source)``: ``ts_source`` is the
-    catalogue id of the dataset the T/S column came from (``'woa23'``,
-    ``'copernicus'`` or ``'argo'``). Reuses the backend the SSP resolved to
+    Returns ``(absorption, sources, water_density)``: ``sources`` names the
+    datasets the T/S and pH came from, the catalogue id of the T/S dataset
+    first (``'woa23'``, ``'copernicus'`` or ``'argo'``), then the record of
+    each other column or pH node read; ``water_density`` is the IES-80
+    density (g/cm³) of the start column's row nearest its mid-depth
+    (:func:`_site_water_density`). Reuses the backend the SSP resolved to
     (``ssp_backend``) for the WOA23 T/S column, so a cache-resolved SSP draws
     its absorption from the same cached grid rather than re-fetching it live.
     ``None`` (literal SSP) reads the WOA23 column cache-first, through the
@@ -1138,45 +1250,21 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
     grid when installed (``ph_source='glodap'``), else the model default. A
     fetched pH is declared ``ph_scale='total'`` so the absorption converts
     it to the NBS scale the formula was fitted on.
+
+    On a transect (``transect_to``, with the fetched ``seafloor``), a start
+    column that ends above the track's deepest seafloor sample is continued
+    below its deepest level by the column read at that sample, from the same
+    dataset: its T/S rows, and its GLODAP pH levels when the start's pH is a
+    GLODAP column too. The law holds a column's end rows beyond its depths,
+    so without this every depth below the start's seafloor would take the
+    start's deepest water. When that column cannot be read, the start column
+    stands alone and the call's notice says so.
     """
-    ts_src = 'woa23'
-    if cache_only:
-        ts = _fetch_ts_profile_backend(
-            point, date=date, backend='local', resolution=resolution,
-            timeout=timeout, verbose=verbose, max_distance_km=max_distance_km,
-            who='fetch_environment')
-        depths, temp, sal = ts.depths, ts.temperature, ts.salinity
-    elif ssp_source == 'copernicus':
-        from uacpy.data.copernicus import fetch_ts_profile_operational
-        extra = {} if max_days is None else {'max_days': max_days}
-        # In-situ temperature, as Francois-Garrison takes it.
-        ts = fetch_ts_profile_operational(
-            point, date=date, verbose=verbose,
-            max_distance_km=max_distance_km, **extra)
-        depths, temp, sal = ts.depths, ts.temperature, ts.salinity
-        ts_src = 'copernicus'
-    elif ssp_source == 'argo':
-        from uacpy.data.argo import fetch_argo_profile
-        extra = {} if max_days is None else {'max_days': max_days}
-        prof = fetch_argo_profile(point, date=date, timeout=timeout,
-                                  verbose=verbose,
-                                  max_distance_km=max_distance_km, **extra)
-        depths = pressure_dbar_to_depth(prof.pressure_dbar, prof.lat)
-        temp, sal = prof.temperature, prof.salinity
-        ts_src = 'argo'
-    elif ssp_backend is None:
-        # Literal SSP: the public WOA23 fetcher is cache-first (the installed
-        # grid, then NCEI THREDDS), as every fetched axis is.
-        ts = fetch_ts_profile(
-            point, date=date, resolution=resolution, source='woa23',
-            timeout=timeout, verbose=verbose, max_distance_km=max_distance_km)
-        depths, temp, sal = ts.depths, ts.temperature, ts.salinity
-    else:
-        ts = _fetch_ts_profile_backend(
-            point, date=date, resolution=resolution, timeout=timeout,
-            verbose=verbose, backend=ssp_backend,
-            max_distance_km=max_distance_km, who='fetch_environment')
-        depths, temp, sal = ts.depths, ts.temperature, ts.salinity
+    read = dict(date=date, ssp_source=ssp_source, ssp_backend=ssp_backend,
+                cache_only=cache_only, resolution=resolution,
+                max_distance_km=max_distance_km, max_days=max_days,
+                timeout=timeout, verbose=verbose)
+    depths, temp, sal, ts_src, ts_record = _ts_column(point, **read)
     # GLODAP gives its pH column, (depth, pH) pairs on its own levels;
     # Copernicus BGC one value, read at the T/S column's mid-depth.
     z_arr = np.asarray(depths, dtype=float)
@@ -1184,18 +1272,165 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
     pH, ph_src = _fetch_ph(point, date=date, ssp_source=ssp_source,
                            cache_only=cache_only, timeout=timeout,
                            verbose=verbose, reference_depth=ref_depth,
-                           max_distance_km=max_distance_km)
+                           max_distance_km=max_distance_km, max_days=max_days,
+                           ts_cell=getattr(ts_record, 'data_point', None))
     # GLODAP (pHtsinsitutp) and the Copernicus BGC ``ph`` field are on the
     # total scale; the formula was fitted on NBS. The model default that
     # stands in when neither is available is on the formula's own scale.
-    return FrancoisGarrison.from_temperature_salinity(
-        depths, temp, sal, pH=pH,
-        ph_scale='nbs' if ph_src is None else 'total'), ts_src, ph_src
+    scale = 'nbs' if ph_src is None else 'total'
+    law = FrancoisGarrison.from_temperature_salinity(
+        depths, temp, sal, pH=pH, ph_scale=scale)
+    water_density = _site_water_density(law)
+    ts_sources, ph_sources = [ts_src], [ph_src]
+
+    deepest = _deepest_waypoint(point, transect_to, seafloor)
+    if deepest is not None and z_arr.size and deepest.depth > z_arr.max():
+        z_end = float(z_arr.max())
+        where = (f"the track's {deepest.depth:.0f} m seafloor, "
+                 f"{deepest.range / 1000.0:.1f} km along it")
+        try:
+            z_d, t_d, s_d, _, ts_record = _ts_column(deepest.point, **read)
+        except (DataFetchError, ConfigurationError) as exc:
+            provenance_fallback(
+                f"fetch_environment: the absorption holds the start "
+                f"column's deepest water below {z_end:.0f} m, because the "
+                f"column at {where} could not be read ({exc.message}).")
+            z_d = t_d = s_d = np.empty(0)
+        below = np.asarray(z_d, dtype=float) > z_end
+        if below.any():
+            depths = np.concatenate([z_arr, np.asarray(z_d, float)[below]])
+            temp = np.concatenate([np.asarray(temp, float),
+                                   np.asarray(t_d, float)[below]])
+            sal = np.concatenate([np.asarray(sal, float),
+                                  np.asarray(s_d, float)[below]])
+            ts_sources.append(ts_record)
+            if isinstance(pH, np.ndarray):
+                pH, ph_record = _deepened_ph(pH, deepest.point, where,
+                                             max_distance_km=max_distance_km)
+                ph_sources.append(ph_record)
+            log_message('environment', f"absorption column continued below "
+                        f"{z_end:.0f} m by the column at {where}",
+                        verbose=verbose)
+            law = FrancoisGarrison.from_temperature_salinity(
+                depths, temp, sal, pH=pH, ph_scale=scale)
+    sources = tuple(s for s in ts_sources + ph_sources if s is not None)
+    return law, sources, water_density
+
+
+def _ts_column(point, *, date, ssp_source, ssp_backend, cache_only,
+               resolution, max_distance_km, max_days, timeout, verbose):
+    """``(depths, temperature, salinity, source, record)`` of the T/S column
+    at ``point`` that :func:`_fetch_absorption` builds the law from:
+    ``source`` is the catalogue id of its dataset (``'woa23'``,
+    ``'copernicus'`` or ``'argo'``) and ``record`` the provenance of the
+    column read."""
+    if cache_only:
+        ts = _fetch_ts_profile_backend(
+            point, date=date, backend='local', resolution=resolution,
+            timeout=timeout, verbose=verbose, max_distance_km=max_distance_km,
+            who='fetch_environment')
+    elif ssp_source == 'copernicus':
+        from uacpy.data.copernicus import fetch_ts_profile_operational
+        extra = {} if max_days is None else {'max_days': max_days}
+        # In-situ temperature, as Francois-Garrison takes it.
+        ts = fetch_ts_profile_operational(
+            point, date=date, verbose=verbose,
+            max_distance_km=max_distance_km, **extra)
+        return (ts.depths, ts.temperature, ts.salinity, 'copernicus',
+                ts.provenance)
+    elif ssp_source == 'argo':
+        from uacpy.data.argo import fetch_argo_profile
+        extra = {} if max_days is None else {'max_days': max_days}
+        prof = fetch_argo_profile(point, date=date, timeout=timeout,
+                                  verbose=verbose,
+                                  max_distance_km=max_distance_km, **extra)
+        return (pressure_dbar_to_depth(prof.pressure_dbar, prof.lat),
+                prof.temperature, prof.salinity, 'argo', prof.provenance)
+    elif ssp_backend is None:
+        # Literal SSP: the public WOA23 fetcher is cache-first (the installed
+        # grid, then NCEI THREDDS), as every fetched axis is.
+        ts = fetch_ts_profile(
+            point, date=date, resolution=resolution, source='woa23',
+            timeout=timeout, verbose=verbose, max_distance_km=max_distance_km)
+    else:
+        ts = _fetch_ts_profile_backend(
+            point, date=date, resolution=resolution, timeout=timeout,
+            verbose=verbose, backend=ssp_backend,
+            max_distance_km=max_distance_km, who='fetch_environment')
+    return ts.depths, ts.temperature, ts.salinity, 'woa23', ts.provenance
+
+
+class _Waypoint(NamedTuple):
+    """A transect seafloor sample: its ``(lat, lon)``, its range (m) from
+    the start and its depth (m)."""
+    point: Coordinate
+    range: float
+    depth: float
+
+
+def _deepest_waypoint(point, transect_to, seafloor):
+    """The deepest sample of a transect's ``seafloor``; ``None`` at a point,
+    and when the start is the deepest."""
+    if transect_to is None or seafloor is None:
+        return None
+    ranges = np.asarray(seafloor.ranges, dtype=float)
+    depths = np.asarray(seafloor.depths, dtype=float)
+    k = int(np.argmax(depths))
+    if ranges[k] <= 0.0:
+        return None
+    return _Waypoint(point_along_track(point, transect_to, ranges[k]),
+                     float(ranges[k]), float(depths[k]))
+
+
+def _deepened_ph(pairs, point, where, *, max_distance_km):
+    """GLODAP ``(depth, pH)`` ``pairs`` continued below their deepest level
+    by GLODAP's column at ``point`` (described by ``where``), and the record
+    of the node read; ``pairs`` unchanged, and ``None``, when that column
+    cannot be read or ends no deeper (the call's notice says so for the
+    first)."""
+    z_end = float(pairs[:, 0].max())
+    try:
+        deep, record = _glodap_ph_column(point,
+                                         max_distance_km=max_distance_km)
+    except (DataFetchError, ConfigurationError) as exc:
+        provenance_fallback(
+            f"fetch_environment: the absorption holds the start column's "
+            f"deepest pH below {z_end:.0f} m, because GLODAP has no column "
+            f"at {where} ({exc.message}).")
+        return pairs, None
+    below = deep[deep[:, 0] > z_end]
+    if not below.size:
+        return pairs, None
+    return np.vstack([pairs, below]), record
+
+
+def _glodap_ph_column(point, *, max_distance_km, read_at=None):
+    """GLODAP's pH column at ``point`` as ``(depth, pH)`` pairs on its finite
+    levels (an ``(N, 2)`` array), with the record of the node read — read at
+    ``read_at`` instead when given, the record still measured from
+    ``point``; ``DataFetchError`` / ``ConfigurationError`` when there is
+    none."""
+    from uacpy.data import glodap_local
+    if read_at is None:
+        profile = glodap_local.fetch_ph_profile(
+            point, max_distance_km=max_distance_km)
+    else:
+        profile = glodap_local._ph_profile(
+            point, max_distance_km=checked_max_distance(
+                max_distance_km, 'fetch_environment'),
+            who='fetch_environment', read_at=read_at)
+    z = np.asarray(profile.depths, dtype=float)
+    ph = np.asarray(profile.ph, dtype=float)
+    keep = np.isfinite(z) & np.isfinite(ph)
+    z_u, first = np.unique(z[keep], return_index=True)
+    if z_u.size == 0:
+        raise DataFetchError("no finite pH level in the column read.")
+    return np.column_stack([z_u, ph[keep][first]]), profile.provenance
 
 
 def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,
               timeout=120.0, verbose=False, reference_depth=None,
-              max_distance_km=None):
+              max_distance_km=None, max_days=None, ts_cell=None):
     """Representative seawater pH at ``point``, pH-source-aware and cache-first.
 
     Returns ``(pH, source)``: one value, or GLODAP's column as ``(depth,
@@ -1203,17 +1438,22 @@ def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,
     has a single level). On the Copernicus SSP branch (``ssp_source ==
     'copernicus'`` and not ``cache_only``) the time-varying BGC ``ph`` field is
     preferred (``source='copernicus_bgc'``), riding the same Copernicus
-    session as the SSP. Otherwise — or if the BGC fetch fails — it falls back to
+    session as the SSP, under the caller's ``max_days`` (``None``: the
+    fetcher's own). Otherwise — or if the BGC fetch fails — it falls back to
     the cached GLODAP climatology, whose ``source`` is the
     :class:`DataProvenance` record of the node read (its point and offset),
-    and finally to the model default (``REFERENCE_PH``, ``None``). pH is cache/best-effort like every
+    and finally to the model default (``REFERENCE_PH``, ``None``). Where
+    GLODAP has no column at ``point`` (a coastal cell), the column at
+    ``ts_cell`` — the cell the absorption's T/S column came from, which the
+    WOA23 search may have taken from a wet neighbour — is read instead, so
+    the T, S and pH share one location; its record measures the offset from
+    ``point``. pH is cache/best-effort like every
     other axis: a run without any pH source keeps the default rather than
     failing, and so does one whose pH cells stand past ``max_distance_km`` —
     with a ``provenance_fallback`` item naming why, so the substituted pH is
     announced in the call's notice.
     """
     from uacpy.core.constants import REFERENCE_PH
-    from uacpy.data.glodap_local import fetch_ph_profile
     lat, lon = as_coordinate(point)
     failures = []
 
@@ -1226,33 +1466,37 @@ def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,
 
     if ssp_source == 'copernicus' and not cache_only and date is not None:
         from uacpy.data.copernicus import fetch_ph_operational
+        extra = {} if max_days is None else {'max_days': max_days}
         try:
             pH = fetch_ph_operational(point, date=date, verbose=verbose,
                                       reference_depth=reference_depth,
-                                      max_distance_km=max_distance_km)
+                                      max_distance_km=max_distance_km,
+                                      **extra)
             log_message('copernicus', f"pH {pH:.3f} from Copernicus BGC at "
                         f"{lat:.3f}, {lon:.3f}", verbose=verbose)
             return pH, 'copernicus_bgc'
         except (DataFetchError, ConfigurationError) as exc:
             failures.append(f"Copernicus BGC: {exc.message}")  # then GLODAP
     try:
-        profile = fetch_ph_profile(point, max_distance_km=max_distance_km)
-    except (DataFetchError, ConfigurationError) as exc:
+        pairs, record = _glodap_ph_column(point,
+                                          max_distance_km=max_distance_km)
+    except ConfigurationError as exc:                # no installed grid
         failures.append(f"GLODAP: {exc.message}")
         return reference_ph()
-    z = np.asarray(profile.depths, dtype=float)
-    ph = np.asarray(profile.ph, dtype=float)
-    keep = np.isfinite(z) & np.isfinite(ph)
-    z_u, first = np.unique(z[keep], return_index=True)
-    if z_u.size == 0:
-        failures.append("GLODAP: no finite pH level in the column read")
-        return reference_ph()
-    pairs = np.column_stack([z_u, ph[keep][first]])
+    except DataFetchError as exc:
+        failures.append(f"GLODAP: {exc.message}")
+        if ts_cell is None:
+            return reference_ph()
+        try:
+            pairs, record = _glodap_ph_column(
+                point, max_distance_km=max_distance_km, read_at=ts_cell)
+        except (DataFetchError, ConfigurationError) as exc:
+            failures.append(f"GLODAP at the T/S column's cell: {exc.message}")
+            return reference_ph()
     log_message('glodap', f"pH {pairs[:, 1].min():.3f}-{pairs[:, 1].max():.3f} "
                 f"over {len(pairs)} levels from GLODAP at {lat:.3f}, "
                 f"{lon:.3f}", verbose=verbose)
-    return (float(pairs[0, 1]) if len(pairs) == 1 else pairs), \
-        profile.provenance
+    return (float(pairs[0, 1]) if len(pairs) == 1 else pairs), record
 
 
 def _deepen_cast_with_woa23(cast, depth_max, point, *, date, formula,
@@ -1297,28 +1541,35 @@ def _deepen_cast_with_woa23(cast, depth_max, point, *, date, formula,
 # imported lazily to keep optional deps optional and avoid import cycles. A
 # half-space source's transect is its point fetcher sampled along the track
 # (:func:`~uacpy.data.sediment.transect_fetcher`); CRUST1.0, whose columns are
-# layered, has its own. Providers with a cached twin (``has_cached_variant``:
-# EMODnet's local polygons vs the live WFS, pelagic's local-GEBCO vs
-# API-allowed depth lookup) take a ``cached`` flag and are tried cache-first;
-# the rest take no argument.
+# layered, has its own. Providers with a cached twin and a live backend
+# (``has_cached_variant``: EMODnet's local polygons vs the live WFS, pelagic's
+# local-GEBCO vs API-allowed depth lookup) take a ``cached`` flag and are tried
+# cache-first; the rest take no argument. The rows become the providers of
+# ``_BOTTOM_CHAIN``, the :class:`~uacpy.data._chain.SourceChain` every bottom
+# fetch resolves through.
 
 
 @dataclass(frozen=True)
 class _BottomProvider:
     """One bottom data source. ``id`` doubles as the source keyword and the
-    provenance catalogue id. ``in_auto`` puts it in the 'auto' fallback chain,
-    ``in_cache_auto`` in the network-free 'local' chain. ``has_cached_variant``
-    means it has a local twin tried before its live/compute backend
-    (cache-first); under ``cache_only`` only the local twin is used."""
+    provenance catalogue id. ``backends`` are its backend tokens, its cached
+    twin (:data:`~uacpy.data._chain.CACHE_BACKEND`) first; ``'local'`` keeps
+    the cached ones alone. ``in_auto`` puts it in the 'auto' fallback chain
+    (the network-free 'local' chain is that chain's cached backends)."""
 
     id: str
     resolve: Callable                  # () -> (point_fn, transect_fn); takes
                                        # (cached: bool) iff has_cached_variant
-    has_cached_variant: bool = False
+    backends: Tuple[str, ...] = (CACHE_BACKEND,)
     in_auto: bool = False
-    in_cache_auto: bool = False
     accepts_depth: bool = False         # depth-driven source: takes the fetched water depth
     accepts_grain_size_model: bool = False  # converts a grain size: takes model=
+
+    @property
+    def has_cached_variant(self):
+        """Whether it has a cached twin and a live backend, so ``resolve``
+        takes ``cached``."""
+        return len(self.backends) > 1
 
 
 def _along_track(point_fn, label, preload=None):
@@ -1368,7 +1619,6 @@ def _graw_pair():
 
 
 def _pelagic_pair(cached):
-    from functools import partial
     from uacpy.data import pelagic as m
     # ``cached`` forbids the GEBCO live-API fallback in the depth lookup, so the
     # cached attempt (local GEBCO only) precedes the API-allowed one.
@@ -1377,53 +1627,91 @@ def _pelagic_pair(cached):
 
 
 _BOTTOM_PROVIDERS = (
-    _BottomProvider('emodnet', _emodnet_pair, has_cached_variant=True,
-                    in_auto=True, in_cache_auto=True,
+    _BottomProvider('emodnet', _emodnet_pair, (CACHE_BACKEND, 'live'),
+                    in_auto=True,
                     accepts_grain_size_model=True),
     # A measured sample beats a modelled or interpolated map, so the
     # grain-size database sits directly behind EMODnet's polygons in 'auto'
     # too, not only in 'local': at 36 N 75 W it answers with a sand sample
     # 124 km away (rho*c 3608) where the pelagic rule gives ooze (2245).
     _BottomProvider('grainsize', _grainsize_pair, in_auto=True,
-                    in_cache_auto=True, accepts_grain_size_model=True),
+                    accepts_grain_size_model=True),
     _BottomProvider('crust1', _crust1_pair),
     _BottomProvider('graw', _graw_pair, accepts_grain_size_model=True),
-    _BottomProvider('diesing', _diesing_pair, in_auto=True, in_cache_auto=True,
+    _BottomProvider('diesing', _diesing_pair, in_auto=True,
                     accepts_grain_size_model=True),
     # MARS is live-only, so it sits *after* the offline global Diesing map:
     # 'auto' consults the installed raster before any AusSeabed request, and
     # MARS then covers the Australian shelf Diesing (deep sea only) misses.
-    _BottomProvider('mars', _mars_pair, in_auto=True,
+    _BottomProvider('mars', _mars_pair, ('live',), in_auto=True,
                     accepts_grain_size_model=True),
-    _BottomProvider('pelagic', _pelagic_pair, has_cached_variant=True,
-                    in_auto=True, in_cache_auto=True,
+    _BottomProvider('pelagic', _pelagic_pair, (CACHE_BACKEND, 'live'),
+                    in_auto=True,
                     accepts_depth=True,  # never fails (last resort)
                     accepts_grain_size_model=True),
 )
 _BOTTOM_BY_ID = {p.id: p for p in _BOTTOM_PROVIDERS}
 _AUTO_BOTTOM_ORDER = tuple(p.id for p in _BOTTOM_PROVIDERS if p.in_auto)
-_CACHE_BOTTOM_ORDER = tuple(p.id for p in _BOTTOM_PROVIDERS if p.in_cache_auto)
 
 
-def _bottom_order(bottom_source, who='fetch_environment'):
-    """Ordered bottom source keywords + a ``cache_only`` flag from the user
-    spec. ``'auto'`` → the best-available chain (EMODnet → grain-size →
-    Diesing → MARS → pelagic); ``'local'`` → the network-free chain (EMODnet local → grain-size →
-    Diesing → pelagic, cached backends only); a str/sequence of keywords is used
-    as-is. Validates each keyword; an unknown one is refused in the name of
-    ``who``, the public function the user called."""
-    if bottom_source == 'local':
-        return _CACHE_BOTTOM_ORDER, True
-    if bottom_source == 'auto':
-        return _AUTO_BOTTOM_ORDER, False
-    order = source_tuple(bottom_source)
-    for name in order:
-        if name not in _BOTTOM_BY_ID:
-            raise ConfigurationError(
-                f"{who}: unknown bottom source {name!r}.",
-                remediation=f"Use 'auto', 'local' or one of {sorted(_BOTTOM_BY_ID)}.",
-            )
-    return order, False
+def _bottom_fetch(source, transect, backend, *where, max_distance_km=None,
+                  depth=None, model=None, hamilton_fit=None,
+                  source_options=None, **kwargs):
+    """One attempt of :data:`_BOTTOM_CHAIN`: ``source``'s point fetcher at
+    ``where = (point,)`` or its transect fetcher (``transect``), its cached
+    twin for ``backend`` :data:`~uacpy.data._chain.CACHE_BACKEND`. The
+    keywords the chain supplies reach a fetcher only where it takes them (an
+    offline backend takes no timeout); ``depth`` reaches the depth-driven
+    sources and ``model`` / ``hamilton_fit`` the ones that convert a grain
+    size; ``source_options`` were checked against every fetcher of the chain
+    before any fetch."""
+    provider = _BOTTOM_BY_ID[source]
+    # Resolution happens per attempt, so a live backend's module is only
+    # imported when the cached attempt has failed.
+    point_fn, transect_fn = (provider.resolve(backend == CACHE_BACKEND)
+                             if provider.has_cached_variant
+                             else provider.resolve())
+    fn = transect_fn if transect else point_fn
+    call_kwargs = dict(_taken_by(fn, kwargs), **(source_options or {}))
+    if max_distance_km is not None:
+        call_kwargs['max_distance_km'] = max_distance_km
+    if provider.accepts_depth and depth is not None:
+        call_kwargs['depth'] = depth
+    if provider.accepts_grain_size_model and model is not None:
+        call_kwargs['model'] = model
+        # Every provider that converts a grain size takes the
+        # hamilton_fit with it; test_data_environment pins that the
+        # two travel together, so a non-default hamilton_fit cannot
+        # be dropped on the way to a fetcher.
+        if hamilton_fit is not None:
+            call_kwargs['hamilton_fit'] = hamilton_fit
+    return fn(*where, **call_kwargs)
+
+
+#: The bottom sources as one :class:`~uacpy.data._chain.SourceChain`: the
+#: ``'auto'`` order of the rows above, ``'local'`` its cached backends.
+_BOTTOM_CHAIN = SourceChain(
+    'bottom',
+    providers=tuple(SourceProvider(p.id, p.backends,
+                                   partial(_bottom_fetch, p.id, False),
+                                   partial(_bottom_fetch, p.id, True))
+                    for p in _BOTTOM_PROVIDERS),
+    auto=_AUTO_BOTTOM_ORDER)
+
+
+def _bottom_order(bottom_source, who='fetch_environment',
+                  keyword='bottom_sources='):
+    """The bottom sources a user spec tries, in order, + a ``cache_only``
+    flag. ``'auto'`` → the best-available chain (EMODnet → grain-size →
+    Diesing → MARS → pelagic); ``'local'`` → the network-free chain (EMODnet
+    local → grain-size → Diesing → pelagic, cached backends only); a
+    str/sequence of keywords is used as-is. An unknown keyword is refused
+    in the name of ``who``, the public function the user called, and the
+    ``keyword`` the spec was passed as."""
+    sources, cache_only = _BOTTOM_CHAIN.resolve(bottom_source)
+    attempts = _BOTTOM_CHAIN.attempts(sources, cache_only=cache_only, who=who,
+                                      keyword=keyword)
+    return tuple(dict.fromkeys(src for src, _backend in attempts)), cache_only
 
 
 #: Keywords ``_fetch_bottom`` supplies to the providers itself, so a
@@ -1513,47 +1801,16 @@ def _fetch_bottom(order, *args, transect, cache_only=False,
             hamilton_fit=hamilton_fit, source_options=source_options,
             who=who, **kwargs)
 
-    def attempts():
-        # Cache-first: the local twin (variant True) before the live backend
-        # (False), where one exists; cache_only drops the live attempt.
-        # Providers without a cached twin resolve one fetcher pair (None).
-        for name in order:
-            if not _BOTTOM_BY_ID[name].has_cached_variant:
-                yield name, None
-            elif cache_only:
-                yield name, True
-            else:
-                yield from ((name, True), (name, False))
-
-    def call(name, cached):
-        provider = _BOTTOM_BY_ID[name]
-        # Resolution happens per attempt, so a live backend's module is only
-        # imported when the cached attempt has failed.
-        point_fn, transect_fn = provider.resolve(
-            *(() if cached is None else (cached,)))
-        fn = transect_fn if transect else point_fn
-        # The keywords fetch_bottom supplies reach a fetcher only where it
-        # takes them (an offline backend takes no timeout); source options
-        # were checked against every fetcher of the chain before any fetch.
-        call_kwargs = dict(_taken_by(fn, kwargs), **(source_options or {}))
-        if max_distance_km is not None:
-            call_kwargs['max_distance_km'] = max_distance_km
-        if provider.accepts_depth and depth is not None:
-            call_kwargs['depth'] = depth
-        if provider.accepts_grain_size_model and model is not None:
-            call_kwargs['model'] = model
-            # Every provider that converts a grain size takes the
-            # hamilton_fit with it; test_data_environment pins that the
-            # two travel together, so a non-default hamilton_fit cannot
-            # be dropped on the way to a fetcher.
-            if hamilton_fit is not None:
-                call_kwargs['hamilton_fit'] = hamilton_fit
-        return fn(*args, **call_kwargs)
-
-    # A cached twin that read an answer ends its provider; only an absent or
-    # unreadable cache is worth asking the live twin.
-    bottom, (name, _cached) = first_answer(
-        attempts(), call, cached=lambda variant: variant is True)
+    request = dict(kwargs, max_distance_km=max_distance_km, depth=depth,
+                   model=model, hamilton_fit=hamilton_fit,
+                   source_options=source_options)
+    # Cache-first within each source; a cached twin that read an answer ends
+    # its provider, and only an absent or unreadable cache is worth asking
+    # the live twin.
+    bottom, (name, _backend) = first_answer(
+        _BOTTOM_CHAIN.attempts(order, cache_only=cache_only, who=who),
+        lambda src, backend: _BOTTOM_CHAIN.fetch(
+            src, backend, args, request, who=who, keyword='source='))
     return bottom, name
 
 
@@ -1623,7 +1880,7 @@ def _bottom_request(source, who):
             f"{who}: source={source!r} selects no source.",
             remediation="Pass 'auto', 'local', a source id, or a non-empty "
                         "sequence of source ids.")
-    return _bottom_order(lower_source_spec(source), who)
+    return _bottom_order(lower_source_spec(source), who, keyword='source=')
 
 
 @one_provenance_notice(subject="the seabed's data",
@@ -1632,7 +1889,7 @@ def fetch_bottom(
     point: Coordinate,
     *,
     source: Union[str, Sequence[str]] = 'auto',
-    model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    model: Optional[str] = None,
     hamilton_fit: Optional[str] = None,
     water_sound_speed: Optional[float] = None,
     depth: Optional[float] = None,
@@ -1657,14 +1914,17 @@ def fetch_bottom(
         them tried in order. The same values ``fetch_environment``'s
         ``bottom_sources=`` takes, resolved the same way.
     model, hamilton_fit, water_sound_speed
-        The grain-size relations, Hamilton & Bachman fit and in-situ water
+        The grain-size relations (``None``: :data:`~uacpy.core.sediment.DEFAULT_GRAIN_SIZE_MODEL`,
+        ``'hamilton'``), Hamilton & Bachman fit and in-situ water
         sound speed (m/s) at the seabed, for every source that converts a
         grain size (see :func:`uacpy.core.sediment.grain_size_to_geoacoustics`);
-        ``'crust1'`` carries measured layer speeds, so a ``water_sound_speed``
-        it answers gives a ``FallbackWarning`` that the value was not used.
+        ``'crust1'`` carries measured layer properties, so any of the three
+        set when it answers gives a ``FallbackWarning`` that it was not used.
     depth : float, optional
         Water depth (m) for the depth-driven ``'pelagic'`` source; fetched
-        from GEBCO when ``None``.
+        from GEBCO when ``None``. A given depth also stands in for the check
+        that the point is wet (no GEBCO lookup), whichever source answers;
+        set when another source answers, it gives a ``FallbackWarning``.
     roughness : float, optional
         RMS seabed roughness (m). Default 0.
     max_distance_km : float, optional
@@ -1695,20 +1955,24 @@ def fetch_bottom(
     ConfigurationError
         An unknown source, or no source whose cache is installed.
     """
+    given_model = model
     model, hamilton_fit = _canonical_grain_size_selection(
-        model, hamilton_fit, who='fetch_bottom')
+        DEFAULT_GRAIN_SIZE_MODEL if model is None else model, hamilton_fit,
+        who='fetch_bottom')
     order, cache_only = _bottom_request(source, 'fetch_bottom')
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_bottom')
     if depth is None:
         _refuse_a_dry_point(point, who='fetch_bottom', cache_only=cache_only,
                             timeout=timeout, verbose=verbose)
-    bottom, _name = _fetch_bottom(
+    bottom, _source = _fetch_bottom(
         order, as_coordinate(point), transect=False, cache_only=cache_only,
         max_distance_km=max_distance_km, depth=depth, model=model,
         hamilton_fit=hamilton_fit, water_sound_speed=water_sound_speed,
         roughness=roughness, timeout=timeout, verbose=verbose,
         source_options=source_options, who='fetch_bottom')
-    _unused_water_sound_speed_notice(water_sound_speed, _name, 'fetch_bottom')
+    _unused_bottom_settings_notices(
+        bottom, 'fetch_bottom', water_sound_speed=water_sound_speed,
+        model=given_model, hamilton_fit=hamilton_fit, depth=depth)
     return bottom
 
 
@@ -1721,7 +1985,7 @@ def fetch_bottom_transect(
     source: Union[str, Sequence[str]] = 'auto',
     n_points: Union[int, str, None] = None,
     max_points: Optional[int] = None,
-    model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    model: Optional[str] = None,
     hamilton_fit: Optional[str] = None,
     water_sound_speed=None,
     depth=None,
@@ -1781,11 +2045,13 @@ def fetch_bottom_transect(
         Ranges measured from ``start`` (``'crust1'`` returns its layered
         columns).
     """
+    given_model = model
     model, hamilton_fit = _canonical_grain_size_selection(
-        model, hamilton_fit, who='fetch_bottom_transect')
+        DEFAULT_GRAIN_SIZE_MODEL if model is None else model, hamilton_fit,
+        who='fetch_bottom_transect')
     order, cache_only = _bottom_request(source, 'fetch_bottom_transect')
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_bottom_transect')
-    bottom, _name = _fetch_bottom(
+    bottom, _source = _fetch_bottom(
         order, as_coordinate(start), as_coordinate(end), transect=True,
         cache_only=cache_only, max_distance_km=max_distance_km, depth=depth,
         model=model, hamilton_fit=hamilton_fit,
@@ -1793,23 +2059,55 @@ def fetch_bottom_transect(
         n_points=n_points, max_points=max_points, timeout=timeout,
         verbose=verbose, source_options=source_options,
         who='fetch_bottom_transect')
-    _unused_water_sound_speed_notice(water_sound_speed, _name,
-                                     'fetch_bottom_transect')
+    _unused_bottom_settings_notices(
+        bottom, 'fetch_bottom_transect', water_sound_speed=water_sound_speed,
+        model=given_model, hamilton_fit=hamilton_fit, depth=depth)
     return bottom
 
 
-def _unused_water_sound_speed_notice(water_sound_speed, name, who):
-    """A ``FallbackWarning`` when the caller's ``water_sound_speed`` reached
-    a source that converts no grain size — CRUST1.0 carries measured layer
-    speeds — so the value changed nothing."""
-    if water_sound_speed is None or _BOTTOM_BY_ID[name].accepts_grain_size_model:
-        return
-    warnings.warn(
-        f"{who}: water_sound_speed= was not used: source {name!r} answered, "
-        f"and it carries measured layer speeds rather than converting a "
-        f"grain size. Drop the argument, or choose a source that converts a "
-        f"grain size.",
-        FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+def _answering_ids(bottom):
+    """The bottom-source ids a fetched seabed's records cite: one for a
+    point, every source a chain resolved to along a transect."""
+    if isinstance(bottom, Bottom):
+        parts = [column.halfspace for column in bottom.columns]
+    elif isinstance(bottom, SeabedColumn):
+        parts = [bottom.halfspace]
+    else:
+        parts = [bottom]
+    return sorted({p.source.id for part in parts for p in part.data_sources
+                   if p.source.id in _BOTTOM_BY_ID})
+
+
+def _converts_a_grain_size(bottom):
+    """Whether a source that converts a grain size answered for some column
+    of a fetched seabed (CRUST1.0 carries measured layer properties)."""
+    return any(_BOTTOM_BY_ID[i].accepts_grain_size_model
+               for i in _answering_ids(bottom))
+
+
+def _unused_bottom_settings_notices(bottom, who, *, water_sound_speed,
+                                    model, hamilton_fit, depth):
+    """A ``FallbackWarning`` for each setting the caller gave that the
+    answering sources do not read: the grain-size conversion's
+    ``water_sound_speed``, ``model`` and ``hamilton_fit`` when none of them
+    converts a grain size, ``depth`` when none is depth-driven (a given depth
+    still stands in for the dry-point lookup)."""
+    ids = _answering_ids(bottom)
+    answered = ', '.join(repr(i) for i in ids)
+    unused = []
+    if not _converts_a_grain_size(bottom):
+        why = (f"source {answered} answered, and it carries measured layer "
+               f"properties rather than converting a grain size. Drop the "
+               f"argument, or choose a source that converts a grain size")
+        unused += [('water_sound_speed', water_sound_speed, why),
+                   ('model', model, why), ('hamilton_fit', hamilton_fit, why)]
+    if not any(_BOTTOM_BY_ID[i].accepts_depth for i in ids):
+        unused.append(('depth', depth,
+                       f"source {answered} answered, and only the "
+                       f"depth-driven 'pelagic' source reads a depth (a "
+                       f"given depth still stands in for the dry-point "
+                       f"lookup)"))
+    unused_setting_notices(who, unused)
 
 
 def _seabed_sound_speed(ssp, seafloor, range_m=0.0):
@@ -1876,7 +2174,10 @@ def _check_bottom_literal(bottom):
     if bottom is None or isinstance(bottom, (str, BoundaryProperties,
                                              SeabedColumn, Bottom)):
         return
-    if not isinstance(bottom, (int, float)) or isinstance(bottom, bool):
+    # A NumPy scalar (a ϕ read from a NetCDF, a float32) is a number too;
+    # a bool (an int subclass) is not, and NumPy's bool is no number type.
+    if (not isinstance(bottom, (int, float, np.integer, np.floating))
+            or isinstance(bottom, bool)):
         raise ConfigurationError(
             f"fetch_environment: bottom must be a ϕ float, a class name, a "
             f"BoundaryProperties, a SeabedColumn, a Bottom, or None; got "

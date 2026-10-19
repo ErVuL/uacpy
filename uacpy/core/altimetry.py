@@ -22,12 +22,12 @@ from uacpy.core._grid import _RangeProfile
 from uacpy.core._validate import (
     real_array_or_none, refuse_two_columns, require_finite,
     require_generator)
-from uacpy.core.constants import STANDARD_GRAVITY_M_S2
+from uacpy.core.constants import STANDARD_GRAVITY
 from uacpy.core._provenance import coerce_data_sources
 
 __all__ = [
     'Altimetry', 'SEA_SURFACE_SAMPLES_PER_PEAK', 'SEA_SURFACE_MIN_POINTS',
-    'SEA_SURFACE_MAX_POINTS', 'SEA_SURFACE_CALM_WIND_MPS',
+    'SEA_SURFACE_MAX_POINTS', 'SEA_SURFACE_CALM_WIND',
     'DEFAULT_SEA_SURFACE_WIND_KN',
     'sea_surface_n_points', 'generate_sea_surface',
 ]
@@ -154,10 +154,12 @@ SEA_SURFACE_MAX_POINTS = 200_000
 #: Wind (m/s) at or below which the sea is calm: its peak wavelength is
 #: 0.16 m and its Hs 5 mm at the threshold, so the realization stands in for a flat
 #: surface, keeps SEA_SURFACE_MIN_POINTS and is not warned about.
-SEA_SURFACE_CALM_WIND_MPS = 0.5
-#: The sea-surface generators' default wind, in knots: 10 m/s, the
-#: Pierson-Moskowitz example wind (Hs about 2.1 m), written as that m/s value
-#: converted so the default realisation is the 10 m/s one exactly.
+SEA_SURFACE_CALM_WIND = 0.5
+#: The sea-surface generators' default wind, in knots: 10 m/s (Hs about
+#: 2.1 m), uacpy guidance — the first example wind of the Pierson-Moskowitz
+#: spectra in Brekhovskikh & Lysanov, *Fundamentals of Ocean Acoustics*,
+#: Fig. 1.24 (wind at 19.5 m), written as that m/s value converted so the
+#: default realisation is the 10 m/s one exactly.
 DEFAULT_SEA_SURFACE_WIND_KN = 10.0 * KNOTS_PER_M_PER_S
 
 
@@ -172,10 +174,10 @@ def sea_surface_n_points(rmax: float, wind_speed_19_5m_kn: float) -> Tuple[int, 
     :func:`uacpy.data.fetch_sea_surface`.
     """
     wind_ms = float(knots_to_ms(wind_speed_19_5m_kn))    # the PM spectrum's U, in m/s
-    lambda_p = 2.0 * np.pi * wind_ms ** 2 / STANDARD_GRAVITY_M_S2
+    lambda_p = 2.0 * np.pi * wind_ms ** 2 / STANDARD_GRAVITY
     needed = int(np.ceil(SEA_SURFACE_SAMPLES_PER_PEAK * float(rmax)
                          / lambda_p)) + 1
-    if wind_ms <= SEA_SURFACE_CALM_WIND_MPS:
+    if wind_ms <= SEA_SURFACE_CALM_WIND:
         return SEA_SURFACE_MIN_POINTS, needed
     return (int(min(max(needed, SEA_SURFACE_MIN_POINTS),
                     SEA_SURFACE_MAX_POINTS)), needed)
@@ -210,8 +212,8 @@ def generate_sea_surface(
         Number of range points in the output altimetry array. The surface is
         resolved with ``SEA_SURFACE_SAMPLES_PER_PEAK`` (8) samples per
         nominal peak wavelength ``lambda_p = 2*pi*U**2/g``, i.e.
-        ``n_points >= 8 * rmax / lambda_p + 1`` (1251 points for 10 km at
-        10 m/s, 19.4 kn). ``None`` (default) picks that count, at least 500 and at
+        ``n_points >= 8 * rmax / lambda_p + 1`` (1250 points for 10 km at
+        10 m/s, 19.44 kn). ``None`` (default) picks that count, at least 500 and at
         most ``SEA_SURFACE_MAX_POINTS`` (200 000) — past the cap it warns
         rather than allocating — and 500 for a calm sea (U <= 0.5 m/s, about
         1 kn), whose
@@ -266,7 +268,7 @@ def generate_sea_surface(
             f"generate_sea_surface: n_points must be >= 2; got {n_points}."
         )
     rng = require_generator(rng, "generate_sea_surface")
-    g = STANDARD_GRAVITY_M_S2
+    g = STANDARD_GRAVITY
 
     ranges = np.linspace(0, rmax, n_points)
     dx = ranges[1] - ranges[0]
@@ -296,7 +298,7 @@ def generate_sea_surface(
     # so a grid sized on the nominal one errs on the fine side). A grid coarser
     # than SEA_SURFACE_SAMPLES_PER_PEAK samples per peak wavelength aliases
     # the spectrum away and returns a surface flatter than the wind's Hs.
-    if wind_ms > SEA_SURFACE_CALM_WIND_MPS and n_points < needed:
+    if wind_ms > SEA_SURFACE_CALM_WIND and n_points < needed:
         lambda_p = 2.0 * np.pi * wind_ms ** 2 / g
         remedy = (f"Shorten rmax: resolving it needs {needed} samples, "
                   f"past the {SEA_SURFACE_MAX_POINTS} cap"

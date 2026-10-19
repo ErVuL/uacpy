@@ -136,7 +136,7 @@ per_shot = np.asarray(H_heard.sound_exposure_level(
 coarse = track_exposure(np.asarray(single['VHF'].at(depth=RECEIVER_DEPTH).data),
                         ranges, stretch, closest_approach=CPA)
 print(f"{stretch.size} shots at {CPA:.0f} m, VHF-weighted: record "
-      f"{running.levels[-1]:.2f} dB, energy sum of the shots "
+      f"{running.levels_dB[-1]:.2f} dB, energy sum of the shots "
       f"{sum_levels_dB(per_shot, axis=0):.2f} dB, track sum on the map "
       f"{coarse:.2f} dB")
 

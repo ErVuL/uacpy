@@ -137,7 +137,7 @@ nonsense.
 | Source beam pattern | ✅ | staged as an `.sbp` |
 | Range-dependent bottom | ✅ | each profile block carries the seabed column at its own range, layers included (every block is a full environment, `kraken.f90:42-46`); the `MODES` path takes the track median (the package default, as every engine) unless `collapse=` sets `'bottom_range'` |
 | Sea-surface altimetry | ❌ | dropped; flat surface |
-| Multiple source depths | ✅ (TL modes) | `field.exe` sums every depth of the `.flp` from the one `.mod` — the mode solve reads no source depth — so `COHERENT_TL` / `INCOHERENT_TL` launch once and the `.shd` reader puts the `NSz` axis on the Field's `source_depth` axis (measured 4.4× at eight depths). `BROADBAND` / `TIME_SERIES` loop through `run()`, one deck per depth; `MODES` returns one `Modes` whose `source_depths` lists every depth. Each depth's plane equals that depth's stand-alone run exactly: the receiver depths sit on the mode-tabulation grid and are written to the `.flp` in full, so no source depth can reach another depth's answer |
+| Multiple source depths | ✅ (TL modes) | `field.exe` sums every depth of the `.flp` from the one `.mod` — the mode solve reads no source depth — so `COHERENT_TL` / `INCOHERENT_TL` launch once and the `.shd` reader puts the `NSz` axis on the Field's `source_depth` axis (measured 6.4× faster at eight depths: 100 m Pekeris guide, 100 Hz, 30 × 100 receivers). `BROADBAND` / `TIME_SERIES` loop through `run()`, one deck per depth; `MODES` returns one `Modes` whose `source_depths` lists every depth. Each depth's plane equals that depth's stand-alone run exactly: the receiver depths sit on the mode-tabulation grid and are written to the `.flp` in full, so no source depth can reach another depth's answer |
 
 The ❌ row is *collapsed* with a `FallbackWarning` naming what was dropped; the
 mechanism, and the `collapse=` dict that overrides it, is in the
@@ -362,14 +362,14 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `c_low` | `None` | Lower phase-speed bound (m/s). `None` → `0.0` for a fluid environment, which hands the floor to KRAKEN; → the slowest compressional speed when the bottom **or the surface** carries shear (an elastic ice canopy drags KRAKEN's automatic floor down exactly as an elastic seabed does). `0` is the manual's own automatic floor (`doc/kraken.htm`, phase speed limits: "CLOW will be computed automatically if you set it to zero"); the slowest compressional speed is uacpy guidance — the manual uses a nonzero CLOW "to exclude interfacial modes (e.g. a Scholte wave)" and names no value. |
-| `c_high` | `None` | Upper bound (m/s). `None` → `1.05 ×` the fastest speed among the SSP and the seabed; `10 ×` the fastest water speed over a `'file'` / `'precalc'` reflection-table seabed (`_TABLE_BOTTOM_C_HIGH_FACTOR`) and over a rigid or vacuum floor on krakenc; unbounded (`1e9`) over a rigid or vacuum floor on kraken.exe; `10 ×` the fastest speed in the profile with `leaky_modes=True`. `run_settings(...).engine` records the window and the rule that set it. The manual leaves CHIGH to "a matter of experience" — in the far field "one may set CHIGH to the sound speed at the ocean bottom", in the near field higher (`doc/kraken.htm`, phase speed limits); `1e9` is the toolbox's "no upper limit" (`doc/bounce.htm`: "CMax to 1.0E9"); the `1.05 ×` and `10 ×` factors are uacpy guidance, measured (`kraken/_window.py`, §6.4). |
+| `c_low` | `None` | Lower phase-speed bound (m/s). `None` → `0.0` for a fluid environment, which hands the floor to KRAKEN; → the slowest compressional speed when the bottom **or the surface** carries shear (an elastic ice canopy drags KRAKEN's automatic floor down exactly as an elastic seabed does). `0` is the manual's own automatic floor (`doc/kraken.htm`, phase speed limits: "CLOW will be computed automatically if you set it to zero"); the slowest compressional speed is the manual's remedy for interfacial modes — "The simplest solution is to exclude interfacial modes by setting the lower phase-speed limit to the minimum p-wave speed in the problem" (`doc/kraken.htm`, FAILURE TO CONVERGE IN SECANT) — and making it the default over shear is uacpy's choice (the manual's default is 0, automatic). A field run whose source or receivers lie within one wavelength of a Scholte wave below the floor (Brekhovskikh & Lysanov eq. 3.4.29) gives a `NumericsWarning`: the manual calls those modes negligible only "when the source and receiver are sufficiently far from the interface". |
+| `c_high` | `None` | Upper bound (m/s). `None` → `1.05 ×` the fastest speed among the SSP and the seabed; `10 ×` the fastest water speed over a `'file'` / `'precalc'` reflection-table seabed (`_TABLE_BOTTOM_C_HIGH_FACTOR`) and over a rigid or vacuum floor on krakenc; unbounded (`1e9`) over a rigid or vacuum floor on kraken.exe; `10 ×` the fastest speed in the profile with `leaky_modes=True`. `run_settings(...).engine` records the window and the rule that set it. The manual leaves CHIGH to "a matter of experience" — in the far field "one may set CHIGH to the sound speed at the ocean bottom", in the near field higher (`doc/kraken.htm`, phase speed limits); `1e9` is the toolbox's "no upper limit" (`doc/bounce.htm`: "CMax to 1.0E9"); the `1.05 ×` and `10 ×` factors are uacpy guidance, measured (`kraken/_window.py`, §6.4). A window that drops a direct or surface-reflected path the receivers see gives a `NumericsWarning`, derived or pinned (a pinned `c_high` is kept, as on Scooter). |
 | `leaky_modes` | `False` | Raise `c_high` to `10 ×` the fastest speed in each profile so the solver attempts leaky modes (§6.5). Forces `backend='krakenc'`. The `10 ×` is uacpy guidance, measured: an unbounded `1e9` made KRAKENC's secant search fail (`kraken/_window.py`); the toolbox's own leaky test deck runs 20000 m/s over a 1600 m/s seabed (`tests/MunkLeaky/MunkKleaky.env`). |
 | `n_modes` | `None` | Cap on the modes `field.exe` sums (`MLimit` in the `.flp`); a `MODES` run's `Modes` is cut to the same first `N`. `None` sums every mode the solver kept (§7, *`n_modes` truncates*), as `doc/field.htm` does with a large count: "If the number of modes specified exceeds the number computed then the program uses all the computed modes." |
 | `range_offsets` | `None` | Receiver range offsets (m), one per receiver depth, shallowest first (`Rro` in the `.flp`, `field.f90:147-152`). `doc/field.htm`: "The field is computed by stepping through the ranges, Rr(1:NR), and adding in the range displacements, Rro() before computing the field on the array. Nonzero values are used to tilt or distort the receiving array, thereby simulating the distortion which occurs on an array deployed in the ocean." The receiver at depth `z_i` and range `r` reads the field at `r + ro_i` (`EvaluateMod.f90:47`, `:72-73`). `None` writes zeros, a vertical array. `field.exe` sorts the offsets ascending as it sorts the depths (`misc/SourceReceiverPositions.f90:224`, `:267-268`), so offsets that decrease with depth — an array leaning toward the source as it deepens — are refused: the binary would pair them with other receivers. Only the range-independent sum reads them (`Evaluate`, `field.f90:214-215`); a range-dependent run and `compute_modes` give a notice that they are not used. |
 | `n_mesh` | `None` | Finite-difference points **per medium** — a total count, not a per-wavelength density, and the *initial* mesh that `rmax` then doubles. `0` lets Kraken size it: 20 points per wavelength, taken from the medium's **shear** speed wherever one is set (`ReadEnvironmentMod.f90:101-104`), which is far finer than the compressional wavelength would ask for. A value below half of what it would have chosen is not silently accepted — it aborts with *Mesh is too coarse*. `0` is the manual's automatic mesh (`doc/EnvironmentalFile.htm`: "If you type 0 for the number of mesh points, the code will calculate NMESH automatically"). A count is the mesh at the deck's frequency line, `source.frequencies[0]`; a band deck (`TopOpt(6)='B'`) solves each frequency f on that count × f / freq0 (`kraken.f90:75`, `krakenc.f90:77`). With `0`, a band-deck medium whose own count would leave fewer than AT's 10 points at the band's lowest frequency is written with the least count that leaves 10 there, and every other medium is left to the binary (§7, *A band deck's mesh at its lowest frequency*; `run_settings(...).engine.launches[0].n_mesh` shows the counts). `None` is that rule: `0`, with the band-deck counts. A set value is written as given — one count for every medium, or one per medium, water first, on a range-independent run (a track's deck takes one count for every medium) — and a set `0` on a band deck that leaves a medium under 10 points at its lowest frequency gives a `NumericsWarning`. |
 | `interp_ssp` | `None` | SSP connection scheme: `'linear'` (the default), `'n2linear'`, `'pchip'`, `'spline'` (cubic spline). `'quad'` (Bellhop-only) is refused with `UnsupportedFeatureError` — a capability limit, not a bad argument — and `'analytic'` (the Acoustics-Toolbox hard-coded Munk curve, which would ignore `env.ssp`) and any other name with `ConfigurationError`, when the run writes its deck. `'linear'` (AT `'C'`) is the manual's choice when unsure (`doc/EnvironmentalFile.htm`: "If your not sure which option to take, I'd suggest you use 'C'."). |
-| `rmax` | `None` | `RMax` written into the deck (m, converted to km) — the range at which the eigenvalues must be accurate. Kraken solves on successively doubled meshes (multipliers 1, 2, 4, 8, 16), Richardson-extrapolates, and stops once `Error × RMax < 1` (`kraken.f90:80`). `None` → the farthest receiver range, narrowband or band, the manual's value: "the largest range for which a field calculation will be desired" (`doc/kraken.htm` (8)); 100 km when no receiver range is positive (`compute_modes`), uacpy guidance, measured: the manual's 0 ("If you set it to zero, then no mesh doublings will be performed") gave 0.27 dB median and 3.7 dB max \|ΔTL\| to 10 km on a 100 m Pekeris guide at 100 Hz, and a 1.09 rad mode phase error at 10 km, against a converged run. A set value is written as given; 0 runs with a `NumericsWarning` that no mesh doubling follows, and a negative value is refused. |
+| `rmax` | `None` | `RMax` written into the deck (m, converted to km) — the range at which the eigenvalues must be accurate. Kraken solves on successively doubled meshes (multipliers 1, 2, 4, 8, 16), Richardson-extrapolates, and stops once `Error × 1000 × RMax[km] < 1`, i.e. `Error × RMax[m] < 1` (`kraken.f90:80`). `None` → the farthest receiver range, narrowband or band, the manual's value: "the largest range for which a field calculation will be desired" (`doc/kraken.htm` (8)); 100 km when no receiver range is positive (`compute_modes`), uacpy guidance, measured: the manual's 0 ("If you set it to zero, then no mesh doublings will be performed") gave 0.27 dB median and 3.7 dB max \|ΔTL\| to 10 km on a 100 m Pekeris guide at 100 Hz, and a 1.09 rad mode phase error at 10 km, against a converged run. A set value is written as given; 0 runs with a `NumericsWarning` that no mesh doubling follows, and a negative value is refused. |
 
 **How the modes are sampled**
 
@@ -395,7 +395,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | `work_dir` | `None` | Pin the scratch dir to keep the `.env` / `.mod` / `.shd` / `.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
 | `use_tmpfs` | `False` | Stage scratch files in RAM. |
-| `timeout` | `600.0` | Subprocess timeout (s). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
+| `timeout` | `600.0` | Subprocess timeout (s), positive and finite, or `None` for no limit (anything else is refused at construction). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`. With `'info'` the resolved `c_low` / `c_high` are logged. |
 | `collapse` | `None` | Per-feature collapse overrides; Kraken declares no default of its own (§3). |
 
@@ -550,10 +550,11 @@ A mode of phase speed `c_p` carries energy up to grazing angle
 `arccos(c/c_p)`, so `c_high` also bounds the steepest path the modal sum
 holds; a run whose receivers see a steeper direct or surface-reflected path
 says so in a notice. *Illustration (measured, not a rule):* on a 100 m
-Pekeris guide (`c_b` 1650 m/s, 200 Hz, source at 50 m, receiver at 75 m)
-the default window read 11.9 dB above Scooter (`c_high=1e9`,
-`taper=0.05`) at 200 m and 1.0 dB at 400 m; `leaky_modes=True` (krakenc,
-ten times the window) was within 0.04 dB at every range.
+Pekeris guide (1500 m/s water, seabed `c_b` 1650 m/s, ρ 1.5 g/cm³,
+0.5 dB/λ; 200 Hz, source at 50 m, receiver at 75 m) the default window read
+11.9 dB above Scooter (`c_high=1e9`, `taper=0.05`) at 200 m and 1.0 dB at
+400 m; `leaky_modes=True` (krakenc, ten times the window) was within 0.04 dB
+at 200, 400, 800 and 2000 m.
 
 ### 6.5 Leaky modes
 
@@ -906,7 +907,7 @@ Acoustics §4.10.1): the continuous spectrum above the half-space's
 compressional speed (`k_r < 2πf/c_p`), the water-borne modes below it — leaky
 in shear where faster than the shear speed, "the shear waves are propagating
 in the bottom ... moving both poles away from the real wavenumber axis" — and
-one interface (Scholte) wave, "evanescent in both the water column and the
+one Scholte wave, "evanescent in both the water column and the
 bottom", slower than every shear and water speed (§8.5.4: it has no
 low-frequency cut-off). A root between the slowest shear speed and the
 slowest water speed is evanescent in the water: over a half-space it radiates
@@ -925,11 +926,15 @@ Scooter (TL at 250 m / 1 km / 4 km, source and receiver 15 m, 30 m of water):
 | cp 1800 / cs 800 | 10 Hz | 1421.0 (between cs and water) | 82 / 191 / 609 | 60 / 78 / 102 |
 
 The window uacpy derives over shear starts at the slowest compressional speed
-(`c_low` below), which leaves the interface wave out; over a seabed whose
+(`c_low` below), which leaves the Scholte wave out; over a seabed whose
 shear speed nears the water's every water-borne mode leaks into shear and the
 field at range is that wave's. *Illustration:* the limestone preset (cp 3000 /
 cs 1500 m/s) at 30 Hz sums to 140.9 / 231.2 dB at 1 / 2 km without its
-1242 m/s wave, against OAST's 66.6 / 72.8.
+1242 m/s wave, against OAST's 66.6 / 72.8; `Kraken(c_low=1000)` keeps the
+wave and reads 66.3 / 72.8. A field run whose source or a receiver lies
+within one wavelength of a Scholte wave below the floor says so (a
+`NumericsWarning` naming the wave's speed, solved from Brekhovskikh &
+Lysanov eq. 3.4.29 for the two media as half-spaces: 1240.4 m/s here).
 
 **Eigenvectors are computed on the first mesh only.** KRAKEN solves on a
 ladder of meshes and Richardson-extrapolates the eigenvalues over them, but
@@ -968,7 +973,7 @@ not finish in 240 s (rigid, 50 Hz), or kept no mode (vacuum, 200 Hz).
   where they are slower than the speed it reports (30 m of 1500 m/s water
   over a 1650 m/s, 1.5 g/cm³, 0.5 dB/λ half-space, 40 Hz: the mode at
   1619.176 m/s is kept with `c_low` = 1619.12 and lost at 1619.14). `leaky_modes=True`
-  adds the leaky spectrum; `c_low` below the interface wave adds it, on
+  adds the leaky spectrum; `c_low` below the Scholte wave adds it, on
   krakenc at the cost of the water-borne roots (cp 1800 / cs 800 m/s,
   30 Hz, `c_low=100`: the wave alone, 103 dB against OAST's 46).
 - *Compare the binaries.* kraken.exe's attenuation is a first-order
@@ -991,8 +996,9 @@ interfacial (Scholte / Stoneley) modes instead of the waterborne field, and TL
 comes back hundreds of dB. uacpy therefore sets `c_low` to the slowest
 compressional speed automatically whenever the bottom — or the surface, an
 elastic ice canopy counting exactly like an elastic seabed — carries shear.
-That window leaves out the seabed interface wave (above); where the wave
-carries the field, OAST holds it.
+That window leaves out the seabed Scholte wave (above), and a run whose
+geometry reaches within one of its wavelengths of the bed warns; where the
+wave carries the field, OAST holds it.
 
 **`n_modes` truncates, it does not converge.** `Kraken(n_modes=N)` caps the
 sum at N modes. Dropping the high-order ones removes the steep energy, which
@@ -1016,9 +1022,20 @@ track a fixed depth grid will dip into the seabed inshore. Kraken returns the
 below-seafloor field there rather than raising; a rectangular grid's cells
 under the bed are logged (`verbose='info'`, with their count and the first of
 them), and a `ValidityWarning` comes only for a paired grid's receiver below
-its seafloor or a range column whose every depth lies below it. If
-the seabed is elastic, `field.exe` has no elastic component to evaluate and
-those depths come back as `NaN`, again with a warning.
+its seafloor or a range column whose every depth lies below it. In or below
+an elastic sediment *layer* the depths come back as `NaN` with a
+`FallbackWarning`: `field.exe` tabulates the modes over the acoustic media
+only. Over an elastic *half-space* they are computed: `field.exe` continues each
+mode below the bottom as `Φ(D)·exp(−γ_B (z − D))` with `γ_B` from the
+half-space's compressional speed alone (`KrakenField/ReadModes.f90:72`,
+`:264-271`, `:277-278`), and its own "Warning in GetMode : Receiver below
+depth of bottom" (`:93-97`) reaches you as an `IOWarning`. That value is the
+water-side pressure at the interface carried down with the compressional
+decay; the field in a solid is a pair of potentials decaying with `γ_p` and
+`γ_s` (Jensen et al., *Computational Ocean Acoustics*, §5.10.4.4), so it is
+neither OASES's bulk pressure `'K'` nor its normal stress `'N'` (measured: 1.1
+dB above OAST `'K'` from 0.5 m below the bed, where the fluid control agrees
+to 0.02 dB). For the field inside a solid, run [OAST](oases.md).
 
 **Several source depths.** In the TL modes (`COHERENT_TL`,
 `INCOHERENT_TL`) one deck carries every depth and `field.exe` evaluates them

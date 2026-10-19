@@ -23,10 +23,11 @@ from uacpy.core.units import m_to_km
 
 def write_mpirams_inpe(
     filepath: Union[str, Path],
+    *,
     fc: float,
     q_factor: float,
     record_duration: float,
-    zsrc: float,
+    zs: float,
     dz: float,
     dr: float,
     n_pade: int,
@@ -45,7 +46,6 @@ def write_mpirams_inpe(
     attn: Optional[np.ndarray] = None,
     range_dependent_sediment: bool = False,
     sed_filename: str = '',
-    *,
     c0: float,
     water_attn_filename: str = '',
 ):
@@ -64,8 +64,8 @@ def write_mpirams_inpe(
         Q value (bandwidth = fc/Q). Use large Q (e.g. 1e6) for narrowband/TL mode.
     record_duration : float
         Time window width (s)
-    zsrc : float
-        Source depth (m)
+    zs : float
+        Source depth (m), the deck's ``zsrc(1)`` (``peramx.f90:76``).
     dz : float
         Depth accuracy parameter (m).
     dr : float
@@ -133,7 +133,7 @@ def write_mpirams_inpe(
     -----
     ``in.pe`` is positional: ``mpiramS/src/peramx.f90:74-105`` consumes one
     record per line in exactly the order written here — a dummy line (``:74``),
-    then ``fc Q``, ``record_duration``, ``zsrc``, ``dz``, ``dr``, ``np_pade nss``,
+    then ``fc Q``, ``record_duration``, ``zs``, ``dz``, ``dr``, ``np_pade nss``,
     ``stability_range``, ``depth_decimation``, ``c0``, ``ssp_filename``, ``earth_curvature``, ``horizontal_interpolation``,
     ``bathymetry_from_file``, ``bth_filename``, the output-ranges filename (``:91``),
     ``sedlayer``, ``n_sediment_points``, ``range_dependent_sediment`` (``:105``). ``range_dependent_sediment = 1`` is followed by
@@ -199,7 +199,7 @@ def write_mpirams_inpe(
         f.write("0.0\n")
         f.write(f"{fc}  {q_factor}\n")
         f.write(f"{record_duration}\n")
-        f.write(f"{zsrc}\n")
+        f.write(f"{zs}\n")
         f.write(f"{dz}\n")
         f.write(f"{dr}\n")
         f.write(f"{int(n_pade)} {int(n_stability)}\n")
@@ -254,7 +254,8 @@ def write_water_attenuation_file(
     header, one row of the ``nfaw`` bin frequencies (Hz), then one row per
     depth — the depth (m) followed by its ``nfaw`` attenuations in
     dB/wavelength. The binary looks the marched bin up in the frequency row
-    and stops if no entry sits within 1e-7 of it, so ``frequencies`` must be
+    and stops if no entry sits within ``1e-7 × f`` of it (a relative test,
+    ``ram.f90:504``), so ``frequencies`` must be
     the sweep :func:`~uacpy.models.ram._band.broadband_frequencies` reproduces.
     Between depths the binary interpolates linearly and holds the end values
     beyond the table (``wksqw`` in ``ram.f90``).

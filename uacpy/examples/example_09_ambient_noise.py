@@ -12,7 +12,7 @@ Uses: noise.WenzNoise(.as_psd) · plot_wenz ·
 acoustic_signal.synthesize_noise_from_psd · spectrogram ·
 probabilistic_welch · constant_q · probabilistic_constant_q ·
 sound_exposure (ISO 18405, decidecade bands) ·
-plot_spectrogram · plot_ppsd · plot_constant_q_ppsd · plot_band_levels
+plot_spectrogram · plot_ppsd · plot_band_levels
 """
 
 import os
@@ -61,7 +61,7 @@ print(f"  synthesised {duration:.0f} s @ {fs / 1e3:.1f} kHz "
       f"({pressure.size:,} samples), df = {fs / nfft:.2f} Hz")
 
 fig, _ = uacpy.plot.plot_waveform(
-    pressure[:int(0.2 * fs)], fs, time_units='ms', lw=0.5,
+    pressure[:int(0.2 * fs)], fs, time_unit='ms', lw=0.5,
     title=f'Synthesised Wenz noise (first 0.2 s of {duration:.0f} s)')
 fig.savefig(OUT / 'example_09_ssrp_timeseries.png', dpi=150,
             bbox_inches='tight')
@@ -77,15 +77,14 @@ plt.close(fig)
 
 # Welch's default 8192-sample segment makes 11.7 Hz bins at 96 kHz, too coarse
 # for the curve's steep fall below 20 Hz, so the PPSD starts at 20 Hz as the
-# constant-Q one below does.
-fig, ax = uacpy.plot.plot_ppsd(
+# constant-Q one below does. The check: the analytic curve the realisation came
+# from, drawn first, under its own PPSD, which then sets the axes' window.
+fig, ax = uacpy.plot.plot_wenz(wenz, show_components=False, color='magenta',
+                               label='Wenz total (analytic)', figsize=(10, 6))
+uacpy.plot.plot_ppsd(
     probabilistic_welch(pressure, fs, level_min_dB=20, level_max_dB=140,
                         freq_min=20.0),
-    title=label, ymin=20, ymax=120)
-# The check: the analytic curve the realisation came from, over its own PPSD.
-ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
-            label='Wenz total (analytic)')
-ax.legend(loc='upper right', fontsize='small', framealpha=0.85)
+    ax=ax, title=label, ymin=20, ymax=120)
 fig.savefig(OUT / 'example_09_ppsd.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
@@ -101,21 +100,18 @@ cq_mean = constant_q(pressure, fs, **cq_kw)
 
 # vmax: the plotter defaults to 1/level_step_dB — the largest density a 1 dB bin
 # could hold — which suits a Welch-averaged PPSD. A single-look constant-Q
-# histogram is far broader (median per-bin std 5.5 dB against 0.9 dB for the
-# linear PPSD above), so its peak density is 0.164 and the default would render
-# the whole panel in the bottom sixth of the colormap.
-fig, ax = uacpy.plot.plot_constant_q_ppsd(cq_hist, title=label, ymin=20,
-                                          ymax=120, vmax=0.18)
-ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
-            label='Wenz total (analytic)')
+# histogram is far broader than the linear PPSD above, so its peak density sits
+# far below that default; vmax=0.18 sits just above it.
+fig, ax = uacpy.plot.plot_wenz(wenz, show_components=False, color='magenta',
+                               label='Wenz total (analytic)', figsize=(10, 6))
+uacpy.plot.plot_ppsd(cq_hist, ax=ax, title=label, ymin=20, ymax=120,
+                     vmax=0.18)
 # The power mean of the same bins lands on that curve, while the histogram's
 # own mean line sits below it — the single-look bias the print below measures,
 # not an error in the synthesis. Dotted because the plotter already draws that
 # mean solid black and its ±STD dashed black.
-ax.semilogx(cq_mean.frequencies, cq_mean.level_dB(),
-            color='k', lw=2.2, ls=':',
-            label='constant_q')
-ax.legend(loc='upper right', fontsize='small', framealpha=0.85)
+cq_mean.plot(ax=ax, color='k', lw=2.2, ls=':', label='constant_q',
+             title=label, ymin=20, ymax=120)
 fig.savefig(OUT / 'example_09_cq_ppsd.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 

@@ -17,7 +17,9 @@ import numpy as np
 import scipy.signal as _sig
 from scipy.linalg import get_lapack_funcs, toeplitz
 from uacpy.acoustic_signal._results import PlottedResult
-from uacpy.acoustic_signal.windows import _DEFAULT_NPERSEG, _default_noverlap
+from uacpy.acoustic_signal.windows import (
+    _DEFAULT_NPERSEG, _default_noverlap, _welch_nperseg,
+)
 from uacpy.core.exceptions import (
     ConfigurationError, NumericsWarning, ValidityWarning,
 )
@@ -209,25 +211,25 @@ class FRFResult(PlottedResult,
 
     ``method``
         The estimator that ran, by its :class:`FRF` name: ``'welch'``
-        (:func:`frf_welch`), ``'etfe'`` (:func:`etfe`), ``'p_etfe'``
-        (:func:`periodic_etfe`) or ``'ls_fir'`` (:func:`lsfir`).
+        (:func:`frf_welch`), ``'etfe'`` (:func:`etfe`), ``'periodic_etfe'``
+        (:func:`periodic_etfe`) or ``'lsfir'`` (:func:`lsfir`).
     ``estimator``
         ``'H1'`` or ``'H2'`` (``'welch'``).
     ``coherence``
         The magnitude-squared coherence on ``frequencies`` (``'welch'``).
     ``impulse_response``, ``order``, ``criterion``
         The fitted FIR, its order, and the criterion that selected the order
-        (``None`` when the order was given) (``'ls_fir'``).
+        (``None`` when the order was given) (``'lsfir'``).
     ``rcond``, ``information_matrix``, ``information_vector``
         The normal equations the FIR was solved from and their reciprocal
         condition number: small means the fit is poorly determined, and at
-        or below ``2.2e-16`` it is a minimum-norm choice (``'ls_fir'``).
+        or below ``2.2e-16`` it is a minimum-norm choice (``'lsfir'``).
 
     From :meth:`FRF.compute` on a 2-D block, ``transfer_function`` and
     ``coherence`` come from the measurements' spectra averaged first
-    (``Σ X*·Y / Σ |X|²`` for ``'etfe'`` and ``'p_etfe'``, the averaged Welch
-    spectra for ``'welch'``); for ``'ls_fir'`` the transfer function is the
-    mean of the measurements' FIR responses, and each ``'ls_fir'`` attribute
+    (``Σ X*·Y / Σ |X|²`` for ``'etfe'`` and ``'periodic_etfe'``, the averaged Welch
+    spectra for ``'welch'``); for ``'lsfir'`` the transfer function is the
+    mean of the measurements' FIR responses, and each ``'lsfir'`` attribute
     is a tuple with one entry per measurement: fits of different orders have
     no mean.
     """
@@ -292,7 +294,7 @@ def _paired_records(x, y, who):
     return x, y
 
 
-def frf_welch(x, y, sample_rate, *, estimator="H1", nperseg=_DEFAULT_NPERSEG,
+def frf_welch(x, y, sample_rate, *, estimator="H1", nperseg=None,
               noverlap=None, **welch_options):
     """The H1 or H2 transfer function, and the coherence, from Welch
     spectra of one input/output record pair.
@@ -316,8 +318,12 @@ def frf_welch(x, y, sample_rate, *, estimator="H1", nperseg=_DEFAULT_NPERSEG,
     sample_rate : float
         Sampling frequency (Hz).
     estimator : {'H1', 'H2'}
-    nperseg : int
-        Welch segment length; the frequency grid is its rfft grid.
+    nperseg : int, optional
+        Welch segment length; the frequency grid is its rfft grid. Unset, it
+        is 8192 samples (uacpy guidance), or the whole record when that is
+        shorter, or an array ``window``'s own length, as on
+        :func:`uacpy.acoustic_signal.welch`; a given one is used as given,
+        and refused when longer than the record.
     noverlap : int, optional
         Unset is the window's overlap, as on
         :func:`uacpy.acoustic_signal.welch`: half a segment under scipy's
@@ -365,10 +371,11 @@ def _welch_frf(x, y, sample_rate, estimator, params, who):
     *Fundamentals of General Linear Acoustics*, App. B.7.3, Eqs. B.74, B.75,
     B.82)."""
     params = dict(params)
-    if params["noverlap"] is None:
-        segment = min(int(params["nperseg"]), x.shape[-1])
-        params["noverlap"] = _default_noverlap(
-            params.get("window", "hann"), segment)
+    window = params.get("window", "hann")
+    params["nperseg"] = _welch_nperseg(params.get("nperseg"), window,
+                                       x.shape[-1], who)
+    if params.get("noverlap") is None:
+        params["noverlap"] = _default_noverlap(window, params["nperseg"])
     freqs, Pxx = _sig.welch(x, sample_rate, scaling="density", **params)
     _, Pyy = _sig.welch(y, sample_rate, scaling="density", **params)
     # ``Pxy`` holds csd(y, x) = Syx = conj(Sxy); the H1 expression
@@ -455,7 +462,7 @@ def periodic_etfe(x, y, sample_rate, *, period):
     Returns
     -------
     FRFResult
-        ``method='p_etfe'``.
+        ``method='periodic_etfe'``.
     """
     x, y = _paired_records(x, y, "periodic_etfe")
     sample_rate = require_positive_finite_scalar(
@@ -465,7 +472,7 @@ def periodic_etfe(x, y, sample_rate, *, period):
     Y = np.fft.rfft(_period_average(y, period, "periodic_etfe"))
     freqs = np.fft.rfftfreq(period, d=1 / sample_rate)
     tf = _etfe_divide(Y, X, "periodic_etfe")
-    return FRFResult(freqs, tf, method="p_etfe")
+    return FRFResult(freqs, tf, method="periodic_etfe")
 
 
 def _period_average(records, period, who):
@@ -540,7 +547,7 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
     Returns
     -------
     FRFResult
-        ``method='ls_fir'``, with ``impulse_response``, ``order``,
+        ``method='lsfir'``, with ``impulse_response``, ``order``,
         ``criterion``, ``rcond``, ``information_matrix`` and
         ``information_vector``.
 
@@ -581,6 +588,13 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
         raise ConfigurationError(
             f"lsfir: n_samples ({N}) must be in [1, {u.size}] — it counts "
             f"the leading samples of the records the fit uses.")
+    if isinstance(order, str) and order not in _ORDER_CRITERIA:
+        raise ConfigurationError(
+            f"lsfir: order={order!r} is neither an FIR order nor a selection "
+            f"criterion.",
+            remediation=f"Pass an integer order, or one of "
+                        f"{', '.join(repr(c) for c in _ORDER_CRITERIA)} "
+                        f"(upper case).")
     criterion = order if order in _ORDER_CRITERIA else None
     m = order
 
@@ -700,35 +714,78 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
     Minfo, Vinfo = _info_matrices(u, y, N, m)
     g, rcond = _solve_info_matrices(Minfo, Vinfo, m)
 
-    # Frequency response on the nperseg rfft grid, so an ls_fir result
-    # lines up bin-for-bin with a welch one, and with a p_etfe one whose
+    # Frequency response on the nperseg rfft grid, so an lsfir result
+    # lines up bin-for-bin with a welch one, and with a periodic_etfe one whose
     # period is nperseg ('etfe' uses the full-record grid instead).
     freqs = np.fft.rfftfreq(int(nperseg), d=1.0 / sample_rate)
     _, h = _sig.freqz(g, worN=freqs, fs=sample_rate)
-    return FRFResult(freqs, h, method="ls_fir", impulse_response=g,
+    return FRFResult(freqs, h, method="lsfir", impulse_response=g,
                      order=int(m), criterion=criterion, rcond=rcond,
                      information_matrix=Minfo, information_vector=Vinfo)
 
 
 #: The estimator each :class:`FRF` method runs.
-_FRF_METHODS = ("welch", "ls_fir", "etfe", "p_etfe")
+_FRF_METHODS = ("welch", "lsfir", "etfe", "periodic_etfe")
+
+#: The FIR order :class:`FRF` fits under ``method='lsfir'`` when ``order``
+#: is unset (uacpy guidance).
+_FRF_DEFAULT_ORDER = 512
+
+#: The methods that read each :class:`FRF` setting; a Welch option not
+#: listed is read by ``'welch'`` alone.
+_FRF_READERS = {"estimator": ("welch",), "order": ("lsfir",),
+                "max_order": ("lsfir",), "stop_count": ("lsfir",),
+                "nperseg": ("welch", "lsfir")}
+
+
+def _refuse_unread_settings(method, order, settings, who):
+    """Refuse every setting in ``settings`` (name → value, ``None`` = unset)
+    that ``method`` does not read, naming the method that does: a setting
+    the run drops would read as one that shaped the estimate. ``max_order``
+    and ``stop_count`` bound a criterion search, so an integer ``order``
+    (512 when unset) does not read them either."""
+    def readers(name):
+        return _FRF_READERS.get(name, ("welch",))
+
+    unread = [name for name, value in settings.items()
+              if value is not None and method not in readers(name)]
+    fit_order = _FRF_DEFAULT_ORDER if order is None else order
+    by_order = [name for name in ("max_order", "stop_count")
+                if method == "lsfir" and fit_order not in _ORDER_CRITERIA
+                and settings.get(name) is not None]
+    unread += by_order
+    if not unread:
+        return
+    where = "; ".join(
+        f"{name}= by " + " or ".join(f"method={m!r}" for m in readers(name))
+        + (" with an order criterion" if name in ("max_order", "stop_count")
+           else "")
+        for name in unread)
+    them = "it" if len(unread) == 1 else "them"
+    raise ConfigurationError(
+        f"{who}: method={method!r}"
+        + (f" with order={fit_order!r}" + (" (unset)" if order is None else "")
+           if by_order else "")
+        + f" does not read {', '.join(n + '=' for n in unread)}.",
+        remediation=f"Drop {them}, or use the method that reads {them}: "
+                    f"{where}.")
 
 
 def _resolve_period(method, period, who):
-    """The ``'p_etfe'`` excitation period as a whole number of samples, or
+    """The ``'periodic_etfe'`` excitation period as a whole number of samples, or
     ``None`` for another method; refused where the method does not match
-    it, since only ``'p_etfe'`` reads a period and it cannot run without
+    it, since only ``'periodic_etfe'`` reads a period and it cannot run without
     one."""
-    if method != "p_etfe":
+    if method != "periodic_etfe":
         if period is not None:
             raise ConfigurationError(
-                f"{who}: period= is the excitation period of method='p_etfe'; "
+                f"{who}: period= is the excitation period of method='periodic_etfe'; "
                 f"method={method!r} does not read it.",
-                remediation="Drop period=, or use method='p_etfe'.")
+                remediation="Drop period=, or use method='periodic_etfe'.")
         return None
     if period is None:
         raise ConfigurationError(
-            f"{who}: method='p_etfe' averages whole periods of a periodic "
+            f"{who}: method='periodic_etfe' averages whole periods of a periodic "
             f"excitation, and no period= was given.",
             remediation="Pass period=, the excitation's period in samples.")
     return _whole_period(period, who)
@@ -761,8 +818,8 @@ class FRF(SettingsRepr):
     keeps no result: every :meth:`compute` returns its own.
     """
 
-    def __init__(self, method="welch", estimator="H1", order=512, *,
-                 period=None, max_order=4096, stop_count=50, **kwargs):
+    def __init__(self, method="welch", estimator=None, order=None, *,
+                 period=None, max_order=None, stop_count=None, **kwargs):
         """
         Parameters
         ----------
@@ -771,40 +828,45 @@ class FRF(SettingsRepr):
 
             - ``'welch'`` -- :func:`frf_welch`, dedicated to stationary
               signals, with coherence.
-            - ``'ls_fir'`` -- :func:`lsfir`, a least-squares impulse
+            - ``'lsfir'`` -- :func:`lsfir`, a least-squares impulse
               response.
             - ``'etfe'`` -- :func:`etfe` over the whole signal.
-            - ``'p_etfe'`` -- :func:`periodic_etfe` over whole periods of
+            - ``'periodic_etfe'`` -- :func:`periodic_etfe` over whole periods of
               ``period`` samples.
-        estimator : str
+        estimator : str, optional
             Estimator type for ``'welch'``. One of:
 
             - ``'H1'`` -- minimizes the effect of noise introduced at the system output.
             - ``'H2'`` -- minimizes the effect of noise introduced at the system input.
-        order : int or str
-            FIR order for ``'ls_fir'``, or the criterion that selects it
+
+            Unset, ``'H1'`` (:func:`frf_welch`'s default).
+        order : int or str, optional
+            FIR order for ``'lsfir'``, or the criterion that selects it
             (``'AIC'``, ``'BIC'``, ``'FPE'``, ``'CP'``) — :func:`lsfir`'s
-            ``order``.
+            ``order``. Unset, 512 (uacpy guidance).
         period : int, optional
-            The excitation's period in samples, which ``'p_etfe'`` requires
+            The excitation's period in samples, which ``'periodic_etfe'`` requires
             and averages the records over (:func:`periodic_etfe`'s
             ``period``); its rfft grid is the result's. Refused under
             another method.
-        max_order : int
-            Highest order an ``'ls_fir'`` criterion search tries
-            (:func:`lsfir`'s ``max_order``). Default 4096.
-        stop_count : int
-            An ``'ls_fir'`` criterion search stops after this many
+        max_order : int, optional
+            Highest order an ``'lsfir'`` criterion search tries
+            (:func:`lsfir`'s ``max_order``). Unset, :func:`lsfir`'s 4096.
+        stop_count : int, optional
+            An ``'lsfir'`` criterion search stops after this many
             consecutive orders with no improvement (:func:`lsfir`'s
-            ``stop_count``). Default 50.
+            ``stop_count``). Unset, :func:`lsfir`'s 50.
         **kwargs
             Welch options (``nperseg``, ``noverlap``, ``window``, ...), as on
-            :func:`frf_welch`; ``nperseg`` is also the ``'ls_fir'`` grid.
+            :func:`frf_welch`, with its defaults; ``nperseg`` is also the
+            ``'lsfir'`` grid (unset, :func:`lsfir`'s 8192).
+
+        A setting the chosen method does not read is refused, naming the
+        method that reads it: ``estimator`` and the Welch options are
+        ``'welch'``'s (``nperseg`` also ``'lsfir'``'s), ``order``,
+        ``max_order`` and ``stop_count`` are ``'lsfir'``'s (the last two
+        with an order criterion only), ``period`` is ``'periodic_etfe'``'s.
         """
-        self.params = {
-            "nperseg": _DEFAULT_NPERSEG,
-            "noverlap": None,
-        }
         # 'fs' and 'scaling' are set internally at every welch/csd call site:
         # the sample rate is compute()'s sample_rate argument, and the spectral
         # scaling is fixed to 'density' — the FRF is a ratio of cross- to
@@ -828,15 +890,20 @@ class FRF(SettingsRepr):
             raise ConfigurationError(
                 f"FRF: {unknown} are not Welch options, which is what the "
                 f"keyword arguments after method/estimator/order are.",
-                remediation=f"Use order= for the 'ls_fir' FIR order; Welch "
+                remediation=f"Use order= for the 'lsfir' FIR order; Welch "
                             f"options are {sorted(welch_options)}.")
-        self.params.update(kwargs)
         if method not in _FRF_METHODS:
             raise ConfigurationError(
                 f"FRF: unknown method={method!r}; "
-                "valid: 'welch', 'ls_fir', 'etfe', 'p_etfe'")
+                "valid: 'welch', 'lsfir', 'etfe', 'periodic_etfe'.")
+        _refuse_unread_settings(
+            method, order, {"estimator": estimator, "order": order,
+                            "max_order": max_order, "stop_count": stop_count,
+                            **kwargs}, "FRF")
+        self.params = dict(kwargs)
         self.method = method
-        self.estimator = _require_estimator(estimator, "FRF")
+        self.estimator = (None if estimator is None
+                          else _require_estimator(estimator, "FRF"))
         self.order = order
         self.period = _resolve_period(method, period, "FRF")
         self.max_order = max_order
@@ -863,15 +930,19 @@ class FRF(SettingsRepr):
             The one record pair's estimate. For a 2-D block, the estimate
             from the measurements' spectra averaged first, as a two-channel
             analyser averages them (Jacobsen & Juhl, App. B.6.2 and B.7.3):
-            ``Σ X*·Y / Σ |X|²`` for ``'etfe'`` and ``'p_etfe'`` (each row
+            ``Σ X*·Y / Σ |X|²`` for ``'etfe'`` and ``'periodic_etfe'`` (each row
             period-averaged first), H1 or H2 and the coherence from the
-            averaged Welch spectra for ``'welch'``. For ``'ls_fir'``, the
-            mean of the measurements' FIR responses, with each ``'ls_fir'``
+            averaged Welch spectra for ``'welch'``. For ``'lsfir'``, the
+            mean of the measurements' FIR responses, with each ``'lsfir'``
             attribute a tuple of one entry per measurement.
         """
-        method, estimator, order = self.method, self.estimator, self.order
-        period = self.period
-        params = dict(self.params)
+        method, period, params = self.method, self.period, dict(self.params)
+        estimator = "H1" if self.estimator is None else self.estimator
+        order = _FRF_DEFAULT_ORDER if self.order is None else self.order
+        # lsfir's own defaults for what is unset.
+        fit_options = {name: value for name, value in (
+            ("max_order", self.max_order), ("stop_count", self.stop_count),
+            ("nperseg", params.get("nperseg"))) if value is not None}
 
         # Convert inputs to 2D arrays (rows = measurements)
         x = np.asarray(x)
@@ -907,14 +978,12 @@ class FRF(SettingsRepr):
                                  **params)
             if method == "etfe":
                 return etfe(x_1, y_1, sample_rate)
-            if method == "p_etfe":
+            if method == "periodic_etfe":
                 return periodic_etfe(x_1, y_1, sample_rate, period=period)
 
-        if method == "ls_fir":
+        if method == "lsfir":
             results = [lsfir(x_i, y_i, sample_rate, order=order,
-                             n_samples=x_i.size, max_order=self.max_order,
-                             stop_count=self.stop_count,
-                             nperseg=params["nperseg"])
+                             n_samples=x_i.size, **fit_options)
                        for x_i, y_i in zip(x, y)]
             if single_measurement:
                 return results[0]
@@ -933,14 +1002,14 @@ class FRF(SettingsRepr):
         # A block: the measurements' spectra are averaged first and the
         # transfer function formed from the averages (_welch_frf,
         # _pooled_etfe), on the grid every row shares — the nperseg rfft grid
-        # for 'welch', the period's for 'p_etfe', the full-record one for
+        # for 'welch', the period's for 'periodic_etfe', the full-record one for
         # 'etfe'.
         for x_i, y_i in zip(x, y):
             _paired_records(x_i, y_i, "FRF.compute")
         if method == "welch":
             return _welch_frf(x, y, sample_rate, estimator, params,
                               "FRF.compute")
-        if method == "p_etfe":
+        if method == "periodic_etfe":
             x = _period_average(x, period, "FRF.compute")
             y = _period_average(y, period, "FRF.compute")
         freqs = np.fft.rfftfreq(x.shape[1], d=1 / sample_rate)

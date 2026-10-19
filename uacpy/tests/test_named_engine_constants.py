@@ -5,7 +5,7 @@ import pytest
 
 import uacpy
 from uacpy.models.bellhop._plan import resolve_ray_box
-from uacpy.core.deck_limits import NO_RECEIVER_RANGE_FALLBACK_M
+from uacpy.core.deck_limits import NO_RECEIVER_RANGE_FALLBACK
 from uacpy.io.bellhop_writer import BELLHOP_RAY_BOX_FACTOR, bellhop_ray_box
 from uacpy.models.bounce import _plan as bounce_plan
 from uacpy.models.kraken import _grid as kraken_grid
@@ -22,9 +22,9 @@ def test_the_factors_hold_their_values():
     # on the auto window the default RMax is 4 x the farthest range
     assert 1.0 + sparc_plan.SPARC_RMAX_TIME_MARGIN * \
         sparc_plan.SPARC_WINDOW_TRAVEL_TIMES == pytest.approx(4.0)
-    assert kraken_grid.KRAKEN_RMAX_NO_RANGE_M == 100_000.0
+    assert kraken_grid.KRAKEN_RMAX_NO_RANGE == 100_000.0
     assert BELLHOP_RAY_BOX_FACTOR == 1.2
-    assert NO_RECEIVER_RANGE_FALLBACK_M == 10_000.0
+    assert NO_RECEIVER_RANGE_FALLBACK == 10_000.0
     assert oasr.OASR_DEFAULT_ANGLES_DEG == (0.0, 90.0, 181)
 
 
@@ -53,9 +53,9 @@ def test_kraken_resolves_the_farthest_receiver_range():
 
 def test_kraken_falls_back_to_the_named_range():
     rmax, _ = kraken_grid.resolve_rmax(_Rx([0.0]), pinned_rmax=None)
-    assert rmax == kraken_grid.KRAKEN_RMAX_NO_RANGE_M
+    assert rmax == kraken_grid.KRAKEN_RMAX_NO_RANGE
     assert kraken_grid.compute_rmax(None) == \
-        kraken_grid.KRAKEN_RMAX_NO_RANGE_M
+        kraken_grid.KRAKEN_RMAX_NO_RANGE
 
 
 def _env():
@@ -75,7 +75,7 @@ def test_bellhop_pads_the_ray_box_by_the_named_factor():
 def test_bellhop_falls_back_to_the_named_range():
     rx = uacpy.Receiver(depths=[50.0], ranges=[0.0])
     _, r = bellhop_ray_box(_env(), rx)
-    assert r == NO_RECEIVER_RANGE_FALLBACK_M
+    assert r == NO_RECEIVER_RANGE_FALLBACK
     _, _, _, r_origin = resolve_ray_box(_env(), rx, z_box=None, r_box=None)
     assert r_origin == '10 km (every receiver range is 0)'
 
@@ -83,7 +83,7 @@ def test_bellhop_falls_back_to_the_named_range():
 def test_bounce_falls_back_to_the_same_range():
     rmax, origin = bounce_plan.resolve_rmax(
         _Rx([0.0]), 100.0, 1400.0, n_angles=None, rmax=None, c_high=1e9)
-    assert rmax == NO_RECEIVER_RANGE_FALLBACK_M
+    assert rmax == NO_RECEIVER_RANGE_FALLBACK
     assert origin == 'the 10 km fallback (no receiver range)'
 
 

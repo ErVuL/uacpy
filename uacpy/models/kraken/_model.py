@@ -8,7 +8,7 @@ import numpy as np
 from pathlib import Path
 from typing import Callable, Dict, NamedTuple, Optional, Sequence, Union
 from uacpy.models.base import (
-    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
+    DEFAULT_RUN_TIMEOUT, PropagationModel, _host_options,
 )
 from uacpy.models._launch import (
     BinarySearch, Launch, _read_prt_if_present, run_launch, run_prt_binary,
@@ -57,6 +57,7 @@ from uacpy.models._checks import (
 )
 from uacpy.models.kraken._window import (
     _LEAKY_C_HIGH_FACTOR,
+    scholte_wave_notice,
     phase_speed_window,
     steep_path_notice,
     validate_phase_speed_limits,
@@ -64,7 +65,7 @@ from uacpy.models.kraken._window import (
 from uacpy.core._validate import (
     require_non_negative, require_strictly_increasing,
 )
-from uacpy.core.deck_limits import DECK_DEPTH_RESOLUTION_M
+from uacpy.core.deck_limits import DECK_DEPTH_RESOLUTION
 from uacpy.models._budget import work_dir_is_memory_backed
 from uacpy.models.kraken._grid import (
     band_mesh_floor_notice,
@@ -326,8 +327,11 @@ class Kraken(PropagationModel):
         (Scholte / Stoneley) modes; set it to the minimum p-wave speed if KRAKEN
         fails to converge on those. (``default_c_low`` in
         ``core/engine_defaults.py`` is the Scooter/SPARC wavenumber-integration
-        default, not Kraken's.) Must be non-negative and
-        strictly less than ``c_high``.
+        default, not Kraken's.) A positive floor above a Scholte wave — the
+        derived one over shear always is — warns on a
+        field run whose source or receivers lie within one wavelength of
+        that interface (``_window.scholte_wave_notice``). Must be
+        non-negative and strictly less than ``c_high``.
     c_high : float, optional
         Upper phase speed limit (m/s). None = auto, per profile of the deck:
         1.05 x the fastest speed among the SSP and the seabed half-space;
@@ -337,7 +341,9 @@ class Kraken(PropagationModel):
         vacuum floor on kraken.exe; 10 x the fastest speed in the profile
         with ``leaky_modes=True`` (``_LEAKY_C_HIGH_FACTOR``). Must be
         strictly greater than ``c_low``. ``run_settings(...).engine`` shows
-        the window and the rule that set it.
+        the window and the rule that set it. A window, derived or pinned,
+        that leaves out a direct or surface-reflected path the receivers
+        see gives a ``NumericsWarning``; a pinned value is kept.
     n_mesh : int or sequence of int, optional
         Total number of mesh points PER MEDIUM used by the finite-difference
         mode solver (AT's ``NMESH`` column on each medium line): one count
@@ -423,8 +429,8 @@ class Kraken(PropagationModel):
         run whose every summed mode is one of them warns (Computational Ocean
         Acoustics §2.4.5.1). Default: False.
 
-        With the automatic window a field run warns when the receivers need
-        paths steeper than it keeps (the near field of a trapped-mode sum,
+        A field run warns when the receivers need paths steeper than the
+        window keeps (the near field of a trapped-mode sum,
         measured +11.9 dB at 200 m on a 100 m Pekeris guide); ``True`` is the
         remedy there (within 0.04 dB of Scooter). A rigid or vacuum seabed
         has no half-space for a mode to leak into (``docs/models/kraken.md``
@@ -446,7 +452,7 @@ class Kraken(PropagationModel):
         **tighter** tolerance (finer mesh, slower, more accurate).
         ``None`` (default) is the farthest receiver range, the manual's
         value; with no positive receiver range it is 100 km
-        (``_grid.KRAKEN_RMAX_NO_RANGE_M``, uacpy guidance, measured: the
+        (``_grid.KRAKEN_RMAX_NO_RANGE``, uacpy guidance, measured: the
         manual's 0 left a 1.09 rad mode phase error at 10 km on a Pekeris
         guide). ``compute_modes`` takes no receiver, so it is that case
         unless ``rmax`` is set. A set value is written as given, 0
@@ -491,8 +497,10 @@ class Kraken(PropagationModel):
     **Range dependence.** RD bathymetry, RD SSP and an RD bottom are
     honoured natively on the field path (segments): each profile carries the
     seabed column at its own range, layers included. ``compute_modes``
-    samples the r = 0 profile of every quantity. A range-dependent surface
-    collapses by :data:`DEFAULT_COLLAPSE`.
+    reduces a range-dependent environment to one profile by the
+    ``collapse=`` methods, else the package defaults (seabed median,
+    bathymetry deepest, SSP and surface r = 0), and says so. A
+    range-dependent surface collapses by :data:`DEFAULT_COLLAPSE`.
 
     Examples
     --------
@@ -619,13 +627,6 @@ class Kraken(PropagationModel):
             return f"<{value.size} {what}>"
         return repr(value)
 
-    def _caller_set(self, name) -> bool:
-        """Whether the caller set knob ``name``: given, and not a value a
-        model rebuilt from a run's record took from what that run derived
-        (``models/_replay.py``, ``_pinned_from_record``)."""
-        return (getattr(self, name) is not None
-                and name not in getattr(self, '_pinned_from_record', ()))
-
     def _chose_backend_or_window(self) -> bool:
         """Whether the caller set ``backend`` or ``c_high``: a run on
         kraken.exe above a fluid seabed says so only then
@@ -669,7 +670,7 @@ class Kraken(PropagationModel):
     # never runs.
     spec = ModelSpec(
         modes=(
-            RunMode.MODES, RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
+            RunMode.COHERENT_TL, RunMode.MODES, RunMode.INCOHERENT_TL,
             RunMode.BROADBAND, RunMode.TIME_SERIES,
         ),
         supports={
@@ -698,8 +699,9 @@ class Kraken(PropagationModel):
             # all — and the .shd reader puts its NSz axis on the Field's
             # source_depth axis,
             # so the two TL modes take a multi-depth Source in one launch
-            # instead of one mode solve per depth (measured 4.3x at eight
-            # depths). Two conditions make that one launch exact: field.f90
+            # instead of one mode solve per depth (measured 6.4x faster at
+            # eight depths: 100 m Pekeris guide, 100 Hz, 30 x 100
+            # receivers). Two conditions make that one launch exact: field.f90
             # shades every source depth of a .sbp run (a uacpy patch — it
             # shaded only the first; third_party/MODIFICATIONS.md), and the
             # receiver depths join the mode-tabulation grid kraken.f90:573
@@ -779,7 +781,7 @@ class Kraken(PropagationModel):
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         super().__init__(**_host_options(locals()))
@@ -957,16 +959,10 @@ class Kraken(PropagationModel):
                 roughness=env.surface.roughness)])
         return drop_roughness_on_tabulated_top(env, model_name=self.model_name)
 
-    def _default_run_mode(self) -> RunMode:
-        """``run(run_mode=None)`` solves a TL field (``BROADBAND`` when a
-        ``frequencies=`` vector is passed, else ``COHERENT_TL``), not the
-        ``MODES`` entry that opens ``spec.modes``. Either choice is a field
-        mode, which is all the base's per-depth loop asks."""
-        return RunMode.COHERENT_TL
-
     def _default_run_mode_for(self, frequencies) -> RunMode:
         """``BROADBAND`` for a ``frequencies=`` vector of more than one
-        element, else :meth:`_default_run_mode`."""
+        element, else :meth:`_default_run_mode` (``COHERENT_TL``, the first
+        of ``spec.modes``)."""
         if frequencies is not None and len(np.atleast_1d(frequencies)) > 1:
             return RunMode.BROADBAND
         return self._default_run_mode()
@@ -1031,7 +1027,7 @@ class Kraken(PropagationModel):
             require_non_negative(grid, "Kraken.mode_depths",
                                  hint="metres, positive down from surface")
             require_strictly_increasing(grid, "Kraken.mode_depths",
-                                        min_step=DECK_DEPTH_RESOLUTION_M)
+                                        min_step=DECK_DEPTH_RESOLUTION)
         # field.exe's Rro: finite metres, in the order its ReadVector leaves
         # them — sorted ascending, as the receiver depths are
         # (misc/SourceReceiverPositions.f90:224, :267-268), so a vector that
@@ -1309,9 +1305,14 @@ class Kraken(PropagationModel):
             chosen=self._chose_backend_or_window(),
             model_name=self.model_name))
         _launch, c_low_origin, c_high_origin, rmax_origin, ppm = resolved[0]
-        if not self._caller_set('c_high') and not self.leaky_modes:
+        if not self.leaky_modes:
             notices.append(steep_path_notice(
-                env, source, rcv, launches[0].c_high[0]))
+                env, source, rcv, launches[0].c_high[0],
+                pinned=self._caller_set('c_high')))
+        notices.append(scholte_wave_notice(
+            env, source, rcv, float(launches[0].c_low),
+            float(np.min(settings.frequencies if mode in _BAND_MODES
+                         else source.frequencies))))
         notices = [n for n in notices if n is not None]
         return KrakenSettings(
             backend=backend,
@@ -2046,13 +2047,15 @@ class Kraken(PropagationModel):
             more = f" and {len(bins) - 8} more" if len(bins) > 8 else ""
             return ", ".join(f"{frequencies[i]:g}" for i in bins[:8]) + more
 
-        still = [i for i in failed if solved[i] and _no_level(data[..., i])]
+        empty_on_own_deck = [i for i in failed
+                             if solved[i] and _no_level(data[..., i])]
         parts = []
-        if still:
+        if empty_on_own_deck:
             parts.append(
                 f"returned no field (no level at any receiver) at "
-                f"{len(still)} of {data.shape[-1]} band frequencies "
-                f"({listed(still)} Hz), on the band deck and again on a deck "
+                f"{len(empty_on_own_deck)} of {data.shape[-1]} band "
+                f"frequencies ({listed(empty_on_own_deck)} Hz), on the band "
+                f"deck and again on a deck "
                 f"of its own")
         if raised:
             parts.append(

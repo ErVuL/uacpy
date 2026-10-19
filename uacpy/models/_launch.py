@@ -241,7 +241,7 @@ def run_subprocess(
     cmd,
     cwd,
     *,
-    timeout: float,
+    timeout: Optional[float],
     verbose,
     env: Optional[dict] = None,
 ):
@@ -266,11 +266,12 @@ def run_subprocess(
         Command argv (str-able elements).
     cwd : path-like
         Working directory for the subprocess.
-    timeout : float
+    timeout : float or None
         Max seconds this one launch may take before it is killed and
-        raises. A run that launches several binaries (Kraken's modes
-        and field steps, RAM's per-frequency Collins runs, the OASES
-        two-stage runs) gives each launch this budget.
+        raises; ``None`` sets no limit (``communicate``'s own). A run that
+        launches several binaries (Kraken's modes and field steps, RAM's
+        per-frequency Collins runs, the OASES two-stage runs) gives each
+        launch this budget.
     verbose : bool or str
         The model's status-output gate (the command line is logged at
         ``debug``).

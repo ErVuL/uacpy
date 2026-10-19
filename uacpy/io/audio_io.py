@@ -5,15 +5,16 @@ actually uses:
 
 * ``pcm16`` / ``pcm24`` — what passive-acoustic recorders write and what
   every player and analysis tool reads. Integer encodings are bounded to
-  ±1 full scale.
+  full scale: +1 down to the most negative code, ``-2**(b-1)`` over the
+  symmetric scale ``2**(b-1) - 1`` (−1.0000305 for 16 bits).
 * ``pcm32`` — the same, at the widest integer depth.
 * ``float32`` / ``float64`` — unbounded, so a **calibrated** signal keeps its
   absolute values (µPa, or whatever units the caller is in) whatever its
   size. This is the encoding to export a modelled received level in.
 
-The samples are written as given (``normalize=False``): a signal inside ±1
-keeps its level in any encoding, and a sample a ``pcm*`` encoding cannot hold
-is clipped with a warning. ``normalize=True`` scales the peak to full scale,
+The samples are written as given (``normalize=False``): a signal inside full
+scale keeps its level in any encoding, and a sample a ``pcm*`` encoding cannot
+hold is clipped with a warning. ``normalize=True`` scales the peak to full scale,
 which is what a waveform meant for playback wants and what throws a
 calibrated level away.
 
@@ -150,14 +151,19 @@ def write_wav(
         Sample rate in Hz, rounded to the nearest integer for the header;
         a rate that is not an integer warns with the relative error.
     encoding : {'pcm16', 'pcm24', 'pcm32', 'float32', 'float64'}
-        Sample format. The integer encodings map ±1.0 to full scale; the
-        float encodings write the values themselves. Default ``'pcm16'``.
+        Sample format. The integer encodings map ±1.0 to ±(``2**(b-1) -
+        1``), the symmetric full scale :func:`read_wav` divides by, and
+        hold one more code below, ``-2**(b-1)`` (−1.0000305 under
+        ``pcm16``), so a saturated recording read back writes back to the
+        code it came from; the float encodings write the values themselves.
+        Default ``'pcm16'``.
     normalize : bool, optional
         Divide by the peak absolute value before writing, so the peak
         lands on full scale. Default ``False``: the samples are written as
         given, so a calibrated signal keeps its level (full scale is ±1 in
         its units under ``pcm*``). A ``pcm*`` encoding cannot hold a sample
-        outside ±1, so such samples are clipped with a warning naming
+        above 1 or below its most negative code, so such samples are
+        clipped with a warning naming
         ``normalize=True``; a ``float*`` encoding holds any value. With
         ``normalize=True`` a signal whose peak is ``p`` is scaled by
         ``-20·log10(p)`` dB. An all-zero signal is written as silence rather
@@ -277,7 +283,13 @@ def write_wav(
     # The samples alone, before the header bytes: refused before encoding.
     _refuse_past_riff_limit(flat.size * (bits // 8), encoding)
     if format_tag == 1:
-        over = np.abs(flat) > 1.0
+        # Symmetric full scale (2**(bits-1) - 1), so +1.0 and -1.0 encode to
+        # equal and opposite codes and neither overflows; the one code below
+        # -1.0, -2**(bits-1), is the floor, so read_wav's -2**(bits-1)/full
+        # writes back to the code it was read from.
+        full = 2.0 ** (bits - 1) - 1.0
+        floor = -(full + 1.0) / full
+        over = (flat > 1.0) | (flat < floor)
         if over.any():
             warnings.warn(
                 f"write_wav: {int(over.sum())} of {flat.size} samples are "
@@ -286,10 +298,8 @@ def write_wav(
                 f"the absolute values.",
                 FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
-            flat = np.clip(flat, -1.0, 1.0)
-        # Symmetric full scale (2**(bits-1) - 1), so +1.0 and -1.0 encode to
-        # equal and opposite codes and neither overflows.
-        quantized = np.round(flat * (2.0 ** (bits - 1) - 1.0))
+            flat = np.clip(flat, floor, 1.0)
+        quantized = np.round(flat * full)
         if bits == 16:
             data = quantized.astype('<i2').tobytes()
         elif bits == 32:
@@ -572,11 +582,13 @@ def read_wav(filepath: Union[str, Path], *, start=0, frames=None):
     -------
     signal : ndarray
         ``(n,)`` for mono, ``(n, n_channels)`` de-interleaved otherwise. An
-        integer encoding comes back divided by its full scale, so it lands in
-        ±1 whatever its bit depth and a round trip through ``pcm16`` and
-        ``pcm24`` gives the same numbers to within their quantisation. A float
-        encoding comes back as written — that is the point of it, so nothing
-        rescales a calibrated signal on the way in. The time axis is the
+        integer encoding comes back divided by its full scale
+        ``2**(b-1) - 1``, so it lands in ±1 whatever its bit depth (the most
+        negative code just below, −1.0000305 for 16 bits, which
+        :func:`write_wav` writes back unclipped) and a round trip through
+        ``pcm16`` and ``pcm24`` gives the same numbers to within their
+        quantisation. A float encoding comes back as written — that is the
+        point of it, so nothing rescales a calibrated signal on the way in. The time axis is the
         first, as in scipy and soundfile: pass ``axis=0`` to the spectral
         functions (``uacpy.welch`` …), whose default is the last axis and
         which refuse a multichannel ``(n, n_channels)`` array without it.
@@ -667,7 +679,7 @@ def read_wav_info(filepath: Union[str, Path]) -> WavInfo:
 
         x, fs = read_wav(path)
         p = uacpy.acoustics.pressure_from_recording(
-            x, sensitivity, gain,
+            x, sensitivity_dB, gain_dB,
             volt_params=(read_wav_info(path).bits, v_ref), x_scale='read_wav')
 
     A float encoding (``info.encoding`` ``'float32'`` / ``'float64'``)

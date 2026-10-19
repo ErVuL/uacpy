@@ -115,16 +115,17 @@ def ber_theory(scheme, ebn0_dB):
     :func:`uacpy.comms.constellation` is Gray-mapped throughout.
 
     The two non-coherent binary modems the package ships have exact closed
-    forms (standard results, uncited here; they match this package's own
-    demodulators in simulation, pinned in the tests):
+    forms (same text; they match this package's own demodulators in
+    simulation, pinned in the tests):
 
     * ``'dbpsk'`` — binary DPSK with differential detection
       (:func:`dpsk_modulate` / :func:`dpsk_demodulate`, ``M=2``):
-      ``P_b = exp(-Eb/N0) / 2``.
+      ``P_b = exp(-Eb/N0) / 2`` (sect. 4.5-5, Differential PSK).
     * ``'bfsk'`` — orthogonal binary FSK with non-coherent (tone-energy)
       detection (:func:`fsk_modulate` / :func:`fsk_demodulate` with two
       tones spaced by a multiple of ``1/symbol_duration``):
-      ``P_b = exp(-Eb/(2 N0)) / 2``.
+      ``P_b = exp(-Eb/(2 N0)) / 2`` (sect. 4.5-3, orthogonal signaling
+      with noncoherent detection, at ``M = 2``).
 
     Parameters
     ----------

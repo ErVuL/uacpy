@@ -150,6 +150,7 @@ def test_mackenzie_reads_the_model_depths_directly(monkeypatch):
     # Mackenzie is stated in depth: evaluated on the model depths with the
     # in-situ temperature, no pressure round trip at the reference latitude.
     from uacpy.core.acoustics import sound_speed_mackenzie
+    from uacpy.tests.conftest import recorded_warnings
     from uacpy.core.acoustics.seawater import depth_to_pressure_dbar, insitu_from_potential
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S))
     z, s = np.array(_DEPTH), np.array(_S)
@@ -157,14 +158,38 @@ def test_mackenzie_reads_the_model_depths_directly(monkeypatch):
         t = insitu_from_potential(salinity=s, theta=np.array(_T),
                                   pressure_dbar=depth_to_pressure_dbar(z, lat))
         expected = sound_speed_mackenzie(temperature=t, salinity=s, depth=z)
-        point = copernicus.fetch_ssp_operational(
-            (lat, -40.0), date='2020-06-15', formula='mackenzie')
+        # No notice about a latitude the caller never passed.
+        with recorded_warnings() as rec:
+            point = copernicus.fetch_ssp_operational(
+                (lat, -40.0), date='2020-06-15', formula='mackenzie')
+        assert not [w for w in rec if 'latitude' in str(w.message)]
+        with recorded_warnings() as rec:
+            transect = copernicus.fetch_ssp_transect_operational(
+                (lat, -40.0), (lat, -39.5), date='2020-06-15',
+                n_points=2, formula='mackenzie')
+        assert not [w for w in rec if 'latitude' in str(w.message)]
         np.testing.assert_allclose(point.sound_speed[:, 0], expected, rtol=0, atol=1e-9)
-        transect = copernicus.fetch_ssp_transect_operational(
-            (lat, -40.0), (lat, -39.5), date='2020-06-15',
-            n_points=2, formula='mackenzie')
         np.testing.assert_allclose(transect.sound_speed[:, 0], expected, rtol=0,
                                    atol=1e-6)
+
+
+@pytest.mark.parametrize('bad', [{'max_days': 1.5}, {'max_distance_km': -1.0}],
+                         ids=['max_days', 'max_distance_km'])
+@pytest.mark.parametrize('fetch, where', [
+    ('fetch_ssp_operational', ((30.0, -40.0),)),
+    ('fetch_ssp_transect_operational', ((30.0, -40.0), (31.0, -40.0))),
+    ('fetch_ts_profile_operational', ((30.0, -40.0),)),
+    ('fetch_waves_operational', ((30.0, -40.0),)),
+    ('fetch_ph_operational', ((30.0, -40.0),))])
+def test_a_bad_tolerance_is_refused_before_the_dataset_is_opened(
+        monkeypatch, fetch, where, bad):
+    """A typo costs no login-gated remote open: the refusal names the
+    function called, before copernicusmarine is imported."""
+    monkeypatch.setattr(copernicus, '_import_copernicusmarine',
+                        lambda: pytest.fail('the dataset was opened'))
+    (name,) = bad
+    with pytest.raises(ConfigurationError, match=rf'^{fetch}: {name}'):
+        getattr(copernicus, fetch)(*where, date='2020-06-15', **bad)
 
 
 def test_missing_toolbox_raises_helpful_error(monkeypatch):
@@ -301,6 +326,25 @@ def test_environment_copernicus_ssp_prefers_bgc_ph(monkeypatch, tmp_path):
     # surface value the old surface-pH pairing returned.
     assert env.absorption.pH == pytest.approx(7.90)
     assert 'copernicus_bgc' in [s.source.id for s in env.data_sources]
+
+
+@pytest.mark.parametrize('max_days, from_bgc', [(14, True), (13, False)])
+def test_environment_max_days_reaches_the_bgc_ph(monkeypatch, tmp_path,
+                                                 max_days, from_bgc):
+    """The user's ``max_days`` governs the BGC pH read as it governs the
+    Copernicus SSP: the step 14 days from the date is taken at 14 and
+    refused at 13, the GLODAP fallback (absent here) then the reference pH
+    answering."""
+    import uacpy.data as data
+    from uacpy.core.constants import REFERENCE_PH
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    _install_routing_toolbox(
+        monkeypatch, bgc=_BGCStub([8.02, 7.95, 7.90], time='2020-06-01'))
+    env = data.fetch_environment((30.0, -40.0), bathymetry=1000.0,
+                                 ssp_sources='copernicus', date='2020-06-15',
+                                 with_absorption=True, max_days=max_days)
+    assert env.absorption.pH == pytest.approx(
+        7.90 if from_bgc else REFERENCE_PH)
 
 
 def test_environment_copernicus_absorption_row_is_in_situ_temperature(

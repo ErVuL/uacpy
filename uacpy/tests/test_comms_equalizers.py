@@ -181,6 +181,25 @@ class TestBlockMMSEEqualizerIsScaleInvariant:
 
 
 class TestEqualization:
+    def test_a_dfe_step_with_rls_is_refused(self):
+        """``step`` is the LMS step and ``forget`` switches to RLS, which
+        reads no step: the pair is refused naming both. Unset, the LMS step
+        is LMS_DEFAULT_STEP, the same run as passing it."""
+        from uacpy.comms.equalize import LMS_DEFAULT_STEP
+        with pytest.raises(ConfigurationError,
+                           match=r"^DFE: step=0\.02 is the LMS step size and "
+                                 r"forget=0\.99 switches to RLS"):
+            comms.DFE(step=0.02, forget=0.99)
+        assert comms.DFE(forget=0.99).step is None
+        rng = np.random.default_rng(1)
+        rx = (rng.choice([-1, 1], 300) + 1j * rng.choice([-1, 1], 300)) \
+            / np.sqrt(2)
+        cst = comms.Modulator("qpsk").constellation
+        unset, _ = comms.DFE(n_ff=5, n_fb=2).equalize(rx, cst)
+        given, _ = comms.DFE(n_ff=5, n_fb=2,
+                             step=LMS_DEFAULT_STEP).equalize(rx, cst)
+        np.testing.assert_array_equal(unset, given)
+
     def test_dfe_opens_closed_eye(self):
         rng = np.random.default_rng(0xACED)
         h = comms.multipath_channel([1.0, 0.6, 0.3],

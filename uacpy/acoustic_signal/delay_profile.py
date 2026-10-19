@@ -17,7 +17,9 @@ from typing import Optional
 import numpy as np
 from uacpy.core._export import CarrierExport
 from uacpy.core._repr import FieldsRepr
-from uacpy.core.exceptions import ConfigurationError, NumericsWarning
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, NumericsWarning,
+)
 from uacpy.core._validate import require_positive, require_positive_finite_scalar
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
@@ -40,6 +42,15 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 COHERENCE_BANDWIDTH_FACTORS = {'inverse_spread': 1.0,
                                'rappaport_0.5': 5.0,
                                'rappaport_0.9': 50.0}
+
+#: The convention :func:`coherence_bandwidth` and :func:`channel_regime`
+#: take when neither ``convention`` nor ``factor`` is given (see
+#: :func:`coherence_bandwidth` for its sources).
+_DEFAULT_COHERENCE_CONVENTION = 'inverse_spread'
+
+#: Headroom :func:`synthesis_band` puts on a derived window when ``margin``
+#: is unset (uacpy guidance; see its docstring for what it buys).
+_SYNTHESIS_MARGIN = 1.2
 
 
 @dataclass(frozen=True)
@@ -162,7 +173,7 @@ def energy_support(delays, powers, fraction: float = 0.999) -> float:
     fraction : float, default 0.999
         Share of the total energy the span must hold, in ``(0, 1]``. ``1.0``
         is the peak-to-peak span. The default leaves a thousandth of the
-        energy — 30 dB down — outside.
+        energy — 30 dB down — outside (uacpy guidance).
 
     Returns
     -------
@@ -255,7 +266,7 @@ def _fold_notice(delays, powers, record: float, *, who: str, remediation: str,
 def synthesis_band(delays, powers, *, bandwidth: float, fc: float,
                    output_duration: Optional[float] = None,
                    energy_fraction: Optional[float] = None,
-                   margin: float = 1.2) -> np.ndarray:
+                   margin: Optional[float] = None) -> np.ndarray:
     """Frequency grid wide enough to synthesise a power delay profile
     un-aliased.
 
@@ -284,9 +295,14 @@ def synthesis_band(delays, powers, *, bandwidth: float, fc: float,
     energy_fraction : float, optional
         Share of the energy the derived window must hold (default 0.999).
     margin : float, optional
-        Headroom on the derived span (default 1.2, at least 1). It is also
+        Headroom on the derived span (unset: 1.2, uacpy guidance; at least
+        1). It is also
         the number of frequency samples per interference fringe of two
-        paths the span apart. Not used when ``output_duration`` is given.
+        paths the span apart. An energy product (a band loss, an exposure)
+        needs 2 or more, the record beating twice the delay spread
+        (``dtau·df < 0.5``, ``docs/theory/broadband_products.md``), and
+        enough samples across the band. Not used when ``output_duration``
+        is given: a given one then gets a ``FallbackWarning``.
 
     Returns
     -------
@@ -315,7 +331,7 @@ def synthesis_band(delays, powers, *, bandwidth: float, fc: float,
 def _synthesis_band(delays, powers, *, bandwidth: float, fc: float,
                    output_duration: Optional[float] = None,
                    energy_fraction: Optional[float] = None,
-                   margin: float = 1.2,
+                   margin: Optional[float] = None,
                    who: str = "synthesis_band") -> np.ndarray:
     """:func:`synthesis_band` reporting its refusals as ``who``."""
     bandwidth = float(bandwidth)
@@ -343,8 +359,14 @@ def _synthesis_band(delays, powers, *, bandwidth: float, fc: float,
     if output_duration is not None:
         record = float(output_duration)
         require_positive(record, f"{who} output_duration", hint="s")
+        if margin is not None:
+            warnings.warn(
+                f"{who}: margin={margin!r} is headroom on a derived window, "
+                f"and output_duration={output_duration!r} states the window, "
+                f"so margin is not used.",
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     else:
-        margin = float(margin)
+        margin = _SYNTHESIS_MARGIN if margin is None else float(margin)
         if margin < 1.0:
             raise ConfigurationError(
                 f"{who}: margin={margin:g} would size "
@@ -385,12 +407,21 @@ def _synthesis_band(delays, powers, *, bandwidth: float, fc: float,
 def _coherence_factor(convention, factor, *, who: str) -> float:
     """The ``k`` of ``1 / (k tau_rms)``: ``factor`` when given (any finite
     ``k > 0``), else the named convention's in
-    :data:`COHERENCE_BANDWIDTH_FACTORS`; refusals name ``who``."""
+    :data:`COHERENCE_BANDWIDTH_FACTORS` (unset:
+    :data:`_DEFAULT_COHERENCE_CONVENTION`); both given are two answers to
+    one question and refused. Refusals name ``who``."""
+    if factor is not None and convention is not None:
+        raise ConfigurationError(
+            f"{who}: convention={convention!r} and factor={factor!r} are two "
+            f"answers to one question — the k of 1 / (k * tau_rms).",
+            remediation="Pass convention= for a named k, or factor= for any "
+                        "other k > 0, not both.")
     if factor is not None:
         return require_positive_finite_scalar(
             factor, who, "factor",
-            why=(f" It is the k of 1 / (k * tau_rms); leave it out to use "
-                 f"convention={convention!r}."))
+            why=" It is the k of 1 / (k * tau_rms).")
+    if convention is None:
+        convention = _DEFAULT_COHERENCE_CONVENTION
     try:
         return COHERENCE_BANDWIDTH_FACTORS[convention]
     except KeyError:
@@ -402,7 +433,7 @@ def _coherence_factor(convention, factor, *, who: str) -> float:
 
 
 def coherence_bandwidth(delays, powers, *,
-                        convention: str = 'inverse_spread',
+                        convention: Optional[str] = None,
                         factor=None) -> float:
     """Bandwidth over which a channel's transfer function stays correlated,
     in Hz, as ``1 / (k * tau_rms)`` with ``tau_rms`` the
@@ -430,10 +461,11 @@ def coherence_bandwidth(delays, powers, *,
     powers : array_like
         Arrival powers.
     convention : str, optional
-        A named ``k`` of :data:`COHERENCE_BANDWIDTH_FACTORS`. Default
+        A named ``k`` of :data:`COHERENCE_BANDWIDTH_FACTORS`. Unset,
         ``'inverse_spread'`` (``k = 1``).
     factor : float, optional
-        An explicit ``k > 0``, in place of ``convention``.
+        An explicit ``k > 0``, in place of ``convention``; refused together
+        with a ``convention``.
     """
     return _coherence_bandwidth(
         delays,
@@ -443,7 +475,7 @@ def coherence_bandwidth(delays, powers, *,
 
 
 def _coherence_bandwidth(delays, powers, *,
-                        convention: str = 'inverse_spread',
+                        convention: Optional[str] = None,
                         factor=None, who: str = "coherence_bandwidth"
                         ) -> float:
     """:func:`coherence_bandwidth` reporting its refusals as ``who``."""
@@ -457,7 +489,7 @@ def _coherence_bandwidth(delays, powers, *,
 
 
 def channel_regime(delays, powers, symbol_rate: float, *,
-                   convention: str = 'inverse_spread', factor=None,
+                   convention: Optional[str] = None, factor=None,
                    rolloff: float = 0.0) -> ChannelRegime:
     """Whether a modem at ``symbol_rate`` sees this profile as flat or
     frequency-selective.
@@ -493,7 +525,7 @@ def channel_regime(delays, powers, symbol_rate: float, *,
 
 
 def _channel_regime(delays, powers, symbol_rate: float, *,
-                   convention: str = 'inverse_spread', factor=None,
+                   convention: Optional[str] = None, factor=None,
                    rolloff: float = 0.0,
                    who: str = "channel_regime") -> ChannelRegime:
     """:func:`channel_regime` reporting its refusals as ``who``."""
@@ -514,6 +546,7 @@ def _channel_regime(delays, powers, symbol_rate: float, *,
         symbol_duration=1.0 / symbol_rate,
         frequency_selective=bool(signal > coherence),
         isi_symbols=spread * symbol_rate,
-        convention=(str(convention) if factor is None
-                    else f"factor={float(factor):g}"),
+        convention=(f"factor={float(factor):g}" if factor is not None
+                    else _DEFAULT_COHERENCE_CONVENTION if convention is None
+                    else str(convention)),
     )

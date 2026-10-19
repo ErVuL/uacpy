@@ -45,6 +45,34 @@ def test_a_per_point_live_transect_warns_past_the_request_budget(
     assert bool(burst) is (n_points > bathymetry.LIVE_POINT_REQUEST_WARN)
 
 
+@pytest.mark.parametrize('base_url, root', [
+    (None, 'https://www.gmrt.org/services/'),
+    ('https://gmrt.example.org/services', 'https://gmrt.example.org/services/'),
+    ('https://gmrt.example.org/services/',
+     'https://gmrt.example.org/services/')])
+def test_the_gmrt_requests_go_to_base_url(monkeypatch, base_url, root):
+    """``fetch_bathy(source='gmrt', base_url=)`` reads the PointServer under
+    the services root given, a grid its GridServer; ``None`` reads the module
+    constants."""
+    urls = []
+
+    def fake(url, *, timeout, verbose, source='data', user_agent='uacpy'):
+        urls.append(url)
+        if 'GridServer' in url:
+            raise DataFetchError('stub: no grid')
+        return b'-2455'
+    monkeypatch.setattr(gmrt_live, 'http_get', fake)
+    assert bathymetry.fetch_bathy((43.2, 7.5), source='gmrt',
+                                  base_url=base_url) == 2455.0
+    bathymetry.fetch_bathy_transect((43.0, 7.0), (43.1, 7.1), n_points=2,
+                                    source='gmrt', base_url=base_url)
+    with pytest.raises(DataFetchError, match='stub: no grid'):
+        bathymetry.fetch_bathy_grid((43, 44), (7, 8), n_lat=2, n_lon=2,
+                                    source='gmrt', base_url=base_url)
+    assert [u.split('?')[0] for u in urls] == (
+        [root + 'PointServer'] * 3 + [root + 'GridServer'])
+
+
 def test_point_land_raises(monkeypatch):
     monkeypatch.setattr(gmrt_live, 'http_get', _stub_point(150))   # +up = land
     with pytest.raises(DataFetchError, match='land'):

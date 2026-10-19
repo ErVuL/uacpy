@@ -50,6 +50,81 @@ def test_tf_stacked_mag_dB_and_phase():
     assert ax_mag.lines[0].get_xdata().shape == _FREQS.shape
 
 
+def test_the_spectrum_of_a_received_trace_is_captioned_s_times_h():
+    """The transform of a received pressure trace is S·H (Pa·s), the source
+    spectrum times the channel: its dB view is captioned -20·log10|S·H|, not
+    TL, and its level view |S·H|; a transfer function H keeps its captions."""
+    f = np.linspace(100.0, 1000.0, 10)
+    data = 1e-3 * np.exp(1j * f / 100.0)
+    spectrum = Field(data=data, coords={'frequency': f}, kind='pressure',
+                     unit='Pa·s')
+    fig, ax = spectrum.plot()
+    assert ax.get_ylabel() == '−20·log10|S·H| (dB re 1 Pa·s)'
+    plt.close(fig)
+    fig, (ax_mag, _) = spectrum.plot_transfer_function()
+    assert ax_mag.get_ylabel() == '|S·H| (dB re 1 Pa·s)'
+    plt.close(fig)
+    transfer = Field(data=data, coords={'frequency': f})
+    fig, ax = transfer.plot()
+    assert ax.get_ylabel() == 'TL (dB)'
+    plt.close(fig)
+    fig, (ax_mag, _) = transfer.plot_transfer_function()
+    assert ax_mag.get_ylabel() == '|H| (dB)'
+    plt.close(fig)
+
+
+def test_the_two_frf_plotters_label_and_frame_the_pair_alike():
+    """Whichever plotter draws an H(f) pair, the magnitude panel carries the
+    same label, the phase panel the whole (-π, π] window, and one legend
+    sits on the magnitude panel."""
+    from uacpy.plot import plot_frf
+    fig_tf, (mag_tf, phase_tf) = _broadband().plot_transfer_function(
+        label='model')
+    fig_frf, (mag_frf, phase_frf) = plot_frf(
+        _FREQS, np.exp(1j * np.linspace(0.0, 1.0, _FREQS.size)),
+        label='measured')
+    try:
+        assert mag_tf.get_ylabel() == mag_frf.get_ylabel() == '|H| (dB)'
+        for phase in (phase_tf, phase_frf):
+            assert phase.get_ylim() == pytest.approx((-np.pi, np.pi))
+            assert phase.get_legend() is None
+        assert mag_tf.get_legend() is not None
+        assert mag_frf.get_legend() is not None
+    finally:
+        plt.close(fig_tf)
+        plt.close(fig_frf)
+
+
+def test_the_two_frf_plotters_floor_size_and_title_the_pair_alike():
+    """One H(f) through either plotter: a null deeper than 120 dB below the
+    peak on the same floor (``dynamic_range_dB`` on both), the same figure
+    size, and the same default caption, the Field's naming its cell."""
+    from uacpy.plot import plot_frf
+    tf = np.exp(1j * np.linspace(0.0, 1.0, _FREQS.size))
+    tf[10] = 1e-9                                     # a 180 dB-deep null
+    H = Field(data=tf[None, None, :],
+              coords={'depth': np.array([20.0]), 'range': np.array([1000.0]),
+                      'frequency': _FREQS},
+              model='Synthetic', speeds=SoundSpeeds(surface=1500.0))
+    fig_tf, (mag_tf, _) = H.plot_transfer_function()
+    fig_frf, (mag_frf, _) = plot_frf(_FREQS, tf)
+    fig_40, (mag_40, _) = H.plot_transfer_function(dynamic_range_dB=40.0)
+    try:
+        drawn_tf = mag_tf.get_lines()[0].get_ydata()
+        np.testing.assert_allclose(drawn_tf,
+                                   mag_frf.get_lines()[0].get_ydata())
+        assert np.min(drawn_tf) == pytest.approx(-120.0)
+        assert np.min(mag_40.get_lines()[0].get_ydata()) == pytest.approx(
+            -40.0)
+        assert tuple(fig_tf.get_size_inches()) == tuple(
+            fig_frf.get_size_inches()) == (8.0, 6.0)
+        assert mag_frf.get_title() == 'Frequency response'
+        assert mag_tf.get_title().startswith('Frequency response — ')
+    finally:
+        for fig in (fig_tf, fig_frf, fig_40):
+            plt.close(fig)
+
+
 def test_tf_shares_plot_frfs_axes_convention():
     """Both FRF plotters draw one convention: log frequency, phase in
     radians, |H| autoscaled; ``label=`` names a line and adds a legend, so

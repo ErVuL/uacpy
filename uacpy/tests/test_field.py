@@ -220,6 +220,51 @@ class TestField:
             Field(data=np.ones(3), coords={'depth': depths}).resample_to(
                 depths=[25.0], ranges=[250.0])
 
+    def test_a_dB_field_is_interpolated_in_energy_next_to_a_no_energy_cell(
+            self):
+        """The 600 dB no-energy marker is no loss to average: halfway
+        between an 80 dB loss and it reads 83.01 dB (half the 80 dB
+        energy), a stencil all marker keeps the marker, and two real cells
+        interpolate in dB."""
+        from uacpy.acoustics import no_energy_mask, resample_depth_range
+        field = self._tl_field(np.array([[80.0, 600.0, 90.0, 94.0]]),
+                               [100.0, 200.0, 300.0, 400.0], [10.0])
+        half = 10 * np.log10(0.5)
+        out = field.resample_to(depths=[10.0], ranges=[150.0, 250.0, 350.0])
+        np.testing.assert_allclose(out.data, [[80 - half, 90 - half, 92.0]],
+                                   atol=1e-9)
+        assert not no_energy_mask(out.data).any()
+        assert field.eval(range=150.0).data == pytest.approx(80 - half,
+                                                             abs=1e-9)
+        assert field.eval(range=200.0).data == 600.0
+        level = field.at_source_level(200.0).resample_to(depths=[10.0],
+                                                         ranges=[150.0])
+        np.testing.assert_allclose(level.data, [[120 + half]], atol=1e-9)
+        # The array function takes the same switch; off, it averages the
+        # marker as a number.
+        args = ([[80.0, 600.0, 90.0]], [10.0], [100.0, 200.0, 300.0],
+                [10.0], [150.0])
+        np.testing.assert_allclose(resample_depth_range(*args, dB=True),
+                                   [[80 - half]], atol=1e-9)
+        np.testing.assert_allclose(resample_depth_range(*args), [[340.0]])
+
+    def test_cubic_is_refused_over_a_no_energy_cell(self):
+        """A cubic spline couples every sample of an axis: a marker several
+        cells away still moves the value (0.4 dB measured 5.5 cells away on
+        a dB ramp)."""
+        ranges = np.arange(5.0) * 100.0
+        data = np.array([[80.0, 81.0, 82.0, 83.0, 600.0]])
+        field = self._tl_field(data, ranges, [10.0])
+        with pytest.raises(ConfigurationError,
+                           match="Field.eval: method='cubic' on dB values"):
+            field.eval(range=50.0, method='cubic')
+        ramp = self._tl_field(data[:, :4], ranges[:4], [10.0])
+        assert ramp.eval(range=50.0, method='cubic').data == pytest.approx(
+            80.5, abs=1e-9)
+        with pytest.raises(ConfigurationError,
+                           match="Field.resample_to: method='cubic' needs"):
+            field.resample_to(depths=[10.0], ranges=[50.0], method='cubic')
+
     @staticmethod
     def _coherent_field(dr, dz=1.0, f0=200.0, c=1500.0):
         """Complex pressure with carrier e^{ikr}, grid spaced ``dz`` x ``dr``."""
@@ -465,6 +510,45 @@ class TestFieldValueAccessorsAreWriteGuarded:
         d['coords']['depth'][0] = 99.0
         assert f.data[1, 1] == 90.0
         assert f.coords['depth'][0] == 0.0
+
+
+class TestTheLoudestAlongAnAxis:
+    """``loudest_along(axis)`` keeps a Field: per remaining point, the
+    loudest sample along the axis by max()'s rule — the largest level, the
+    least loss, the largest |p| (its complex value kept)."""
+
+    def test_an_exposure_map_keeps_the_worst_depth_per_range(self):
+        sel = Field(data=np.array([[100.0, -600.0, np.nan],
+                                   [120.0, -600.0, np.nan],
+                                   [110.0, -600.0, 90.0]]),
+                    coords={'depth': [5.0, 15.0, 25.0],
+                            'range': [100.0, 200.0, 300.0]},
+                    kind='sound_exposure', unit='dB', weighting='VHF')
+        worst = sel.loudest_along('depth')
+        assert worst.axes == ['range'] and worst.kind == 'sound_exposure'
+        assert worst.weighting == 'VHF'
+        np.testing.assert_array_equal(worst.ranges, [100.0, 200.0, 300.0])
+        # 120 the largest level; all silent keeps the marker; NaN skipped.
+        np.testing.assert_array_equal(worst.data, [120.0, -600.0, 90.0])
+        np.testing.assert_array_equal(
+            worst.data, np.nanmax(np.asarray(sel.data), axis=0))
+
+    def test_a_loss_keeps_the_least_and_complex_data_its_sample(self):
+        tl = Field(data=np.array([[60.0, 600.0, np.nan],
+                                  [55.0, 600.0, np.nan]]),
+                   coords={'depth': [5.0, 15.0],
+                           'range': [100.0, 200.0, 300.0]})
+        assert tl.unit == 'dB'
+        np.testing.assert_array_equal(tl.loudest_along('depth').data,
+                                      [55.0, 600.0, np.nan])
+        H = Field(data=np.array([[1 + 1j, 0.1], [-3 + 0j, np.nan]]),
+                  coords={'depth': [5.0, 15.0], 'range': [100.0, 200.0]})
+        np.testing.assert_array_equal(H.loudest_along('depth').data,
+                                      [-3 + 0j, 0.1 + 0j])
+        with pytest.raises(ConfigurationError,
+                           match="^Field.loudest_along: 'time' is not an "
+                                 "axis"):
+            H.loudest_along('time')
 
 
 class TestFieldMaxComplexData:
@@ -1382,8 +1466,8 @@ class TestSpectrumAndToneExtraction:
 class TestFieldDomainAccessorContracts:
     """The documented unit/domain guards on the value accessors
     (docs/guide/results.md §4): ``.dB`` refuses a time-domain trace,
-    ``.p`` refuses real data, and ``.dt``/``.sample_rate`` read 0.0 when
-    no time axis exists."""
+    ``.p`` refuses real data, and ``.dt``/``.sample_rate`` are None when
+    no time step exists."""
 
     def test_dB_raises_on_a_time_domain_field(self):
         trace = Field(data=np.zeros((1, 1, 8)),
@@ -1402,13 +1486,25 @@ class TestFieldDomainAccessorContracts:
         with pytest.raises(AttributeError, match='data is real'):
             tl.p
 
-    def test_dt_and_sample_rate_are_zero_without_a_time_axis(self):
+    def test_dt_and_sample_rate_are_none_without_a_time_step(self):
+        # No time axis, or one sample: no spacing exists, and a number would
+        # be divided or passed on as a rate nobody gave.
         tl = Field(data=np.array([[60.0]]),
                    coords={'depth': np.array([10.0]),
                            'range': np.array([100.0])},
                    model='Test', frequencies=100.0)
-        assert tl.dt == 0.0
-        assert tl.sample_rate == 0.0
+        assert tl.dt is None and tl.sample_rate is None
+        instant = Field(data=np.zeros((1, 1, 1)),
+                        coords={'depth': np.array([10.0]),
+                                'range': np.array([100.0]),
+                                'time': np.array([0.5])}, model='Test')
+        assert instant.dt is None and instant.sample_rate is None
+        with pytest.raises(ConfigurationError,
+                           match=r"^Field\.sound_exposure_level: this Field's "
+                                 r"time axis holds 1 sample"):
+            instant.sound_exposure_level()
+        assert float(np.ravel(
+            instant.peak_sound_pressure_level().data)[0]) == -600.0
 
     def test_dt_and_sample_rate_read_the_time_axis(self):
         trace = Field(data=np.zeros((1, 1, 50)),
@@ -1564,7 +1660,7 @@ class TestSliceLabelsMustBeFiniteScalars:
             'Bottom.column_index_at': lambda v: bottom.column_index_at(
                 range=v),
             'Bottom.halfspace_at': lambda v: bottom.halfspace_at(
-                range=v, interp='linear'),
+                range=v, method='linear'),
             'SeabedColumn.layer_at': lambda v: column.layer_at(v),
             'Surface.at': lambda v: surface.at(range=v),
             'ReflectionCoefficient.at': lambda v: rc.at(angle=v),
@@ -2156,7 +2252,7 @@ class TestFieldRemoveDelay:
     def test_removing_the_exact_delay_flattens_the_phase(self):
         one_range = self._transfer_function().at(range=5000.0)
 
-        flattened = one_range.remove_delay(seconds=5000.0 / self.SPEED)
+        flattened = one_range.remove_delay(delay=5000.0 / self.SPEED)
         assert np.max(np.abs(np.angle(flattened.data))) < 1e-9
 
     def test_sound_speed_takes_the_delay_from_the_fields_own_range(self):
@@ -2165,7 +2261,7 @@ class TestFieldRemoveDelay:
         one_range = self._transfer_function().at(range=5000.0)
 
         assert np.allclose(one_range.remove_delay(sound_speed=self.SPEED).data,
-                           one_range.remove_delay(seconds=5000.0 / self.SPEED).data)
+                           one_range.remove_delay(delay=5000.0 / self.SPEED).data)
 
     def test_each_range_is_advanced_by_its_own_travel_time(self):
         """The reduced-time convention: on a field that still has a range axis,
@@ -2206,8 +2302,8 @@ class TestFieldRemoveDelay:
 
     @pytest.mark.parametrize('kwargs,match', [
         ({}, 'exactly one of'),
-        ({'seconds': 1.0, 'sound_speed': 1500.0}, 'exactly one of'),
-        ({'seconds': np.inf}, 'not finite'),
+        ({'delay': 1.0, 'sound_speed': 1500.0}, 'exactly one of'),
+        ({'delay': np.inf}, 'not finite'),
         ({'sound_speed': 0.0}, 'not a positive, finite speed'),
         ({'sound_speed': -1500.0}, 'not a positive, finite speed'),
     ])
@@ -2224,11 +2320,58 @@ class TestFieldRemoveDelay:
                               'time': np.arange(3.0)})
 
         with pytest.raises(ConfigurationError, match='shift\\(time='):
-            trace.remove_delay(seconds=1.0)
+            trace.remove_delay(delay=1.0)
 
     def test_real_data_has_no_phase_to_move(self):
         with pytest.raises(ConfigurationError, match='carries no'):
-            self._transfer_function().to_dB().remove_delay(seconds=1.0)
+            self._transfer_function().to_dB().remove_delay(delay=1.0)
+
+    def test_the_delay_is_recorded_and_adds_up(self):
+        field = self._transfer_function()
+        assert field.removed_delay is None
+        by_speed = field.remove_delay(sound_speed=self.SPEED)
+        assert by_speed.removed_delay == {'delay': 0.0,
+                                          'sound_speed': self.SPEED}
+        assert by_speed.remove_delay(0.1).removed_delay == {
+            'delay': 0.1, 'sound_speed': self.SPEED}
+        # two speeds: the slownesses add, 1/1500 + 1/3000 = 1/1000
+        assert by_speed.remove_delay(sound_speed=3000.0).removed_delay[
+            'sound_speed'] == pytest.approx(1000.0, rel=1e-12)
+        assert field.remove_delay(0.3).remove_delay(-0.3).removed_delay \
+            is None
+        assert 'delay r/1500 m/s removed' in repr(by_speed)
+
+    def test_every_synthesis_of_the_advanced_H_sits_on_the_true_time(self):
+        """A path arriving at 2.5 s, 3300 m out with 1500 m/s stamped (r/c =
+        2.2 s), on a 1 Hz grid. The advanced H's syntheses put the delay
+        back: the same records as the H it came from, the arrival at 2.5 s
+        and not at the 2.3 s fold of the residual onto a record placed for
+        the delay."""
+        f = np.arange(100.0, 201.0)
+        fs = 1000.0
+        H = Field(data=(0.01 * np.exp(-2j * np.pi * f * 2.5)).reshape(1, 1, -1),
+                  coords={'depth': [50.0], 'range': [3300.0], 'frequency': f},
+                  phase_reference=PhaseReference.TRAVELLING_WAVE,
+                  speeds=SoundSpeeds(water_max=1500.0, water_min=1480.0))
+        advanced = H.remove_delay(sound_speed=1500.0)
+        for t_start in (None, 'reduced', 0.0):
+            want = H.impulse_response(fs, t_start=t_start)
+            got = advanced.impulse_response(fs, t_start=t_start)
+            np.testing.assert_array_equal(got.times, want.times)
+            np.testing.assert_allclose(got.data, want.data, rtol=0,
+                                       atol=1e-12 * np.max(np.abs(want.data)))
+            assert got.reduction_speed == want.reduction_speed
+            assert got.removed_delay is None
+        trace = advanced.to_time_trace(sample_rate=fs)
+        peak = trace.times[np.argmax(np.abs(np.ravel(trace.data)))]
+        assert abs(peak - 2.5) < 0.5 / fs
+        pulse = np.hanning(40)
+        np.testing.assert_allclose(
+            advanced.synthesize_time_series(source_waveform=pulse,
+                                            sample_rate=fs).data,
+            H.synthesize_time_series(source_waveform=pulse,
+                                     sample_rate=fs).data,
+            rtol=0, atol=1e-12)
 
     def test_a_field_without_a_range_cannot_infer_the_delay(self):
         from uacpy.core.results import Field
@@ -2934,6 +3077,25 @@ class TestTheTransformOfATraceKeepsItsTag:
             warnings.simplefilter('error')
             plain.to_transfer_function()
 
+    def test_a_pressure_traces_transform_is_S_times_H_in_Pa_s(self):
+        """An impulse response transforms back to H, in the 'Pa' a model's
+        H carries; a received pressure trace to the spectrum S·H, a density
+        in Pa·s, and is labelled so rather than as H."""
+        grid = _two_path_grid()
+        h = grid.to_time_trace(**self._CELL)
+        assert (h.kind, h.unit) == ('impulse_response', '1/s')
+        assert h.to_transfer_function().unit == 'Pa'
+        fs = self._CELL['sample_rate']
+        pulse = np.hanning(40) * np.sin(2 * np.pi * 200.0 * np.arange(40)
+                                        / fs)
+        p = grid.to_time_trace(source_waveform=pulse, **self._CELL)
+        assert (p.kind, p.unit) == ('pressure', 'Pa')
+        spectrum = p.to_transfer_function()
+        assert (spectrum.kind, spectrum.unit) == ('pressure', 'Pa·s')
+        assert 'pressure Pa·s' in repr(spectrum)
+        from uacpy.core.results.quantities import label
+        assert label('pressure', 'Pa·s') == 'S·H (Pa·s)'
+
 
 class TestIdentityAxesAreNotShifted:
     def test_shifting_a_frequency_axis_is_refused(self):
@@ -3472,3 +3634,161 @@ def test_synthesis_floor_is_the_least_whole_count_covering_the_report(
     f = _two_path_grid().replace(synthesis_floor=reported)
     assert f.synthesis_floor == stored
     assert isinstance(f.synthesis_floor, int)
+
+
+# ── The derivation record ─────────────────────────────────────────────
+# What a reader acts on travels as a typed attribute of the Field: carried
+# to a derived Field, round-tripped through to_dict and the xarray export,
+# refused as a metadata key, and a saved dict keeping it in metadata
+# refused on load.
+
+_BUDGET = {'mode': 'passive', 'source_level_dB': 140.0,
+          'detection_threshold_dB': 3.0, 'noise_level_dB': 60.0,
+          'target_strength_dB': None, 'reverberation_level_dB': None,
+          'directivity_index_dB': 15.0, 'array_gain_dB': [1.0, 2.0],
+          'processing_loss_dB': 0.0}
+
+#: tag -> (value, its metadata spelling)
+_DERIVATION_RECORD = {
+    'band': ((100.0, 300.0), 'band'),
+    'synthesis_window': ('hann', 'window'),
+    'no_mode_bins': ((0, 2), 'no_mode_bins'),
+    'sonar_budget': (_BUDGET, 'sonar_budget'),
+    'sigma_dB': (5.6, 'sigma_dB'),
+    'reduction_speed': (1490.0, 'reduction_speed'),
+    'removed_delay': ({'delay': 0.25, 'sound_speed': 1500.0},
+                      'removed_delay'),
+}
+
+
+def _derivation_field(**kw):
+    return Field(data=np.full((2, 3, 3), 60.0),
+                 coords={'depth': np.array([10.0, 20.0]),
+                         'range': np.array([100.0, 200.0, 300.0]),
+                         'frequency': np.array([50.0, 60.0, 70.0])},
+                 kind='pressure', unit='dB', **kw)
+
+
+@pytest.mark.parametrize('speed, ok', [
+    (1500.0, True), (1e-9, True), (0.0, False), (-1500.0, False),
+    (np.nan, False), (np.inf, False)])
+def test_a_reduction_speed_is_a_positive_finite_speed(speed, ok):
+    if ok:
+        assert _derivation_field(reduction_speed=speed).reduction_speed == speed
+    else:
+        with pytest.raises(ConfigurationError, match="reduction_speed"):
+            _derivation_field(reduction_speed=speed)
+
+
+@pytest.mark.parametrize('record', [
+    {'delay': np.nan, 'sound_speed': None},
+    {'delay': 0.0, 'sound_speed': 0.0},
+    {'delay': 0.0, 'sound_speed': -1500.0},
+    {'delay': 0.0},
+    (0.0, 1500.0)])
+def test_a_removed_delay_is_a_finite_delay_and_a_positive_speed(record):
+    with pytest.raises(ConfigurationError, match="removed_delay"):
+        _derivation_field(removed_delay=record)
+    assert _derivation_field(removed_delay={'delay': -0.5, 'sound_speed': None}
+                  ).removed_delay == {'delay': -0.5, 'sound_speed': None}
+
+
+@pytest.mark.parametrize('tag', sorted(_DERIVATION_RECORD))
+class TestFieldDerivationRecord:
+
+    def test_the_constructor_keyword_is_the_attribute(self, tag):
+        value, _ = _DERIVATION_RECORD[tag]
+        assert getattr(_derivation_field(**{tag: value}), tag) == value
+        assert getattr(_derivation_field(), tag) is None
+
+    def test_a_derived_field_carries_it(self, tag):
+        value, _ = _DERIVATION_RECORD[tag]
+        sliced = _derivation_field(**{tag: value}).at(range=200.0)
+        assert getattr(sliced, tag) == value
+
+    def test_to_dict_round_trips_it(self, tag):
+        value, _ = _DERIVATION_RECORD[tag]
+        back = Field.from_dict(_derivation_field(**{tag: value}).to_dict())
+        assert getattr(back, tag) == value
+        assert not back.metadata
+
+    def test_the_xarray_export_round_trips_it(self, tag):
+        pytest.importorskip('xarray')
+        value, _ = _DERIVATION_RECORD[tag]
+        back = Field.from_xarray(_derivation_field(**{tag: value}).to_xarray())
+        assert getattr(back, tag) == value
+        assert not back.metadata
+
+    def test_a_saved_dict_keeping_it_in_metadata_is_refused(self, tag):
+        """Only the current layout is read: the tag is an attribute, so a
+        dict that holds it in metadata is refused, not read."""
+        value, spelling = _DERIVATION_RECORD[tag]
+        d = _derivation_field().to_dict()
+        d['metadata'] = {spelling: value, 'title': 'kept'}
+        with pytest.raises(ConfigurationError, match=spelling):
+            Field.from_dict(d)
+
+    def test_a_metadata_entry_naming_it_is_refused(self, tag):
+        value, spelling = _DERIVATION_RECORD[tag]
+        with pytest.raises(ConfigurationError, match=spelling):
+            _derivation_field(metadata={spelling: value})
+
+
+@pytest.mark.parametrize('bins, axis', [
+    ((3,), True), ((-1,), True), ((0.5,), True), ((0,), False)])
+def test_no_mode_bins_index_the_frequency_axis(bins, axis):
+    field = _derivation_field() if axis else _derivation_field().at(frequency=60.0)
+    with pytest.raises(ConfigurationError, match='no_mode_bins'):
+        field.replace(no_mode_bins=bins)
+
+
+def test_no_mode_bins_are_sorted_distinct_and_none_when_empty():
+    assert _derivation_field(no_mode_bins=[2, 0, 2]).no_mode_bins == (0, 2)
+    assert _derivation_field(no_mode_bins=()).no_mode_bins is None
+
+
+def test_an_array_narrowed_along_frequency_keeps_the_bins_it_holds():
+    """The attrs index the band they list; an array cut from it keeps the
+    no-mode bins of the frequencies it still holds, at their new index."""
+    pytest.importorskip('xarray')
+    band = np.array([50.0, 60.0, 70.0])
+    da = _derivation_field(no_mode_bins=(0, 2), frequencies=band).to_xarray()
+    assert Field.from_xarray(da.isel(frequency=slice(1, None))
+                             ).no_mode_bins == (1,)
+    assert Field.from_xarray(da.isel(frequency=[1])).no_mode_bins is None
+    assert Field.from_xarray(da.isel(frequency=0)).no_mode_bins is None
+    # With no band in the attrs, bins the narrowed axis cannot place go.
+    bare = _derivation_field(no_mode_bins=(0, 2)).to_xarray()
+    assert Field.from_xarray(bare.isel(frequency=slice(1, None))
+                             ).no_mode_bins is None
+
+
+def test_no_mode_bins_round_trip_through_netcdf(tmp_path):
+    pytest.importorskip('xarray')
+    path = tmp_path / 'band.nc'
+    _derivation_field(no_mode_bins=(0, 2),
+           frequencies=np.array([50.0, 60.0, 70.0])).to_netcdf(path)
+    assert Field.from_netcdf(path).no_mode_bins == (0, 2)
+
+
+def test_a_band_that_is_not_a_pair_is_refused():
+    with pytest.raises(ConfigurationError, match='band'):
+        _derivation_field(band=(100.0, 200.0, 300.0))
+
+
+def test_the_budget_property_is_a_copy():
+    f = _derivation_field(sonar_budget=_BUDGET)
+    f.sonar_budget['mode'] = 'active'
+    assert f.sonar_budget['mode'] == 'passive'
+
+
+def test_a_windowed_trace_warns_on_inversion_and_an_unwindowed_one_does_not():
+    import warnings
+    t = np.arange(64) / 1000.0
+    trace = Field(data=np.sin(2 * np.pi * 50.0 * t), coords={'time': t},
+                  synthesis_window='hann')
+    with pytest.warns(uacpy.NumericsWarning, match="'hann' band window"):
+        trace.to_transfer_function()
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', uacpy.NumericsWarning)
+        trace.replace(synthesis_window=None).to_transfer_function()

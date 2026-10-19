@@ -1,7 +1,8 @@
 """The environments a Kraken deck cannot carry, refused by name, and the
 reductions that make one carriable: the elastic stacks, krakenc over a hard
-or free floor, roughness on a tabulated top, the
-r = 0 profile of the MODES path and the elastic sub-bottom receivers."""
+or free floor, roughness on a tabulated top, the one profile of the MODES
+path (reduced by the collapse policy) and the elastic sub-bottom
+receivers."""
 
 import warnings
 import numpy as np

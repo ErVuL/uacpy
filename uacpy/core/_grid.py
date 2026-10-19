@@ -15,7 +15,8 @@ import numpy as np
 
 from uacpy.core._repr import axis, build, extent
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
+from uacpy.core.constants import NO_ENERGY_DB
+from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION
 from uacpy.core._validate import (
     normalize_axis, real_scalar_or_none, require_non_negative,
     require_real_array, require_strictly_increasing,
@@ -119,8 +120,71 @@ def nearest_index_on_axis(axis_values, value, name='range', *, who,
     return int(np.argmin(np.abs(axis - label)))
 
 
+def interpolate_dB(values, interpolate, *, method, who):
+    """``interpolate``, a linear map from samples to interpolated values,
+    applied to dB values (levels or losses) through the energy wherever a
+    no-energy cell enters the stencil.
+
+    A cell no energy reached holds the marker ``±NO_ENERGY_DB``
+    (:func:`~uacpy.core.acoustics.levels.no_energy_mask`): its energy is
+    zero, a dB value it does not have. An interpolated value whose stencil
+    holds such a cell is therefore the interpolated energy, the marker
+    counting as zero, converted back to dB; one whose every weighted sample
+    is the marker is the marker. Every other value is the dB interpolation
+    itself. The marker's sign says which view the values are: ``+600`` a
+    loss, energy ``10^(-L/10)`` (TL = -10·log10(I/I0), Jensen et al.,
+    *Computational Ocean Acoustics*, sect. 1.3.4, Eq. 1.15), ``-600`` a
+    level, energy ``10^(L/10)``. ``method='cubic'`` is refused once a
+    marker is present: the spline couples every sample of an axis, so the
+    marker would reach every interpolated value. ``who``, the call, opens
+    the refusals.
+    """
+    from uacpy.core.acoustics.levels import no_energy_mask
+    v = np.asarray(values)
+    if np.iscomplexobj(v):
+        raise ConfigurationError(
+            f"{who}: dB=True reads real dB values; got complex values.",
+            remediation="Interpolate the complex pressure with dB=False and "
+                        "take its level afterwards.")
+    v = v.astype(float)
+    marker = no_energy_mask(v)
+    if not marker.any():
+        return interpolate(v)
+    if method == 'cubic':
+        raise ConfigurationError(
+            f"{who}: method='cubic' on dB values that hold "
+            f"{int(marker.sum())} no-energy cell(s) (the ±{NO_ENERGY_DB:g} "
+            f"dB marker): a cubic spline couples every sample of an axis, so "
+            f"a cell with no level would enter every interpolated value.",
+            remediation="Use method='linear' (the energy is interpolated "
+                        "next to a no-energy cell) or 'nearest'.")
+    signs = np.sign(v[marker])
+    if np.any(signs != signs[0]):
+        raise ConfigurationError(
+            f"{who}: the dB values hold both the loss marker "
+            f"+{NO_ENERGY_DB:g} and the level marker -{NO_ENERGY_DB:g}; one "
+            f"grid is either losses or levels.",
+            remediation="Pass losses (no energy at +600) or levels (no "
+                        "energy at -600), not both.")
+    louder = -1.0 if signs[0] > 0 else 1.0       # a loss falls as it gets louder
+    oriented = louder * np.where(marker, np.nan, v)
+    finite = oriented[np.isfinite(oriented)]
+    # The energies relative to the loudest sample, so 10^(L/10) cannot
+    # overflow whatever the dB reference.
+    top = float(finite.max()) if finite.size else 0.0
+    energy = np.where(marker, 0.0, 10.0 ** ((oriented - top) / 10.0))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        through_energy = louder * (top + 10.0 * np.log10(interpolate(energy)))
+    # Zero interpolated energy (every weighted sample silent) is the marker.
+    through_energy = np.where(np.isinf(through_energy),
+                              -louder * NO_ENERGY_DB, through_energy)
+    touched = interpolate(marker.astype(float)) > 0.0
+    return np.where(touched, through_energy,
+                    interpolate(np.where(marker, 0.0, v)))
+
+
 def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
-                  name='axis', who, several=""):
+                  name='axis', who, several="", dB=False):
     """Collapse ``arr`` along ``axis`` at coordinate ``value``.
 
     Returns ``(reduced_array, coord)`` where ``reduced_array`` has ``axis``
@@ -134,7 +198,9 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
     ``ConfigurationError`` for the interpolating methods, ``name`` labels
     the axis in these errors and ``who``, the call, opens them (``several``
     as on :func:`finite_scalar_label`). Values outside the axis ends use
-    constant extrapolation.
+    constant extrapolation. ``dB=True`` reads ``arr`` as dB values (levels
+    or losses): next to a no-energy cell the energy is interpolated
+    (:func:`interpolate_dB`).
     """
     if method not in INTERP_METHODS:
         raise ConfigurationError(
@@ -170,29 +236,32 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
         j = int(np.clip(np.searchsorted(x, v), 1, n - 1))
         x0, x1 = float(x[j - 1]), float(x[j])
         w = 0.0 if x1 == x0 else (v - x0) / (x1 - x0)
-        lo = np.take(arr, j - 1, axis=axis)
-        hi = np.take(arr, j, axis=axis)
-        return lo * (1.0 - w) + hi * w, v
 
-    # cubic
-    if n < 4:
-        raise ConfigurationError(
-            f"{who}: method='cubic' needs at least 4 samples on the axis; "
-            f"got {n}. "
-            f"Use method='linear' (or 'nearest')."
-        )
-    from scipy.interpolate import interp1d
-    moved = np.moveaxis(np.asarray(arr), axis, -1)
+        def interpolate(values):
+            return (np.take(values, j - 1, axis=axis) * (1.0 - w)
+                    + np.take(values, j, axis=axis) * w)
+    else:   # cubic
+        if n < 4:
+            raise ConfigurationError(
+                f"{who}: method='cubic' needs at least 4 samples on the "
+                f"axis; got {n}. "
+                f"Use method='linear' (or 'nearest')."
+            )
+        from scipy.interpolate import interp1d
 
-    def _interp1d(real):
-        f = interp1d(x, real, kind='cubic', axis=-1, bounds_error=False,
-                     fill_value=(real[..., 0], real[..., -1]))
-        return f(v)
-    if np.iscomplexobj(moved):
-        out = _interp1d(moved.real) + 1j * _interp1d(moved.imag)
-    else:
-        out = _interp1d(moved)
-    return out, v
+        def _interp1d(real):
+            f = interp1d(x, real, kind='cubic', axis=-1, bounds_error=False,
+                         fill_value=(real[..., 0], real[..., -1]))
+            return f(v)
+
+        def interpolate(values):
+            moved = np.moveaxis(np.asarray(values), axis, -1)
+            if np.iscomplexobj(moved):
+                return _interp1d(moved.real) + 1j * _interp1d(moved.imag)
+            return _interp1d(moved)
+    if dB:
+        return interpolate_dB(arr, interpolate, method=method, who=who), v
+    return interpolate(arr), v
 
 
 class _RangeProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
@@ -254,7 +323,7 @@ class _RangeProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         self._validate_values()
         if self.ranges.size > 1:
             require_strictly_increasing(
-                self.ranges, f"{cls}.ranges", min_step=DECK_RANGE_RESOLUTION_M)
+                self.ranges, f"{cls}.ranges", min_step=DECK_RANGE_RESOLUTION)
 
     def __repr__(self) -> str:
         return build(type(self).__name__, [
@@ -336,7 +405,8 @@ class _RangeProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
 
 def resample_depth_range(values, depths, ranges, new_depths, new_ranges, *,
-                         method: str = 'linear', axis=(-2, -1)) -> np.ndarray:
+                         method: str = 'linear', axis=(-2, -1),
+                         dB: bool = False) -> np.ndarray:
     """``values`` on a ``(depth, range)`` grid, resampled onto the grid
     ``(new_depths, new_ranges)``.
 
@@ -347,6 +417,18 @@ def resample_depth_range(values, depths, ranges, new_depths, new_ranges, *,
     sample: a sample nothing computed is no data, not a value to average
     against its neighbours. Every other axis of ``values`` is carried
     through. :meth:`uacpy.Field.resample_to` is this on a Field.
+
+    A level or loss grid marks a cell no energy reached with the marker
+    ``±600`` dB (:func:`~uacpy.acoustics.no_energy_mask`), which has no dB
+    value to interpolate. ``dB=True`` says ``values`` are such dB values: a
+    new point whose stencil holds the marker is interpolated in energy (the
+    marker counting as zero) and converted back, so halfway between an
+    80 dB loss and a no-energy cell reads 83.01 dB; a point whose stencil is
+    all marker is the marker, and every other point is the dB interpolation
+    unchanged. ``method='cubic'`` is refused on dB values that hold the
+    marker: the spline couples every sample of an axis, so the marker would
+    reach every new point. ``dB=False`` (default) interpolates the numbers
+    as they are, the marker included.
 
     Interpolating a coherent field is only faithful while its carrier is
     resolved: samples under a quarter wavelength apart on both axes (the
@@ -366,6 +448,9 @@ def resample_depth_range(values, depths, ranges, new_depths, new_ranges, *,
         Interpolation scheme. Default ``'linear'``.
     axis : (int, int), optional
         The depth and range axes of ``values``. Default ``(-2, -1)``.
+    dB : bool, optional
+        ``values`` are real dB levels or losses; interpolate the energy next
+        to a no-energy cell (above). Default ``False``.
 
     Returns
     -------
@@ -376,11 +461,30 @@ def resample_depth_range(values, depths, ranges, new_depths, new_ranges, *,
     Raises
     ------
     ConfigurationError
-        An unknown ``method``, two axes that are not two distinct axes of
-        ``values``, or stored axes that do not match ``values``.
+        An unknown ``method``, ``'cubic'`` on an axis of fewer than 4
+        samples, two axes that are not two distinct axes of ``values``,
+        stored axes that do not match ``values``, or with ``dB=True``:
+        complex values, ``'cubic'`` over the no-energy marker, or both the
+        loss and the level marker in one grid.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> loss = [[80.0, 600.0, 90.0]]
+    >>> resample_depth_range(loss, [10], [100, 200, 300], [10], [150, 250],
+    ...                      dB=True).round(2)
+    array([[83.01, 93.01]])
     """
+    return _resample_depth_range(values, depths, ranges, new_depths,
+                                 new_ranges, method=method, axis=axis, dB=dB)
+
+
+def _resample_depth_range(values, depths, ranges, new_depths, new_ranges, *,
+                          method='linear', axis=(-2, -1), dB=False,
+                          who='resample_depth_range'):
+    """:func:`resample_depth_range` reporting its refusals as ``who``, the
+    call the user made (:meth:`uacpy.Field.resample_to` passes its own)."""
     from scipy.interpolate import RegularGridInterpolator
-    who = 'resample_depth_range'
     if method not in INTERP_METHODS:
         raise ConfigurationError(
             f"{who}: method={method!r}; choose from {list(INTERP_METHODS)}.")
@@ -401,6 +505,11 @@ def resample_depth_range(values, depths, ranges, new_depths, new_ranges, *,
             f"{who}: values hold {v.shape[0]} depth(s) by {v.shape[1]} "
             f"range(s) on the axes {axis}, but depths has {grid[0].size} and "
             f"ranges {grid[1].size}.")
+    if method == 'cubic' and min(v.shape[:2]) < 4:
+        raise ConfigurationError(
+            f"{who}: method='cubic' needs at least 4 samples on each axis; "
+            f"got {v.shape[0]} depth(s) by {v.shape[1]} range(s).",
+            remediation="Use method='linear' (or 'nearest').")
     new_d = np.atleast_1d(np.asarray(new_depths, dtype=float))
     new_r = np.atleast_1d(np.asarray(new_ranges, dtype=float))
     DD, RR = np.meshgrid(new_d, new_r, indexing='ij')
@@ -411,8 +520,12 @@ def resample_depth_range(values, depths, ranges, new_depths, new_ranges, *,
             grid, np.asarray(part, dtype=float), method=method,
             bounds_error=False, fill_value=np.nan)(points)
 
-    out = (resampled(v.real) + 1j * resampled(v.imag)
-           if np.iscomplexobj(v) else resampled(v))
+    if dB:
+        out = interpolate_dB(v, resampled, method=method, who=who)
+    elif np.iscomplexobj(v):
+        out = resampled(v.real) + 1j * resampled(v.imag)
+    else:
+        out = resampled(v)
     out = out.reshape((new_d.size, new_r.size) + v.shape[2:])
     return np.moveaxis(out, (0, 1), (d_ax, r_ax))
 

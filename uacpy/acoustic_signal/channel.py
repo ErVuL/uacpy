@@ -47,8 +47,12 @@ from uacpy.core.absorption import arrival_absorption_exponent
 # response, and building that response from a transfer function.
 # ──────────────────────────────────────────────────────────────────────
 
-# Windowed-sinc fractional-delay kernel: taps each side of the arrival and
-# the Kaiser window shape. L=8 is flat to ~0.01 dB below f/fs = 0.35.
+# Windowed-sinc fractional-delay kernel (the window method of FIR design,
+# Abraham, Underwater Acoustic Signal Processing, sect. 4.9.2; the Kaiser
+# window, sect. 4.10.5): taps each side of the arrival and the window's
+# shape. uacpy guidance, chosen by the measured flatness: L = 8, beta = 8 is
+# flat to ~0.01 dB below f/fs = 0.35 (-0.012 / -0.576 / -4.10 / -11.25 dB at
+# f/fs 0.35 / 0.40 / 0.45 / 0.48).
 _FRAC_DELAY_HALF_LEN = 8
 
 
@@ -88,14 +92,19 @@ def fractional_delay_taps(frac: float, half_len: int = _FRAC_DELAY_HALF_LEN,
     :func:`arrival_impulse_response`, the band-limited impulse of each path,
     holds the band up to the Nyquist frequency.
 
+    The kernel is the window method of FIR design applied to a delayed
+    ideal low-pass (Abraham, *Underwater Acoustic Signal Processing*, sect.
+    4.9.2), with a Kaiser window (sect. 4.10.5).
+
     Parameters
     ----------
     frac : float
         The fractional delay, in samples.
     half_len : int, optional
-        Half the tap count. Default 8.
+        Half the tap count. Default 8 (uacpy guidance: flat to ~0.01 dB
+        below ``f/fs = 0.35``, -0.58 dB at 0.40, -4.10 dB at 0.45).
     beta : float, optional
-        Kaiser window shape. Default 8.
+        Kaiser window shape. Default 8 (uacpy guidance, with ``half_len``).
     """
     offsets = np.arange(-half_len + 1, half_len + 1) - float(frac)
     u = offsets / half_len
@@ -136,8 +145,9 @@ def impulse_response(amplitudes, delays, *, sample_rate: float,
     sample_rate : float
         Sample rate (Hz).
     n_samples : int, optional
-        Length of the IR. Default: just past the latest arrival; defaults
-        above ``2**26`` taps (1 GiB as complex128) raise rather than
+        Length of the IR, a whole number of samples (at least 1; 2.7 is
+        refused, not truncated). Default: just past the latest arrival;
+        defaults above ``2**26`` taps (1 GiB as complex128) raise rather than
         allocate. An explicit ``n_samples`` can end before an arrival: any
         arrival falling entirely outside the window is dropped from ``h``,
         with a ``NumericsWarning`` counting the drops (on both placement
@@ -188,6 +198,13 @@ def impulse_response(amplitudes, delays, *, sample_rate: float,
             n_samples = n_est
         else:
             n_samples = 1
+    else:
+        count = _whole_number_or_none(n_samples)
+        if count is None or count < 1:
+            raise ConfigurationError(
+                f"impulse_response: n_samples must be a whole number of "
+                f"samples, at least 1; got {n_samples!r}.")
+        n_samples = count
     n_samples = int(n_samples)
     dtype = complex if np.iscomplexobj(a) else float
     h = np.zeros(n_samples, dtype=dtype)
@@ -463,8 +480,9 @@ def apply_impulse_response_blocks(h, blocks, *, block_size: Optional[int] = None
     Raises
     ------
     ConfigurationError
-        An empty ``h``, a ``block_size`` below 1, a block that is not a
-        finite 1-D signal, or a stream with no samples at all.
+        An empty ``h`` or a ``block_size`` below 1, at the call; a block
+        that is not a finite 1-D signal, or a stream with no samples at
+        all, as the blocks are read.
     """
     who = "apply_impulse_response_blocks"
     taps = np.asarray(h)
@@ -489,71 +507,76 @@ def apply_impulse_response_blocks(h, blocks, *, block_size: Optional[int] = None
                 f"least 1; got {block_size!r}.")
         segment = int(block_size)
         n_fft = _sp_fft.next_fast_len(segment + n_taps - 1)
-    spectra = {}
+    def stream():
+        """The blocks, convolved; the checks above have already run,
+        at the call."""
+        spectra = {}
 
-    def response(complex_input):
-        # One spectrum per input kind: rfft for real data through real taps.
-        real = not (complex_input or np.iscomplexobj(taps))
-        if real not in spectra:
-            spectra[real] = (_sp_fft.rfft(taps, n_fft, axis=-1) if real
-                             else _sp_fft.fft(taps, n_fft, axis=-1))
-        return real, spectra[real]
+        def response(complex_input):
+            # One spectrum per input kind: rfft for real data through real taps.
+            real = not (complex_input or np.iscomplexobj(taps))
+            if real not in spectra:
+                spectra[real] = (_sp_fft.rfft(taps, n_fft, axis=-1) if real
+                                 else _sp_fft.fft(taps, n_fft, axis=-1))
+            return real, spectra[real]
 
-    def convolve(segment_samples):
-        real, spectrum = response(np.iscomplexobj(segment_samples))
-        length = segment_samples.size + n_taps - 1
-        if real:
-            out = _sp_fft.irfft(_sp_fft.rfft(segment_samples, n_fft)
-                                * spectrum, n_fft, axis=-1)
-        else:
-            out = _sp_fft.ifft(_sp_fft.fft(segment_samples, n_fft)
-                               * spectrum, axis=-1)
-        return out[..., :length]
+        def convolve(segment_samples):
+            real, spectrum = response(np.iscomplexobj(segment_samples))
+            length = segment_samples.size + n_taps - 1
+            if real:
+                out = _sp_fft.irfft(_sp_fft.rfft(segment_samples, n_fft)
+                                    * spectrum, n_fft, axis=-1)
+            else:
+                out = _sp_fft.ifft(_sp_fft.fft(segment_samples, n_fft)
+                                   * spectrum, axis=-1)
+            return out[..., :length]
 
-    def emit(values):
-        return np.moveaxis(values, -1, axis)
+        def emit(values):
+            return np.moveaxis(values, -1, axis)
 
-    overlap = None
-    pending = []
-    held = 0
-    seen = 0
-    for index, block in enumerate(blocks):
-        samples = np.asarray(block)
-        if (samples.ndim != 1 or samples.dtype.kind not in 'biufc'
-                or not np.all(np.isfinite(samples))):
+        overlap = None
+        pending = []
+        held = 0
+        seen = 0
+        for index, block in enumerate(blocks):
+            samples = np.asarray(block)
+            if (samples.ndim != 1 or samples.dtype.kind not in 'biufc'
+                    or not np.all(np.isfinite(samples))):
+                raise ConfigurationError(
+                    f"{who}: block {index} must be a 1-D signal of finite "
+                    f"numbers; got shape {samples.shape}, dtype {samples.dtype}.")
+            if samples.size == 0:
+                continue
+            pending.append(samples)
+            held += samples.size
+            seen += samples.size
+            while held >= segment:
+                joined = np.concatenate(pending)
+                current, rest = joined[:segment], joined[segment:]
+                pending = [rest] if rest.size else []
+                held = rest.size
+                out = convolve(current)
+                if overlap is not None:
+                    if np.iscomplexobj(overlap) and not np.iscomplexobj(out):
+                        out = out.astype(complex)
+                    out[..., :n_taps - 1] += overlap
+                overlap = out[..., segment:].copy()
+                yield emit(out[..., :segment])
+        if seen == 0:
             raise ConfigurationError(
-                f"{who}: block {index} must be a 1-D signal of finite "
-                f"numbers; got shape {samples.shape}, dtype {samples.dtype}.")
-        if samples.size == 0:
-            continue
-        pending.append(samples)
-        held += samples.size
-        seen += samples.size
-        while held >= segment:
-            joined = np.concatenate(pending)
-            current, rest = joined[:segment], joined[segment:]
-            pending = [rest] if rest.size else []
-            held = rest.size
-            out = convolve(current)
+                f"{who}: the signal had no samples; there is nothing to "
+                f"convolve.")
+        if held:
+            out = convolve(np.concatenate(pending))
             if overlap is not None:
                 if np.iscomplexobj(overlap) and not np.iscomplexobj(out):
                     out = out.astype(complex)
                 out[..., :n_taps - 1] += overlap
-            overlap = out[..., segment:].copy()
-            yield emit(out[..., :segment])
-    if seen == 0:
-        raise ConfigurationError(
-            f"{who}: the signal had no samples; there is nothing to "
-            f"convolve.")
-    if held:
-        out = convolve(np.concatenate(pending))
-        if overlap is not None:
-            if np.iscomplexobj(overlap) and not np.iscomplexobj(out):
-                out = out.astype(complex)
-            out[..., :n_taps - 1] += overlap
-        yield emit(out)
-    elif overlap is not None and n_taps > 1:
-        yield emit(overlap)
+            yield emit(out)
+        elif overlap is not None and n_taps > 1:
+            yield emit(overlap)
+
+    return stream()
 
 
 class ChannelResponse(PlottedResult,
@@ -1059,7 +1082,14 @@ def impulse_response_from_transfer_function(H, *, frequencies, sample_rate: floa
         Time (s) of ``h[0]``: a number for every cell, or one per cell
         (an array broadcasting against ``H`` without ``axis``).
     n_samples : int, optional
-        Length of the response; ``None`` is one record (see above).
+        Length of the response; ``None`` is one record (see above). A
+        longer one on a uniform ``frequencies`` is the periodic
+        continuation of the record, the exact sum at every instant: each
+        arrival appears again every ``1/Δf`` (rotated in phase when the
+        band does not start on a multiple of ``Δf``), not zeros, and taps
+        that long played through :func:`apply_impulse_response` repeat
+        the waveform once per record. A ``NumericsWarning`` says so; a
+        longer response needs a finer ``Δf``.
     axis : int, default -1
         Frequency axis of ``H``.
 
@@ -1071,7 +1101,17 @@ def impulse_response_from_transfer_function(H, *, frequencies, sample_rate: floa
         a number ``t_start``, and ``t_start``'s shape plus a trailing time
         axis for one start per cell.
     """
-    who = "impulse_response_from_transfer_function"
+    return _impulse_response_from_transfer_function(
+        H, frequencies=frequencies, sample_rate=sample_rate, t_start=t_start,
+        n_samples=n_samples, axis=axis,
+        who="impulse_response_from_transfer_function")
+
+
+def _impulse_response_from_transfer_function(H, *, frequencies, sample_rate,
+                                             t_start, n_samples, axis,
+                                             who: str):
+    """:func:`impulse_response_from_transfer_function` reporting its
+    refusals and notices as ``who``."""
     f = np.asarray(frequencies, dtype=float)
     Hc = np.asarray(H, dtype=complex)
     if f.ndim != 1:
@@ -1168,13 +1208,22 @@ def impulse_response_from_transfer_function(H, *, frequencies, sample_rate: floa
     elapsed = np.arange(n_samples) / fs
     if uniform:
         df = float(np.diff(f).mean())
+        if n_samples > record_samples(fs, df):
+            warnings.warn(
+                f"{who}: n_samples={n_samples} spans {n_samples * df / fs:.3g} "
+                f"records of 1/Δf = {1.0 / df:.6g} s ({fs / df:.6g} samples, "
+                f"Δf = {df:.6g} Hz): H sampled every Δf repeats every 1/Δf, "
+                f"so each arrival appears again once per record after the "
+                f"first, not zeros. For a longer response refine frequencies "
+                f"to Δf <= {fs / n_samples:.6g} Hz.",
+                NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
         tol = 1e-9 * df
         kept = f <= nyquist + tol
         on_nyquist = kept & (np.abs(f - nyquist) <= tol)
         if on_nyquist.any():
             line = rows[:, on_nyquist][:, 0] * np.exp(
                 2j * np.pi * np.remainder(nyquist * row_starts, 1.0))
-            _warn_nyquist_quadrature_dropped(line, rows, nyquist)
+            _warn_nyquist_quadrature_dropped(line, rows, nyquist, who)
         weights = np.where((np.abs(f) <= tol) | on_nyquist, 0.5, 1.0)
         G = rows[:, kept] * (weights[kept] * df / fs)
         h = 2.0 * band_sum(G, f[kept], sample_rate=fs, t_start=row_starts,
@@ -1201,7 +1250,8 @@ def impulse_response_from_transfer_function(H, *, frequencies, sample_rate: floa
                                            right=0.0))
         if n_samples % 2 == 0:
             # irfft takes only the real part of the Nyquist bin.
-            _warn_nyquist_quadrature_dropped(on_grid[:, -1], on_grid, nyquist)
+            _warn_nyquist_quadrature_dropped(on_grid[:, -1], on_grid, nyquist,
+                                             who)
         h = np.fft.irfft(on_grid, n=n_samples, axis=-1)
     h = np.moveaxis(h.reshape(rest + (n_samples,)), -1, axis)
     if starts_in.ndim == 0:
@@ -1209,11 +1259,12 @@ def impulse_response_from_transfer_function(H, *, frequencies, sample_rate: floa
     return starts[..., None] + elapsed, h
 
 
-def _warn_nyquist_quadrature_dropped(value, H, nyquist: float) -> None:
-    """Warn when ``value``, the ``H`` placed on the Nyquist frequency (one
-    entry per cell, taken at the record's start), has an imaginary part
-    above rounding: the sine at ``sample_rate/2`` is zero at every sample,
-    so a real response keeps only the real part there."""
+def _warn_nyquist_quadrature_dropped(value, H, nyquist: float,
+                                     who: str) -> None:
+    """Warn, naming ``who``, when ``value``, the ``H`` placed on the
+    Nyquist frequency (one entry per cell, taken at the record's start), has
+    an imaginary part above rounding: the sine at ``sample_rate/2`` is zero
+    at every sample, so a real response keeps only the real part there."""
     finite = np.isfinite(H)
     peak = float(np.max(np.abs(H[finite]))) if finite.any() else 0.0
     dropped = np.abs(np.imag(np.asarray(value)))
@@ -1221,7 +1272,7 @@ def _warn_nyquist_quadrature_dropped(value, H, nyquist: float) -> None:
         np.isfinite(dropped)) else 0.0
     if dropped > 1e-9 * peak:
         warnings.warn(
-            f"impulse_response_from_transfer_function: H at the Nyquist "
+            f"{who}: H at the Nyquist "
             f"frequency {nyquist:g} Hz has an imaginary part "
             f"{dropped / peak:.2g} of the peak |H|, which a real response "
             f"cannot carry (the sine at sample_rate/2 is zero at every "
@@ -1451,7 +1502,8 @@ def arrival_grid_transfer_function(frequencies, cells, *,
         :func:`simulate_arrival_grid` takes it: ``n_arrivals``,
         ``amplitudes``, ``delays`` (s), ``delays_imag`` (s), ``phases``
         (rad); without ``n_arrivals`` the count is the length of
-        ``delays``.
+        ``delays``. Every row holds the same number of cells: an empty grid
+        and a ragged one are refused.
     phase_offset : float, default 0
         Added to every arrival's phase.
     trace_frequency, absorption : optional
@@ -1486,7 +1538,7 @@ def _arrival_grid_transfer_function(frequencies, cells, *,
     """:func:`arrival_grid_transfer_function` reporting its refusals as ``who``."""
     freqs = np.atleast_1d(np.asarray(frequencies))
     phase_offset = _require_phase_offset(phase_offset, who)
-    n_i, n_j = len(cells), len(cells[0])
+    n_i, n_j = _grid_shape(cells, who)
     H = np.zeros((n_i, n_j, freqs.size), dtype=complex)
     for i in range(n_i):
         for j in range(n_j):
@@ -1542,10 +1594,24 @@ def received_amplitudes(amplitudes, delays_imag, phases, frequency: float,
     Returns
     -------
     ndarray, complex, shape (n_arrivals,)
+
+    Raises
+    ------
+    ConfigurationError
+        A negative amplitude, and ``delays_imag`` or ``phases`` not holding
+        one entry per amplitude.
     """
-    amplitude = _arrival_magnitudes(amplitudes, "received_amplitudes")
+    who = "received_amplitudes"
+    amplitude = _arrival_magnitudes(amplitudes, who)
     delays_imag = np.asarray(delays_imag, dtype=float).ravel()
     phase = np.asarray(phases, dtype=float).ravel()
+    for name, column in (('delays_imag', delays_imag), ('phases', phase)):
+        if column.size != amplitude.size:
+            raise ConfigurationError(
+                f"{who}: {name} holds {column.size} value(s) for "
+                f"{amplitude.size} amplitude(s); each arrival has its own.",
+                remediation=f"Pass one {name} entry per arrival (zeros "
+                            f"where there is none).")
     exponent = arrival_absorption_exponent(
         delays_imag, [float(frequency)], trace_frequency=trace_frequency,
         absorption=absorption)[:, 0]
@@ -1624,10 +1690,16 @@ def broadband_loss(H, weights=None, *, axis: int = -1):
     ``∫|U|²df / ∫|H|²|U|²df`` (sect. 3.2.4.2) and as Ainslie's total path
     loss (sect. 3.3.2.1).
 
-    Do not confuse it with **incoherent** TL (Eq. 11.47), the average of
-    ``|H|²`` over paths rather than over frequency: that one is a cheap
-    stand-in the KRAKEN manual endorses, and Ainslie marks it invalid
-    within a few wavelengths of a boundary.
+    Do not confuse it with an engine's **incoherent** TL
+    (``RunMode.INCOHERENT_TL``), which sums intensities over paths rather
+    than averaging ``|H|²`` over frequency. Bellhop's sums its ray
+    arrivals: Ainslie's Eq. 11.47, "incoherent" in his "ray sense", which
+    he marks invalid when the sonar or target is within a few wavelengths
+    of the sea surface. Kraken's sums its modes (Jensen et al.,
+    *Computational Ocean Acoustics*, Eq. 5.18), the "mode sense" Eq. 11.47
+    is not, which they and the KRAKEN manual offer to simulate data
+    averaged over frequency. Both approximate the band average computed
+    here.
 
     Parameters
     ----------
@@ -2056,6 +2128,9 @@ def _truncate_response(H, *, frequencies, duration: float,
             f"but frequencies has {n_f}.")
     moved = np.moveaxis(data, axis, -1)
     flat = moved.reshape(-1, n_f)
+    # An unsolved (NaN) bin makes its cell's response, and so its cut H,
+    # no data, as in every synthesis: said once, as there.
+    warn_unsolved_bins(flat, who=who, frequencies=freqs)
     # The band's own baseband response: one period is 1/df and the step is
     # 1/(n_f*df), which is the resolution the band itself has.
     h = np.fft.ifft(flat, axis=-1)
@@ -2317,8 +2392,8 @@ def arrival_impulse_response(amplitudes, delays, *, sample_rate: float,
     but a 4-cycle 50 Hz pulse through a lone quarter-turn arrival 0.55 of
     the peak off. For a
     waveform with content that low, :func:`simulate_arrival_reception` (or
-    :meth:`Arrivals.to_time_series <uacpy.core.results.Arrivals.
-    to_time_series>`) gives the reception itself, the phase rotation taken
+    :meth:`Arrivals.synthesize_time_series <uacpy.core.results.Arrivals.
+    synthesize_time_series>`) gives the reception itself, the phase rotation taken
     on the waveform, exactly.
 
     Parameters
@@ -2429,6 +2504,7 @@ def _arrival_cells_impulse_response(cells, *, sample_rate, phase_offset=0.0,
     its refusals and notices reported as ``who`` with ``remedy`` for a
     record that leaves arrivals out and ``length_knob`` the argument that
     states the record's length."""
+    _grid_shape(cells, who)
     columns = [[None if _arrival_count(cell, who,
                                        f" at cells[{i}][{j}]") == 0
                 else _arrival_columns(cell['amplitudes'], cell['delays'],
@@ -3184,6 +3260,31 @@ def delayandsum(
 
 
 
+def _grid_shape(cells, who: str) -> Tuple[int, int]:
+    """``(n_i, n_j)`` of the receiver grid ``cells[i][j]``. Refused naming
+    ``who``: a grid with no row or no cell, and rows of different lengths,
+    whose extra cells a grid shaped by its first row would leave out."""
+    lengths = [len(row) for row in cells]
+    if not lengths or lengths[0] == 0:
+        raise ConfigurationError(
+            f"{who}: cells holds no receiver; it is cells[i][j], one "
+            f"arrival list per receiver of an (n_i, n_j) grid.",
+            remediation="Pass at least one row holding at least one "
+                        "arrival list (an empty list for a receiver no "
+                        "path reaches).")
+    ragged = [i for i, n in enumerate(lengths) if n != lengths[0]]
+    if ragged:
+        i = ragged[0]
+        raise ConfigurationError(
+            f"{who}: cells[{i}] holds {lengths[i]} arrival list(s) and "
+            f"cells[0] holds {lengths[0]}; a grid holds one per receiver, "
+            f"so every row has the same length.",
+            remediation="Give every row one arrival list per receiver "
+                        "(an empty one where no path reaches), or call "
+                        "the function once per row.")
+    return len(lengths), lengths[0]
+
+
 def _arrival_count(cell, who: str, where: str = "") -> int:
     """The arrivals of one receiver cell: the length of its ``delays``,
     which its ``n_arrivals`` states when it carries one (a record built by
@@ -3268,7 +3369,8 @@ def simulate_arrival_grid(cells, *, source_waveform: np.ndarray,
         with ``amplitudes`` and ``delays`` (s), and optionally
         ``delays_imag`` (s) and ``phases`` (rad), zeros when absent, and
         ``n_arrivals`` (else the length of ``delays``) — the record
-        :class:`~uacpy.Arrivals` keeps per receiver.
+        :class:`~uacpy.Arrivals` keeps per receiver. Every row holds the
+        same number of cells: an empty grid and a ragged one are refused.
     source_waveform : ndarray
         Source waveform (1-D, real).
     sample_rate : float
@@ -3336,7 +3438,7 @@ def _simulate_arrival_grid(
             output_duration, who, "output_duration", " s",
             why=" Pass the window's length, or None to size it from the "
                 "arrivals.")
-    n_i, n_j = len(cells), len(cells[0])
+    n_i, n_j = _grid_shape(cells, who)
     columns = [[None if _arrival_count(cells[i][j], who,
                                        f" at cells[{i}][{j}]") == 0
                 else _arrival_columns(

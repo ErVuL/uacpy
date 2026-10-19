@@ -258,13 +258,18 @@ def fetch_ssp_operational(
     """
     formula = canonical_formula(formula, 'fetch_ssp_operational')
     lat, lon = as_coordinate(point)
+    # Both refused before the dataset is opened (a login-gated remote read).
+    limit = checked_max_distance(max_distance_km, 'fetch_ssp_operational')
+    max_days = checked_max_days(max_days, 'fetch_ssp_operational')
     depths, t_insitu, sal, actual, product = _ts_column(
         point, date=date, max_days=max_days, dataset_id=dataset_id,
         verbose=verbose,
     )
-    # Mackenzie is stated in depth and reads the model depths directly.
-    c = np.asarray(sound_speed_at_depth(t_insitu, sal, depths, formula=formula,
-                                        latitude=lat), dtype=float)
+    # Mackenzie is stated in depth: it reads the model depths directly and
+    # takes no latitude.
+    c = np.asarray(sound_speed_at_depth(
+        t_insitu, sal, depths, formula=formula,
+        latitude=None if formula == 'mackenzie' else lat), dtype=float)
     log_message(
         'copernicus', f"operational SSP at {lat:.3f}, {lon:.3f} ({date}): "
         f"{depths.size} levels, c=[{c.min():.1f}, {c.max():.1f}] m/s",
@@ -279,8 +284,7 @@ def fetch_ssp_operational(
         product=product,
     )
     prov = _offset_checked(prov, actual['cell'], who='fetch_ssp_operational',
-                           max_distance_km=checked_max_distance(
-                               max_distance_km, 'fetch_ssp_operational'))
+                           max_distance_km=limit)
     return SoundSpeedProfile(depths=depths, sound_speed=c, kind='measured',
                              data_sources=(prov,), formula=formula)
 
@@ -356,6 +360,10 @@ def fetch_ssp_transect_operational(
         extended to it (see above).
     """
     formula = canonical_formula(formula, 'fetch_ssp_transect_operational')
+    # Refused before the dataset is opened (a login-gated remote read).
+    limit = checked_max_distance(max_distance_km,
+                                 'fetch_ssp_transect_operational')
+    max_days = checked_max_days(max_days, 'fetch_ssp_transect_operational')
     max_points = checked_max_points(max_points,
                                     'fetch_ssp_transect_operational')
     n_points = checked_n_points(n_points, 'fetch_ssp_transect_operational',
@@ -374,7 +382,6 @@ def fetch_ssp_transect_operational(
             ds, start, end, auto_budget(max_points))
     else:
         lats, lons, ranges = geodesic_waypoints(start, end, n_points)
-    limit = checked_max_distance(max_distance_km, 'fetch_ssp_transect_operational')
     columns = []
     for la, lo in zip(lats, lons):
         depths, temp, sal, actual = _extract_ts(ds, la, lo, when,
@@ -387,9 +394,9 @@ def fetch_ssp_transect_operational(
         pressure = depth_to_pressure_dbar(depths, la)
         t_insitu = insitu_from_potential(salinity=sal, theta=temp,
                                          pressure_dbar=pressure)
-        c = np.asarray(sound_speed_at_depth(t_insitu, sal, depths,
-                                            formula=formula, latitude=la),
-                       dtype=float)
+        c = np.asarray(sound_speed_at_depth(
+            t_insitu, sal, depths, formula=formula,
+            latitude=None if formula == 'mackenzie' else la), dtype=float)
         prov = DataProvenance(source=SOURCES['copernicus'],
                               data_date=actual['date'],
                               data_point=actual['point'],
@@ -464,6 +471,10 @@ def fetch_ts_profile_operational(
 
     """
     lat, lon = as_coordinate(point)
+    # Both refused before the dataset is opened (a login-gated remote read).
+    limit = checked_max_distance(max_distance_km,
+                                 'fetch_ts_profile_operational')
+    max_days = checked_max_days(max_days, 'fetch_ts_profile_operational')
     depths, temp, sal, actual, product = _ts_column(
         point, date=date, max_days=max_days, dataset_id=dataset_id,
         verbose=verbose)
@@ -477,8 +488,7 @@ def fetch_ts_profile_operational(
                              requested_date=str(parse_date(date)),
                              product=product),
                          actual['cell'], who='fetch_ts_profile_operational',
-                         max_distance_km=checked_max_distance(
-                             max_distance_km, 'fetch_ts_profile_operational')))
+                         max_distance_km=limit))
 
 
 def _ts_column(point, *, date, max_days, dataset_id, verbose):
@@ -748,6 +758,9 @@ def fetch_waves_operational(
         Logging gate passed through to ``log_message``.
     """
     lat, lon = as_coordinate(point)
+    # Both refused before the dataset is opened (a login-gated remote read).
+    limit = checked_max_distance(max_distance_km, 'fetch_waves_operational')
+    max_days = checked_max_days(max_days, 'fetch_waves_operational')
     when = parse_date(date).isoformat()
     marine = _import_copernicusmarine()
     log_message('waves', f"opening {dataset_id} for {lat:.3f}, {lon:.3f}",
@@ -775,14 +788,12 @@ def fetch_waves_operational(
                           data_point=snapped_point, requested_point=(lat, lon),
                           requested_date=when, product=dataset_id)
     return SeaStateRecord(hs=hs, tp=tp, provenance=_offset_checked(
-        prov, cell, who='fetch_waves_operational',
-        max_distance_km=checked_max_distance(max_distance_km,
-                                             'fetch_waves_operational')))
+        prov, cell, who='fetch_waves_operational', max_distance_km=limit))
 
 
 @one_provenance_notice(
     subject='the pH data',
-    record='env.extra_data_sources of fetch_environment(with_absorption=True)')
+    record='env.absorption.data_sources of fetch_environment(with_absorption=True)')
 def fetch_ph_operational(
     point: Coordinate,
     *,
@@ -839,6 +850,9 @@ def fetch_ph_operational(
         Logging gate passed through to ``log_message``.
     """
     lat, lon = as_coordinate(point)
+    # Both refused before the dataset is opened (a login-gated remote read).
+    limit = checked_max_distance(max_distance_km, 'fetch_ph_operational')
+    max_days = checked_max_days(max_days, 'fetch_ph_operational')
     when = parse_date(date).isoformat()
     marine = _import_copernicusmarine()
     log_message('copernicus', f"opening {dataset_id or 'the BGC product'} (pH) "
@@ -858,9 +872,7 @@ def fetch_ph_operational(
                                    data_point=snapped, data_date=ph_date,
                                    requested_point=(lat, lon),
                                    requested_date=when, product=product),
-                    cell, who='fetch_ph_operational',
-                    max_distance_km=checked_max_distance(max_distance_km,
-                                                         'fetch_ph_operational'))
+                    cell, who='fetch_ph_operational', max_distance_km=limit)
     depth = np.asarray(ds['depth'].values, float).reshape(-1)
     ph = np.asarray(ph_da.values, float).reshape(-1)
     n = min(depth.size, ph.size)

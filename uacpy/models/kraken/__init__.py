@@ -6,13 +6,18 @@ A single :class:`Kraken` wraps the AT Kraken pipeline, mirroring
 
 - ``backend=`` selects the modes binary — ``'kraken'`` (real arithmetic)
   or ``'krakenc'`` (complex: elastic media / attenuation / leaky modes);
-  ``None`` (default) auto-picks krakenc when the env carries shear/leaky.
+  ``None`` (default) picks krakenc when the environment carries shear,
+  ``leaky_modes=True``, or a tabulated reflection coefficient (a
+  ``'file'`` / ``'precalc'`` boundary or ``top_reflection_file=``), and
+  kraken.exe otherwise.
 - ``field.exe`` runs only when the requested run mode produces a field:
   ``compute_modes`` stops after the modes binary; ``compute_field`` /
   ``compute_transfer_function`` / ``compute_time_series`` chain field.exe.
 - Range-dependence (bathy / SSP) is handled natively for field modes via
   ``field.exe`` adiabatic / coupled modes (``mode_coupling=``); the
-  range-independent MODES path samples the r=0 profile.
+  range-independent MODES path reduces the environment to one profile by
+  the ``collapse=`` methods, else the package defaults (seabed median,
+  bathymetry deepest, SSP and surface r = 0).
 
 Note
 ----

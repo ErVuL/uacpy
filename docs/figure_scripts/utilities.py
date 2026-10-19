@@ -155,7 +155,7 @@ def cross_model_metrics():
     # came out narrower than the two TL panels it sits under and the ranges
     # did not line up down the column.
     uacpy.metrics.tl_difference(bellhop, kraken).plot(
-        ax=axes[2], env=env, diff_vmax=20.0, title='Bellhop − Kraken (dB)')
+        ax=axes[2], env=env, vmax=20.0, title='Bellhop − Kraken (dB)')
     axes[2].set_title('Bellhop − Kraken (dB)', fontweight='bold',
                       fontsize=11)
     for ax in axes:

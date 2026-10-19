@@ -28,8 +28,7 @@ Examples
 """
 
 from uacpy.noise.ambient import (
-    wind_noise_level, WenzNoise, NoiseComponents, KNUDSEN_UNCERTAINTY_DB,
-    KNUDSEN_BAND_HZ, WIND_MODELS, SHIPPING_MODELS, RAIN_MODELS, THERMAL_MODELS, TURBULENCE_MODELS,
+    wind_noise_level, WenzNoise, NoiseComponents, WIND_MODELS, SHIPPING_MODELS, RAIN_MODELS, THERMAL_MODELS, TURBULENCE_MODELS,
     register_noise_model,
 )
 from uacpy.noise.ship_radiated_noise import (
@@ -54,8 +53,6 @@ from uacpy.noise import ambient, marine_mammal, ship_radiated_noise  # noqa: F40
 __all__ = [
     'wind_noise_level',
     'WenzNoise',
-    'KNUDSEN_UNCERTAINTY_DB',
-    'KNUDSEN_BAND_HZ',
     'NoiseComponents',
     'WIND_MODELS', 'SHIPPING_MODELS', 'RAIN_MODELS',
     'THERMAL_MODELS', 'TURBULENCE_MODELS', 'register_noise_model',

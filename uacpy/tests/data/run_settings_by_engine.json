@@ -15,14 +15,13 @@
    "bounce_rmax": null,
    "deck_ranges": null,
    "eps_multiplier": null,
-   "executable": "/home/theo/claudecode/uacpy_workspace (Copy)/uacpy/uacpy/bin/bellhopcuda/bellhopcuda",
+   "executable": null,
    "fc": 100.0,
    "ib_win": null,
    "interp_ssp": "linear",
    "knobs": {
     "auto_bounce": true,
     "backend": null,
-    "bandwidth_factor": null,
     "beam_curvature": null,
     "beam_shift": false,
     "beam_type": "G",
@@ -41,7 +40,6 @@
      80
     ],
     "n_beams": 0,
-    "n_frequencies": null,
     "n_image": null,
     "r_box": null,
     "r_loop": null,
@@ -375,10 +373,12 @@
   "depth_loop": "single",
   "engine": {
    "__class__": "uacpy.models.oases.OASNSettings",
-   "c_high": null,
-   "c_low": null,
+   "c_high": 100000000.0,
+   "c_high_origin": "1e8, OASES' no upper limit (oasn.tex:284-285, :479)",
+   "c_low": 1350.0,
+   "c_low_origin": "0.9 \u00d7 1500 m/s, the water \u2014 the slowest speed of every medium (scooter.f90:193-259)",
    "deep_noise_level_dB": 0.0,
-   "deep_source_depth": null,
+   "deep_source_depth": 50.0,
    "discrete_sources": [],
    "frequency_sweep": [
     100.0,
@@ -386,6 +386,7 @@
     1
    ],
    "integration_offset": 0.0,
+   "integration_window": null,
    "knobs": {
     "c_high": null,
     "c_low": null,
@@ -394,8 +395,10 @@
     "deep_source_depth": null,
     "discrete_sources": null,
     "integration_offset": 0.0,
+    "integration_window": null,
     "n_wavenumbers": null,
     "options": null,
+    "receiver_gains_dB": null,
     "replica_nx": null,
     "replica_ny": null,
     "replica_nz": null,
@@ -422,6 +425,7 @@
     }
    ],
    "options": "J N",
+   "receiver_gains_dB": null,
    "replica_nx": null,
    "replica_ny": null,
    "replica_nz": null,
@@ -476,6 +480,7 @@
    "freq_min": 100.0,
    "integrand_plot_step": null,
    "integration_offset": 0.0,
+   "integration_window": null,
    "knobs": {
     "c_high": null,
     "c_low": null,
@@ -486,6 +491,7 @@
     "freq_min": null,
     "integrand_plot_step": null,
     "integration_offset": 0.0,
+    "integration_window": null,
     "n_time_samples": null,
     "n_wavenumbers": null,
     "options": null
@@ -770,7 +776,8 @@
   "depth_loop": "single",
   "engine": {
    "__class__": "uacpy.models.oases.OASSSettings",
-   "c_high": null,
+   "c_high": 100000000.0,
+   "c_high_origin": "1e8, OASES' no upper limit (oast.tex:487, :568)",
    "c_low": 1350.0,
    "c_low_origin": "the mean field's CMIN",
    "correlation_length": 10.0,
@@ -805,6 +812,7 @@
       1
      ],
      "integration_offset": 0.0,
+     "integration_window": null,
      "knobs": {
       "c_high": null,
       "c_low": null,
@@ -814,6 +822,7 @@
       "compute_depth_average": null,
       "dip_angle_deg": null,
       "integration_offset": 0.0,
+      "integration_window": null,
       "n_wavenumbers": null,
       "options": "K J T s",
       "range_max": null,
@@ -889,11 +898,13 @@
   "depth_loop": "single",
   "engine": {
    "__class__": "uacpy.models.oases.OASSPSettings",
-   "c_high": null,
+   "c_high": 100000000.0,
+   "c_high_origin": "1e8, OASES' no upper limit (oast.tex:487, :568); without 'P' OASSP replaces it with 1e12 (unoassp30.f:205-217)",
    "c_low": 1350.0,
    "c_low_origin": "0.9 \u00d7 1500 m/s, the water \u2014 the slowest speed of every medium (scooter.f90:193-259)",
    "correlation_length": 5.0,
    "integration_offset": 0.0,
+   "integration_window": null,
    "interface": 4,
    "knobs": {
     "c_high": null,
@@ -904,6 +915,7 @@
     "freq_max": null,
     "freq_min": null,
     "integration_offset": 0.0,
+    "integration_window": null,
     "interface": null,
     "mean_field": null,
     "n_time_samples": 256,
@@ -931,6 +943,7 @@
      "freq_min": 0.0,
      "integrand_plot_step": null,
      "integration_offset": 0.0,
+     "integration_window": null,
      "knobs": {
       "c_high": null,
       "c_low": null,
@@ -941,6 +954,7 @@
       "freq_min": null,
       "integrand_plot_step": null,
       "integration_offset": 0.0,
+      "integration_window": null,
       "n_time_samples": 256,
       "n_wavenumbers": null,
       "options": "K J s"
@@ -1423,6 +1437,7 @@
     1
    ],
    "integration_offset": 0.0,
+   "integration_window": null,
    "knobs": {
     "c_high": null,
     "c_low": null,
@@ -1432,6 +1447,7 @@
     "compute_depth_average": null,
     "dip_angle_deg": null,
     "integration_offset": 0.0,
+    "integration_window": null,
     "n_wavenumbers": null,
     "options": null,
     "range_max": null,
@@ -1489,8 +1505,8 @@
      "frequency": 100.0,
      "n_depth_points": 494,
      "ndr": null,
+     "rams_rotation_angle_deg": null,
      "rmax_march": null,
-     "theta_deg": null,
      "zmax": 496.72544080604536,
      "zmplt": null,
      "zr_line": null
@@ -1640,7 +1656,6 @@
     "output_mode": "R",
     "pulse_type": null,
     "rmax_factor": null,
-    "time_max": null,
     "window_sound_speed": null
    },
    "march_start": -0.1,

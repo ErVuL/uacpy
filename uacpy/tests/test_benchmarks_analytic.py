@@ -312,7 +312,7 @@ def test_kraken_tl_matches_pekeris_modal_sum():
     .shd reader) must reproduce the analytic Pekeris normal-mode-sum TL
     (Porter Kraken manual eq. 2.19) across a depth x range table — this validates the field
     *assembly and reader*, not just the eigenvalues. Measured agreement is
-    ~0.02 dB median / 0.07 dB max; atol=0.3 dB is a tight, robust bound."""
+    0.015 dB median / 0.051 dB max; atol=0.3 dB is a tight, robust bound."""
     src, rcv = _modal_src_rcv()
     d, _ = _modal_abs_dtl(Kraken(timeout=120).compute_field(_pekeris_env(), src, rcv).dB)
     assert np.median(d) < 0.1, f"median |dTL|={np.median(d):.3f} dB"
@@ -322,7 +322,7 @@ def test_kraken_tl_matches_pekeris_modal_sum():
 def test_scooter_tl_matches_pekeris_modal_sum():
     """Scooter (finite-element wavenumber integration) absolute TL matches the
     analytic Pekeris normal-mode sum — two *independent exact* range-independent
-    methods. Measured median ~0.03 dB / p90 ~0.13 dB; bounds are tight."""
+    methods. Measured median 0.017 dB / p90 0.043 dB; bounds are tight."""
     src, rcv = _modal_src_rcv()
     d, _ = _modal_abs_dtl(Scooter(timeout=120).compute_field(_pekeris_env(), src, rcv).dB)
     assert np.median(d) < 0.2, f"median |dTL|={np.median(d):.3f} dB"
@@ -350,7 +350,7 @@ def test_oast_tl_matches_pekeris_modal_sum():
 def test_ram_tl_matches_pekeris_modal_sum():
     """RAM (parabolic equation) absolute TL agrees with the analytic Pekeris
     modal sum within PE accuracy on a shallow 100 m / 50 Hz waveguide. The
-    bound is 1.5 dB: measured median 0.55 dB (2026-09-19), and a factor-2
+    bound is 1.5 dB: measured median 0.52 dB, and a factor-2
     power error (3.01 dB in every cell) must fail it. Tighter per-backend
     level and shape pins live in ``test_benchmarks_ram_level``."""
     src, rcv = _modal_src_rcv()
@@ -464,17 +464,17 @@ def test_kraken_vacuum_waveguide_matches_dirichlet_modal_sum():
 
 
 def test_ram_pressure_release_waveguide_matches_dirichlet_modal_sum():
-    """RAM reproduces the same closed-form Dirichlet modal sum to 0.012 dB
-    median — ~190x tighter than the ~2.3 dB the Pekeris case above allows it.
+    """RAM reproduces the same closed-form Dirichlet modal sum to 0.0085 dB
+    median, where the Pekeris case above reads 0.52 dB.
     The mid-depth source is what buys that: it excites only the odd modes, so
     the steepest one carrying energy has gamma_5/k = 0.75, a 49 deg ray well
     inside the Pade-6 aperture, where the Pekeris fixture's source excites the
     near-cutoff mode the PE under-resolves.
 
     The discretisation is pinned rather than left to the Lytaev optimizer: the
-    default grid gives 3.55 dB median on this problem, and ``dr=5, dz=0.25,
-    n_pade=6`` gives 0.012 dB median / 0.043 dB p90 / 0.185 dB max. The bounds
-    below are 12x and 11x that measurement. ``max`` is deliberately not bounded
+    default grid gives 3.79 dB median on this problem, and ``dr=5, dz=0.25,
+    n_pade=6`` gives 0.0085 dB median / 0.028 dB p90 / 0.136 dB max. The
+    bounds below are about 18x that measurement. ``max`` is deliberately not bounded
     — the field runs 40.7 to 74.4 dB and the deepest cells are hypersensitive
     to a sub-metre shift of a null (a nearby grid, dr=2.5, moves one cell to
     3.97 dB while its median stays at 0.064 dB).
@@ -515,7 +515,7 @@ def test_bellhop_ideal_wedge_matches_analytic():
     That gap is structural, not a grid: it moves by 0.09 dB over dr 1-10 m,
     dz 0.1-1.0 m, Pade 4 and 8, and both the mpiramS and ramgeo backends, while
     RAM on the same boundaries with the slope removed matches
-    ``dirichlet_modal_tl`` to 0.012 dB (the test above). Reversing the geometry
+    ``dirichlet_modal_tl`` to 0.0085 dB (the test above). Reversing the geometry
     does not help: down-slope the standing wave moves into the source-side
     factor J_nu(k r_src), and comparing the two analytic series against each
     other — source 2 km from the apex, receivers out to 4 km — leaves them

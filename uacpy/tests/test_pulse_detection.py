@@ -47,9 +47,39 @@ class TestMatchedFilter:
         assert delays[0] == pytest.approx(500 / FS, abs=2 / FS)
         assert delays[1] == pytest.approx(1200 / FS, abs=2 / FS)
 
-    def test_requires_1d(self):
-        with pytest.raises(ConfigurationError, match='must be 1-D'):
-            matched_filter(np.zeros((2, 2)), np.zeros(2))
+    def test_the_replica_is_one_record(self):
+        with pytest.raises(ConfigurationError,
+                           match=r'replica must be 1-D; got replica shape '
+                                 r'\(2, 2\)'):
+            matched_filter(np.zeros(8), np.zeros((2, 2)))
+
+    def test_an_array_recording_is_filtered_per_channel(self):
+        """``axis`` names the time axis of an array recording, as on
+        ``welch``: every channel is the 1-D filter of that channel, the
+        channels first and the lag axis last; ``pulse_compression`` passes
+        it through with the same lag axis. Unset, a ``read_wav``-shaped
+        ``(n_samples, n_channels)`` block is refused, not filtered across
+        its channels."""
+        s = _chirp()
+        rng = np.random.default_rng(3)
+        rec = rng.standard_normal((1500, 3))
+        rec[300:300 + s.size, 1] += s
+        per_channel = np.array([matched_filter(rec[:, i], s)
+                                for i in range(3)])
+        got = matched_filter(rec, s, axis=0)
+        assert got.shape == per_channel.shape
+        np.testing.assert_allclose(got, per_channel, rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(matched_filter(rec.T, s), per_channel,
+                                   rtol=1e-10, atol=1e-12)
+        lags, comp = pulse_compression(rec, s, FS, axis=0)
+        np.testing.assert_allclose(comp, per_channel, rtol=1e-10, atol=1e-12)
+        assert lags.size == comp.shape[-1]
+        assert lags[np.argmax(np.abs(comp[1]))] == pytest.approx(300 / FS,
+                                                                 abs=1 / FS)
+        with pytest.raises(ConfigurationError,
+                           match=r"^matched_filter: data is shaped "
+                                 r"\(1500, 3\)"):
+            matched_filter(rec, s)
 
 
 class TestProcessingGain:
@@ -95,9 +125,30 @@ class TestAmbiguity:
     -1/k = -5.0e-6 s/Hz, so any such test must build the analytic signal first.
     """
 
+    def test_n_doppler_given_with_the_doppler_axis_gets_a_notice(self):
+        """``n_doppler_shifts`` sizes the Doppler axis the function builds; with
+        ``doppler_shifts=`` given it is not used, so a given one is named in
+        a FallbackWarning. Unset, the built axis is 101 shifts over
+        +/-sample_rate/20."""
+        import warnings
+        from uacpy.core.exceptions import FallbackWarning
+        s = _chirp()[:64].astype(complex)
+        shifts = np.linspace(-50.0, 50.0, 7)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            given = ambiguity_function(s, FS, doppler_shifts=shifts)
+            built = ambiguity_function(s, FS)
+        assert built.doppler_shifts.size == 101
+        assert built.doppler_shifts[-1] == pytest.approx(FS / 20.0)
+        with pytest.warns(FallbackWarning,
+                          match=r"^ambiguity_function: doppler_shifts= is the "
+                                r"Doppler axis itself, so n_doppler_shifts=31"):
+            got = ambiguity_function(s, FS, doppler_shifts=shifts, n_doppler_shifts=31)
+        np.testing.assert_array_equal(got.amplitude, given.amplitude)
+
     def test_peak_at_origin(self):
         s = _chirp().astype(complex)
-        lags, dop, A = ambiguity_function(s, FS, n_doppler=31)
+        lags, dop, A = ambiguity_function(s, FS, n_doppler_shifts=31)
         i, j = np.unravel_index(np.argmax(A), A.shape)
         assert A[i, j] == pytest.approx(1.0, abs=1e-6)
         assert dop[i] == pytest.approx(0.0, abs=1e-9)
@@ -110,7 +161,7 @@ class TestAmbiguity:
         assert np.allclose(A[0], auto, atol=1e-9)
 
     def test_default_doppler_span_is_plus_minus_fs_over_20(self):
-        """Leaving ``doppler_shifts`` unset evaluates ``n_doppler`` (default 101)
+        """Leaving ``doppler_shifts`` unset evaluates ``n_doppler_shifts`` (default 101)
         evenly spaced points across exactly ``+/- sample_rate/20``, zero
         included."""
         s = np.exp(2j * np.pi * 1000.0 * np.arange(64) / FS)
@@ -121,7 +172,7 @@ class TestAmbiguity:
         assert np.any(dop == 0.0)
         np.testing.assert_allclose(np.diff(dop), (FS / 10.0) / 100)
         assert A.shape == (101, 2 * s.size - 1)
-        _, dop11, _ = ambiguity_function(s, FS, n_doppler=11)
+        _, dop11, _ = ambiguity_function(s, FS, n_doppler_shifts=11)
         assert dop11.size == 11
         assert dop11[0] == pytest.approx(-FS / 20.0)
         assert dop11[-1] == pytest.approx(FS / 20.0)
@@ -145,7 +196,7 @@ class TestAmbiguity:
 
 
 class TestAmbiguityFunctionCapsItsAllocation:
-    """The surface is ``n_doppler x (2N-1)`` float64 and one full-length FFT
+    """The surface is ``n_doppler_shifts x (2N-1)`` float64 and one full-length FFT
     convolution runs per Doppler row, so a long pulse at a high sample rate
     asks for gigabytes and minutes from a call that names neither: a 10 s
     pulse at 96 kHz on the default 101-Doppler grid is 1.44 GiB.
@@ -166,7 +217,7 @@ class TestAmbiguityFunctionCapsItsAllocation:
             ambiguity_function(np.ones(n), 96000.0)
         message = str(exc.value)
         assert 'ambiguity_function' in message
-        assert 'n_doppler' in message
+        assert 'n_doppler_shifts' in message
 
     def test_a_surface_just_under_the_cap_is_accepted(self):
         """Both sides of the threshold: the cap is checked on the cell count,
@@ -174,12 +225,12 @@ class TestAmbiguityFunctionCapsItsAllocation:
         from uacpy.acoustic_signal.detect import (_MAX_AMBIGUITY_CELLS,
                                                   ambiguity_function)
         n = 4096
-        n_doppler = _MAX_AMBIGUITY_CELLS // (2 * n - 1)
-        assert n_doppler * (2 * n - 1) <= _MAX_AMBIGUITY_CELLS
+        n_doppler_shifts = _MAX_AMBIGUITY_CELLS // (2 * n - 1)
+        assert n_doppler_shifts * (2 * n - 1) <= _MAX_AMBIGUITY_CELLS
         # Verified by arithmetic rather than allocation: the accepted call
         # below uses a small grid, and the boundary itself is the comparison.
-        assert (n_doppler + 1) * (2 * n - 1) > _MAX_AMBIGUITY_CELLS
-        result = ambiguity_function(np.ones(n), 96000.0, n_doppler=5)
+        assert (n_doppler_shifts + 1) * (2 * n - 1) > _MAX_AMBIGUITY_CELLS
+        result = ambiguity_function(np.ones(n), 96000.0, n_doppler_shifts=5)
         assert result.amplitude.shape == (5, 2 * n - 1)
 
     def test_an_ordinary_call_produces_the_full_surface(self):

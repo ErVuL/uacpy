@@ -10,7 +10,7 @@ import numpy as np
 
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
-from uacpy.core.deck_limits import NO_RECEIVER_RANGE_FALLBACK_M
+from uacpy.core.deck_limits import NO_RECEIVER_RANGE_FALLBACK
 from uacpy.core.units import m_to_km
 from uacpy.io.oalib_writer import writable_layers
 from uacpy.models._defaults import DEFAULT_C_MIN
@@ -177,8 +177,11 @@ def resolve_c_low(env: Environment, *, c_low: Optional[float]) -> float:
     interval [ CMin, CMax ]. For a full 90 degree calculation set CMin to
     the lowest speed in the problem (say 1400.0) CMax to 1.0E9." The rule
     is *the lowest speed in the problem*; the 1400 is that sentence's
-    illustrative example. ``min(SSP)`` reads the rule directly, and capping
-    it at ``DEFAULT_C_MIN`` keeps the tabulation grid at ``c_low = 1400``
+    illustrative example. ``min(SSP)`` follows the rule for every speed
+    that can tabulate a row: a phase speed below the seafloor water speed
+    only adds ``theta = 0`` rows (below), so a slower sediment or shear
+    speed, which the rule also names, would add nothing to the table.
+    Capping it at ``DEFAULT_C_MIN`` keeps the tabulation grid at ``c_low = 1400``
     for every column whose water never drops below 1400 m/s —
     ``NkTab = rmax * f / c_low`` moves only once ``min(SSP)`` undercuts
     it.
@@ -198,9 +201,10 @@ def resolve_c_low(env: Environment, *, c_low: Optional[float]) -> float:
     reference takes the ``ELSEWHERE`` branch and comes out as
     ``theta = 0, R = 1, phase = 180`` — byte-identical duplicate rows,
     which ``dedupe_reflection_file`` collapses (and ``stage_reflection_file``
-    runs over every staged table). The manual's rule is followed because
-    the manual is ground truth for the deck, and the cost of following it
-    is rows that are already removed downstream.
+    runs over every staged table). Taking the water's minimum rather than
+    the literal lowest speed of every medium therefore changes no row of
+    the table, and the water rows below the seafloor speed cost only rows
+    that are already removed downstream.
     """
     if c_low is not None:
         return float(c_low)
@@ -292,8 +296,8 @@ def resolve_rmax(receiver, frequency: float, c_low: float, *, n_angles,
     recv_rmax = float(receiver.range_max)
     if recv_rmax > 0:
         return recv_rmax, 'receiver.range_max'
-    return (NO_RECEIVER_RANGE_FALLBACK_M,
-            f'the {NO_RECEIVER_RANGE_FALLBACK_M / 1000.0:g} km fallback '
+    return (NO_RECEIVER_RANGE_FALLBACK,
+            f'the {NO_RECEIVER_RANGE_FALLBACK / 1000.0:g} km fallback '
             f'(no receiver range)')
 
 

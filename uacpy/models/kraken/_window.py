@@ -9,6 +9,7 @@ from uacpy.core.boundary import BoundaryType
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.models._window import (
     C_HIGH_FACTOR, resolve_phase_speed_bounds,
+    scholte_wave_notice as _scholte_wave_notice,
     steep_path_notice as _steep_path_notice,
 )
 from uacpy.models.kraken._checks import (
@@ -78,9 +79,16 @@ def c_low_for(env, *, collapse, pinned_c_low) -> float:
     modes of its own, and ``:230`` only ever raises the written floor) and
     the minimum of ``env.ssp.sound_speed`` over EVERY profile column, since the
     value is stamped into every block of a multi-profile deck and a floor
-    above a profile's slowest water deletes its modes. Too low is
-    harmless: no eigenvalue exists below the minimum water sound speed.
-    The measurements behind each rule are pinned in ``test_kraken.py``.
+    above a profile's slowest water deletes its modes. On a fluid deck a
+    lower floor costs only search time: "all the eigenvalues are less than
+    ω/c_min", the lowest sound speed in the problem (Porter, *The KRAKEN
+    Normal Mode Program*, §2, after eq. 2.7).
+    Over shear a floor below the slowest compressional speed admits the
+    interfacial roots it exists to exclude (the Scholte wave of
+    Brekhovskikh & Lysanov eq. 3.4.29 is slower than the water and the
+    shear wave); a run whose geometry reaches one says so
+    (:func:`scholte_wave_notice`). The measurements behind each rule
+    are pinned in ``test_kraken.py``.
     """
     if pinned_c_low is not None:
         return float(pinned_c_low)
@@ -239,22 +247,56 @@ def profile_c_high(profile, c_low, *, backend: str, leaky_modes, pinned_c_high
     return c_high, _HALF_SPACE_RULE
 
 
-def steep_path_notice(env, source, receiver,
-                       c_high: float) -> Optional[Notice]:
+def steep_path_notice(env, source, receiver, c_high: float, *,
+                      pinned: bool = False) -> Optional[Notice]:
     """``(note, warning)`` when a receiver's direct or surface-reflected
-    path is steeper than the unpinned ``c_high`` of the source's profile
-    keeps (:func:`~uacpy.models._window.steep_path_notice`), else
-    ``None``.
+    path is steeper than the ``c_high`` of the source's profile keeps
+    (:func:`~uacpy.models._window.steep_path_notice`), else ``None``;
+    ``pinned`` says the user set it (the value is kept either way, as
+    Scooter's notice keeps its pinned one).
 
     A mode of phase speed ``c_p`` carries energy up to grazing angle
     ``arccos(c/c_p)``, so the modal sum leaves out every steeper path, as
     Scooter's wavenumber integral does at the same cut. The limit is the
     trapped-mode sum's; this says when the geometry reaches it, and
-    ``docs/models/kraken.md`` §6.4 holds a measured illustration."""
+    ``docs/models/kraken.md`` §6.4 holds a measured illustration. A pinned
+    ``c_high`` and ``leaky_modes=True`` are refused together, so the
+    remedy for a pinned one raises it or drops it first."""
+    remediation = ('Pass leaky_modes=True to solve the modes above the '
+                   'window on krakenc, or use Scooter for the near field.')
+    if pinned:
+        remediation = ('Raise c_high, drop it and pass leaky_modes=True to '
+                       'solve the modes above the window on krakenc, or use '
+                       'Scooter for the near field.')
     return _steep_path_notice(
         env, source, receiver, c_high, model_name='Kraken',
         kept='modes carrying paths', summed_in='modal sum',
         evidence='docs/models/kraken.md §6.4 shows a measured case',
-        remediation=('Pass leaky_modes=True to solve the modes above the '
-                     'window on krakenc, or use Scooter for the near '
-                     'field.'))
+        remediation=remediation, pinned=pinned)
+
+
+def scholte_wave_notice(env, source, receiver, c_low: float,
+                        frequency: float) -> Optional[Notice]:
+    """A notice when the search floor ``c_low`` lies above a Scholte wave the
+    geometry reaches
+    (:func:`~uacpy.models._window.scholte_wave_notice`), else ``None``.
+
+    Over shear the derived floor is the slowest compressional speed
+    (:func:`c_low_for`), kraken.htm's way to "exclude interfacial modes
+    (e.g. a Scholte wave)", which it calls negligible only "when the
+    source and receiver are sufficiently far from the interface"; the
+    Scholte wave is slower than the water (Brekhovskikh & Lysanov
+    §3.4.2), so that floor always leaves it out and the notice says when
+    the geometry is close to it. A floor of 0 hands the search to KRAKEN
+    and is not checked."""
+    if not c_low > 0.0:
+        return None
+    return _scholte_wave_notice(
+        env, source, receiver, c_low, frequency, model_name='Kraken',
+        edge_text=(f"the mode-search floor c_low = {c_low:.1f} m/s "
+                   f"(kraken.htm: a nonzero CLOW skips the slower modes)"),
+        remediation=("Pass c_low below the wave speed to let the search "
+                     "reach it (kraken.htm: the root finder is especially "
+                     "slow on interfacial modes, and FAILURE TO CONVERGE IN "
+                     "SECANT can follow), or run Scooter or OAST, whose "
+                     "derived window includes it."))

@@ -2,7 +2,7 @@
 
 Each canonical plot function is exercised with synthetic data to confirm
 it produces a figure without raising. Numerical correctness of the plots
-is not asserted — that's :mod:`uacpy.core.metrics` and the model
+is not asserted — that's :mod:`uacpy.metrics` and the model
 regression tests' job.
 """
 
@@ -24,6 +24,7 @@ import uacpy
 from uacpy import (Bathymetry, Bottom, BoundaryProperties, Environment,
                    SeabedColumn, SedimentLayer)
 from uacpy.core.bottom import Bottom as _Bottom
+from uacpy.core.acoustics.levels import no_energy_mask
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.visualization.plots.environment import _seabed_property_grid
@@ -47,8 +48,6 @@ from uacpy.visualization.plots.noise import plot_source_level, plot_wenz
 from uacpy.visualization.plots.rays_modes import plot_rays, plot_modes_heatmap
 from uacpy.visualization.plots.signal import (_clamped_freq_limits,
                                               _log_freq_xlim, _ref_label,
-                                              plot_constant_q_ppsd,
-                                              plot_constant_q_psd,
                                               plot_constant_q_spectrogram,
                                               plot_band_levels,
                                               plot_frf, plot_ppsd, plot_psd,
@@ -586,6 +585,34 @@ class TestAFieldOverSourceDepthsPlotsOnePanelPerDepth:
         finally:
             plt.close(fig)
 
+    def test_the_grid_draws_into_a_callers_figure(self):
+        """``fig=`` places the grid in a SubFigure the caller lays out, as
+        compare_models does: the panels and their one shared bar sit in it,
+        a field with no model provenance writes no footnote, and
+        ``figsize=`` beside it is refused."""
+        parent = plt.figure(figsize=(14, 5), layout='constrained')
+        left, _right = parent.subfigures(1, 2)
+        try:
+            fig, axes = uacpy.plot.plot_source_depth_panels(self._field(),
+                                                            fig=left)
+            assert fig is left and axes.shape == (1, 3)
+            assert all(ax in left.axes for ax in axes.ravel())
+            assert len(_colorbars(left)) == 1
+            assert parent.texts == [] and left.texts == []
+            with pytest.raises(ConfigurationError, match='figsize='):
+                uacpy.plot.plot_source_depth_panels(
+                    self._field(), fig=_right, figsize=(4, 3))
+        finally:
+            plt.close(parent)
+
+    def test_env_is_a_keyword(self):
+        """An Axes in the second slot is not taken for the environment:
+        ``env`` is keyword-only, as on every other result plotter."""
+        with pytest.raises(TypeError, match='positional'):
+            uacpy.plot.plot_source_depth_panels(
+                self._field(), mfig.Figure().add_subplot())
+        assert not plt.get_fignums()
+
     def test_a_weighted_field_says_its_panels_carry_no_weights(self):
         field = self._field()
         field.source_weights = np.array([1.0, -1.0, 1.0])
@@ -1032,9 +1059,9 @@ class TestPlotEnvironment:
 
 
 class TestDataAttributionFootnote:
-    """A figure the plotter owns is stamped with the environment's data
-    attribution as a ``Data:`` footnote; ``show_data_credit=False`` and ``ax=``
-    (composition) both leave the figure unstamped."""
+    """An environment plot stamps the environment's data attribution as a
+    ``Data:`` footnote on the figure it is drawn in, its own or the caller's
+    (``ax=``); ``show_data_credit=False`` leaves the figure unstamped."""
 
     @pytest.fixture
     def fetched_env(self, env):
@@ -1060,11 +1087,66 @@ class TestDataAttributionFootnote:
         assert not self._data_texts(fig)
         plt.close(fig)
 
-    def test_explicit_ax_suppresses(self, fetched_env):
+    def test_explicit_ax_credits_the_callers_figure(self, fetched_env):
         fig, ax = plt.subplots()
         fetched_env.plot(ax=ax)
-        assert not self._data_texts(fig)
+        notes = self._data_texts(fig)
+        assert len(notes) == 1 and 'GEBCO' in notes[0].get_text()
         plt.close(fig)
+
+    def test_a_fetched_sound_speed_profile_credits_its_dataset(self):
+        """plot_ssp credits the profile's own data sources, on its own
+        figure and in a caller's; a hand-built profile credits nothing."""
+        from uacpy.data.sources import SOURCES, DataProvenance
+        woa = SOURCES['woa23'].attribution
+        ssp = uacpy.SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1500.0], [100.0, 1490.0]]))
+        ssp.data_sources = (DataProvenance(source=SOURCES['woa23']),)
+        own, _ = ssp.plot()
+        caller, ax = plt.subplots()
+        plots.plot_ssp(ssp, ax=ax)
+        bare, _ = plots.plot_ssp(np.array([1500.0, 1490.0]),
+                                 depths=np.array([0.0, 100.0]))
+        try:
+            for fig in (own, caller):
+                assert fig.get_supxlabel() == f'Data: {woa}'
+            assert not self._data_texts(bare)
+        finally:
+            for fig in (own, caller, bare):
+                plt.close(fig)
+
+    def test_a_fetched_absorption_credits_its_water(self):
+        """plot_absorption credits the water a fetched law was built from,
+        on its own figure and in a caller's; water typed by hand credits
+        nothing."""
+        from uacpy.data.sources import SOURCES, DataProvenance
+        woa = SOURCES['woa23'].attribution
+        law = uacpy.FrancoisGarrison(
+            10.0, 35.0, 8.0,
+            data_sources=(DataProvenance(source=SOURCES['woa23']),))
+        own, _ = law.table([1000.0, 10000.0]).plot()
+        caller, ax = plt.subplots()
+        plots.plot_absorption(law.table([1000.0, 10000.0]), ax=ax)
+        typed, _ = uacpy.Thorp().table([1000.0, 10000.0]).plot()
+        try:
+            for fig in (own, caller):
+                assert fig.get_supxlabel() == f'Data: {woa}'
+            assert not self._data_texts(typed)
+        finally:
+            for fig in (own, caller, typed):
+                plt.close(fig)
+
+    def test_a_fetched_range_profile_credits_its_dataset(self):
+        from uacpy.data.sources import SOURCES, DataProvenance
+        bathymetry = Bathymetry(
+            ranges=np.array([0.0, 5000.0]), depths=np.array([100.0, 120.0]),
+            data_sources=(DataProvenance(source=SOURCES['gebco']),))
+        fig, _ = bathymetry.plot()
+        try:
+            assert fig.get_supxlabel() == (
+                f"Data: {SOURCES['gebco'].attribution}")
+        finally:
+            plt.close(fig)
 
 
 class TestBottomTitles:
@@ -1123,6 +1205,17 @@ class TestBottomTitles:
                                                   show_data_credit=None)
             assert fig._suptitle.get_text() == f"Seabed properties — {expected}"
             plt.close(fig)
+
+    @pytest.mark.parametrize('title, drawn', [('Custom', 'Custom'), ('', '')])
+    def test_bottom_properties_draws_the_title_given(self, bottoms, title,
+                                                     drawn):
+        """As its docstring says: a title replaces the caption, ``''``
+        draws none."""
+        fig, _ = plots.plot_bottom_properties(
+            self._env(bottoms['half-space']), title=title,
+            show_data_credit=None)
+        assert fig._suptitle.get_text() == drawn
+        plt.close(fig)
 
     def test_explicit_title_wins(self, env):
         fig, ax = env.plot(title='Custom')
@@ -1579,10 +1672,10 @@ class TestNoiseSonarPlotterSignatures:
     @pytest.mark.parametrize('name, params, args, kwargs', [
         ('plot_roc', ('pfa', 'pd', 'ax', 'label'),
          (uacpy.sonar.roc_curve(2.0, n_points=16),), {}),
-        ('plot_source_level', ('frequency', 'level_dB', 'ax', 'label'),
+        ('plot_source_level', ('frequencies', 'level_dB', 'ax', 'label'),
          (np.array([63.0, 125.0, 250.0]),
           np.array([150.0, 148.0, 145.0])), {}),
-        ('plot_weighting', ('frequency', 'weighting_dB', 'ax', 'label'),
+        ('plot_weighting', ('frequencies', 'weighting_dB', 'ax', 'label'),
          (np.logspace(1, 5, 50),
           uacpy.noise.auditory_weighting(np.logspace(1, 5, 50), 'LF')), {}),
     ])
@@ -1610,6 +1703,20 @@ def test_the_weighting_plotter_draws_the_curve_it_is_handed():
         with pytest.raises(ConfigurationError, match='auditory_weighting'):
             uacpy.plot.plot_weighting(group)
     assert not plt.get_fignums()
+
+
+def test_the_weighting_axis_can_be_widened_to_the_whole_curve():
+    """The default window stops at -40 dB, where the VHF curve over
+    10 Hz-200 kHz is mostly below it; ``ymin=`` / ``ymax=`` widen it."""
+    f = np.logspace(1.0, np.log10(2e5), 200)
+    w = uacpy.noise.auditory_weighting(f, 'VHF')
+    assert w.min() < -100.0
+    fig, ax = uacpy.plot.plot_weighting(f, w)
+    assert ax.get_ylim() == (-40.0, 5.0)
+    plt.close(fig)
+    fig, ax = uacpy.plot.plot_weighting(f, w, ymin=-120.0, ymax=10.0)
+    assert ax.get_ylim() == (-120.0, 10.0)
+    plt.close(fig)
 
 
 class TestTheRocPlotterDrawsACurveItIsHanded:
@@ -2026,7 +2133,7 @@ class TestAntimeridianMap:
                             lambda *a, **k: None)
         fig, ax = plots.plot_bathymetry_map(
             *self._crossing(), transect=((-19.0, 179.0), (-17.0, -179.0)),
-            source=(-18.0, -178.5))
+            source_point=(-18.0, -178.5))
         x0, x1 = ax.get_xlim()
         transect = [ln for ln in ax.lines if ln.get_label() == 'transect'][0]
         assert transect.get_xdata() == pytest.approx([179.0, 181.0])
@@ -2045,7 +2152,7 @@ class TestAntimeridianMap:
         depth = np.tile(np.linspace(100.0, 5000.0, self._N), (self._N, 1))
         fig, ax = plots.plot_bathymetry_map(
             lats, lons, depth, transect=((48.2, -8.0), (45.6, -6.2)),
-            source=(48.2, -8.0), graticule=1.0, graticule_minor=None)
+            source_point=(48.2, -8.0), graticule=1.0, graticule_minor=None)
         assert ax.get_xlim() == pytest.approx((-11.0, -3.5))
         transect = [ln for ln in ax.lines if ln.get_label() == 'transect'][0]
         assert transect.get_xdata() == pytest.approx([-8.0, -6.2])
@@ -2108,7 +2215,8 @@ class TestReliefLighting:
         assert lum['NW'] == min(lum.values()), lum
 
     def test_cell_size_and_dy_sign_reach_the_shader(self, monkeypatch):
-        """n samples span n-1 intervals, and the row order is south→north."""
+        """n samples span n-1 intervals of one degree of arc on the
+        package's mean-radius sphere, and the row order is south→north."""
         from matplotlib.colors import LightSource
         seen = {}
         real = LightSource.shade_rgb
@@ -2121,7 +2229,7 @@ class TestReliefLighting:
         monkeypatch.setattr(LightSource, 'shade_rgb', spy)
         self._flank_luminance(self._feature(+1))
 
-        deg_m = 111320.0
+        deg_m = 2.0 * np.pi * 6_371_008.8 / 360.0    # mean-radius degree
         assert seen['dy'] == pytest.approx(
             -np.ptp(self._LATS) / (self._LATS.size - 1) * deg_m)
         assert seen['dx'] == pytest.approx(
@@ -2192,12 +2300,15 @@ class TestOverview:
             self, env, monkeypatch):
         import uacpy.data.seaice_local as sil
         monkeypatch.setattr(sil, 'sea_ice_pixel', lambda pt, hemi='N': (2, 3))
-        ice = np.random.default_rng(0).uniform(0, 1, (8, 10))
+        ice = sil.SeaIceGrid(
+            concentration=np.random.default_rng(0).uniform(0, 1, (448, 304)),
+            hemi='N', month=3)
         fig, (ax_map, _, _) = plots.plot_overview(
             env, ice, map_fn=plots.plot_sea_ice_map)
         try:
             image, = ax_map.images
-            assert np.array_equal(np.asarray(image.get_array()), ice)
+            assert np.array_equal(np.asarray(image.get_array()),
+                                  ice.concentration)
         finally:
             plt.close(fig)
 
@@ -2237,10 +2348,11 @@ class TestSeaIce:
         import uacpy.data.seaice_local as sil
         # mock the reprojection so no cache/pyproj is needed
         monkeypatch.setattr(sil, 'sea_ice_pixel', lambda pt, hemi='N': (2, 3))
-        grid = np.random.default_rng(0).uniform(0, 1, (8, 10))
-        grid[0, 0] = np.nan                            # land cell
+        concentration = np.random.default_rng(0).uniform(0, 1, (448, 304))
+        concentration[0, 0] = np.nan                   # land cell
+        grid = sil.SeaIceGrid(concentration=concentration, hemi='N', month=3)
         fig, ax = plots.plot_sea_ice_map(
-            grid, transect=((88, 0), (79, -3)), source=(88, 0), title='ice')
+            grid, transect=((88, 0), (79, -3)), source_point=(88, 0), title='ice')
         assert ax.has_data()
         assert ax.get_legend() is not None             # 'transect' legend, as on the map
         assert uacpy.plot.plot_sea_ice_map is plots.plot_sea_ice_map
@@ -2250,9 +2362,11 @@ class TestSeaIce:
         """``contours=`` on every map plotter (ruling 6): concentration levels
         on the image's own pixel grid, one outside the grid's range reported
         and the others drawn."""
-        rows, cols = np.mgrid[0:20, 0:30]
-        grid = np.clip(cols / 29.0, 0.0, 0.95)          # 0 at left, 0.95 right
-        grid[0, 0] = np.nan                             # land cell
+        from uacpy.data import SeaIceGrid
+        rows, cols = np.mgrid[0:448, 0:304]             # NSIDC 'N'
+        concentration = np.clip(cols / 303.0, 0.0, 0.95)  # 0 left, 0.95 right
+        concentration[0, 0] = np.nan                    # land cell
+        grid = SeaIceGrid(concentration=concentration, hemi='N', month=3)
         fig, ax = plots.plot_sea_ice_map(grid, contours=[0.5], zoom=False,
                                          graticule=0)
         try:
@@ -2261,7 +2375,7 @@ class TestSeaIce:
             assert list(contour.levels) == [0.5]
             x = np.concatenate([p.vertices[:, 0]
                                 for p in contour.get_paths() if len(p)])
-            np.testing.assert_allclose(x, 14.5, atol=1e-6)   # 0.5 at column 14.5
+            np.testing.assert_allclose(x, 151.5, atol=1e-6)  # 0.5 at column 151.5
         finally:
             plt.close(fig)
         with pytest.warns(uacpy.NumericsWarning, match=r'contours=\[1.0\]'):
@@ -2342,50 +2456,312 @@ def test_the_ppsd_level_axis_follows_the_results_own_scaling():
     plt.close(fig)
 
 
-def test_the_compare_models_colourbar_follows_the_credit_margin(tl_field):
-    """The figure-level colourbar is placed from the panels' FINAL bottom.
+def _credit_and_lowest_label(fig):
+    """``(credit top, lowest bottom of every other axes decoration)`` in
+    display pixels, on the drawn figure."""
+    fig.canvas.draw()
+    r = fig.canvas.get_renderer()
+    credit = next(t for t in fig.texts if t.get_text().startswith('Model:'))
+    lowest = min(ax.get_tightbbox(r).y0 for ax in fig.axes if ax.get_visible())
+    return credit.get_window_extent(r).y1, lowest
 
-    ``compare_models`` reserves a bottom margin by formula, draws the panels,
-    then adds the colourbar as a free axes at that coordinate. The model credit
-    is drawn afterwards and reserves its own margin with a second
-    ``subplots_adjust``, which moves the panels but not an axes already placed
-    at an absolute figure coordinate — so the bar used to hang below the panels,
-    level with the x tick labels, whenever a credit was drawn.
 
-    The reserve depends on font metrics, so it is forced here rather than
-    conjured with real text: any credit that raises the bottom must carry the
-    colourbar with it.
-    """
-    from uacpy.visualization.plots import fields as _fields
+def _credited_field():
+    from uacpy.models.provenance import model_provenance
+    d, r = np.linspace(2.0, 98.0, 20), np.linspace(100.0, 5000.0, 40)
+    return Field(data=60.0 + 10.0 * np.log10(r)[None, :] + 0.0 * d[:, None],
+                 coords={'depth': d, 'range': r}, kind='pressure', unit='dB',
+                 model='Bellhop', frequencies=100.0,
+                 model_source=model_provenance('acoustics_toolbox'))
 
-    real = _fields._draw_multi_model_credit
 
-    def reserving(fig, flds):
-        real(fig, flds)
-        fig.subplots_adjust(bottom=fig.subplotpars.bottom + 0.05)
-
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(_fields, '_draw_multi_model_credit', reserving)
+def test_a_users_tight_layout_keeps_the_labels_clear_of_the_credit():
+    """The credit footnote is the figure's supxlabel, which tight_layout lays
+    out: a ``fig.tight_layout()`` called on a plotter's own figure leaves
+    every tick and axis label above it (a ``fig.text`` footnote is ignored by
+    the engine, and the range label landed on it)."""
+    fig, _ax = plot_field(_credited_field())
     try:
-        fig, axes = _fields.compare_models([tl_field, tl_field, tl_field])
+        fig.tight_layout()
+        top, lowest = _credit_and_lowest_label(fig)
+        assert top <= lowest
     finally:
-        monkey.undo()
-    panel_axes = list(np.ravel(axes))
-    panel_bottom = min(a.get_position().y0
-                       for a in panel_axes if a.get_visible())
-    bars = [a.get_position() for a in fig.axes if a not in panel_axes]
-    assert bars, "compare_models drew no figure-level colourbar"
-    assert bars[0].y0 == pytest.approx(panel_bottom, abs=1e-6), (
-        f"colourbar bottom {bars[0].y0:.4f} does not sit at the panels' final "
-        f"bottom {panel_bottom:.4f}; it was placed before the credit moved them"
-    )
+        plt.close(fig)
+
+
+@pytest.mark.parametrize('n, ncols', [(1, None), (3, None), (4, 2)])
+def test_a_grid_figure_lays_out_its_bar_title_and_credit(n, ncols):
+    """``compare_models`` opens a constrained figure: the shared bar runs the
+    panels' full height, the panel titles sit under the figure title and the
+    credit under every label, whatever the grid's shape."""
+    fig, axes = compare_models([_credited_field()] * n, ncols=ncols,
+                               title='Models')
+    try:
+        assert type(fig.get_layout_engine()).__name__ == \
+            'ConstrainedLayoutEngine'
+        top, lowest = _credit_and_lowest_label(fig)
+        assert top <= lowest
+        r = fig.canvas.get_renderer()
+        panels = [ax for ax in axes.ravel() if ax.get_visible()]
+        boxes = [ax.get_window_extent(r) for ax in panels]
+        bar = next(ax for ax in fig.axes if ax not in list(axes.ravel()))
+        bar_box = bar.get_window_extent(r)
+        assert bar_box.y0 == pytest.approx(min(b.y0 for b in boxes), abs=1.0)
+        assert bar_box.y1 == pytest.approx(max(b.y1 for b in boxes), abs=1.0)
+        assert bar.get_tightbbox(r).x1 <= fig.bbox.width
+        assert max(ax.get_tightbbox(r).y1 for ax in panels) <= \
+            fig._suptitle.get_window_extent(r).y0
+    finally:
+        plt.close(fig)
+
+
+# ── credits follow the result into any figure ───────────────────────────────
+
+_BELLHOP_CREDIT = 'Model: Bellhop — Michael B. Porter, Acoustics Toolbox'
+
+
+def _ram_field():
+    from uacpy.models.provenance import model_provenance
+    field = _credited_field()
+    return Field(data=field.data, coords=dict(field.coords), kind='pressure',
+                 unit='dB', model='RAM', frequencies=100.0,
+                 model_source=model_provenance('collins_ram'))
+
+
+def test_a_result_drawn_into_a_callers_axes_credits_its_model():
+    """A plotter handed ``ax=`` adds its model to that figure's footnote, as
+    on a figure of its own."""
+    fig, ax = plt.subplots()
+    try:
+        plot_field(_credited_field(), ax=ax)
+        assert fig.get_supxlabel() == _BELLHOP_CREDIT
+    finally:
+        plt.close(fig)
+
+
+def test_a_model_drawn_twice_into_one_figure_is_credited_once():
+    fig, axes = plt.subplots(1, 2)
+    try:
+        plot_field(_credited_field(), ax=axes[0])
+        plot_field(_credited_field(), ax=axes[1])
+        assert fig.get_supxlabel() == _BELLHOP_CREDIT
+        assert len(fig.texts) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_two_models_in_one_figure_are_credited_as_compare_models_credits_them():
+    """Two models drawn into a caller's figure take compare_models' footnote:
+    one ``Model:`` group, a line per model, in the order drawn."""
+    bellhop, ram = _credited_field(), _ram_field()
+    reference, _ = compare_models([bellhop, ram])
+    fig, axes = plt.subplots(1, 2)
+    try:
+        plot_field(bellhop, ax=axes[0])
+        plot_field(ram, ax=axes[1])
+        lines = fig.get_supxlabel().splitlines()
+        assert len(lines) == 2 and lines[0] == _BELLHOP_CREDIT
+        assert lines[1].split()[0] == 'RAM', lines
+        assert fig.get_supxlabel() == reference.get_supxlabel()
+    finally:
+        plt.close(fig)
+        plt.close(reference)
+
+
+def test_a_fetched_env_drawn_with_a_result_credits_its_sources(env):
+    """The data sources of the ``env`` a plotter draws join the caller's
+    footnote, under the model."""
+    from uacpy.data.sources import SOURCES, DataProvenance
+    env.extra_data_sources = (DataProvenance(source=SOURCES['gebco']),)
+    fig, ax = plt.subplots()
+    try:
+        plot_field(_credited_field(), ax=ax, env=env)
+        lines = fig.get_supxlabel().splitlines()
+        assert lines[0] == _BELLHOP_CREDIT
+        assert lines[1].startswith('Data:') and 'GEBCO' in lines[1], lines
+    finally:
+        plt.close(fig)
+
+
+def test_a_non_model_input_adds_nothing_to_the_footnote(complex_field):
+    """A Field with no model provenance and bare arrays leave the footnote
+    as the model drawn before them wrote it."""
+    fig, axes = plt.subplots(1, 3)
+    try:
+        plot_field(_credited_field(), ax=axes[0])
+        plot_field(complex_field, ax=axes[1])          # no model_source
+        plots.plot_beam_power(np.linspace(-90.0, 90.0, 19), np.ones(19),
+                              ax=axes[2])
+        assert fig.get_supxlabel() == _BELLHOP_CREDIT
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize('tight', [False, True])
+def test_a_credited_panel_in_a_users_figure_keeps_the_labels_clear(tight):
+    """In a caller's ``plt.subplots`` figure the footnote sits under every
+    label: as drawn (the subplot bottom raised to clear it) and after the
+    caller's ``fig.tight_layout()``."""
+    fig, axes = plt.subplots(2, 1)
+    try:
+        axes[1].set_xlabel('Range (km)')
+        plot_field(_credited_field(), ax=axes[0])
+        if tight:
+            fig.tight_layout()
+        top, lowest = _credit_and_lowest_label(fig)
+        assert top <= lowest
+    finally:
+        plt.close(fig)
+
+
+def test_a_callers_own_supxlabel_is_not_drawn_over():
+    """The footnote is the figure's supxlabel; one the caller wrote stays,
+    and a ProvenanceWarning hands them the credit to place."""
+    from uacpy.core.exceptions import ProvenanceWarning
+    fig, ax = plt.subplots()
+    fig.supxlabel('Shared range axis')
+    try:
+        with pytest.warns(ProvenanceWarning, match='Bellhop'):
+            plot_field(_credited_field(), ax=ax)
+        assert fig.get_supxlabel() == 'Shared range axis'
+    finally:
+        plt.close(fig)
+
+
+def test_a_contour_of_another_model_joins_the_footnote():
+    fig, ax = plot_field(_credited_field())
+    try:
+        plots.draw_contours(ax, _ram_field(), [90.0])
+        lines = fig.get_supxlabel().splitlines()
+        assert lines[0] == _BELLHOP_CREDIT and 'RAM' in lines[1], lines
+    finally:
+        plt.close(fig)
+
+
+def test_the_overview_credits_by_its_own_show_data_credit():
+    """plot_overview draws its panels with the single-panel plotters, then
+    credits the figure by its own ``show_data_credit=``: data it hides stays
+    hidden though its TL and environment panels draw a fetched env."""
+    from uacpy.data.sources import SOURCES, DataProvenance
+    lats, lons = np.linspace(58.0, 61.0, 40), np.linspace(2.0, 5.0, 50)
+    LON, LAT = np.meshgrid(lons, lats)
+    depth = 100 + 300 * (LAT - 58) / 3 + 20 * np.sin(LON * 3)
+    env = uacpy.Environment(bathymetry=200.0, ssp=1500.0)
+    env.extra_data_sources = (DataProvenance(source=SOURCES['gebco']),)
+    fig, _ = plot_overview(env, _bathy_grid(lats, lons, depth),
+                           tl=_credited_field(),
+                           map_kwargs=dict(basemap=False),
+                           show_data_credit=False)
+    try:
+        assert fig.get_supxlabel() == _BELLHOP_CREDIT
+    finally:
+        plt.close(fig)
+
+
+def _grid_figures():
+    """The three grid plotters whose figure holds a shared colorbar."""
+    r, z = np.linspace(100.0, 5000.0, 60), np.linspace(1.0, 99.0, 30)
+
+    def tl(offset):
+        return Field(data=offset + 20.0 * np.log10(r)[None, :]
+                     + 0.05 * z[:, None], coords={'depth': z, 'range': r},
+                     kind='pressure', unit='dB')
+    env = Environment(bathymetry=100.0, ssp=1500.0, bottom=BoundaryProperties(
+        acoustic_type='half-space', sound_speed=1650.0, density=1.8,
+        attenuation=0.6))
+    by_source = Field(data=np.stack([tl(0.0).data, tl(3.0).data]),
+                      coords={'source_depth': np.array([10.0, 50.0]),
+                              'depth': z, 'range': r},
+                      kind='pressure', unit='dB')
+    return {
+        'compare_models': lambda: compare_models(
+            [tl(0.0), tl(2.0), tl(4.0)], ['a', 'b', 'c'], env=env),
+        'plot_source_depth_panels': lambda: plots.plot_source_depth_panels(
+            by_source, env=env),
+        'plot_bottom_properties': lambda: plots.plot_bottom_properties(env),
+    }
+
+
+@pytest.mark.parametrize('name', ['compare_models', 'plot_source_depth_panels',
+                                  'plot_bottom_properties'])
+def test_a_users_tight_layout_on_a_grid_figure_keeps_the_constrained_layout(name):
+    """matplotlib refuses to switch a figure holding a colorbar from the
+    constrained engine to the tight one (RuntimeError "Colorbar layout of
+    new layout engine not compatible with old engine"); the grid plotters'
+    figure takes ``fig.tight_layout()`` and ``plt.tight_layout()`` without
+    an error or a warning, keeps its constrained engine, and leaves every
+    Axes where it was (the engine settles within two draws, measured: the
+    second moves a panel by up to 1.3e-5 of the figure, the third by
+    5e-10). A tight-layout setting it does not read is told."""
+    out = _grid_figures()[name]()
+    fig = out[0] if isinstance(out, tuple) else out
+    try:
+        fig.canvas.draw()
+        fig.canvas.draw()
+        before = [tuple(ax.get_position().bounds) for ax in fig.axes]
+        with recorded_warnings() as caught:
+            fig.tight_layout()
+            plt.figure(fig.number)
+            plt.tight_layout()
+        assert caught == []
+        assert type(fig.get_layout_engine()).__name__ == \
+            'ConstrainedLayoutEngine'
+        fig.canvas.draw()
+        after = [tuple(ax.get_position().bounds) for ax in fig.axes]
+        np.testing.assert_allclose(np.array(after), np.array(before),
+                                   rtol=0.0, atol=1e-9)
+        with recorded_warnings() as caught:
+            fig.tight_layout(pad=2.0, rect=(0, 0, 1, 0.9))
+        assert [str(w.message) for w in caught] == [
+            "tight_layout(): pad, rect are not used, because this figure "
+            "is laid out by matplotlib's constrained engine, which "
+            "tight_layout() re-runs. Set its padding with "
+            "fig.get_layout_engine().set(w_pad=…, h_pad=…, rect=…)."]
+    finally:
+        plt.close('all')
+
+
+def test_compare_names_the_overlay_route_for_a_result_that_is_not_a_field():
+    """``compare`` overlays Field cuts; two reflection coefficients are
+    refused naming their own ``.plot(ax=ax)`` overlay, which works as
+    typed."""
+    rc = [ReflectionCoefficient(angles_deg=np.linspace(0, 90, 91),
+                                magnitude=np.linspace(1.0, m, 91),
+                                phase=np.zeros(91), model='Bounce')
+          for m in (0.1, 0.3)]
+    with pytest.raises(ConfigurationError,
+                       match=r'^compare: expected Field, got '
+                             r'ReflectionCoefficient') as info:
+        uacpy.plot.compare(rc)
+    assert 'b.plot(ax=ax)' in info.value.remediation
+    a, b = rc
+    fig, ax = a.plot()
+    b.plot(ax=ax)
+    assert len(ax.lines) == 2
     plt.close(fig)
+    with pytest.raises(ConfigurationError, match='got ndarray') as info:
+        uacpy.plot.compare([np.zeros(3)])
+    assert info.value.remediation is None
 
 
 def test_compare_models_label_length_validation(tl_field):
     with pytest.raises(ConfigurationError, match="match"):
         uacpy.plot.compare_models([tl_field, tl_field, tl_field],
                                   labels=['only-one'])
+
+
+@pytest.mark.parametrize('sharex, labelled', [
+    (True, [False, False, True]), (False, [True, True, True])])
+def test_a_field_drawn_into_a_shared_x_stack_labels_the_bottom_panel(
+        tl_field, sharex, labelled):
+    """``plt.subplots(3, 1, sharex=True)`` hides the inner tick labels; the
+    field's own x label goes with them, or it prints into the title of the
+    panel below. Panels that share nothing keep theirs."""
+    fig, axes = plt.subplots(3, 1, sharex=sharex)
+    for ax in axes:
+        tl_field.plot(ax=ax)
+    assert [bool(ax.get_xlabel()) for ax in axes] == labelled
+    plt.close(fig)
 
 
 def test_compare_models_labels_only_the_lowest_panel_of_each_column(tl_field):
@@ -2749,7 +3125,25 @@ class TestTheDifferenceMapIsDrawnAsAResidual:
                           fig.axes[-1].get_ylabel()))
             plt.close(fig)
         assert drawn[0] == drawn[1]
-        assert drawn[0][:2] == ((-10.0, 10.0), 'RdBu_r')
+        span = 20.0 * np.log10(2.0)                 # the residual is 6.02 dB
+        assert drawn[0][0] == pytest.approx((-span, span))
+        assert drawn[0][1] == 'RdBu_r'
+
+    def test_every_door_gives_the_difference_one_window(self):
+        """One residual, one picture: plot_field, the method, the plotter
+        and a compare_models grid all take the data's symmetric span."""
+        d = self._difference()
+        span = 20.0 * np.log10(2.0)
+        figures = [uacpy.plot.plot_field(d), d.plot(),
+                   uacpy.plot.plot_field_difference(d)]
+        clims = [_fields._value_mesh(ax).get_clim() for _, ax in figures]
+        fig, axes = uacpy.plot.compare_models([d, d])
+        clims += [_fields._value_mesh(ax).get_clim() for ax in axes.ravel()]
+        figures.append((fig, axes))
+        for clim in clims:
+            assert clim == pytest.approx((-span, span))
+        for fig, _ in figures:
+            plt.close(fig)
 
     def test_the_colormap_is_the_callers_to_choose(self):
         """The default is the residual's diverging map; ``cmap=`` replaces it
@@ -2762,17 +3156,23 @@ class TestTheDifferenceMapIsDrawnAsAResidual:
         assert ax.collections[0].get_cmap().name == 'viridis'
         plt.close(fig)
 
-    def test_one_window_form_at_a_time(self):
-        """``diff_vmax`` and ``vmin``/``vmax`` both set the window; each works
-        alone, the default is ±10 dB, and the two together are refused."""
+    def test_vmax_is_the_one_window_keyword(self):
+        """``vmax=`` is the half-width of the symmetric window, as on
+        plot_signal_excess; ``vmin=`` is refused (the neutral colour stays on
+        zero), a non-positive ``vmax`` is refused, and ``diff_vmax=`` is
+        gone."""
         d = self._difference()
-        for kw, clim in (({}, (-10.0, 10.0)), ({'diff_vmax': 20.0}, (-20.0, 20.0)),
-                         ({'vmin': -3.0, 'vmax': 5.0}, (-3.0, 5.0))):
-            fig, ax = uacpy.plot.plot_field_difference(d, **kw)
-            assert ax.collections[0].get_clim() == clim
-            plt.close(fig)
-        with pytest.raises(ConfigurationError, match='give one form'):
-            uacpy.plot.plot_field_difference(d, vmin=-3.0, diff_vmax=20.0)
+        fig, ax = uacpy.plot.plot_field_difference(d, vmax=20.0)
+        assert ax.collections[0].get_clim() == (-20.0, 20.0)
+        plt.close(fig)
+        with pytest.raises(ConfigurationError, match='takes vmax= only'):
+            uacpy.plot.plot_field_difference(d, vmin=-3.0)
+        for bad in (0.0, -5.0, float('nan')):
+            with pytest.raises(ConfigurationError, match='half-width'):
+                uacpy.plot.plot_field_difference(d, vmax=bad)
+        with pytest.raises((TypeError, ConfigurationError), match='diff_vmax'):
+            uacpy.plot.plot_field_difference(d, diff_vmax=20.0)
+        assert not plt.get_fignums()
 
     def test_a_cell_with_no_difference_is_grey_not_agreement(self):
         """A no-energy cell has no difference (NaN); blank, it would show
@@ -3145,6 +3545,40 @@ class TestOnlyABottomWithACpGetsABottomColourbar:
         from uacpy.visualization.plots.environment import (
             BOTTOM_CP_LABEL, WATER_C_LABEL)
         assert {WATER_C_LABEL, BOTTOM_CP_LABEL} <= self._inset_labels(fig)
+        plt.close(fig)
+
+    @pytest.mark.parametrize('cp, extend', [
+        (1449.0, 'min'), (1450.0, 'neither'), (1700.0, 'neither'),
+        (2300.0, 'neither'), (2301.0, 'max'), (4000.0, 'max')])
+    def test_a_half_space_off_the_fixed_scale_ends_the_bar_in_an_arrow(
+            self, cp, extend):
+        """A single half-space is shaded on the fixed 1450-2300 m/s scale, so
+        a rock basement takes the 2300 m/s colour; the bar's arrow on that
+        side says the speed lies past it."""
+        from uacpy.visualization.plots.environment import (
+            BOTTOM_CP_LABEL, plot_environment)
+        fig, _ = plot_environment(
+            uacpy.Environment(bathymetry=100.0, bottom=cp))
+        bar, = [c for ax in fig.axes for c in ax.child_axes
+                if c.get_ylabel() == BOTTOM_CP_LABEL]
+        assert bar._colorbar.mappable.get_clim() == (1450.0, 2300.0)
+        assert bar._colorbar.extend == extend
+        plt.close(fig)
+
+    def test_a_layered_bottom_bar_spans_its_own_speeds_with_no_arrow(self):
+        from uacpy.visualization.plots.environment import (
+            BOTTOM_CP_LABEL, plot_environment)
+        bottom = SeabedColumn(
+            layers=[SedimentLayer(thickness=10.0, sound_speed=1600.0,
+                                  density=1.6)],
+            halfspace=BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=4000.0, density=2.4))
+        fig, _ = plot_environment(
+            uacpy.Environment(bathymetry=100.0, bottom=bottom))
+        bar, = [c for ax in fig.axes for c in ax.child_axes
+                if c.get_ylabel() == BOTTOM_CP_LABEL]
+        assert bar._colorbar.mappable.get_clim() == (1600.0, 4000.0)
+        assert bar._colorbar.extend == 'neither'
         plt.close(fig)
 
 
@@ -3772,6 +4206,70 @@ class TestCompareSharesOneQuantity:
         plt.close(fig)
 
 
+class TestTheSeabedCanBeDrawnAsALine:
+    """``seabed='line'`` on ``plot_field`` and ``compare_models`` draws the
+    ``env`` seafloor as its line alone, so the values a field holds below it
+    stay visible; ``'fill'`` (the default) covers them with the sediment."""
+
+    @staticmethod
+    def _field():
+        depths = np.linspace(5.0, 150.0, 30)      # 50 m of it below the seabed
+        ranges = np.linspace(100.0, 3000.0, 20)
+        return Field(data=np.tile(np.linspace(40.0, 90.0, depths.size)[:, None],
+                                  (1, ranges.size)),
+                     coords={'depth': depths, 'range': ranges},
+                     kind='pressure', unit='dB', model='test')
+
+    @staticmethod
+    def _envs():
+        flat = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+        sloping = uacpy.Environment(
+            bathymetry=[(0.0, 90.0), (3000.0, 110.0)], ssp=1500.0)
+        return flat, sloping
+
+    @staticmethod
+    def _sediment_fills(ax):
+        from matplotlib.colors import to_rgba
+        from uacpy.visualization.style import BOTTOM_FILL_COLOR
+        return [c for c in ax.collections
+                if isinstance(c, mcoll.PolyCollection)
+                and len(c.get_facecolor())
+                and np.allclose(c.get_facecolor()[0], to_rgba(BOTTOM_FILL_COLOR))]
+
+    @pytest.mark.parametrize('which', [0, 1])
+    def test_the_line_leaves_the_sediment_values_uncovered(self, which):
+        env = self._envs()[which]
+        fig, ax = plot_field(self._field(), env=env)
+        fig_l, ax_l = plot_field(self._field(), env=env, seabed='line')
+        try:
+            assert len(self._sediment_fills(ax)) == 1
+            assert self._sediment_fills(ax_l) == []
+            # The seafloor line is drawn in both.
+            assert len(ax_l.get_lines()) == len(ax.get_lines()) >= 1
+            assert max(ax_l.get_ylim()) == max(ax.get_ylim())
+        finally:
+            plt.close(fig)
+            plt.close(fig_l)
+
+    def test_compare_models_draws_the_line_on_every_panel(self):
+        fig, axes = compare_models([self._field(), self._field()],
+                                   labels=['a', 'b'], env=self._envs()[0],
+                                   seabed='line')
+        try:
+            assert all(self._sediment_fills(ax) == [] for ax in axes.ravel())
+        finally:
+            plt.close(fig)
+
+    @pytest.mark.parametrize('kwargs, match', [
+        ({'seabed': 'none'}, "not one of"),
+        ({'seabed': 'line', 'env': None}, "no env= was given"),
+    ])
+    def test_a_seabed_it_cannot_draw_is_refused(self, kwargs, match):
+        with pytest.raises(ConfigurationError, match=match):
+            plot_field(self._field(), **{'env': self._envs()[0], **kwargs})
+        assert not plt.get_fignums()
+
+
 class TestEnvironmentPanelSpansToReceivers:
     """The panel's xlim follows the furthest receiver; the water mesh, the
     sediment fill, and the seafloor line hold the last bathymetry value out
@@ -4225,11 +4723,11 @@ def _stem_heads(ax):
 
 
 def test_the_dB_view_draws_twenty_log_of_the_received_amplitude():
-    """``dB=True`` is 20·log10 of what reaches the receiver, absorption
+    """``value='dB'`` is 20·log10 of what reaches the receiver, absorption
     included — the same quantity the linear view draws, not the amplitude
     column, which stands the absorbed cluster 19 dB too high."""
     arr = _absorbing_arrivals()
-    fig, ax = arr.plot(dB=True, dynamic_range_dB=400.0)
+    fig, ax = arr.plot(value='dB', dynamic_range_dB=400.0)
     expected = sorted(20.0 * np.log10(np.abs(arr.received_amplitudes)),
                       reverse=True)
     assert np.allclose(sorted(_stem_heads(ax), reverse=True), expected), (
@@ -4254,7 +4752,7 @@ def test_dB_stems_rise_from_the_dynamic_range_floor_not_from_zero():
     from the axis and its length reads loudness inverted — the loudest
     arrival drawing the shortest stem."""
     arr = _absorbing_arrivals()
-    fig, ax = arr.plot(dB=True, dynamic_range_dB=40.0)
+    fig, ax = arr.plot(value='dB', dynamic_range_dB=40.0)
     peak = float(np.max(20.0 * np.log10(np.abs(arr.received_amplitudes))))
     bases = [seg[0][1] for coll in ax.collections
              for seg in coll.get_segments()]
@@ -4268,7 +4766,7 @@ def test_arrivals_below_the_dynamic_range_floor_are_declared():
     """Off the bottom of a dB axis an arrival leaves no trace of itself, so
     the plot names it the way it names one off the end of the delay axis."""
     arr = _absorbing_arrivals()          # the third arrival is 229 dB down
-    fig, ax = arr.plot(dB=True, dynamic_range_dB=60.0)
+    fig, ax = arr.plot(value='dB', dynamic_range_dB=60.0)
     assert len(_stem_heads(ax)) == 2, _stem_heads(ax)
     text = ' '.join(t.get_text() for t in ax.get_legend().get_texts())
     peak = float(np.max(20.0 * np.log10(np.abs(arr.received_amplitudes))))
@@ -4287,12 +4785,12 @@ def test_an_arrival_exactly_on_the_dynamic_range_floor_is_drawn():
     exactly on the second arrival's level: on the floor it is kept, a hair
     under it is dropped."""
     span = -20.0 * np.log10(0.5)
-    fig, ax = _arrivals_at_levels([1.0, 0.5]).plot(dB=True,
+    fig, ax = _arrivals_at_levels([1.0, 0.5]).plot(value='dB',
                                                    dynamic_range_dB=span)
     assert len(_stem_heads(ax)) == 2, _stem_heads(ax)
     plt.close(fig)
     fig, ax = _arrivals_at_levels([1.0, 0.5 * (1 - 1e-9)]).plot(
-        dB=True, dynamic_range_dB=span)
+        value='dB', dynamic_range_dB=span)
     assert len(_stem_heads(ax)) == 1, _stem_heads(ax)
     plt.close(fig)
 
@@ -4311,9 +4809,9 @@ def test_a_non_positive_dynamic_range_is_rejected():
     arr = _absorbing_arrivals()
     for bad in (0.0, -10.0, float('nan'), float('inf')):
         with pytest.raises(ConfigurationError, match="dynamic_range"):
-            arr.plot(dB=True, dynamic_range_dB=bad)
+            arr.plot(value='dB', dynamic_range_dB=bad)
     assert not plt.get_fignums()
-    fig, _ax = arr.plot(dB=True, dynamic_range_dB=1e-6)
+    fig, _ax = arr.plot(value='dB', dynamic_range_dB=1e-6)
     plt.close(fig)
 
 
@@ -4325,7 +4823,7 @@ def test_the_dB_delay_axis_spans_the_arrivals_it_drew():
     arr = _arrivals_at_levels([1.0, 0.9, 0.02, 0.005],
                               delays=[0.6664580, 0.6664585, 2.0910809, 2.0923464])
     assert arr.energy_support() * 1e3 < 0.01, "fixture must collapse the support"
-    fig, ax = arr.plot(dB=True, dynamic_range_dB=60.0)
+    fig, ax = arr.plot(value='dB', dynamic_range_dB=60.0)
     drawn = [ln.get_xdata()[0] for ln in ax.lines if ln.get_marker() == 'o']
     assert len(drawn) == 4, drawn
     lo, hi = ax.get_xlim()
@@ -4337,7 +4835,7 @@ def test_the_dB_delay_axis_spans_the_arrivals_it_drew():
 def test_a_silent_arrival_gets_a_finite_dB_level():
     """``log10(0)`` is ``-inf``; one infinite stem takes the whole axis
     with it and every real arrival collapses onto a single pixel."""
-    fig, ax = _arrivals_at_levels([1.0, 0.0]).plot(dB=True,
+    fig, ax = _arrivals_at_levels([1.0, 0.0]).plot(value='dB',
                                                    dynamic_range_dB=700.0)
     assert all(np.isfinite(h) for h in _stem_heads(ax)), _stem_heads(ax)
     assert all(np.isfinite(v) for v in ax.get_ylim()), ax.get_ylim()
@@ -4377,6 +4875,12 @@ _PRIVATE_RENDERERS = (
     ("rays_modes", "plot_replicas"),
     ("fields", "_plot_source_depth_panels"),
     ("fields", "_plot_field_as"),
+    ("rays_modes", "_plot_rays"),
+    ("rays_modes", "_plot_arrivals"),
+    ("rays_modes", "_plot_mode_shapes"),
+    ("rays_modes", "_plot_reflection_coefficient"),
+    ("rays_modes", "_plot_covariance"),
+    ("rays_modes", "_plot_replicas"),
 )
 
 
@@ -4578,11 +5082,11 @@ def _ppsd_result(level_lo, level_hi, ref=1e-6):
     """A Welch ``ProbabilisticSpectralEstimate`` whose histogram sits between
     ``level_lo`` and ``level_hi`` dB, stated against ``ref``."""
     frequencies = np.array([100.0, 200.0, 400.0])
-    level_edges = np.linspace(level_lo, level_hi, 5)
-    pdf = np.full((level_edges.size - 1, frequencies.size), 0.25)
+    level_edges_dB = np.linspace(level_lo, level_hi, 5)
+    pdf = np.full((level_edges_dB.size - 1, frequencies.size), 0.25)
     mean_dB = np.full(frequencies.size, 0.5 * (level_lo + level_hi))
     return ProbabilisticSpectralEstimate(
-        frequencies, level_edges, pdf, mean_dB=mean_dB,
+        frequencies, level_edges_dB, pdf, mean_dB=mean_dB,
         std_dB=np.ones(frequencies.size), level_step_dB=1.0, segment_duration=1.0,
         ref=ref)
 
@@ -4590,7 +5094,7 @@ def _ppsd_result(level_lo, level_hi, ref=1e-6):
 def _cq_ppsd_result(level_lo, level_hi, ref=1e-6):
     r = _ppsd_result(level_lo, level_hi, ref)
     return ProbabilisticSpectralEstimate(
-        r.frequencies, r.level_edges, r.pdf, mean_dB=r.mean_dB,
+        r.frequencies, r.level_edges_dB, r.pdf, mean_dB=r.mean_dB,
         std_dB=r.std_dB, level_step_dB=r.level_step_dB, ref=ref,
         scaling='spectrum', method='constant_q')
 
@@ -4609,8 +5113,9 @@ class TestALevelAxisNamesTheReferenceItWasComputedAgainst:
 
     @pytest.mark.parametrize('ref, shown', [(1e-6, '1 µ'), (1.0, '1 '),
                                             (20e-6, '20 µ')])
-    def test_the_constant_q_ppsd_level_axis_carries_it_too(self, ref, shown):
-        fig, ax = plot_constant_q_ppsd(_cq_ppsd_result(60.0, 90.0, ref))
+    def test_a_constant_q_histogram_level_axis_carries_it_too(self, ref,
+                                                               shown):
+        fig, ax = plot_ppsd(_cq_ppsd_result(60.0, 90.0, ref))
         assert ax.get_ylabel() == f"Level (dB re {shown}Pa²)"
         plt.close(fig)
 
@@ -4944,6 +5449,114 @@ class TestTheSonarMapsTakeContourLevels:
             draw(field, **{keyword: (0.5,)})
 
 
+class TestTheSignalExcessCurveMarksItsDetectionRanges:
+    """A signal-excess Field over range draws the SE = 0 dB line and shades
+    the ranges where SE >= 0 (Etter Fig. 11.10), one region per
+    ``sonar.detection_annuli`` interval, so a convergence zone beyond a
+    shadow is a second region."""
+
+    RANGES = np.linspace(1000.0, 40000.0, 40)
+
+    def _curve(self, kind='signal_excess'):
+        from uacpy.core.results import Field
+        r = self.RANGES
+        # Detected out to 10 km, a shadow, then detected again 25-30 km.
+        se = np.where((r <= 10000.0) | ((r >= 25000.0) & (r <= 30000.0)),
+                      6.0, -6.0)
+        return Field(data=se, coords={'range': r}, kind=kind, unit='dB')
+
+    @staticmethod
+    def _spans_km(ax):
+        return sorted((p.get_x(), p.get_x() + p.get_width())
+                      for p in ax.patches)
+
+    def test_the_curve_shades_each_detection_annulus(self):
+        from uacpy.sonar import detection_annuli
+        field = self._curve()
+        fig, ax = field.plot()
+        try:
+            expected = [(a / 1000.0, b / 1000.0) for a, b in detection_annuli(
+                self.RANGES, signal_excess_dB=field.data)]
+            assert len(expected) == 2
+            np.testing.assert_allclose(self._spans_km(ax), expected)
+            zero = [line for line in ax.get_lines()
+                    if line.get_label() == 'SE = 0 dB']
+            assert len(zero) == 1
+            assert np.all(np.asarray(zero[0].get_ydata()) == 0.0)
+            assert [t.get_text() for t in ax.get_legend().get_texts()] == [
+                'SE = 0 dB', 'detected (SE ≥ 0)']
+        finally:
+            plt.close(fig)
+
+    def test_another_quantity_over_range_is_not_marked(self):
+        fig, ax = self._curve(kind='level').plot()
+        try:
+            assert not ax.patches
+            assert ax.get_legend() is None
+        finally:
+            plt.close(fig)
+
+
+class TestDrawContoursOverlaysASecondField:
+    """``draw_contours(ax, field, levels)`` contours another Field over a map
+    already drawn, read as ``plot_field`` reads it, so its lines are the ones
+    ``plot_field(field, contours=levels)`` draws."""
+
+    @staticmethod
+    def _segments(ax):
+        sets = [c for c in ax.collections
+                if isinstance(c, mcontour.ContourSet)]
+        return [seg for cs in sets for level in cs.allsegs for seg in level]
+
+    def test_the_overlay_draws_the_level_on_the_maps_axes(self):
+        # Range on x in km, depth on y: the axes plot_field draws the map on.
+        se = _se_field(4, 5)
+        fig, ax = plt.subplots()
+        fig_o, ax_o = plot_signal_excess(se, contours=())
+        try:
+            ax.contour(se.coords['range'] / 1000.0, se.coords['depth'],
+                       se.data, levels=[0.0])
+            uacpy.plot.draw_contours(ax_o, se, [0.0], label='SE = 0')
+            expected, drawn = self._segments(ax), self._segments(ax_o)
+            assert len(drawn) == len(expected) >= 1
+            for a, b in zip(drawn, expected):
+                np.testing.assert_allclose(a, b)
+        finally:
+            plt.close(fig)
+            plt.close(fig_o)
+
+    def test_without_a_label_each_line_carries_its_level(self):
+        fig, ax = plot_signal_excess(_se_field(4, 5), contours=())
+        try:
+            uacpy.plot.draw_contours(ax, _se_field(4, 5), [0.0])
+            assert [t.get_text() for t in ax.texts] == ['0 dB']
+            assert ax.get_legend() is None
+        finally:
+            plt.close(fig)
+
+    def test_a_label_is_one_legend_entry_in_the_lines_style(self):
+        fig, ax = plot_signal_excess(_se_field(4, 5), contours=())
+        try:
+            uacpy.plot.draw_contours(ax, _pd_field(4, 5), levels=[0.5],
+                                     label='Pd = 0.5', color='C3', ls='--')
+            entry, = ax.get_legend().get_lines()
+            assert ax.get_legend().get_texts()[0].get_text() == 'Pd = 0.5'
+            assert entry.get_linestyle() == '--'
+            assert not ax.texts                     # no in-place level label
+            assert self._segments(ax)
+        finally:
+            plt.close(fig)
+
+    def test_a_line_cut_is_refused_naming_the_line_view(self):
+        fig, ax = plot_signal_excess(_se_field(4, 5), contours=())
+        try:
+            with pytest.raises(ConfigurationError, match=r'field\.plot'):
+                uacpy.plot.draw_contours(ax, _se_field(4, 5).isel(depth=0),
+                                         [0.0])
+        finally:
+            plt.close(fig)
+
+
 def test_compare_models_signal_excess_window_spans_every_panel():
     """The symmetric window came from ``fields[0]`` alone, so a wider second
     panel saturated (measured: 70% of its samples) under a colourbar that
@@ -5003,15 +5616,8 @@ def _plot_offscreen_sel():
                             ymin=0.0, ymax=200.0)
 
 
-def _plot_offscreen_constant_q_psd():
-    return plot_constant_q_psd(np.array([100.0, 200.0, 400.0]),
-                               np.array([1e-30, 1e-30, 1e-30]),
-                               ymin=0.0, ymax=150.0)
-
-
 def _plot_offscreen_constant_q_ppsd():
-    return plot_constant_q_ppsd(_cq_ppsd_result(300.0, 320.0), ymin=0.0,
-                                ymax=200.0)
+    return plot_ppsd(_cq_ppsd_result(300.0, 320.0), ymin=0.0, ymax=200.0)
 
 
 def _plot_offscreen_frf():
@@ -5023,8 +5629,7 @@ def _plot_offscreen_frf():
 @pytest.mark.parametrize("call, caller", [
     (_plot_offscreen_ppsd, "plot_ppsd"),
     (_plot_offscreen_sel, "plot_band_levels"),
-    (_plot_offscreen_constant_q_psd, "plot_constant_q_psd"),
-    (_plot_offscreen_constant_q_ppsd, "plot_constant_q_ppsd"),
+    (_plot_offscreen_constant_q_ppsd, "plot_ppsd"),
     (_plot_offscreen_frf, "plot_frf"),
 ])
 def test_a_record_outside_the_pinned_level_window_says_the_panel_is_empty(
@@ -5060,9 +5665,8 @@ def _fitted_ppsd(occupied_rows_dB, mean_dB, std_dB, method='welch'):
 
 
 class TestALevelPlotterFitsItsWindowToTheLevelsItDraws:
-    """``plot_psd``, ``plot_constant_q_psd``, ``plot_ppsd``,
-    ``plot_constant_q_ppsd`` and ``plot_band_levels`` share one default level
-    window: the finite levels drawn, less / plus 5 dB, rounded outward to a
+    """``plot_psd``, ``plot_ppsd`` (either estimator) and
+    ``plot_band_levels`` share one default level window: the finite levels drawn, less / plus 5 dB, rounded outward to a
     multiple of 10 dB. ``ymin`` / ``ymax`` each override their own edge."""
 
     F = np.array([100.0, 200.0, 400.0])
@@ -5071,8 +5675,6 @@ class TestALevelPlotterFitsItsWindowToTheLevelsItDraws:
         levels = [lo_dB, 0.5 * (lo_dB + hi_dB), hi_dB]
         if name == 'plot_psd':
             return plot_psd(self.F, _levels_to_power(levels), **kw)
-        if name == 'plot_constant_q_psd':
-            return plot_constant_q_psd(self.F, _levels_to_power(levels), **kw)
         if name == 'plot_band_levels':
             return plot_band_levels(_banded(
                 _levels_to_power(levels),
@@ -5082,11 +5684,10 @@ class TestALevelPlotterFitsItsWindowToTheLevelsItDraws:
         mean = 0.5 * (lo_dB + hi_dB)
         if name == 'plot_ppsd':
             return plot_ppsd(_fitted_ppsd(rows, [mean] * 3, 1.0), **kw)
-        return plot_constant_q_ppsd(
+        return plot_ppsd(
             _fitted_ppsd(rows, [mean] * 3, 1.0, method='constant_q'), **kw)
 
-    NAMES = ['plot_psd', 'plot_constant_q_psd', 'plot_band_levels', 'plot_ppsd',
-             'plot_constant_q_ppsd']
+    NAMES = ['plot_psd', 'plot_band_levels', 'plot_ppsd', 'constant-Q ppsd']
 
     @pytest.mark.parametrize('name', NAMES)
     def test_the_default_window_is_fitted_to_the_levels(self, name):
@@ -5138,9 +5739,8 @@ class TestALevelPlotterFitsItsWindowToTheLevelsItDraws:
                                                                    method):
         """A lone occupied row below the mean - STD line sets the floor, and
         a mean + STD line above every occupied row sets the top."""
-        plotter = plot_ppsd if method == 'welch' else plot_constant_q_ppsd
-        fig, ax = plotter(_fitted_ppsd([22.5, 60.5], [70.0] * 3, 20.0,
-                                       method=method))
+        fig, ax = plot_ppsd(_fitted_ppsd([22.5, 60.5], [70.0] * 3, 20.0,
+                                         method=method))
         assert ax.get_ylim() == pytest.approx((10.0, 100.0))
         plt.close(fig)
 
@@ -5556,6 +6156,30 @@ def test_the_credit_clears_every_axis_label(credits):
     plt.close(fig)
 
 
+@pytest.mark.parametrize('draw, n_panels', [
+    (lambda: plot_frf(np.array([10.0, 100.0, 1000.0]),
+                      np.array([1.0, 0.5, 0.2], dtype=complex)), 2),
+    (lambda: plots.plot_transfer_function(Field(
+        data=np.array([1.0, 0.5, 0.2], dtype=complex),
+        coords={'frequency': np.array([10.0, 100.0, 1000.0])})), 2),
+    (lambda: plots.plot_lsfir_diagnostics(np.eye(3), np.arange(3.0),
+                                          np.arange(4.0)), 3),
+    (lambda: _overview(), 3),
+])
+def test_a_multi_panel_plotter_returns_its_axes_as_one_numpy_array(draw,
+                                                                    n_panels):
+    """One container for one kind of return: the pair and triple plotters
+    return a numpy array of Axes, as the grid plotters do, and it unpacks
+    into its panels."""
+    import matplotlib.axes as maxes
+    fig, axes = draw()
+    assert isinstance(axes, np.ndarray) and axes.shape == (n_panels,)
+    assert all(isinstance(ax, maxes.Axes) for ax in axes)
+    first, *_rest = axes
+    assert first is axes[0]
+    plt.close(fig)
+
+
 def _overview(**kwargs):
     env = uacpy.Environment(bathymetry=200.0, ssp=1500.0)
     tl = _grid()
@@ -5896,7 +6520,7 @@ def test_the_default_colour_window_follows_the_record(plotter, given, window):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         fig, ax = getattr(up, plotter)(f, t, S, **given)
-    mesh = ax.collections[0]
+    mesh = (ax.images or ax.collections)[0]
     assert mesh.get_clim() == pytest.approx(window)
     assert mesh.get_cmap().name == "viridis"
     plt.close(fig)
@@ -5959,6 +6583,55 @@ def test_a_spectrogram_pinned_off_its_own_band_says_the_panel_is_empty():
                       match=r"plot_spectrogram: every sample.*plotted y range"):
         fig, _ = plot_spectrogram(*_flat_spectrogram(140.0),
                                   freq_min=800.0, freq_max=900.0)
+    plt.close(fig)
+
+
+def _drawn_colour_distance(fig, ax, frequency, colour):
+    """Largest distance (0-255 RGB) from ``colour`` of the pixel rows within
+    2 px of ``frequency``, each row read as its median across the panel so a
+    vertical grid line does not count."""
+    fig.canvas.draw()
+    rgb = np.asarray(fig.canvas.buffer_rgba())[..., :3].astype(float)
+    x0, _, x1, _ = ax.get_window_extent().extents
+    row = int(rgb.shape[0] - ax.transData.transform([[1.0, frequency]])[0, 1])
+    band = rgb[row - 2:row + 3, int(x0) + 3:int(x1) - 3]
+    return float(np.linalg.norm(np.median(band, axis=1) - colour,
+                                axis=-1).max())
+
+
+def test_every_one_row_tonal_shows_on_the_default_spectrogram_figure():
+    """A 48 kHz spectrogram has 4097 frequency rows for a few hundred pixel
+    rows. Drawn as a mesh, a one-row tonal shows only where a pixel centre
+    falls on it (measured: a tonal 43 dB above the noise is absent at 72-150
+    dpi, and these five lines sit 0.3 RGB units off the noise colour at 80
+    dpi); the antialiased image blends each into its pixel row, 21-25 units
+    off."""
+    frequencies = np.linspace(0.0, 24000.0, 4097)
+    times = np.linspace(0.0, 10.0, 40)
+    power = np.full((frequencies.size, times.size), 1e-8)    # 40 dB
+    rows = [171, 1280, 2133, 2987, 3840]          # between the y grid lines
+    power[rows, :] = 1e-2                                    # 100 dB
+    fig, ax = plot_spectrogram(frequencies, times, power)
+    fig.set_dpi(80)
+    floor = 255.0 * np.asarray(ax.images[0].cmap(0.0)[:3])
+    distances = [_drawn_colour_distance(fig, ax, frequencies[r], floor)
+                 for r in rows]
+    assert min(distances) > 10.0, distances
+    plt.close(fig)
+
+
+def test_a_non_uniform_spectrogram_grid_draws_each_row_on_its_own_frequency():
+    """An image spaces its rows evenly, so a spectrogram on an uneven
+    frequency axis is drawn as a mesh with each row at its own frequency:
+    the bright 160 Hz row is drawn at 160 Hz, not at its index's place."""
+    frequencies = np.array([10.0, 20.0, 40.0, 80.0, 160.0, 320.0])
+    times = np.linspace(0.0, 10.0, 8)
+    power = np.full((frequencies.size, times.size), 1e-8)
+    power[4, :] = 1e-2
+    fig, ax = plot_spectrogram(frequencies, times, power, freq_min=None)
+    floor = 255.0 * np.asarray(ax.collections[0].cmap(0.0)[:3])
+    assert _drawn_colour_distance(fig, ax, 160.0, floor) > 100.0
+    assert _drawn_colour_distance(fig, ax, 60.0, floor) < 1.0
     plt.close(fig)
 
 
@@ -7139,6 +7812,21 @@ class TestAmbiguityIsARegisteredQuantity:
                              'range': np.linspace(500.0, 5000.0, 30)},
                      model='MFP', kind='ambiguity')
 
+    def test_the_surface_credits_the_model_its_covariance_came_from(self):
+        """``plot_matched_field`` credits the model a surface carries, as
+        ``plot_field`` does (``Covariance.bartlett`` keeps the covariance's
+        engine on the surface)."""
+        from uacpy.models.provenance import model_provenance
+        surface = self._surface().replace(
+            model='OASN', backend='oasn',
+            model_source=model_provenance('oases'))
+        fig, _ = plots.plot_matched_field(surface)
+        try:
+            assert fig.get_supxlabel() == (
+                'Model: OASN — Henrik Schmidt, OASES')
+        finally:
+            plt.close(fig)
+
     def test_it_renders_with_its_own_label_and_colormap(self):
         fig, ax = plots.plot_field(self._surface(), vmin=-15, vmax=0)
 
@@ -7204,10 +7892,9 @@ def test_compare_defaults_to_plot_fields_view_of_a_time_trace():
 
 @pytest.mark.parametrize('figsize', [(13.0, 4.6), (12.0, 9.0)])
 def test_compare_models_panel_titles_clear_the_figure_title(figsize):
-    """``top`` was a fixed fraction, so on a short wide figure the panel
-    titles reached 9 px into the suptitle and example 44 moved the margin by
-    hand. The panels now sit under the suptitle at any height, and the shared
-    colorbar still spans them."""
+    """On a short wide figure as on a tall one, the panel titles sit under
+    the suptitle (a fixed ``top`` fraction let them reach 9 px into it), and
+    the shared colorbar spans the panels' height."""
     coords = {'depth': np.linspace(5.0, 95.0, 20),
               'range': np.linspace(100.0, 20000.0, 60)}
     fields = [Field(data=np.full((20, 60), 1e-3 * (k + 1), complex),
@@ -7222,8 +7909,10 @@ def test_compare_models_panel_titles_clear_the_figure_title(figsize):
     title_bottom = fig._suptitle.get_window_extent(renderer).y0
     assert max(ax.get_tightbbox(renderer).y1 for ax in axes.ravel()) \
         <= title_bottom
-    bar = fig.axes[-1]
-    assert bar.get_position().y1 == pytest.approx(fig.subplotpars.top)
+    bar = fig.axes[-1].get_position()
+    panels = [ax.get_position() for ax in axes.ravel()]
+    assert bar.y1 == pytest.approx(max(p.y1 for p in panels), abs=1e-3)
+    assert bar.y0 == pytest.approx(min(p.y0 for p in panels), abs=1e-3)
     plt.close(fig)
 
 
@@ -7364,7 +8053,7 @@ def test_the_dB_legend_names_a_hidden_far_arrival_once():
     arr = Arrivals(by_receiver=[[[cell]]], receiver_depths=np.array([100.0]),
                    receiver_ranges=np.array([1000.0]), model='Bellhop',
                    frequencies=10e3)
-    fig, ax = arr.plot(dB=True, dynamic_range_dB=60.0)
+    fig, ax = arr.plot(value='dB', dynamic_range_dB=60.0)
     texts = [t.get_text() for t in ax.get_legend().get_texts()]
     qualifiers = [t for t in texts
                   if 'beyond' in t or 'below' in t]
@@ -7447,6 +8136,23 @@ class TestModalSpeedPlots:
         assert np.allclose(ax.lines[1].get_ydata(), m.group_speeds)
         plt.close(fig)
 
+    def test_mode_attenuation_rules_the_seabed_sound_speed_once(self):
+        """``seabed_sound_speed=`` draws the dashed seabed rule at that
+        speed, the spelling every seabed speed takes; two mode sets
+        overlaid on one ``ax=`` draw it once."""
+        k = 2 * np.pi * 200.0 / np.array([1500.0, 1600.0, 1700.0]) \
+            + 1j * np.array([1e-5, 1e-4, 1e-3])
+        m = Modes(k=k, phi=np.ones((5, 3)), depths=np.linspace(0, 100, 5),
+                  model='Test', frequencies=200.0)
+        fig, ax = plots.plot_mode_attenuation(m, seabed_sound_speed=1650.0)
+        try:
+            plots.plot_mode_attenuation(m, ax=ax, seabed_sound_speed=1650.0)
+            rules = [ln for ln in ax.lines if ln.get_gid() == 'seabed-speed-1650']
+            assert len(rules) == 1
+            assert np.allclose(rules[0].get_xdata(), 1650.0)
+        finally:
+            plt.close(fig)
+
     def test_mode_speeds_marks_the_trapped_leaky_boundary(self):
         m = self._modes_at(200.0)
         cp = np.sort(m.phase_speeds)
@@ -7454,11 +8160,11 @@ class TestModalSpeedPlots:
         # split leaves sum(cp <= cb) == sum(cp >= cb), so the assertion passes
         # whichever way the comparison runs -- it cannot see the direction it
         # exists to check, and inverting '<=' in the source left it green.
-        c_bottom = float(0.5 * (cp[1] + cp[2]))
-        n_below, n_above = int(np.sum(cp <= c_bottom)), int(np.sum(cp >= c_bottom))
+        cb = float(0.5 * (cp[1] + cp[2]))
+        n_below, n_above = int(np.sum(cp <= cb)), int(np.sum(cp >= cb))
         assert n_below == 2 and n_above == 4 and n_below != n_above
-        fig, ax = plots.plot_mode_speeds(m, c_bottom=c_bottom)
-        assert any(np.allclose(ln.get_ydata(), c_bottom) for ln in ax.lines)
+        fig, ax = plots.plot_mode_speeds(m, seabed_sound_speed=cb)
+        assert any(np.allclose(ln.get_ydata(), cb) for ln in ax.lines)
         assert any(f'{n_below} trapped' in t.get_text() for t in ax.texts)
         assert not any(f'{n_above} trapped' in t.get_text() for t in ax.texts)
         plt.close(fig)
@@ -7482,7 +8188,7 @@ class TestModalSpeedPlots:
         plt.close(fig)
 
     def test_mode_speeds_draws_the_seabed_speed_the_result_records(self):
-        """``c_bottom=None`` is the result's own fluid half-space speed
+        """``seabed_sound_speed=None`` is the result's own fluid half-space speed
         (``media.halfspace_sound_speed``), counted by ``Modes.trapped``; a
         result recording none draws no boundary."""
         from uacpy.core.results import MediaTable
@@ -7509,7 +8215,7 @@ class TestModalSpeedPlots:
 
     # ── the seabed label keeps clear of the curve ────────────────────────
     #
-    # The label sits in the band just above the ``c_bottom`` rule, which is
+    # The label sits in the band just above the ``seabed_sound_speed`` rule, which is
     # the one band the phase-speed curve is certain to enter: cp rises with
     # mode index and leaves the rule at the trapped/leaky crossing. So the
     # label has to go to whichever end of the axis is farther from that
@@ -7518,12 +8224,12 @@ class TestModalSpeedPlots:
 
     def _modes_rising(self, n=12, f=200.0):
         """A mode set whose phase speed rises monotonically across the panel,
-        so the crossing can be placed anywhere by choosing ``c_bottom``."""
+        so the crossing can be placed anywhere by choosing ``seabed_sound_speed``."""
         return self._modes_at(f, n=n)
 
     @staticmethod
-    def _c_bottom_at(cp, fraction):
-        """``c_bottom`` placing the trapped/leaky crossing ``fraction`` of the
+    def _seabed_sound_speed_at(cp, fraction):
+        """``seabed_sound_speed`` placing the trapped/leaky crossing ``fraction`` of the
         way along the mode axis."""
         i = int(round(fraction * (cp.size - 1)))
         return float(0.5 * (cp[i] + cp[min(i + 1, cp.size - 1)]))
@@ -7561,7 +8267,7 @@ class TestModalSpeedPlots:
         m = self._modes_rising()
         cp = np.sort(m.phase_speeds)
         fig, ax = plots.plot_mode_speeds(
-            m, c_bottom=self._c_bottom_at(cp, fraction))
+            m, seabed_sound_speed=self._seabed_sound_speed_at(cp, fraction))
         try:
             label = next(t for t in ax.texts if 'trapped' in t.get_text())
             assert label.get_ha() == expected_side
@@ -7576,7 +8282,7 @@ class TestModalSpeedPlots:
         m = self._modes_rising()
         cp = np.sort(m.phase_speeds)
         fig, ax = plots.plot_mode_speeds(
-            m, c_bottom=self._c_bottom_at(cp, fraction))
+            m, seabed_sound_speed=self._seabed_sound_speed_at(cp, fraction))
         try:
             hits = self._curve_points_inside_label(fig, ax)
             assert hits == 0, (
@@ -7585,18 +8291,18 @@ class TestModalSpeedPlots:
         finally:
             plt.close(fig)
 
-    @pytest.mark.parametrize('c_bottom_of, expected_side', [
+    @pytest.mark.parametrize('seabed_speed_of, expected_side', [
         ('above_all', 'left'),     # every mode trapped, curve below the rule
         ('below_all', 'right'),    # every mode leaky, curve above it
     ])
     def test_a_channel_with_no_crossing_places_the_label_at_the_far_end(
-            self, c_bottom_of, expected_side):
+            self, seabed_speed_of, expected_side):
         """Both degenerate ends of the rule: with no crossing the trapped
         fraction is 1 or 0, and the label goes to the far end either way."""
         m = self._modes_rising()
         cp = np.sort(m.phase_speeds)
-        cb = cp.max() * 1.05 if c_bottom_of == 'above_all' else cp.min() * 0.95
-        fig, ax = plots.plot_mode_speeds(m, c_bottom=cb)
+        cb = cp.max() * 1.05 if seabed_speed_of == 'above_all' else cp.min() * 0.95
+        fig, ax = plots.plot_mode_speeds(m, seabed_sound_speed=cb)
         try:
             label = next(t for t in ax.texts if 'trapped' in t.get_text())
             assert label.get_ha() == expected_side
@@ -7615,7 +8321,7 @@ class TestModalSpeedPlots:
         m = self._modes_rising()
         cp = np.sort(m.phase_speeds)
         for fraction, ha, x in ((0.85, 'right', 0.99), (0.10, 'left', 0.01)):
-            cb = self._c_bottom_at(cp, fraction)
+            cb = self._seabed_sound_speed_at(cp, fraction)
             fig, ax = plots.plot_mode_speeds(m)
             try:
                 ax.axhline(cb, color='C3', ls='--', lw=1.0)
@@ -7754,6 +8460,22 @@ class TestGreensFunctionPlot:
         assert len(overlaid) == n
         plt.close(fig)
 
+    def test_the_kraken_overlay_joins_the_footnote(self):
+        """The overlaid Modes are a model result: the figure credits their
+        model (the Green's function read from a file carries none)."""
+        from uacpy.models.provenance import model_provenance
+        depths = np.linspace(0.0, 100.0, 11)
+        modes = Modes(k=np.linspace(0.80, 0.74, 4) + 0j,
+                      phi=np.zeros((11, 4)), depths=depths, model='Kraken',
+                      frequencies=200.0,
+                      model_source=model_provenance('acoustics_toolbox'))
+        fig, _ = plots.plot_greens_function(self._grn(), modes=modes)
+        try:
+            assert fig.get_supxlabel() == (
+                'Model: Kraken — Michael B. Porter, Acoustics Toolbox')
+        finally:
+            plt.close(fig)
+
     def test_rejects_something_that_is_not_a_greens_function(self):
         with pytest.raises(ConfigurationError, match='expected a GreensFunction'):
             plots.plot_greens_function({'G': np.zeros((1, 1, 2, 2))})
@@ -7797,13 +8519,44 @@ class TestGreensFunctionPlot:
             plots.plot_greens_function(self._grn(), modes=_rays())
 
 
+def _sampling(frequency, c_low, c_high, delta_k, **kw):
+    """``acoustics.wavenumber_sampling`` with the window and step given in
+    order, for these tests."""
+    return uacpy.acoustics.wavenumber_sampling(
+        frequency, c_low=c_low, c_high=c_high, delta_k=delta_k, **kw)
+
+
+def _sampled_axis(*args, **kw):
+    """The picture of :func:`_sampling`'s record, ``ws.plot()``."""
+    return _sampling(*args, **kw).plot()
+
+
 class TestWavenumberSamplingPlot:
     """The Hankel transform's sampling: the window that decides which physics
-    is carried, and the step that sets the alias period."""
+    is carried, and the step that sets the alias period, computed by
+    ``acoustics.wavenumber_sampling`` and drawn by its record's ``.plot()``."""
+
+    def test_the_record_holds_what_the_picture_shows(self):
+        """The window, the period and the verdict are numbers on the record,
+        and the plotter draws that record only."""
+        ws = _sampling(200.0, 1400.0, 1e9, 2 * np.pi / 2900.0, rmax=5000.0,
+                       water_sound_speed=1500.0, seabed_sound_speed=1700.0)
+        omega = 2 * np.pi * 200.0
+        assert ws.k_min == pytest.approx(omega / 1e9)
+        assert ws.k_max == pytest.approx(omega / 1400.0)
+        assert ws.alias_period == pytest.approx(2900.0)
+        assert ws.fits is False
+        assert ws.water_wavenumber == pytest.approx(omega / 1500.0)
+        assert ws.seabed_wavenumber == pytest.approx(omega / 1700.0)
+        with pytest.raises(ConfigurationError, match='wavenumber_sampling'):
+            plots.plot_wavenumber_sampling(200.0)
+        with pytest.raises(TypeError, match='positional'):
+            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3)
+        assert not plt.get_fignums()
 
     def test_window_spans_omega_over_c_high_to_omega_over_c_low(self):
         f, c_lo, c_hi = 200.0, 1400.0, 1e9
-        fig, ax = plots.plot_wavenumber_sampling(f, c_lo, c_hi, 1e-3)
+        fig, ax = _sampled_axis(f, c_lo, c_hi, 1e-3)
         omega = 2 * np.pi * f
         lo, hi = ax.get_xlim()
         # c_low sets the LARGEST wavenumber -- the easy one to get backwards.
@@ -7813,14 +8566,14 @@ class TestWavenumberSamplingPlot:
 
     def test_says_the_field_folds_when_the_farthest_range_exceeds_the_alias_period(self):
         dk = 2 * np.pi / 2900.0                      # alias period 2900 m
-        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, dk,
+        fig, ax = _sampled_axis(200.0, 1400.0, 1e9, dk,
                                                  rmax=5000.0)
         assert 'BEYOND' in ax.get_title()
         plt.close(fig)
 
     def test_says_it_fits_when_the_farthest_range_is_inside_the_alias_period(self):
         dk = 2 * np.pi / 22000.0
-        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, dk,
+        fig, ax = _sampled_axis(200.0, 1400.0, 1e9, dk,
                                                  rmax=5000.0)
         # "inside" must NOT be reported as sufficient: this book's own ch05
         # has a run that is inside the period and still 4.86 dB out.
@@ -7830,7 +8583,7 @@ class TestWavenumberSamplingPlot:
         plt.close(fig)
 
     def test_alias_period_is_two_pi_over_delta_k(self):
-        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 2 * np.pi / 7000.0)
+        fig, ax = _sampled_axis(200.0, 1400.0, 1e9, 2 * np.pi / 7000.0)
         assert '7000' in ax.get_title()
         plt.close(fig)
 
@@ -7838,53 +8591,53 @@ class TestWavenumberSamplingPlot:
         """There is no critical angle, so there is nothing to trap. Drawn
         blind the span came out reversed and kept the label -- a picture of a
         trapped band over a channel that has none."""
-        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+        fig, ax = _sampled_axis(200.0, 1400.0, 1e9, 1e-3,
                                                  water_sound_speed=1500.0,
-                                                 c_bottom=1450.0)
+                                                 seabed_sound_speed=1450.0)
         labels = [t.get_text() for t in ax.get_legend().get_texts()]
         assert any('no trapped band' in t for t in labels), labels
         plt.close(fig)
 
     def test_a_faster_seabed_gets_its_trapped_band(self):
-        fig, ax = plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+        fig, ax = _sampled_axis(200.0, 1400.0, 1e9, 1e-3,
                                                  water_sound_speed=1500.0,
-                                                 c_bottom=1700.0)
+                                                 seabed_sound_speed=1700.0)
         labels = [t.get_text() for t in ax.get_legend().get_texts()]
         assert 'trapped band' in labels, labels
         plt.close(fig)
 
     def test_rejects_a_window_whose_bounds_are_the_wrong_way_round(self):
         with pytest.raises(ConfigurationError, match='c_high'):
-            plots.plot_wavenumber_sampling(200.0, 1700.0, 1500.0, 1e-3)
+            _sampling(200.0, 1700.0, 1500.0, 1e-3)
 
     def test_rejects_a_non_positive_step(self):
         with pytest.raises(ConfigurationError, match='delta_k'):
-            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 0.0)
+            _sampling(200.0, 1400.0, 1e9, 0.0)
 
     def test_rejects_a_non_positive_marked_speed(self):
         """The optional marks were unchecked: a truthiness test dropped an
         explicit 0.0 without a word, and a negative speed drew its line at a
         negative wavenumber and stretched the axis to reach it."""
         with pytest.raises(ConfigurationError, match='water_sound_speed'):
-            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+            _sampling(200.0, 1400.0, 1e9, 1e-3,
                                            water_sound_speed=0.0)
-        with pytest.raises(ConfigurationError, match='c_bottom'):
-            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
-                                           c_bottom=-1700.0)
+        with pytest.raises(ConfigurationError, match='seabed_sound_speed'):
+            _sampling(200.0, 1400.0, 1e9, 1e-3,
+                                           seabed_sound_speed=-1700.0)
 
     def test_the_water_speed_and_range_carry_their_unit_names(self):
         with pytest.raises(TypeError,
                            match="unexpected keyword argument 'c_water'"):
-            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+            _sampling(200.0, 1400.0, 1e9, 1e-3,
                                            c_water=1500.0)
         with pytest.raises(TypeError,
                            match="unexpected keyword argument 'r_max'"):
-            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+            _sampling(200.0, 1400.0, 1e9, 1e-3,
                                            r_max=5000.0)
 
     def test_rejects_a_non_positive_range(self):
         with pytest.raises(ConfigurationError, match='rmax'):
-            plots.plot_wavenumber_sampling(200.0, 1400.0, 1e9, 1e-3,
+            _sampling(200.0, 1400.0, 1e9, 1e-3,
                                            rmax=-5000.0)
 
 
@@ -8032,7 +8785,7 @@ class TestMatchedFieldSurface:
 
 
 class TestAmbiguityDecibelScale:
-    """``plot_ambiguity(dB=True)`` — sidelobes live tens of dB down."""
+    """``plot_ambiguity(value='dB')`` — sidelobes live tens of dB down."""
 
     @staticmethod
     def _chi():
@@ -8051,7 +8804,7 @@ class TestAmbiguityDecibelScale:
     def test_decibels_are_relative_to_the_peak_and_floored(self):
         delays, doppler, chi = self._chi()
         fig, ax = plots.plot_ambiguity(delays, doppler, chi,
-                                       dB=True, dynamic_range_dB=40.0)
+                                       value='dB', dynamic_range_dB=40.0)
         data = ax.images[0].get_array()
         assert data.max() == pytest.approx(0.0, abs=1e-9)
         assert data.min() == pytest.approx(-40.0, abs=1e-9)
@@ -8061,7 +8814,7 @@ class TestAmbiguityDecibelScale:
     def test_rejects_a_surface_with_no_positive_peak(self):
         delays, doppler, chi = self._chi()
         with pytest.raises(ConfigurationError, match='dB scale'):
-            plots.plot_ambiguity(delays, doppler, np.zeros_like(chi), dB=True)
+            plots.plot_ambiguity(delays, doppler, np.zeros_like(chi), value='dB')
 
 
 class TestBroadbandReflectionOrientation:
@@ -8180,8 +8933,8 @@ def _one_call_per_title_spelling(title):
             lambda: plots.plot_absorption(
                 uacpy.Thorp().table(freqs), title=title),
         'rays_modes.plot_wavenumber_sampling':
-            lambda: plots.plot_wavenumber_sampling(200.0, 1400.0, 1800.0,
-                                                   1e-3, title=title),
+            lambda: plots.plot_wavenumber_sampling(
+                _sampling(200.0, 1400.0, 1800.0, 1e-3), title=title),
         'fields.plot_field (pinned 1-D cut)':
             lambda: plot_field(cut, title=title),
         'fields.plot_field (signal excess)':
@@ -8351,9 +9104,10 @@ class TestWavenumberSamplingKeepsItsLabelsOnTheCanvas:
     @pytest.mark.parametrize("font_size", [9, 14, 20])
     def test_every_label_stays_inside_the_figure(self, font_size):
         with plt.rc_context({'font.size': font_size}):
-            fig, ax = plots.plot_wavenumber_sampling(
+            fig, ax = _sampled_axis(
                 200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
-                rmax=5000.0, water_sound_speed=1500.0, c_bottom=1650.0)
+                rmax=5000.0, water_sound_speed=1500.0,
+                seabed_sound_speed=1650.0)
             fig.canvas.draw()
             renderer = fig.canvas.get_renderer()
             width, height = fig.bbox.width, fig.bbox.height
@@ -8379,9 +9133,9 @@ class TestWavenumberSamplingKeepsItsLabelsOnTheCanvas:
         the whole axes height rather than the room above its anchor lets it
         print through the title."""
         with plt.rc_context({'font.size': font_size}):
-            fig, ax = plots.plot_wavenumber_sampling(
+            fig, ax = _sampled_axis(
                 200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
-                water_sound_speed=1500.0, c_bottom=1650.0)
+                water_sound_speed=1500.0, seabed_sound_speed=1650.0)
             fig.canvas.draw()
             renderer = fig.canvas.get_renderer()
             axes_top = ax.get_window_extent(renderer).y1
@@ -8396,9 +9150,10 @@ class TestWavenumberSamplingKeepsItsLabelsOnTheCanvas:
         """Fitting must not win by deleting the information: at the size the
         plotter is authored for, the numeric value belongs on the chart."""
         with plt.rc_context({'font.size': 9}):
-            fig, ax = plots.plot_wavenumber_sampling(
+            fig, ax = _sampled_axis(
                 200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
-                rmax=5000.0, water_sound_speed=1500.0, c_bottom=1650.0)
+                rmax=5000.0, water_sound_speed=1500.0,
+                seabed_sound_speed=1650.0)
             labels = [t.get_text() for t in ax.texts]
             plt.close(fig)
         assert any('0.8' in t for t in labels), (
@@ -8413,9 +9168,10 @@ class TestWavenumberSamplingKeepsItsLabelsOnTheCanvas:
         something the font-shrink quietly absorbs.
         """
         with plt.rc_context({'font.size': 20}):
-            fig, ax = plots.plot_wavenumber_sampling(
+            fig, ax = _sampled_axis(
                 200.0, 1400.0, 1.0e4, 2 * np.pi / 40_000.0,
-                rmax=5000.0, water_sound_speed=1500.0, c_bottom=1650.0)
+                rmax=5000.0, water_sound_speed=1500.0,
+                seabed_sound_speed=1650.0)
             marks = [t for t in ax.texts if 'omega' in t.get_text()
                      or t.get_text().strip() in ('water', 'seabed')]
             sizes = [t.get_fontsize() for t in marks]
@@ -8621,7 +9377,7 @@ def test_the_arrivals_legend_counts_add_up_to_what_is_drawn():
                    frequencies=10e3)
     total = len(arr.arrivals)
 
-    for kwargs in ({}, {'dB': True, 'dynamic_range_dB': 40.0}):
+    for kwargs in ({}, {'value': 'dB', 'dynamic_range_dB': 40.0}):
         fig, ax = arr.plot(**kwargs)
         try:
             texts = [t.get_text() for t in ax.get_legend().get_texts()]
@@ -8741,7 +9497,7 @@ class TestTheWaveformPlotterDrawsWhatItIsAsked:
         x = self._burst()
         try:
             _fig, ax = uacpy.plot.plot_waveform(
-                x, self.FS, time_units='ms')
+                x, self.FS, time_unit='ms')
             t_ms, _y = self._drawn(ax)
             _fig2, ax2 = uacpy.plot.plot_waveform(x, self.FS)
             t_s, _y2 = self._drawn(ax2)
@@ -8771,7 +9527,7 @@ class TestTheWaveformPlotterDrawsWhatItIsAsked:
         x = self._burst()
         try:
             _fig, ax = uacpy.plot.plot_waveform(
-                x, self.FS, t0=-0.004, time_units='ms')
+                x, self.FS, t0=-0.004, time_unit='ms')
             t, _y = self._drawn(ax)
         finally:
             plt.close('all')
@@ -8780,7 +9536,7 @@ class TestTheWaveformPlotterDrawsWhatItIsAsked:
 
     @pytest.mark.parametrize('kwargs,message', [
         ({'value': 'rms'}, 'value must be'),
-        ({'time_units': 'us'}, 'time_units must be'),
+        ({'time_unit': 'us'}, 'time_unit must be'),
         ({'value': 'envelope_dB', 'reference': -1.0}, 'positive, finite'),
         ({'value': 'envelope_dB', 'dynamic_range_dB': np.inf},
          'dynamic_range_dB=inf must be'),
@@ -8814,6 +9570,45 @@ class TestTheWaveformPlotterDrawsWhatItIsAsked:
     def test_it_refuses_a_sample_rate_that_is_not_one(self, rate):
         with pytest.raises(ConfigurationError, match='positive and finite'):
             uacpy.plot.plot_waveform(self._burst(), rate)
+
+    def _trace(self, t0=1.5):
+        x = self._burst()
+        return Field(data=x, coords={'time': t0 + np.arange(x.size) / self.FS},
+                     kind='pressure', unit='Pa')
+
+    @pytest.mark.parametrize('value', ['envelope', 'envelope_dB'])
+    def test_a_time_trace_plots_the_envelope_views_of_its_samples(self,
+                                                                  value):
+        """``trace.plot(value='envelope')`` is the picture
+        ``plot_waveform(trace.data, fs, t0=…, value='envelope')`` draws, so a
+        time Field need not be unpacked into arrays for it."""
+        trace = self._trace()
+        try:
+            _fig, ax = trace.plot(value=value)
+            _fig, ax_w = uacpy.plot.plot_waveform(
+                trace.data, self.FS, t0=1.5, value=value)
+            (t, y), (t_w, y_w) = self._drawn(ax), self._drawn(ax_w)
+        finally:
+            plt.close('all')
+        np.testing.assert_allclose(t, t_w)
+        np.testing.assert_allclose(y, y_w)
+        assert ax.get_ylim()[0] == ax_w.get_ylim()[0]
+        assert ax.get_ylabel() == ('|envelope| (Pa)' if value == 'envelope'
+                                   else 'Envelope (dB re peak)')
+
+    @pytest.mark.parametrize('cut, message', [
+        (lambda f: Field(data=np.vstack([f.data, f.data]),
+                         coords={'range': np.array([1.0e3, 2.0e3]),
+                                 'time': f.coords['time']},
+                         kind='pressure', unit='Pa'), 'Cut one trace'),
+        (lambda f: Field(data=np.abs(f.data), coords={'range': f.coords['time']},
+                         kind='pressure', unit='Pa'), 'no time axis|own views'),
+    ])
+    def test_the_envelope_view_is_refused_off_one_time_trace(self, cut,
+                                                             message):
+        with pytest.raises(ConfigurationError, match=message):
+            cut(self._trace()).plot(value='envelope')
+        assert not plt.get_fignums()
 
 
 # ── The no-energy marker takes no part in a colour limit or a statistic ─────
@@ -8890,7 +9685,7 @@ class TestALinePlotLeavesTheNoEnergyMarkerOut:
         finally:
             plt.close(fig)
 
-    @pytest.mark.parametrize('plotter', ['plot_psd', 'plot_constant_q_psd'])
+    @pytest.mark.parametrize('plotter', ['plot_psd'])
     def test_a_psd_line(self, plotter):
         f = np.array([10.0, 20.0, 40.0, 80.0, 160.0])
         # An exact-zero bin (-600 dB) and a real 1e-20 Pa²/Hz bin (-80 dB
@@ -8925,7 +9720,7 @@ class TestALinePlotLeavesTheNoEnergyMarkerOut:
         fs = 100.0
         p = np.r_[np.zeros(300), np.full(300, 1e-3)]
         exposure = cumulative_sound_exposure_level(p, fs)
-        assert no_energy_mask(exposure.levels)[:3].all()
+        assert no_energy_mask(exposure.levels_dB)[:3].all()
         fig, ax = exposure.plot()
         try:
             y = np.asarray(ax.lines[0].get_ydata(), dtype=float)
@@ -9138,6 +9933,29 @@ def test_contour_labels_are_not_printed_over_each_other():
         assert boxes
         assert not any(a.overlaps(b) for i, a in enumerate(boxes)
                        for b in boxes[i + 1:])
+    finally:
+        plt.close(fig)
+
+
+def test_a_contour_label_at_the_frame_is_moved_inside_it():
+    """A label matplotlib places across the frame is cut by it ('SE = 0 dB'
+    reads 'SE = 0', 18 px past the frame on this map); it is moved inward
+    onto the line, whole."""
+    depths = np.linspace(0.0, 50.0, 51)
+    ranges = np.linspace(100.0, 30000.0, 300)
+    Z, R = np.meshgrid(depths, ranges / 1000.0, indexing='ij')
+    se = (np.where(R > 21.0, (Z - (3.0 + 0.6 * (R - 21.0))) * 3.0, 5.0)
+          - np.where((R > 22.0) & (R < 24.0) & (Z < 2.0), 10.0, 0.0))
+    field = Field(data=se, coords={'depth': depths, 'range': ranges},
+                  kind='signal_excess', unit='dB')
+    fig, ax = plot_signal_excess(field)
+    try:
+        fig.canvas.draw()
+        frame = ax.get_window_extent()
+        boxes = [t.get_window_extent() for t in ax.texts]
+        assert [t.get_text() for t in ax.texts] == ['SE = 0 dB']
+        assert all(frame.x0 <= b.x0 and b.x1 <= frame.x1 and frame.y0 <= b.y0
+                   and b.y1 <= frame.y1 for b in boxes), (frame, boxes)
     finally:
         plt.close(fig)
 
@@ -9386,9 +10204,9 @@ def test_the_difference_of_two_cuts_is_drawn_as_a_residual_line():
 
 def test_a_colour_window_on_a_one_axis_difference_is_refused():
     a, b = _one_depth_pair()
-    with pytest.raises(ConfigurationError, match='vmin= sets a colour window'):
+    with pytest.raises(ConfigurationError, match='vmax= sets a colour window'):
         plots.plot_field_difference(uacpy.metrics.tl_difference(a, b),
-                                    vmin=-5.0)
+                                    vmax=5.0)
 
 
 def test_the_difference_keeps_the_pins_and_credits_no_model(complex_field):
@@ -9478,14 +10296,92 @@ def test_a_private_plotters_generic_refusal_names_its_public_call():
         Field(data=np.full(4, 60.0), coords={'frequency': np.arange(1.0, 5.0)},
               unit='dB', model='Synth')),
      'plot_transfer_function'),
+    (lambda: uacpy.plot.plot_transfer_function(np.zeros(4)),
+     'plot_transfer_function'),
+    (lambda: uacpy.plot.plot_impulse_response(np.zeros(10)),
+     'plot_impulse_response'),
+    (lambda: uacpy.plot.plot_impulse_response(None), 'plot_impulse_response'),
+    (lambda: uacpy.plot.plot_source_depth_panels(np.zeros(3)),
+     'plot_source_depth_panels'),
+    (lambda: uacpy.plot.plot_source_depth_panels(
+        Field(data=np.zeros((2, 3, 4)),
+              coords={'source_depth': [10.0, 20.0], 'depth': [5.0, 10.0, 15.0],
+                      'range': [100.0, 200.0, 300.0, 400.0]}),
+        env=mfig.Figure().add_subplot()),
+     'plot_source_depth_panels'),
+    (lambda: uacpy.plot.plot_rays(np.zeros(3)), 'plot_rays'),
+    (lambda: uacpy.plot.plot_rays(_rays(), color_by='angle'), 'plot_rays'),
+    (lambda: uacpy.plot.plot_arrivals(np.zeros(3)), 'plot_arrivals'),
+    (lambda: uacpy.plot.plot_mode_shapes(np.zeros(3)), 'plot_mode_shapes'),
+    (lambda: uacpy.plot.plot_mode_shapes(_modes(), bogus=1),
+     'plot_mode_shapes'),
+    (lambda: uacpy.plot.plot_reflection_coefficient(np.zeros(3)),
+     'plot_reflection_coefficient'),
+    (lambda: uacpy.plot.plot_covariance(np.zeros(3)), 'plot_covariance'),
+    (lambda: uacpy.plot.plot_replicas(np.zeros(3)), 'plot_replicas'),
 ])
 def test_a_public_plotters_refusal_names_the_public_plotter(call, name):
-    """A public plotter is the call the user made, so its refusal names it —
-    these named a method form (``Environment.plot``,
-    ``Field.plot_transfer_function``), and ``plot_range_profile(5)`` leaked a
-    raw AttributeError."""
+    """A public plotter is the call the user made, so its refusal names it,
+    never a method form (``Environment.plot``, ``Rays.plot``,
+    ``Field.plot_impulse_response``); input of the wrong type is a typed
+    refusal, not a raw AttributeError."""
     with pytest.raises(ConfigurationError, match=rf'^{name}: '):
         call()
+    assert not plt.get_fignums()
+
+
+def test_a_labelled_twin_takes_its_public_plotters_keywords():
+    """A result's ``.plot()`` draws through the labelled twin ``_plot_x`` of
+    the public ``plot_x``; the two take the same keywords with the same
+    defaults (the twin adds ``who``), so the two calls draw alike."""
+    pairs = [name for name in plots.__all__
+             if callable(getattr(plots, f'_{name}', None))]
+    assert {'plot_rays', 'plot_arrivals', 'plot_mode_shapes',
+            'plot_reflection_coefficient', 'plot_covariance', 'plot_replicas',
+            'plot_source_depth_panels'} <= set(pairs)
+
+    def keywords(fn):
+        return [(p.name, p.kind, p.default) for p in
+                inspect.signature(fn).parameters.values() if p.name != 'who']
+
+    differ = [name for name in pairs
+              if keywords(getattr(plots, name))
+              != keywords(getattr(plots, f'_{name}'))]
+    assert not differ, differ
+
+
+@pytest.mark.parametrize('result, name', [
+    (lambda: _rays(), 'Rays.plot'),
+    (lambda: Arrivals(arrivals=[{"kind": "direct", "amplitude": 1.0,
+                                 "delay": 0.1}],
+                      receiver_depths=np.array([10.0]),
+                      receiver_ranges=np.array([100.0])), 'Arrivals.plot'),
+    (lambda: _modes(), 'Modes.plot'),
+    (lambda: ReflectionCoefficient(angles_deg=np.linspace(0, 90, 91),
+                                   magnitude=np.linspace(1.0, 0.0, 91),
+                                   phase=np.zeros(91)),
+     'ReflectionCoefficient.plot'),
+    (lambda: Covariance(covariance=np.eye(3)[None].astype(complex),
+                        frequencies=200.0), 'Covariance.plot'),
+    (lambda: Replicas(replicas=np.ones((1, 3, 4, 2), dtype=complex),
+                      candidates={'depth': np.linspace(10.0, 50.0, 3),
+                                  'range': np.linspace(1e3, 4e3, 4)},
+                      frequencies=200.0), 'Replicas.plot'),
+])
+def test_a_results_plot_and_plot_result_name_their_own_call(result, name):
+    """A result's ``.plot()`` reaches the same drawing as its public
+    plotter, its refusals naming the method; through ``plot_result`` they
+    name ``plot_result``. A keyword the view does not take is a TypeError,
+    or, on a view forwarding keywords to matplotlib, matplotlib's refusal
+    typed."""
+    for call, who in ((lambda: result().plot(bogus=1), name),
+                      (lambda: uacpy.plot.plot_result(result(), bogus=1),
+                       'plot_result')):
+        with pytest.raises((TypeError, ConfigurationError),
+                           match=rf"^{re.escape(who)}(\(\) got an unexpected "
+                                 rf"keyword argument 'bogus'|: a keyword was "
+                                 rf"passed)"):
+            call()
     assert not plt.get_fignums()
 
 
@@ -9558,7 +10454,7 @@ def test_every_dynamic_range_dB_is_a_positive_number_of_dB(bad):
             dynamic_range_dB=bad)
     with pytest.raises(ConfigurationError, match='dynamic_range_dB'):
         plots.plot_ambiguity(np.arange(4.0), np.arange(3.0), surface,
-                             dB=True, dynamic_range_dB=bad)
+                             value='dB', dynamic_range_dB=bad)
     assert not plt.get_fignums()
 
 
@@ -9566,6 +10462,35 @@ def test_the_ambiguity_floor_is_refused_on_the_linear_view():
     with pytest.raises(ConfigurationError, match='nothing to bound'):
         plots.plot_ambiguity(np.arange(4.0), np.arange(3.0), np.ones((3, 4)),
                              dynamic_range_dB=30.0)
+
+
+@pytest.mark.parametrize('draw, views', [
+    (lambda **kw: plots.plot_arrivals(_arrivals_at_levels([1.0, 0.5]), **kw),
+     ('magnitude', 'dB')),
+    (lambda **kw: plots.plot_ambiguity(np.arange(4.0), np.arange(3.0),
+                                       np.ones((3, 4)), **kw),
+     ('magnitude', 'dB')),
+    (lambda **kw: plots.plot_beam_power(np.linspace(-90.0, 90.0, 7),
+                                        np.linspace(1.0, 2.0, 7), **kw),
+     ('dB', 'power')),
+])
+def test_the_decibel_view_is_a_value_on_every_plotter(draw, views):
+    """"Draw it in dB" is one ``value=`` view on the arrivals, ambiguity and
+    beam-power plotters, as on ``plot_field``: each named view draws, an
+    unknown one is refused naming them, the floor is refused off the dB view,
+    and a ``dB=`` keyword is refused."""
+    for value in views:
+        fig, _ = draw(value=value)
+        plt.close(fig)
+    with pytest.raises(ConfigurationError,
+                       match=re.escape(f"pass one of {views}")):
+        draw(value='loss')
+    linear = next(v for v in views if v != 'dB')
+    with pytest.raises(ConfigurationError, match="Pass value='dB'"):
+        draw(value=linear, dynamic_range_dB=30.0)
+    with pytest.raises((TypeError, ConfigurationError), match="'dB'"):
+        draw(dB=True)
+    assert not plt.get_fignums()
 
 
 def test_the_matched_field_floor_sits_dynamic_range_dB_below_the_peak():
@@ -9585,16 +10510,40 @@ def test_the_matched_field_floor_sits_dynamic_range_dB_below_the_peak():
         plt.close(fig)
 
 
-def test_a_misspelt_hemisphere_is_refused_with_the_choices():
-    with pytest.raises(ConfigurationError, match=r"hemi='n'.*\('N', 'S'\)"):
-        plots.plot_sea_ice_map(np.zeros((4, 4)), hemi='n')
+def test_the_sea_ice_map_refuses_a_bare_array_naming_the_record():
+    """The map's graticule, transect and zoom are placed on the cells of the
+    grid's hemisphere, which a bare array does not carry."""
+    with pytest.raises(ConfigurationError, match='draws a SeaIceGrid') as info:
+        plots.plot_sea_ice_map(np.zeros((448, 304)))
+    assert 'SeaIceGrid(concentration=' in info.value.remediation
     assert not plt.get_fignums()
+
+
+@pytest.mark.parametrize('shape, hemi', [((448, 304), 'N'), ((332, 316), 'S')])
+def test_the_grids_hemisphere_places_the_map(monkeypatch, shape, hemi):
+    """The plotter reads the record's hemisphere: the overlays are
+    reprojected onto that hemisphere's grid, and ``.plot()`` is the same
+    call."""
+    import uacpy.data.seaice_local as sil
+    asked = []
+    monkeypatch.setattr(sil, 'sea_ice_pixel',
+                        lambda pt, hemi='N': asked.append(hemi) or (2, 3))
+    grid = sil.SeaIceGrid(concentration=np.full(shape, 0.5), hemi=hemi,
+                          month=3)
+    fig, ax = plots.plot_sea_ice_map(grid, source_point=(80.0, 0.0), graticule=0,
+                                     zoom=False)
+    assert ax.images[0].get_array().shape == shape
+    assert asked == [hemi]
+    plt.close(fig)
+    fig, ax = grid.plot(graticule=0, zoom=False)
+    assert ax.images[0].get_array().shape == shape
+    plt.close(fig)
 
 
 def test_a_misspelt_scaling_is_refused_with_the_choices():
     with pytest.raises(ConfigurationError,
                        match=r"scaling='foo' is not a spectral scaling"):
-        plot_constant_q_psd(np.logspace(1, 3, 10), np.ones(10), scaling='foo')
+        plot_psd(np.logspace(1, 3, 10), np.ones(10), scaling='foo')
     assert not plt.get_fignums()
 
 
@@ -9660,8 +10609,8 @@ def test_a_vertical_array_covariance_is_drawn_against_depth():
 
 def test_compare_models_draws_into_a_subfigure_and_forwards_style(
         complex_field):
-    """The caller's figure is laid out and credited by the caller: nothing
-    is written under it even though both fields carry a model credit."""
+    """The caller's figure is laid out by the caller; the model is credited
+    once, in the footnote of the figure the SubFigure belongs to."""
     from uacpy.models.provenance import model_provenance
     credited = Field(data=complex_field.data,
                      coords=dict(complex_field.coords), model='Bellhop',
@@ -9675,7 +10624,9 @@ def test_compare_models_draws_into_a_subfigure_and_forwards_style(
         meshes = [c for ax in axes.ravel() for c in ax.collections
                   if isinstance(c, mcoll.QuadMesh)]
         assert len(meshes) == 2 and all(m.get_rasterized() for m in meshes)
-        assert not parent.texts and not top.texts   # the credit is the caller's
+        assert parent.get_supxlabel() == (
+            'Model: Bellhop — Michael B. Porter, Acoustics Toolbox')
+        assert not top.texts
     finally:
         plt.close(parent)
 
@@ -9717,7 +10668,10 @@ def test_the_sea_ice_map_bar_is_the_height_of_the_map_and_credits_nsidc():
     """The zoom window around a transect is 1.6 times wider than tall, so
     at square pixels the map is much shorter than its square slot; the bar
     matches the map, not the slot."""
-    grid = np.random.default_rng(0).uniform(0.0, 1.0, (448, 304))  # NSIDC 'N'
+    from uacpy.data import SOURCES, DataProvenance, SeaIceGrid
+    grid = SeaIceGrid(
+        concentration=np.random.default_rng(0).uniform(0.0, 1.0, (448, 304)),
+        hemi='N', month=3, provenance=DataProvenance(source=SOURCES['seaice']))
     fig, ax = plots.plot_sea_ice_map(grid, transect=((75.0, -10.0),
                                                      (80.0, 5.0)))
     try:
@@ -9727,6 +10681,44 @@ def test_the_sea_ice_map_bar_is_the_height_of_the_map_and_credits_nsidc():
         bar_h = cax.get_window_extent().height
         assert bar_h == pytest.approx(map_h, rel=0.05), (bar_h, map_h)
         assert any('NSIDC' in t.get_text() for t in fig.texts)
+    finally:
+        plt.close(fig)
+
+
+def test_a_hand_built_sea_ice_grid_credits_nothing(monkeypatch):
+    """``provenance=None`` is user-supplied data, as on a BathyGrid: the map
+    draws with no credit footnote."""
+    import uacpy.data.seaice_local as sil
+    monkeypatch.setattr(sil, 'sea_ice_pixel', lambda pt, hemi='N': (2, 3))
+    grid = sil.SeaIceGrid(concentration=np.full((332, 316), 0.5), hemi='S',
+                          month=9)
+    fig, ax = grid.plot(graticule=0)
+    try:
+        assert ax.has_data()
+        assert fig.texts == []
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize('lat_span, lon_span', [((56.0, 57.0), (0.0, 4.0)),
+                                                ((56.0, 58.0), (2.0, 5.0))])
+def test_the_depth_map_bar_is_the_height_of_the_map(lat_span, lon_span):
+    """The depth map keeps its 1/cos(latitude) aspect, so a region four
+    times wider than tall draws 295 px high in a 655 px slot, beside which a
+    bar sized from the slot runs 720 px. The bar is shrunk to the drawn map,
+    as the sea-ice map's is (within the 7 % the final layout pass moves
+    it)."""
+    lats, lons = np.linspace(*lat_span, 30), np.linspace(*lon_span, 40)
+    depth = np.full((lats.size, lons.size), 100.0)
+    depth[:, :20] = 300.0
+    fig, ax = plots.plot_bathymetry_map(lats, lons, depth, basemap=False,
+                                        show_data_credit=False)
+    try:
+        fig.canvas.draw()
+        cax, = [a for a in fig.axes if a is not ax]
+        map_h = ax.get_window_extent().height
+        bar_h = cax.get_window_extent().height
+        assert bar_h == pytest.approx(map_h, rel=0.1), (bar_h, map_h)
     finally:
         plt.close(fig)
 
@@ -9744,7 +10736,7 @@ class TestBandLevelsPlotNamesItsLadderAndReference:
         fig, ax = levels.plot()
         assert ax.get_xlabel() == f'Frequency, {word.lower()} bands (Hz)'
         assert ax.get_title() == f'{word} band levels'
-        unit = levels.units['levels']
+        unit = levels.units['levels_dB']
         assert ax.get_ylabel() == f'Band level ({unit})'
         plt.close(fig)
 
@@ -9827,9 +10819,12 @@ class TestATrackPlanViewDrawsTheMapAroundItsLine:
     line, its events and an optional threshold contour."""
 
     @staticmethod
-    def plan(n_depths=1, positions=np.arange(-500.0, 501.0, 100.0)):
+    def plan(n_depths=1, positions=np.arange(-500.0, 501.0, 100.0),
+             silent_beyond=None):
         ranges = np.geomspace(5.0, 5000.0, 200)
         one = 200.0 - 20.0 * np.log10(ranges)
+        if silent_beyond is not None:
+            one[ranges >= silent_beyond] = -600.0      # the no-energy marker
         sel = Field(data=np.repeat(one[None, :], n_depths, axis=0),
                     coords={'depth': np.arange(n_depths) * 10.0 + 10.0,
                             'range': ranges},
@@ -9838,6 +10833,58 @@ class TestATrackPlanViewDrawsTheMapAroundItsLine:
         return sel.track_exposure(positions,
                                   closest_approach=np.linspace(10.0, 2000.0, 20),
                                   along=np.linspace(-1500.0, 1500.0, 31))
+
+    def test_a_cell_no_event_reached_is_grey_and_outside_the_scale(self):
+        """The -600 dB marker of the cells every event misses is not a level:
+        it is painted grey, the colour window spans the computed levels, a
+        contour level between the marker and them has no line, and a
+        window pinned inside the levels ends the bar in an arrow."""
+        plan = self.plan(silent_beyond=1500.0)
+        marker = no_energy_mask(plan.data)
+        levels = np.asarray(plan.data)[~marker]
+        assert marker.sum() > 0 and levels.size > 0
+        with recorded_warnings() as caught:
+            fig, ax = plots.plot_track_exposure(
+                plan, contours=[0.5 * (-600.0 + levels.min())])
+        assert ax.collections[0].get_clim() == pytest.approx(
+            (levels.min(), levels.max()))
+        grey, = [c for c in ax.collections
+                 if c.get_gid() == _fields._NO_ENERGY_GID]
+        n_near = int(marker[..., plan.coords['range'] > 0].sum())
+        assert np.ma.count(grey.get_array()) == marker.sum() + n_near
+        assert any('outside' in str(w.message) for w in caught)
+        fig, ax = plots.plot_track_exposure(plan, vmin=float(np.median(levels)))
+        assert fig.axes[-1]._colorbar.extend == 'min'
+
+    @pytest.mark.parametrize('closest_approach, blank_half_width', [
+        (np.arange(400.0, 2001.0, 100.0), 0.35),   # nothing inside 350 m
+        (np.arange(0.0, 2001.0, 100.0), 0.0),      # the track is a sample
+        (np.linspace(10.0, 2000.0, 20), 0.0),      # within half a spacing
+    ])
+    def test_only_the_computed_distances_are_painted(self, closest_approach,
+                                                     blank_half_width):
+        """Each cell spans half a spacing either side of its own distance,
+        so a map computed from 400 m leaves the strip inside 350 m blank;
+        a map sampled on the track, or within half a spacing of it, is
+        painted across it. Plan views built by hand, as track_exposure
+        refuses a distance shorter than the exposure's first range."""
+        along = np.linspace(-1500.0, 1500.0, 31)
+        level = 150.0 - 10.0 * np.log10(
+            1.0 + along[:, None] ** 2 + closest_approach[None, :] ** 2)
+        plan = Field(data=level,
+                     coords={'along': along, 'range': closest_approach},
+                     kind='sound_exposure', unit='dB')
+        fig, ax = plots.plot_track_exposure(plan)
+        mesh = ax.collections[0]
+        y = mesh.get_coordinates()[:, 0, 1]
+        blank = np.ma.getmaskarray(mesh.get_array()).all(axis=1)
+        rows = [(lo, hi) for lo, hi, no in zip(y[:-1], y[1:], blank) if no]
+        if blank_half_width:
+            assert rows == [pytest.approx((-blank_half_width,
+                                           blank_half_width))]
+        else:
+            assert rows == []
+        assert y[0] == pytest.approx(-y[-1])
 
     def test_it_is_what_field_plot_draws(self):
         fig, ax = self.plan().plot()
@@ -10192,6 +11239,27 @@ class TestALevelMapIsCaptionedAgainstItsOwnReference:
         fig, ax = plots.plot_track_exposure(plan, depth=5.0)
         assert unit in [a.get_ylabel() for a in fig.axes][-1]
         plt.close(fig)
+
+
+def test_a_bathy_grid_plots_itself_as_its_map():
+    """``grid.plot()`` is ``plot_bathymetry_map(grid)`` — compute, then
+    plot — into a new figure or a caller's Axes."""
+    from uacpy.data import BathyGrid
+    lats, lons = np.linspace(56.0, 57.0, 20), np.linspace(2.0, 3.0, 25)
+    grid = BathyGrid(lats=lats, lons=lons,
+                     depths=100.0 + 50.0 * (lons[None, :] - 2.0)
+                     + np.zeros((lats.size, 1)))
+    pictures = []
+    for draw in (lambda: grid.plot(basemap=False),
+                 lambda: plots.plot_bathymetry_map(grid, basemap=False)):
+        fig, ax = draw()
+        fig.canvas.draw()
+        pictures.append(np.asarray(fig.canvas.buffer_rgba()).copy())
+        plt.close(fig)
+    assert np.array_equal(*pictures)
+    fig, ax = plt.subplots()
+    assert grid.plot(ax=ax, basemap=False)[1] is ax
+    plt.close(fig)
 
 
 class TestAnAxesPassedAfterACarrierIsRefusedNamingAx:

@@ -57,22 +57,27 @@ suite by a source scan, not by a sampling test —
 figure script and fails on `np.random.<draw>`, `import random`, or a
 non-generator import from `numpy.random`.
 
-**Exactly nine public functions draw at all**, and every one of them takes a
-seeding argument. **Eight of the nine draw afresh unless you seed them** — those
-are the ones a reproducible run has to pin:
+**Exactly ten public functions draw at all**, and every one of them takes a
+seeding argument. **Nine of the ten draw afresh unless you seed them** — those
+are the ones a reproducible run has to pin. Four transceiver classes draw too,
+from fixed seeds and with no argument (last row):
 
 | Module | Functions | Seeded by | Default |
 |---|---|---|---|
 | `uacpy.acoustic_signal` | `make_bandlimited_noise`, `synthesize_noise_from_psd` | `rng=` | unseeded |
-| `uacpy.comms` | `awgn`, `fading_taps`, `simulate_link`, `ber_sweep` | `rng=` | unseeded |
+| `uacpy.comms` | `awgn`, `fading_taps`, `simulate_link`, `ber_sweep`, `ofdm_ber_sweep` | `rng=` | unseeded |
 | `uacpy` | `generate_sea_surface` | `rng=` | unseeded |
 | `uacpy.data` | `fetch_sea_surface` | `rng=` | unseeded |
 | `uacpy.comms` | `schmidl_cox_preamble` | `rng=` | **fixed sequence** |
+| `uacpy.comms` | `Transmitter`, `CommsReceiver` (default preamble); `OFDMTransmitter`, `OFDMReceiver` (pilot) | no argument | **fixed sequence** |
 
-`schmidl_cox_preamble` is the exception: its `rng=None` draws one fixed
-sequence, `np.random.default_rng(0x5C0FFEE)`, so two calls that leave it unset
-return the same preamble — a transmitter and a receiver both rebuild it — and it
-needs no action from you. It is listed because the point of this table is that
+`schmidl_cox_preamble` is the exception among the functions: its `rng=None`
+draws one fixed sequence, `np.random.default_rng(0x5C0FFEE)`, so two calls that
+leave it unset return the same preamble — a transmitter and a receiver both
+rebuild it — and it needs no action from you. The transceiver classes draw
+their default preamble (a symbol array passed as `preamble=` replaces it) and
+the OFDM pilot from fixed seeds the same way, so a transmitter and a receiver
+built apart share them. They are listed because the point of this table is that
 it is exhaustive — a drawing function absent from it is a stream you cannot know
 to look for.
 
@@ -84,8 +89,8 @@ The data layer reaches it through
 defaulting to `None`; a plain `fetch_environment` call draws nothing, because
 its `altimetry_sources` defaults to `None` too.
 
-Each of the nine returns identical output for a given seeded generator,
-and the eight unseeded ones a fresh draw when the seeding argument is omitted —
+Each of the ten returns identical output for a given seeded generator,
+and the nine unseeded ones a fresh draw when the seeding argument is omitted —
 the right default for a
 Monte-Carlo sweep, and the wrong one for a figure you intend to publish:
 
@@ -191,7 +196,7 @@ export OMP_NUM_THREADS=1
 
 ## 5. A checklist for a reproducible run
 
-1. **Seed every draw.** `rng=np.random.default_rng(seed)` on any of the eight
+1. **Seed every draw.** `rng=np.random.default_rng(seed)` on any of the nine
    unseeded-by-default functions in
    [§2](#2-the-analysis-layer-is-deterministic) — `altimetry_rng=` when you
    reach the sea surface through `fetch_environment` — and record the seed
@@ -212,7 +217,13 @@ export OMP_NUM_THREADS=1
    the engine that repeats the run with all of them pinned
    (`RAM.from_run_settings(Field.from_netcdf(path).run_settings)`), and
    `uacpy.PropagationModel.from_run_settings(rs)` builds whichever engine
-   wrote the record `rs`, so you need not know the class.
+   wrote the record `rs`, so you need not know the class. The record holds
+   the engine, not the problem: the replay takes the same Environment,
+   Source and Receiver again, so keep them too (`env.to_netcdf(path)`,
+   `source.to_netcdf(path)`, `receiver.to_netcdf(path)`, each read back by
+   its class's `from_netcdf`). The rebuilt engine has the first run's
+   derived values pinned, so on another environment it keeps them rather
+   than deriving new ones.
 
 ---
 
@@ -244,7 +255,7 @@ before you claim it.
   and why a moved bit did not move a bearing.
 - **[Bellhop](../models/bellhop.md)** — backend selection, and the
   reproducibility difference between the fortran and multithreaded backends.
-- **[Communications](comms.md)** — `simulate_link`, `ber_sweep` and the
+- **[Communications](comms.md)** — `simulate_link`, `ber_sweep`, `ofdm_ber_sweep` and the
   Monte-Carlo sweeps whose `rng` you need to seed.
 - **[File I/O](io.md)** — `work_dir` and `cleanup`, the deck files the
   stability claim above is about, and the readers that parse them back.

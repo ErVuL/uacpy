@@ -76,7 +76,7 @@ uacpy/
     ├── third_party/         Vendored Fortran/C sources (§9)
     ├── bin/                 Gitignored; populated by install.sh
     ├── parallel.py          run_parallel / Job — parallel batch runner
-    ├── metrics.py           tl_rmse / tl_max_error / tl_bias (core.metrics shim)
+    ├── metrics.py           tl_rmse / tl_max_error / tl_bias (core.results.metrics shim)
     ├── _log.py              Single log channel + warning formatter
     ├── __main__.py          `python -m uacpy`: version, engine_status table, verdict
     ├── acoustics.py, plot.py, materials.py, units.py
@@ -195,21 +195,20 @@ code (a hook added, removed or newly overridden fails it).
 | `_default_backend` | identity | the first `_BINARIES` key (`None` without one) | Bellhop |
 | `_repr_backend` | identity | `None`: `__repr__` names no backend for `backend=None` | Bellhop |
 | `_per_launch_knob_values` | rebuilt model (§2.3) | `{}`: no knob is derived per launch | Kraken, RAM |
-| `_default_run_mode` | 1 | the first of `spec.modes` | Kraken |
+| `_default_run_mode` | 1 | the first of `spec.modes` | — |
 | `_default_run_mode_for` | 1 | `_default_run_mode()`, whatever `frequencies=` holds | Kraken |
 | `_refuse_run_mode` | 1 | nothing: the generic `UnsupportedFeatureError` follows | SPARC |
 | `_normalise_env` | 1 | the environment as given | Kraken |
 | `_project_environment` | 1 | the collapse projection, one `FallbackWarning` per dropped feature (an override calls `super()`) | Bellhop, Kraken, RAM, Scooter |
 | `_check_time_series_request` | 2 | refuses a missing or unusable pulse pair (`_checks.require_timeseries_signal`) | SPARC |
 | `_multi_frequency_refusal` | 2 | a `ConfigurationError` pointing at `BROADBAND` / `TIME_SERIES` | Bounce, OAST |
-| `_validate_geometry` | 2 | beam pattern, multi-depth source, source depths, receiver grid | Bellhop, Bounce |
+| `_validate_geometry` | 2 | beam pattern, multi-depth source, source depths, receiver grid; nothing on a REFLECTION run, which reads no geometry | Bellhop |
 | `_check_source_depths` | 2 | refuses a source below `_max_receiver_depth` | RAM |
 | `_max_receiver_depth` | 2 | the seafloor, or the deepest interface with `spec.traits.receivers_reach_sediment` | — |
 | `_source_below_domain_note` | 2 | `None`: no paragraph added to the source-depth refusal | — |
 | `_receiver_grid_is_paired` | 2 | `False`: the deck spans the depth-by-range product | Bellhop |
 | `_validate_engine` | 2 | nothing to refuse | Bellhop, Bounce, Kraken, OASN, OASP, OASR, OASS, OASSP, OAST, RAM, SPARC, Scooter |
-| `_broadband_band_knobs` | 3 | `(None, None)`: the package's band defaults | Bellhop |
-| `_requested_frequencies` | 3 | `_band.resolve_band` with the band knobs | OASP, OASSP, RAM, SPARC |
+| `_requested_frequencies` | 3 | `_band.resolve_band` | OASP, OASSP, RAM, SPARC |
 | `_resolve_engine_settings` | 3 | `None`: no settings of its own | every engine |
 | `_announce_engine_settings` | 3 | one warning per notice of `settings.engine.notices` | OASS, OASSP |
 | `_marched_frequencies` | 3 | `settings.frequencies` | OASP, OASSP, RAM, SPARC |
@@ -622,7 +621,12 @@ These are the physics-agnostic primitives every model consumes:
   `GreensFunction`, `Covariance`, `Replicas`, `ReflectionCoefficient`, plus
   `ResultStack` (sparse results over a coordinate) and `_superposition.py`
   (the field of several sources). Defines `PhaseReference` enum (`'travelling_wave'` /
-  `'time_domain_native'`).
+  `'time_domain_native'`). `results/metrics.py` holds the cross-model TL
+  agreement helpers over `(field, reference)`, two `Field`s on one
+  depth/range grid or two plain dB arrays: `tl_rmse`, `tl_max_error`,
+  `tl_bias`, and `tl_rmse_on_shared_ranges` for two grids that share only
+  some ranges; it sits with the `Field` it compares, and the top-level
+  `metrics.py` shim re-exports it as `uacpy.metrics`.
 - `absorption.py` — `Thorp`, `FrancoisGarrison` (one water row, or a T/S
   profile, each property a number or `(depth, value)` pairs on its own depths; no
   depth of its own — every evaluation takes the depth evaluated), `Biological`, `ConstantAbsorption`. **One object
@@ -692,12 +696,6 @@ These are the physics-agnostic primitives every model consumes:
   uppercase module-level constants and no `'mud'`/`'ice'` entries (sea-ice
   lives as `SEA_ICE_*` constants in `data/seaice_local.py`, their one
   reader).
-- `metrics.py` — cross-model TL agreement helpers over `(field, reference)`,
-  two `Field`s on one depth/range grid or two plain dB arrays: `tl_rmse`,
-  `tl_max_error`, `tl_bias`, and
-  `tl_rmse_on_shared_ranges` for two grids that share only some ranges.
-  Re-exported at
-  `uacpy.metrics` by the top-level `metrics.py` shim.
 - `sediment.py` — grain size (Wentworth ϕ) → bulk geoacoustics. Distinct from
   `data/sediment.py` (§7.1), which fetches ϕ; this converts it. It lives in
   `core/` so `BoundaryProperties.from_grain_size` works without importing
@@ -726,17 +724,20 @@ These are the physics-agnostic primitives every model consumes:
   why `stacklevel` must not be combined with the skip walk.
 - `constants.py` — the physics reference every layer reads: the reference
   sea water (`REFERENCE_*`, `DEFAULT_SOUND_SPEED`,
-  `DEFAULT_WATER_DENSITY_G_CM3`), `PRESSURE_FLOOR`/`NO_ENERGY_DB`, the dB
+  `DEFAULT_WATER_DENSITY`), `PRESSURE_FLOOR`/`NO_ENERGY_DB`, the dB
   reference pressures and `NEPER_TO_DB`. A constant lives
   with its owner: the Acoustics-Toolbox deck limits the carriers enforce in
-  `core/deck_limits.py`, `EARTH_RADIUS_M` beside the great-circle helpers in
+  `core/deck_limits.py`, `EARTH_RADIUS` beside the great-circle helpers in
   `core/geo.py`, `BoundaryType` in `core/boundary.py`, model defaults in
   `models/_defaults.py` (`DEFAULT_C_MIN`, `DEFAULT_BROADBAND_N_FREQUENCIES`,
   `DEFAULT_BROADBAND_BANDWIDTH_FACTOR`), the phase-speed search factors
   (`C_HIGH_FACTOR`, `DEFAULT_C_MAX_UNBOUNDED`) beside their
   one resolver in `models/_window.py`, the `c_low` rule every
   wavenumber integration and its deck writer share (`C_LOW_FACTOR`,
-  `C_LOW_FACTOR_ELASTIC`, `default_c_low`) in `core/engine_defaults.py`,
+  `default_c_low`, and the Scholte waves it counts among the speeds,
+  `scholte_waves`, each solved by the public array formula
+  `scholte_wave_speed` of `core/acoustics/boundaries.py`) in
+  `core/engine_defaults.py`,
   and the AT deck letters
   (`AttenuationUnits`, `parse_boundary_type`) in `io/at_codes.py`.
 - `exceptions.py` — `UACPYError` (the base every other one derives
@@ -769,14 +770,20 @@ Three kinds of data object cross the package, each with one base:
   refuses. A carrier whose fields are coupled overrides
   `_fields_for_assignment`; `Environment`, which holds the other carriers,
   checks and completes an assignment in its own `__setattr__` instead of the
-  mixin. `@carrier`'s `__init__` counts as a package
+  mixin. Both refuse an assignment to a name that is neither a field nor
+  declared by the class (`refuse_unknown_attribute`): a mistyped setting
+  would otherwise be stored where nothing reads it. `@carrier`'s `__init__`
+  counts as a package
   frame, so a warning raised while building one names the user's line (§6.2).
 - A **record** is a frozen value nothing changes after it is built:
   `FrozenRecord` (`core/_records.py`) for the run records (`RunSettings`,
   `EngineSettings` and the per-engine Settings, `OutputSpec`, `TimeSettings`)
   and `ExportRecord` (`core/_export.py`) for what a reader or a data fetcher
-  returns. Array fields named in `_ARRAY_FIELDS` are stored as read-only
-  copies.
+  returns. Array fields named in `_ARRAY_FIELDS` are stored read-only: a
+  `FrozenRecord` copies them; an `ExportRecord` holds read-only views of the
+  arrays it is built from (a reader's grid is not duplicated), so it refuses
+  writes through itself while the builder's own array stays the builder's.
+  A carrier built from a record copies what it keeps (`Source(beam_pattern=)`).
 - A **result** is what a run or a computation returns: `Result`
   (`core/results/_base.py`) and its subclasses. A result carries no carriers;
   it carries its coordinates, its `run_settings` and `metadata`.
@@ -1055,10 +1062,12 @@ plotting lives in `uacpy.visualization.plots`**, reached as `uacpy.plot`
   view takes `env=`; `Field._plotter_name()` picks among a field's views by
   what it holds: one panel per source depth, the track plan view, the sonar
   maps, the difference map, the ambiguity surface): `plot_result(result,
-  env=…)` for a result, to the public per-type renderers (`plot_rays`,
-  `plot_arrivals`, `plot_mode_shapes`, …; a Field's two through their
-  labelled twins `_plot_field_as` / `_plot_source_depth_panels`, whose
-  refusals name the call made), and `plot_carrier(carrier)` for a carrier, to
+  env=…)` for a result, to the per-type renderers (`plot_rays`,
+  `plot_arrivals`, `plot_mode_shapes`, …) through their labelled twins
+  (`_plot_rays`, …, a Field's `_plot_field_as` / `_plot_source_depth_panels`),
+  which take the public plotter's keywords plus `who`, so a refusal names the
+  call made (`Rays.plot`, `plot_result`; the public plotter names itself),
+  and `plot_carrier(carrier)` for a carrier, to
   the public `plot_environment`, `plot_ssp`, `plot_range_profile` and
   `plot_absorption`; a signal result's `.plot()` calls its plotter
   directly. Public free functions remain
@@ -1077,7 +1086,7 @@ plotting lives in `uacpy.visualization.plots`**, reached as `uacpy.plot`
 and `uacpy.metrics` are THE documented paths of the plotters, the acoustics
 helpers and the TL metrics, and docs, examples and the README name them.
 `uacpy.visualization.plots`, `uacpy.core.acoustics` (with the absorption
-formulas of `uacpy.core.absorption`) and `uacpy.core.metrics` are the
+formulas of `uacpy.core.absorption`) and `uacpy.core.results.metrics` are the
 implementation modules those facades expose; package code imports the
 implementation modules (layering: `core` must not import a root facade), and a
 facade adds no name of its own. `uacpy.visualization` re-exports no plotter;
@@ -1177,15 +1186,21 @@ then:
   source such as CRUST1.0 returns its own transect), and add one
   `_BottomProvider` row to
   `environment._BOTTOM_PROVIDERS` (its `id` doubles as the source keyword;
-  `in_auto=True` joins the `'auto'` chain, `in_cache_auto=True` the `'local'`
-  one). The accepted keywords, fallback order and provenance id all derive from
-  that list.
-- *Sound speed* / *bathymetry* → add one `SourceProvider` row (id, backends
-  cached twin first, point fetcher, transect fetcher or `None`) to
-  `environment._SSP_CHAIN` / `bathymetry._BATHY_CHAIN` (`data/_chain.py`), and
-  its id to the chain's `auto` order if `'auto'` should try it. The accepted
-  keywords, the cache-first attempts and the fallback order derive from that
-  row.
+  `backends` are its backend tokens, cached twin first — `('local',)` for an
+  installed dataset, `('live',)` for a service, both for a source with a local
+  twin; `in_auto=True` joins the `'auto'` chain, whose cached backends are the
+  `'local'` one). The rows become `environment._BOTTOM_CHAIN`, a
+  `SourceChain`; the accepted keywords, fallback order and provenance id all
+  derive from that list.
+- *Sound speed* / *bathymetry* / *sea state* / *sea ice* → add one
+  `SourceProvider` row (id, backends cached twin first, point fetcher,
+  transect fetcher or `None`) to the axis's `SourceChain` (`data/_chain.py`):
+  `sound_speed._SSP_CHAIN`, `bathymetry._BATHY_CHAIN`, `waves._WAVE_CHAIN`,
+  `sea_surface._SEA_SURFACE_CHAIN`, `environment._SURFACE_CHAIN`
+  (`seabed._SUBSTRATE_CHAIN` for the EMODnet record), and its id to the
+  chain's `auto` order if `'auto'` should try it. The accepted keywords, the
+  cache-first attempts, the fallback order and the one unknown-source refusal
+  derive from that row.
 - *Absorption pH* → `environment._fetch_ph` is pH-source aware: it prefers the
   operational Copernicus BGC `ph` field on the Copernicus SSP branch
   (`copernicus.fetch_ph_operational`), else the cached GLODAP grid
@@ -1209,12 +1224,13 @@ identity/citation through `prov.source`; there is **no** attribute delegation.
 
 Every carrier carries provenance **uniformly as a tuple of `DataProvenance`** in
 `carrier.data_sources` — leaf carriers (`SoundSpeedProfile`/`Bathymetry`/
-`BoundaryProperties`) as a validated field (`_coerce_data_sources` rejects a
+`Altimetry`/`BoundaryProperties`, the `Absorption` laws (keyword-only) and
+`AbsorptionCoefficient`) as a validated field (`core/_provenance.py::coerce_data_sources` rejects a
 non-`DataProvenance`), container carriers (`Bottom`/`SeabedColumn`/`Surface`) as
 an aggregating property. A fetcher stamps its carrier with a real
 `DataProvenance` (e.g. WOA23 → snapped cell centre + climatology period; Argo →
 cast time + float position); `Environment` aggregates the union across its
-carriers (`_aggregate_data_sources`, dedup by `r.source.id`) into
+carriers (`dedupe_provenance`, exact repeats removed) into
 `env.data_sources`, and `fetch_environment`'s `_record_provenance` wraps any
 un-stamped layer's bare catalogue id in `DataProvenance(source=…)` so the tuple
 stays uniform. `uacpy.data.citations(env)` (or a carrier, id, `DataSource`, or
@@ -1461,9 +1477,13 @@ Worth knowing:
 
 ## 10. Coding conventions
 
-- Public API uses metres / Hz / m/s / g/cm³ / dB/wavelength. A name may
-  carry its unit as a suffix (`_m`, `_km`, `_s`, `_deg`, `_rad`, `_kn`,
-  `_dbar`, `_dB`; DOCUMENTATION §15); a length that is not metres must.
+- Public API uses metres / Hz / m/s / g/cm³ / dB/wavelength. A name carries a
+  unit suffix only when its unit is not SI (`_km`, `_deg`, `_kn`, `_dbar`,
+  `_dB`); an SI unit (m, s, Hz, m/s, rad) goes unsaid, and density (g/cm³),
+  attenuation (dB/λ), latitude/longitude, temperature and salinity keep plain
+  names (DOCUMENTATION §15). `TestNoPublicNameCarriesAnSIUnitSuffix`
+  (`tests/test_architecture.py`) refuses `_m`, `_s`, `_rad` and the other SI
+  suffixes on a public name or constant (`EARTH_RADIUS`, `DEFAULT_RUN_TIMEOUT`).
 - Constructor-only model configuration — no `set_params()`.
 - Use the typed exception hierarchy (`core/exceptions.py`), not bare
   `ValueError`.
@@ -1581,7 +1601,7 @@ A module's layer is its subpackage (`core.results` and `core.acoustics`
 counted apart from `core`). A layer imports only its own rank or below:
 
 ```
-1  core, core.acoustics, _log, _stack, _version
+1  core, core.acoustics, _log, _version
 2  acoustic_signal
 3  comms, noise
 4  core.results
@@ -1590,7 +1610,8 @@ counted apart from `core`). A layer imports only its own rank or below:
 7  models
 8  parallel
 9  visualization
-10 the top-level modules: uacpy/__init__.py, acoustics, metrics, plot
+10 the top-level modules: uacpy/__init__.py, __main__, acoustics, materials,
+   metrics, plot, units
 ```
 
 `tests/test_architecture.py::test_layering` enforces it (`_LAYER_ORDER`) with
@@ -1599,7 +1620,13 @@ three more rules: no module-level import cycle; `core` imports nothing from
 that points up the order, and every private name imported across a layer, is
 in an allow-list (`_UPWARD_IMPORTS`, `_PRIVATE_NAMES_ACROSS_LAYERS`). The
 allow-lists only shrink: a new entry fails the test, and so does an entry
-whose import has gone.
+whose import has gone. `_PRIVATE_NAMES_ACROSS_LAYERS` takes a new entry, with
+a comment naming the public function, for the labelled twin of a user-level
+function: a private `_f` that takes the caller's name, so a method's refusal
+names the call the user made (`Field.impulse_response` reaches
+`acoustic_signal.impulse_response_from_transfer_function` through
+`_impulse_response_from_transfer_function`, listed there and in
+`_CROSS_PACKAGE_PRIVATES`).
 
 When the gate fails, move the code down to the layer that needs it, or pass
 the value in as an argument. The one sanctioned upward seam is `.plot()`:
@@ -1644,7 +1671,7 @@ step is skipped.
    the change is meant. uacpy reads only records this version writes, so no
    default is needed for a record saved before the field existed.
 4. Spell it by the house rules: `<quantity>_max` / `_min`, `dB` never `db`,
-   a unit suffix from §10's list (`_s` for seconds, …), a default equal to a package constant
+   a unit suffix only for a non-SI unit (§10's list: `_km`, `_deg`, …), a default equal to a package constant
    written as that constant (`tests/test_harmonisation_gates.py`,
    `tests/test_architecture.py`). The deck writer that carries it takes a
    parameter of the same name and no default of its own.

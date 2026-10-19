@@ -181,14 +181,24 @@ def fetch_ph_profile(point, *, max_distance_km=None) -> PHProfile:
         Refuse a node farther than this (km) from ``point`` (the offset rule);
         ``None`` (default) sets no limit beyond its ``ProvenanceWarning``.
     """
+    return _ph_profile(point, max_distance_km=checked_max_distance(
+        max_distance_km, 'fetch_ph_profile'), who='fetch_ph_profile')
+
+
+def _ph_profile(point, *, max_distance_km, who, read_at=None) -> PHProfile:
+    """:func:`fetch_ph_profile` at ``point``, read at the GLODAP node
+    nearest ``read_at`` (the cell another dataset's column at ``point`` came
+    from) when given; the record and the offset rule measure from ``point``
+    either way, its notices named after ``who``."""
     lat, lon = as_coordinate(point)
-    prov = _grid().node_provenance(
-        'glodap', lat, lon, who='fetch_ph_profile',
-        max_distance_km=checked_max_distance(max_distance_km, 'fetch_ph_profile'))
-    depths, ph = _grid().profile(lat, lon)
+    r_lat, r_lon = (lat, lon) if read_at is None else as_coordinate(read_at)
+    prov = _grid().node_provenance('glodap', lat, lon, who=who,
+                                   max_distance_km=max_distance_km,
+                                   read_at=(r_lat, r_lon))
+    depths, ph = _grid().profile(r_lat, r_lon)
     if depths.size == 0:
         raise DataFetchError(
-            f"GLODAP has no pH column at {lat:.3f}, {lon:.3f} "
+            f"GLODAP has no pH column at {r_lat:.3f}, {r_lon:.3f} "
             "(land or unmapped).",
             remediation="Pick an ocean location, or supply pH directly.",
         )

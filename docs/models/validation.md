@@ -2,8 +2,10 @@
 
 uacpy's engines are measured against references that do not come from the
 engine itself: closed-form solutions, a two-way coupled-mode solution written
-in the test suite, and tables computed by an independent code for the
-standard range-dependent cases of the literature. This page lists every one of
+in the test suite, and tables for the standard cases of the literature — the
+range-dependent ones computed by COUPLE07, a code uacpy does not wrap, and
+Bucker's range-independent waveguide by Scooter through uacpy, checked against
+OAST. This page lists every one of
 those benchmarks: the case, its reference, what each engine measured against
 it, the bound the test holds it to, and where an engine does not reach the
 reference.
@@ -41,11 +43,11 @@ A 100 m guide at 50 Hz, absolute TL in dB re 1 m.
 |---|---|---|---|
 | `Modes.modal_pressure_field` | absolute level, prefactor and density convention | median < 0.1 dB, max < 0.4 dB | `test_benchmarks_analytic.py::test_modal_pressure_field_matches_pekeris_modal_sum` |
 | Kraken eigenvalues | `k_m` against the characteristic equation | `atol=1e-5` | `test_benchmarks_analytic.py::test_kraken_modes_match_pekeris_analytic` |
-| Kraken TL | 0.02 dB median, 0.07 dB max | median < 0.1, max < 0.4 dB | `test_benchmarks_analytic.py::test_kraken_tl_matches_pekeris_modal_sum` |
-| Scooter TL | 0.03 dB median, 0.13 dB p90 | median < 0.2, p90 < 0.6 dB | `test_benchmarks_analytic.py::test_scooter_tl_matches_pekeris_modal_sum` |
+| Kraken TL | 0.015 dB median, 0.051 dB max | median < 0.1, max < 0.4 dB | `test_benchmarks_analytic.py::test_kraken_tl_matches_pekeris_modal_sum` |
+| Scooter TL | 0.017 dB median, 0.043 dB p90 | median < 0.2, p90 < 0.6 dB | `test_benchmarks_analytic.py::test_scooter_tl_matches_pekeris_modal_sum` |
 | OAST TL (strong-field cells) | 0.02 dB median | median < 0.3, p90 < 1.0 dB | `test_benchmarks_analytic.py::test_oast_tl_matches_pekeris_modal_sum` |
 | OASP, broadband bin at 49.922 Hz | 0.0068 dB median, 0.023 dB p90 | median < 0.1, p90 < 0.3 dB | `test_benchmarks_oases.py::test_oasp_broadband_bin_matches_pekeris_modal_sum_at_the_bin_frequency` |
-| RAM TL | 0.55 dB median | median < 1.5 dB | `test_benchmarks_analytic.py::test_ram_tl_matches_pekeris_modal_sum` |
+| RAM TL | 0.52 dB median | median < 1.5 dB | `test_benchmarks_analytic.py::test_ram_tl_matches_pekeris_modal_sum` |
 | Kraken complex pressure against `Modes.modal_pressure_field` | one sign and phase: `field.exe`'s prefactor is the negative of the modal sum's, and the reader removes it | misfit < 1e-3 of the grid's peak | `test_benchmarks_analytic.py::test_a_kraken_pressure_field_equals_the_modal_sum_in_phase` |
 | RAM TL every 25 m over 1–10 km | 0.48 dB median, 1.88 dB p90; window medians 0.24 / 0.59 / 0.80 dB over 1–4 / 4–7 / 7–10 km — the error grows with range ([ram.md §6](ram.md#6-the-grid-what-drnone-actually-does)) | median < 1.0, p90 < 2.5 dB | `test_benchmarks_analytic.py::test_ram_tl_on_a_dense_range_axis_matches_pekeris_modal_sum` |
 
@@ -66,7 +68,7 @@ modal sum is closed-form.
 | Engine | Measured | Bound | Test |
 |---|---|---|---|
 | Kraken over a `'vacuum'` bottom | 0.014 dB median, 0.091 dB max | median < 0.1, max < 0.4 dB | `test_benchmarks_analytic.py::test_kraken_vacuum_waveguide_matches_dirichlet_modal_sum` |
-| RAM (`dr=5, dz=0.25, n_pade=6`) over a near-massless bottom | 0.012 dB median, 0.043 dB p90 | median < 0.15, p90 < 0.5 dB | `test_benchmarks_analytic.py::test_ram_pressure_release_waveguide_matches_dirichlet_modal_sum` |
+| RAM (`dr=5, dz=0.25, n_pade=6`) over a near-massless bottom | 0.0085 dB median, 0.028 dB p90 | median < 0.15, p90 < 0.5 dB | `test_benchmarks_analytic.py::test_ram_pressure_release_waveguide_matches_dirichlet_modal_sum` |
 | The reference at an exact mode cutoff | 1.4e-6 dB from a guide a hair shallower | < 1e-4 dB | `test_benchmarks_analytic.py::test_a_waveguide_exactly_at_a_cutoff_does_not_generate_the_cutoff_mode` |
 | The exact (Hankel) modal sum against the far-field form | meet far from the source, also for complex (lossy) mode shapes, and part near it; an unknown form is refused | relative 1e-3 far, 1e-2 near | `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_the_forms_meet_far_from_the_source`, `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_the_forms_meet_for_complex_mode_shapes`, `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_the_forms_part_near_the_source`, `test_benchmarks_analytic.py::TestTheExactModalSumIsTheAsymptoticOnesLimit::test_an_unknown_form_is_refused` |
 
@@ -196,9 +198,14 @@ same grid that gave 0.069 dB at the 2 % step
 ## 3. Published range-dependent benchmarks
 
 `test_benchmarks_published.py` scores the engines on the cases the field uses
-to judge a range-dependent model. The references were computed by codes uacpy
-does not wrap and ship as tables under `uacpy/tests/data/benchmarks/`, each
-with a header naming the problem, the run settings and the source. COUPLE07
+to judge a propagation model. The range-dependent references were computed by
+COUPLE07, a code uacpy does not wrap; Bucker's waveguide (below) is
+range-independent, and its reference is uacpy's own Scooter run, which
+wavenumber integration makes exact for that environment (*Computational Ocean
+Acoustics*, Sect. 4.10.2), checked against OAST, whose deck writer is separate
+from the one Kraken and Scooter share. The references ship as tables under
+`uacpy/tests/data/benchmarks/`, each with a header naming the problem, the run
+settings and the source. COUPLE07
 (R. B. Evans, December 2007, OALIB `Modes/couple/couple07.zip`) is the
 stepwise coupled-mode code behind the ASA benchmark curves (Jensen & Ferla,
 JASA 87, 1499-1510, 1990); it carries no licence, so only its generated
@@ -236,7 +243,8 @@ so the test pins the grid
 A range-independent guide, 100 m of water over a 1590 m/s, density 1.2 bottom;
 source and receiver both 99.5 m deep, 0.5 m above the seafloor. Reference:
 COUPLE07 Test Case 1, `benchmarks/pe_workshop_3b_250hz_couple07.txt`
-(Davis, White & Cavanagh, NORDA Technical Note 143, 1982). The table holds
+(Davis, White & Cavanagh, NORDA Technical Note 143, 1982; shown in
+*Computational Ocean Acoustics*, Sect. 6.2.4, Fig. 6.2). The table holds
 seven deep nulls over a 63-113 dB field
 (`test_benchmarks_published.py::test_the_pe_workshop_3b_reference_table_places_its_nulls`).
 
@@ -358,11 +366,13 @@ shows up as a failing test rather than a silently better number.
   On the stepped waveguide at 25 Hz its 1.233 dB median is the method's error
   (`test_benchmarks_coupled_mode.py::test_bellhop_stepped_waveguide_matches_coupled_mode_reference`).
 - **The PE codes on a dense stair-step.** Over the square-wave corrugated
-  seafloor above, RAM keeps the field across the vertical step faces, an amplitude error that
-  grows with the density contrast (Collins & Siegmann, *Parabolic Wave
-  Equations with Applications*, Sect. 2.6): mpirams is +4.70 dB at density
+  seafloor above, RAM marches `p/α`, so `p/α` is continuous across the
+  vertical step faces (the small-angle energy-conservation condition,
+  Collins & Siegmann, *Parabolic Wave Equations with Applications*,
+  Sect. 2.6.2, Eq. 2.56), and the measured offset grows with the bottom
+  density; no source attributes it to a cause: mpirams is +4.70 dB at density
   2.5, +0.69 at 1.5 and -0.03 at 1.0; ramgeo is +5.82 at 2.5, and rams, the
-  elastic PE with its own energy-flux correction, +5.81 over a 50 m/s
+  elastic PE with its own approximate energy-flux correction, +5.81 over a 50 m/s
   shear bottom; over 36 grids — dr 1, 2, 5 and 10 m × dz 0.1, 0.25 and
   0.5 m × Padé 4, 6 and 8, 1 m step faces — mpirams lands at +4.41 to
   +5.31 dB, under a decibel of spread

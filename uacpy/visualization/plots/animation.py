@@ -12,7 +12,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 from uacpy.core.results._superposition import split_source_depths
 from uacpy.visualization.style import LINEAR_VIEW_COLORMAP
-from uacpy.visualization.plots._common import DEPTH_AXIS_HEADROOM, ZORDER_SOURCE, _coordinate_caption, _depth_range_heatmap, _draw_geometry, _grid_figure, _overlay_seafloor, _painted_x_span, _time_trace_label, typed_plot_error
+from uacpy.visualization.plots._common import DEPTH_AXIS_HEADROOM, ZORDER_SOURCE, _coordinate_caption, _depth_range_heatmap, _draw_geometry, _draw_result_credit, _grid_figure, _overlay_seafloor, _painted_x_span, _time_trace_label, typed_plot_error
 
 
 _TIME_AXES = ('depth', 'range', 'time')
@@ -49,36 +49,6 @@ def _time_layout(field, who: str, what: str = 'field'):
     data = np.moveaxis(np.asarray(field.data),
                        [order.index(a) for a in _TIME_AXES], [0, 1, 2])
     return (data, *(np.asarray(coords[a], dtype=float) for a in _TIME_AXES))
-
-
-#: Rounds of :func:`_fit_inset_colorbars`; each one moves the panels by the
-#: overhang it measures, and an equal-aspect panel's drawn box follows its
-#: slot only in proportion, so a second round takes up the remainder.
-_INSET_FIT_ROUNDS = 3
-
-
-def _fit_inset_colorbars(fig, anchors, pad_px=4.0):
-    """Narrow the panels until every colorbar inset beside ``anchors`` (and
-    its label) ends inside the canvas.
-
-    An inset bar sits outside its panel, so the right margin a figure
-    reserves for it is a guess in inches, while the bar's tick labels and
-    label are in points: measured, the default 1×3 montage's label ended
-    5 px past the canvas. The overhang is measured on the drawn figure and
-    the subplot right edge pulled in by it."""
-    for _ in range(_INSET_FIT_ROUNDS):
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-        reach = max((child.get_tightbbox(renderer).x1
-                     for ax in anchors for child in ax.child_axes),
-                    default=None)
-        if reach is None:
-            return
-        over = reach + pad_px - fig.bbox.width
-        right = fig.subplotpars.right - over / fig.bbox.width
-        if over <= 0 or right <= fig.subplotpars.left:
-            return
-        fig.subplots_adjust(right=right)
 
 
 #: The snapshot montage's default slot (inches): a panel drawn at its data
@@ -198,7 +168,8 @@ def animate_field(
 
     Each cell is drawn at its own coordinates: an evenly spaced grid as an
     image, any other grid (a receiver fan dense near the surface) as a mesh
-    centred on each sample.
+    centred on each sample. The field's model, and the data sources of the
+    ``env`` drawn, are credited in the figure's footnote.
 
     Returns
     -------
@@ -264,6 +235,8 @@ def animate_field(
     if show_seafloor and env is not None:
         _overlay_seafloor(ax, env, ranges, painted=im)
 
+    # Credited before the source star, which is sized in the panel's pixels.
+    _draw_result_credit(fig, field, env=env if show_seafloor else None)
     if show_source:
         _draw_geometry(ax, field.source_depths)
 
@@ -428,7 +401,9 @@ def plot_time_snapshots(
 
     Each cell is drawn at its own coordinates: an evenly spaced grid as an
     image, any other grid (a receiver fan dense near the surface) as a mesh
-    centred on each sample.
+    centred on each sample. Every row's model, and the data sources of
+    ``env``, are credited in the figure's footnote, as on
+    :func:`compare_models`.
 
     Returns
     -------
@@ -535,13 +510,10 @@ def plot_time_snapshots(
     # Rows on their own scales are labelled so, since equal colours in two
     # rows are then not equal pressures.
     shared = p_max is not None and np.isscalar(p_max)
-    if owns_fig:
-        fig.tight_layout()
-        # One bar per row, inset beside the row's last panel so it takes that
-        # panel's drawn height (the aspect shrinks a panel inside its slot)
-        # and no width from any panel; the right margin is reserved for it.
-        if show_colorbar:
-            fig.subplots_adjust(right=1.0 - 0.9 / fig.get_figwidth())
+    # On a figure this plotter opened, one bar per row is inset beside the
+    # row's last panel so it takes that panel's drawn height (the aspect
+    # shrinks a panel inside its slot); constrained layout keeps its labels
+    # on the canvas.
     for (_, field), row, mappable in zip(rows if show_colorbar else (),
                                          axes, row_mappables):
         # A caller's figure is laid out by its own engine, which places a
@@ -554,8 +526,7 @@ def plot_time_snapshots(
         bar.set_label(label if shared else f"{label}, row scale",
                       fontsize='small')
         bar.ax.tick_params(labelsize='small')
-    if owns_fig and show_colorbar:
-        _fit_inset_colorbars(fig, [row[-1] for row in axes])
+    _draw_result_credit(fig, *(field for _, field in rows), env=env)
     # The source star sits on the left limit and widens it by its own half
     # width, measured in the panel's pixels — so it is drawn once the layout
     # has fixed the panel size.

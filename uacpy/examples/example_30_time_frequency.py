@@ -63,7 +63,7 @@ gather = sum(ricker_wavelet(t_gather[:, None], 40.0,
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
     slownesses, taus, slant_stack = taup_transform(
-        gather, gather_fs, gather_dx, p_max=1 / 1200.0, n_slowness=301)
+        gather, gather_fs, gather_dx, p_max=1 / 1200.0, n_slownesses=301)
 for warning in caught:
     print(f"  noted: {str(warning.message).split(' — ')[0]}")
 

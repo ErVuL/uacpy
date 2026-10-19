@@ -15,6 +15,7 @@ e.g. ``woa23_decav_t00_01.nc`` (annual temperature, 1°), ``..._s07_04.nc``
 
 import numpy as np
 
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.data import _cache
 from uacpy.data._netcdf import netcdf_lock, open_netcdf
 from uacpy.data.sound_speed import _GRIDS
@@ -23,6 +24,10 @@ __all__ = ['column', 'close']
 
 # Resolution → WOA file-resolution code, read off sound_speed._GRIDS.
 _CODE = {resolution: grid[2] for resolution, grid in _GRIDS.items()}
+
+#: The grid ``install.sh --data woa23`` installs (its ``WOA_RESOLUTION``);
+#: a finer grid is read live, or from files placed in the cache by hand.
+_INSTALLED_RESOLUTION = '1.00'
 
 _DATASETS = {}   # path -> netCDF Dataset (open once, read many)
 
@@ -73,6 +78,21 @@ _cache.register_cache(close)
 def _field(period, var, *, resolution, decade):
     code = _CODE[resolution]
     fname = f"woa23_{decade}_{var}{period:02d}_{code}.nc"
+    if (resolution != _INSTALLED_RESOLUTION
+            and not _cache.is_installed('woa23', fname)):
+        # Re-running the install fetches the 1° grids again, not this one.
+        raise ConfigurationError(
+            f"Offline woa23 data not found: the {resolution}° grid file "
+            f"{fname} is not in {_cache.dataset_root('woa23')}, and "
+            f"`./install.sh --data woa23` installs the "
+            f"{_INSTALLED_RESOLUTION}° grids only.",
+            remediation=(
+                f"Read the {resolution}° grid live with source='woa23' "
+                f"(ssp_sources='woa23' in fetch_environment: the cache "
+                f"first, then NCEI THREDDS), or place the WOA23 "
+                f"{resolution}° files (woa23_<decade>_<t|s><period>_{code}.nc)"
+                f" in that directory."),
+        )
     return _cache.require('woa23', fname)
 
 

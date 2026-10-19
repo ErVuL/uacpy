@@ -162,14 +162,17 @@ class RocCurve(PlottedResult, namedtuple("RocCurve", "pfa pd")):
 def roc_curve(deflection: float, n_points: int = 200) -> RocCurve:
     """ROC ``(P_F, P_D)`` for a Gaussian detector of the given deflection.
 
-    Samples ``P_F`` logarithmically over ``[1e-6, ~1]``.
+    Samples ``P_F`` logarithmically over ``[1e-6, ~1]``, a display grid
+    (uacpy guidance): "much smaller values of Pf are of interest relative to
+    Pd so the abscissa is usually plotted logarithmically" (Abraham,
+    *Underwater Acoustic Signal Processing*, §6.2.2.1).
 
     Parameters
     ----------
     deflection : float
         Deflection ``d'``.
     n_points : int, optional
-        Points on the curve. Default 200.
+        Points on the curve. Default 200 (uacpy guidance).
 
     Returns
     -------
@@ -250,6 +253,14 @@ def albersheim_snr(pd: float, pf: float, n_pulses: int = 1) -> float:
 #: Abraham's own accuracy statement for eq. (2.77) is quoted in dB, so the
 #: envelope is policed in the units it is promised in.
 _DT_APPROXIMATION_TOLERANCE_DB = 1.0
+
+#: Time-bandwidth product below which the large-M approximation is reported
+#: where the exact threshold cannot be computed to check it: Abraham states
+#: its error as "more than 1 dB for M = 10 and on the order of 0.5 dB for
+#: M = 100" (*Underwater Acoustic Signal Processing*, sect. 2.3.5.1, below
+#: eq. 2.77), so M = 100 is the smallest product the source puts inside the
+#: 1 dB the approximation claims.
+_DT_LARGE_M_FALLBACK = 100.0
 
 
 def _exact_detection_threshold_dB(pd: float, pf: float, m: float) -> float:
@@ -441,8 +452,9 @@ def detection_threshold_energy(
     # Gamma quantiles cost ~100 us, and the criterion then is the promise: the
     # warning fires when and only when the approximation is off by more than
     # it claims, so it cannot warn on a correct value or stay silent on a
-    # wrong one. The fitted `max(10, 7*d)` backs it up only where the exact
-    # quantiles do not resolve, so the check never disappears silently.
+    # wrong one. Where the exact quantiles do not resolve, Abraham's stated
+    # M = 100 (_DT_LARGE_M_FALLBACK) backs it up so the check never
+    # disappears silently.
     exact_dB = _exact_detection_threshold_dB(pd, pf, m)
     if exact:
         if not np.isfinite(exact_dB):
@@ -465,10 +477,11 @@ def detection_threshold_energy(
                   f"it is off by {error_dB:.2f} dB here (exact threshold "
                   f"{exact_dB:.2f} dB)")
     else:
-        outside = m < max(10.0, 7.0 * d)
+        outside = m < _DT_LARGE_M_FALLBACK
         detail = (f"the exact threshold did not resolve at this operating "
-                  f"point, and M = {m:g} is below the fitted fallback bound "
-                  f"max(10, 7*d) = {max(10.0, 7.0 * d):g}")
+                  f"point, and M = {m:g} is below the "
+                  f"{_DT_LARGE_M_FALLBACK:g} at which Abraham (sect. "
+                  f"2.3.5.1) puts the approximation's error near 0.5 dB")
     if outside:
         warnings.warn(
             f"detection_threshold_energy: DT = 5*log10(d/M) is Abraham's "

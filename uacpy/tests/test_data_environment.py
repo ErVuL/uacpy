@@ -91,6 +91,94 @@ def test_the_generic_default_seabed_is_announced(stub_fetchers, bottom_kw,
     assert bool(announced) is warns
 
 
+def _unused_notices(**kw):
+    """The '<name>=<value>' heads of the was-not-used notices a
+    fetch_environment call gives."""
+    with recorded_warnings() as caught:
+        env_mod.fetch_environment((43.2, 7.5), **kw)
+    return sorted(str(w.message).split(' was not used')[0].split(': ', 1)[1]
+                  for w in caught if 'was not used' in str(w.message))
+
+
+def test_transect_settings_on_a_point_are_announced(stub_fetchers):
+    """A point fetch samples no transect: each count given says it was not
+    used, one notice each."""
+    assert _unused_notices(
+        bottom=2.0, n_points=30, max_points=100, ssp_n_points=12,
+        bottom_n_points=3, surface_n_points=4) == [
+        'bottom_n_points=3', 'max_points=100', 'n_points=30',
+        'ssp_n_points=12', 'surface_n_points=4']
+
+
+def test_transect_counts_of_an_axis_not_sampled_are_announced(stub_fetchers):
+    """Along a transect the bathymetry and SSP are sampled; a seabed or
+    surface count with no range-dependent seabed or surface fetched is not."""
+    assert _unused_notices(
+        bottom=2.0, transect_to=(42.8, 8.1), n_points=30, max_points=100,
+        ssp_n_points=12, bottom_n_points=3, surface_n_points=4) == [
+        'bottom_n_points=3', 'surface_n_points=4']
+
+
+@pytest.mark.parametrize('kw, unused', [
+    ({'bottom': 2.0}, []),
+    ({'bottom': 'sand'}, ["bottom_model='apl-uw'"]),
+    ({}, ["bottom_model='apl-uw'"]),
+    ({'bottom_sources': 'pelagic'}, []),
+], ids=['phi', 'material', 'default-seabed', 'fetched'])
+def test_a_bottom_model_with_no_grain_size_converted_is_announced(
+        stub_fetchers, kw, unused):
+    """bottom_model reaches every grain size converted, a ϕ literal and a
+    fetched source alike; with none converted it changed nothing."""
+    assert _unused_notices(bottom_model='apl-uw', **kw) == unused
+
+
+@pytest.mark.parametrize('kw, unused', [
+    ({}, ["max_days=5"]),
+    ({'ssp': 1500.0}, ["max_days=5", "resolution='0.25'"]),
+    ({'ssp': 1500.0, 'with_absorption': True}, ["max_days=5"]),
+    ({'ssp_sources': 'copernicus', 'date': '2020-06-15'},
+     ["resolution='0.25'"]),
+], ids=['woa23', 'literal', 'literal-with-absorption', 'copernicus'])
+def test_a_resolution_or_max_days_nothing_read_is_announced(
+        monkeypatch, stub_fetchers, kw, unused):
+    """resolution reaches every WOA23 read (the SSP, or the absorption's T/S
+    column beside a literal SSP), max_days the time-specific sources only."""
+    monkeypatch.setattr(ssp_mod, '_fetch_ts_profile_backend',
+                        lambda point, **kw: _ts_record())
+    monkeypatch.setattr(copernicus, 'fetch_ssp_operational',
+                        lambda point, **kw: stub_fetchers)
+    assert _unused_notices(bottom=2.0, resolution='0.25', max_days=5,
+                           **kw) == unused
+
+
+def test_sea_surface_settings_with_none_fetched_are_announced(stub_fetchers):
+    assert _unused_notices(bottom=2.0, altimetry_n_points=99,
+                           altimetry_rng=np.random.default_rng(1)) == [
+        'altimetry_n_points=99', 'altimetry_rng=']
+
+
+def test_settings_left_unset_give_no_notice(stub_fetchers):
+    assert _unused_notices(bottom=2.0) == []
+    assert _unused_notices(bottom=2.0, transect_to=(42.8, 8.1)) == []
+
+
+def test_a_source_with_no_transect_fetch_is_passed_over_on_a_transect(
+        stub_fetchers):
+    """An Argo cast is one profile: on a transect the chain moves past it,
+    and Argo alone is refused naming the keyword it was asked by."""
+    env = env_mod.fetch_environment(
+        (43.2, 7.5), transect_to=(42.8, 8.1), date='2024-06-01', bottom=2.0,
+        ssp_sources=('argo', 'woa23'))
+    assert env.ssp.ranges.size == 2
+    with pytest.raises(ConfigurationError,
+                       match=r"^fetch_environment: ssp_sources='argo' has no "
+                             r"transect fetch, so it gives no range-dependent "
+                             r"ssp\."):
+        env_mod.fetch_environment((43.2, 7.5), transect_to=(42.8, 8.1),
+                                  date='2024-06-01', bottom=2.0,
+                                  ssp_sources='argo')
+
+
 def test_bottom_from_phi(stub_fetchers):
     env = env_mod.fetch_environment((43.2, 7.5), bottom=2.0)  # ϕ → sand-ish
     assert env.bottom is not None
@@ -120,6 +208,22 @@ def test_a_bottom_number_that_is_no_grain_size_is_refused_before_any_fetch(
     calls = _block_all_fetchers(monkeypatch)
     with pytest.raises(ConfigurationError, match='sound speed'):
         env_mod.fetch_environment((43.2, 7.5), bottom=phi)
+    assert calls == []
+
+
+@pytest.mark.parametrize('phi', [np.float32(2.0), np.int64(2)])
+def test_a_numpy_grain_size_is_a_bottom_literal(stub_fetchers, phi):
+    """A ϕ read from a NetCDF or computed in float32 is a number like any
+    other; the data layer's own validators take NumPy scalars too."""
+    env = env_mod.fetch_environment((43.2, 7.5), bottom=phi)
+    assert env.bottom.columns[0].halfspace.grain_size_phi == 2.0
+
+
+@pytest.mark.parametrize('flag', [True, np.bool_(True)])
+def test_a_boolean_bottom_literal_is_refused(monkeypatch, flag):
+    calls = _block_all_fetchers(monkeypatch)
+    with pytest.raises(ConfigurationError, match='bottom must be a ϕ float'):
+        env_mod.fetch_environment((43.2, 7.5), bottom=flag)
     assert calls == []
 
 
@@ -602,6 +706,126 @@ def test_with_absorption(monkeypatch, stub_fetchers):
     assert env.absorption.salinity == WaterProfile([0.0, 50.0], [36.0, 36.1])
 
 
+_START, _END = (43.2, 7.5), (42.8, 8.1)
+
+
+def _columns_by_site(monkeypatch, *, deep_fails=False):
+    """Stub the absorption's T/S and GLODAP reads: the transect start
+    ``_START`` has the 0-50 m column of :func:`_ts_record` (pH to 50 m),
+    every other site a column to 2200 m (pH to 2000 m). Returns the list of
+    sites the T/S column was read at; ``deep_fails`` makes every site but
+    the start unreadable."""
+    from uacpy.core.exceptions import DataFetchError
+    from uacpy.data import SOURCES, DataProvenance, glodap_local
+    seen = []
+
+    def ts(point, **kw):
+        seen.append(tuple(point))
+        if tuple(point) == _START:
+            return _ts_record()
+        if deep_fails:
+            raise DataFetchError('no WOA23 column there')
+        return ssp_mod.TSProfile(
+            depths=np.array([0.0, 50.0, 1000.0, 2200.0]),
+            temperature=np.array([17.0, 15.0, 4.0, 2.5]),
+            salinity=np.array([36.0, 35.9, 35.0, 34.9]),
+            temperature_kind='in_situ',
+            provenance=DataProvenance(source=SOURCES['woa23'],
+                                      data_point=(42.5, 8.5),
+                                      requested_point=tuple(point)))
+
+    def ph(point, **kw):
+        deep = tuple(point) != _START
+        return glodap_local.PHProfile(
+            depths=np.array([0.0, 50.0, 2000.0] if deep else [0.0, 50.0]),
+            ph=np.array([8.1, 8.05, 7.9] if deep else [8.1, 8.0]),
+            ph_scale='total',
+            provenance=DataProvenance(source=SOURCES['glodap'],
+                                      data_point=(42.5, 8.5) if deep
+                                      else (43.5, 7.5),
+                                      requested_point=tuple(point)))
+
+    monkeypatch.setattr(env_mod, '_fetch_ts_profile_backend', ts)
+    monkeypatch.setattr(glodap_local, 'fetch_ph_profile', ph)
+    return seen
+
+
+def test_a_transect_absorption_column_is_continued_by_the_deepest_sites(
+        monkeypatch, stub_fetchers):
+    """On a transect the absorption column read at the start (0-50 m) is
+    continued below its deepest level by the column read at the track's
+    deepest seafloor sample (2200 m at 5 km in the stub), T/S and GLODAP pH
+    alike: the water at 1000 m is that column's, not the start's 50 m row
+    held. The added column is cited, and the water density stays the start
+    column's (the point fetch's)."""
+    from uacpy.core._water import WaterProfile
+    from uacpy.data._geo import point_along_track
+    seen = _columns_by_site(monkeypatch)
+    env = env_mod.fetch_environment(_START, transect_to=_END,
+                                    with_absorption=True)
+    deep = point_along_track(_START, _END, 5000.0)
+    assert len(seen) == 2 and seen[0] == _START
+    np.testing.assert_allclose(seen[1], deep, rtol=0, atol=1e-12)
+    absorption = env.absorption
+    assert absorption.temperature == WaterProfile(
+        [0.0, 50.0, 1000.0, 2200.0], [18.0, 16.0, 4.0, 2.5])
+    assert absorption.salinity == WaterProfile(
+        [0.0, 50.0, 1000.0, 2200.0], [36.0, 36.1, 35.0, 34.9])
+    assert absorption.pH == WaterProfile([0.0, 50.0, 2000.0],
+                                         [8.1, 8.0, 7.9])
+    cited = [p.requested_point for p in env.absorption.data_sources
+             if p.requested_point is not None]
+    assert len(cited) == 3                  # start pH, deep T/S, deep pH
+    # The water's records are the law's own, so its tables carry them too.
+    assert env.extra_data_sources == ()
+    assert env.absorption.table(1000.0).data_sources == \
+        env.absorption.data_sources
+    np.testing.assert_allclose(cited[0], deep, rtol=0, atol=1e-12)
+    seen.clear()
+    point_env = env_mod.fetch_environment(_START, with_absorption=True)
+    assert seen == [_START]
+    assert env.water_density == point_env.water_density
+
+
+@pytest.mark.parametrize('profile, deep_read', [
+    ([[0.0, 40.0], [5000.0, 50.0]], False),     # ends at the column's 50 m
+    ([[0.0, 40.0], [5000.0, 50.5]], True),      # 0.5 m below it
+    ([[0.0, 2200.0], [5000.0, 2000.0]], False),  # the start is the deepest
+], ids=['at-column-end', 'below-column-end', 'start-deepest'])
+def test_a_transect_absorption_column_is_continued_only_below_its_end(
+        monkeypatch, stub_fetchers, profile, deep_read):
+    """The second column is read only when the track's deepest seafloor
+    sample lies below the start column's deepest level, away from the
+    start."""
+    seen = _columns_by_site(monkeypatch)
+    monkeypatch.setattr(bathy_mod, '_fetch_bathy_transect_backend',
+                        lambda a, b, **kw: np.array(profile))
+    env_mod.fetch_environment(_START, transect_to=_END, with_absorption=True)
+    assert (len(seen) == 2) is deep_read
+
+
+def test_a_transect_absorption_column_unread_below_is_announced(
+        monkeypatch, stub_fetchers):
+    """When the column at the deepest seafloor sample cannot be read, the
+    start column stands alone (held below 50 m, as at a point) and the
+    call's notice says so and why."""
+    from uacpy.core._water import WaterProfile
+    from uacpy.core.exceptions import ProvenanceWarning
+    _columns_by_site(monkeypatch, deep_fails=True)
+    with recorded_warnings() as rec:
+        env = env_mod.fetch_environment(_START, transect_to=_END,
+                                        with_absorption=True)
+    assert env.absorption.temperature == WaterProfile([0.0, 50.0],
+                                                      [18.0, 16.0])
+    notes = [str(w.message) for w in rec
+             if issubclass(w.category, ProvenanceWarning)]
+    assert len(notes) == 1
+    assert ("the absorption holds the start column's deepest water below "
+            "50 m, because the column at the track's 2200 m seafloor, "
+            "5.0 km along it could not be read (no WOA23 column there)"
+            in notes[0])
+
+
 def test_a_grain_size_seabed_is_converted_against_the_sites_water(
         monkeypatch, stub_fetchers):
     """With the site's T/S fetched, the deck carries its IES-80 water
@@ -661,6 +885,51 @@ def test_a_reference_ph_standing_in_for_the_sites_is_announced(
     assert len(items) == notes
     if notes:
         assert 'GLODAP: Offline glodap data not found' in items[0]
+        assert env.absorption.pH == 8.0
+
+
+@pytest.mark.parametrize('point_failure, read_at', [
+    ('no column', [(43.5, 7.5)]), ('not installed', [])])
+def test_a_ph_missing_at_a_coastal_point_is_read_at_the_ts_cell(
+        monkeypatch, stub_fetchers, point_failure, read_at):
+    """WOA23 answers a coastal point from its nearest wet cell; GLODAP has
+    no column at the point itself, so its column at the T/S cell is read and
+    the absorption's T, S and pH share one location (the record still
+    measures from the point). An absent GLODAP grid has nothing to retry."""
+    from uacpy.core.exceptions import DataFetchError
+    from uacpy.data import SOURCES, DataProvenance, glodap_local
+    ts = ssp_mod.TSProfile(
+        depths=np.array([0.0, 50.0]), temperature=np.array([18.0, 16.0]),
+        salinity=np.array([36.0, 36.1]), temperature_kind='in_situ',
+        provenance=DataProvenance(source=SOURCES['woa23'],
+                                  data_point=(43.5, 7.5),
+                                  requested_point=(43.2, 7.5)))
+    monkeypatch.setattr(env_mod, '_fetch_ts_profile_backend',
+                        lambda point, **kw: ts)
+
+    def at_point(point, **kw):
+        if point_failure == 'no column':
+            raise DataFetchError('GLODAP has no pH column at 43.200, 7.500')
+        raise ConfigurationError('Offline glodap data not found.')
+    seen = []
+
+    def at_cell(point, *, read_at, **kw):
+        seen.append(tuple(read_at))
+        return glodap_local.PHProfile(
+            depths=np.array([0.0, 50.0]), ph=np.array([8.1, 8.0]),
+            ph_scale='total',
+            provenance=DataProvenance(source=SOURCES['glodap'],
+                                      data_point=(43.5, 7.5),
+                                      requested_point=tuple(point)))
+    monkeypatch.setattr(glodap_local, 'fetch_ph_profile', at_point)
+    monkeypatch.setattr(glodap_local, '_ph_profile', at_cell)
+    env = env_mod.fetch_environment((43.2, 7.5), with_absorption=True)
+    assert seen == read_at
+    if read_at:
+        assert env.absorption.ph_scale == 'total'
+        (record,) = [p for p in env.data_sources if p.source.id == 'glodap']
+        assert record.requested_point == (43.2, 7.5)
+    else:
         assert env.absorption.pH == 8.0
 
 
@@ -906,8 +1175,8 @@ def test_an_argo_cast_is_continued_by_woa23_through_a_blend(monkeypatch):
                                     bottom='sand')
     z = np.asarray(env.ssp.depths)
     c = np.asarray(env.ssp.sound_speed)[:, 0]
-    from uacpy.data.sound_speed import CAST_BLEND_M
-    top = 2000.0 - CAST_BLEND_M
+    from uacpy.data.sound_speed import CAST_BLEND
+    top = 2000.0 - CAST_BLEND
     assert np.all(c[z <= top] == 1490.0)
     assert np.all(c[z >= 2000.0] == 1500.0)
     blend = (z > top) & (z < 2000.0)
@@ -1270,6 +1539,29 @@ def test_auto_bottom_chain_prefers_a_measured_grain_size_sample():
     assert (order.index('emodnet') < order.index('grainsize')
             < order.index('diesing') < order.index('mars')
             < order.index('pelagic'))
+
+
+def test_the_local_bottom_chain_is_the_auto_chains_cached_backends():
+    """'local' is not a second list: it is the 'auto' chain with the live
+    backends dropped — MARS (live only) leaves, EMODnet and pelagic keep
+    their cached twins alone."""
+    order, cache_only = env_mod._bottom_order('local')
+    assert (order, cache_only) == (('emodnet', 'grainsize', 'diesing',
+                                    'pelagic'), True)
+    assert env_mod._BOTTOM_CHAIN.attempts(order, cache_only=True) == [
+        ('emodnet', 'local'), ('grainsize', 'local'), ('diesing', 'local'),
+        ('pelagic', 'local')]
+    auto, _ = env_mod._bottom_order('auto')
+    assert [a for a in env_mod._BOTTOM_CHAIN.attempts(auto, cache_only=False)
+            if a[0] in ('emodnet', 'mars')] == [
+        ('emodnet', 'local'), ('emodnet', 'live'), ('mars', 'live')]
+
+
+def test_an_unknown_surface_source_is_refused_before_the_date_is_asked():
+    with pytest.raises(ConfigurationError,
+                       match="fetch_environment: unknown surface source 'ice'"):
+        env_mod.fetch_environment((75.0, -10.0), bathymetry=2000.0,
+                                  ssp=1500.0, surface_sources='ice')
 
 
 def test_every_grain_size_provider_takes_the_environment_with_the_model():

@@ -37,7 +37,7 @@ from scipy.optimize import brentq
 # SOUND_SPEED_FORMULAS, which lives in core beside the equations and is
 # imported rather than restated, so every fetcher resolves the same names.
 from uacpy.core.acoustics.seawater import (
-    DEFAULT_SOUND_SPEED_FORMULA, REFERENCE_LATITUDE_DEG, SOUND_SPEED_FORMULAS,
+    DEFAULT_SOUND_SPEED_FORMULA, REFERENCE_LATITUDE, SOUND_SPEED_FORMULAS,
     canonical_formula,
     depth_to_pressure_dbar, sound_speed_at_depth,
 )
@@ -59,7 +59,7 @@ from uacpy.core.geo import parse_date
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data._chain import (MissingPrerequisiteError, SourceChain,
                                SourceProvider, first_answer,
-                               lower_source_spec)
+                               lower_source_spec, unused_setting_notices)
 from uacpy.data._http import http_get
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
@@ -73,6 +73,9 @@ __all__ = ['fetch_ssp', 'fetch_ssp_transect', 'ssp_transect_sampling',
 
 DEFAULT_BASE_URL = 'https://www.ncei.noaa.gov/thredds-ocean/dodsC/woa23/DATA'
 DEFAULT_DECADE = 'decav'              # 1955-2022 average of all decades
+#: The WOA23 grid read when ``resolution=None``: the 1° grid, the one
+#: ``install.sh --data woa23`` installs.
+_DEFAULT_RESOLUTION = '1.00'
 WOA_FILL_THRESHOLD = 1e30             # _FillValue is 9.96921e36
 
 # Regular cell-centred grids: (n_lat, n_lon, file_resolution_code,
@@ -111,10 +114,12 @@ def _fetch_ssp_backend(
         point, date=date, month=month, resolution=resolution, source=backend,
         decade=decade, base_url=base_url, timeout=timeout, verbose=verbose,
     )
-    # Mackenzie is stated in depth, so it reads the WOA23 depths directly;
-    # the pressure equations convert them at the site latitude.
-    c = np.asarray(sound_speed_at_depth(temp, sal, depths, formula=formula,
-                                        latitude=lat), dtype=float)
+    # Mackenzie is stated in depth, so it reads the WOA23 depths directly
+    # and takes no latitude; the pressure equations convert them at the
+    # site latitude.
+    c = np.asarray(sound_speed_at_depth(
+        temp, sal, depths, formula=formula,
+        latitude=None if formula == 'mackenzie' else lat), dtype=float)
     log_message(
         'sound_speed', f"WOA23 SSP at {lat:.3f}, {lon:.3f}: {depths.size} "
         f"levels, c=[{c.min():.1f}, {c.max():.1f}] m/s", verbose=verbose,
@@ -139,10 +144,10 @@ def fetch_ssp(
     date: Union[str, _dt.date, None] = None,
     month: Optional[int] = None,
     formula: str = DEFAULT_SOUND_SPEED_FORMULA,
-    resolution: str = '1.00',
+    resolution: Optional[str] = None,
     source: Union[str, Sequence[str]] = 'woa23',
-    decade: str = DEFAULT_DECADE,
-    base_url: str = DEFAULT_BASE_URL,
+    decade: Optional[str] = None,
+    base_url: Optional[str] = None,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
     max_days: Optional[int] = None,
@@ -171,7 +176,8 @@ def fetch_ssp(
         pressure equations convert the depths to pressure at the site
         latitude.
     resolution : {'1.00', '0.25'}, optional
-        WOA grid spacing in degrees. Default ``'1.00'``.
+        WOA grid spacing in degrees. ``None`` (default) is ``'1.00'``, the
+        grid ``install.sh --data woa23`` installs.
     source : str or sequence of str, optional
         ``'woa23'`` (default) is cache-first, as ``fetch_environment`` is: the
         install-time WOA23 grids (``install.sh --data woa23``), else the NCEI
@@ -182,9 +188,12 @@ def fetch_ssp(
         with its first source that returns a profile, each cached first —
         the rule ``fetch_environment(ssp_sources=)`` resolves by.
     decade : str, optional
-        WOA averaging period directory (default ``'decav'``).
-    base_url, timeout, verbose
-        THREDDS root, network timeout, logging gate.
+        WOA averaging period directory; ``None`` (default) is
+        :data:`DEFAULT_DECADE` (``'decav'``).
+    base_url : str, optional
+        THREDDS root; ``None`` (default) is :data:`DEFAULT_BASE_URL`.
+    timeout, verbose
+        Network timeout, logging gate.
     max_days : int, optional
         The staleness guard (whole days) of the time-specific sources, as in
         :func:`uacpy.data.fetch_environment`; WOA23 does not read it. A
@@ -194,7 +203,9 @@ def fetch_ssp(
         source answers; ``None`` (default) sets no limit beyond the
         ``ProvenanceWarning`` a source gives when its data come from another
         cell than the point's (WOA23's wet-cell hop) or from a far sample.
-        ``month``, ``decade`` and ``base_url`` reach WOA23 only.
+        ``month``, ``resolution``, ``decade`` and ``base_url`` reach WOA23
+        only, and ``max_days`` the other sources only: a set value the
+        answering source does not read gives a ``FallbackWarning`` naming it.
 
     Returns
     -------
@@ -210,10 +221,13 @@ def fetch_ssp(
         Service failure, or the location is on land / has no profile.
     """
     formula = canonical_formula(formula, 'fetch_ssp')
+    _checked_optional_resolution(resolution, 'fetch_ssp')
     def woa23_call(backend):
         return _fetch_ssp_backend(
             point, backend=backend, date=date, month=month, formula=formula,
-            resolution=resolution, decade=decade, base_url=base_url,
+            resolution=resolution or _DEFAULT_RESOLUTION,
+            decade=decade or DEFAULT_DECADE,
+            base_url=base_url or DEFAULT_BASE_URL,
             timeout=timeout, verbose=verbose, max_distance_km=max_distance_km)
 
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_ssp')
@@ -223,13 +237,18 @@ def fetch_ssp(
     _refuse_a_dry_point(point, who='fetch_ssp', cache_only=source == 'local',
                         timeout=timeout, verbose=verbose)
     if isinstance(source, str) and source in WOA_SOURCES:
-        return _woa_cache_first(source, woa23_call)
-    return _ssp_chain_fetch(
-        source, (point,), woa23_call,
-        dict(date=date, formula=formula, max_days=max_days,
-             max_distance_km=max_distance_km, timeout=timeout,
-             verbose=verbose, who='fetch_ssp', keyword='source'),
-        who='fetch_ssp')
+        profile, answered = _woa_cache_first(source, woa23_call), 'woa23'
+    else:
+        profile, answered = _ssp_chain_fetch(
+            source, (point,), woa23_call,
+            dict(date=date, formula=formula, max_days=max_days,
+                 max_distance_km=max_distance_km, timeout=timeout,
+                 verbose=verbose, who='fetch_ssp', keyword='source'),
+            who='fetch_ssp')
+    _unused_ssp_settings_notices(
+        'fetch_ssp', answered, max_days=max_days, month=month,
+        resolution=resolution, decade=decade, base_url=base_url)
+    return profile
 
 
 def ssp_transect_sampling(
@@ -357,10 +376,10 @@ def fetch_ssp_transect(
     date: Union[str, _dt.date, None] = None,
     month: Optional[int] = None,
     formula: str = DEFAULT_SOUND_SPEED_FORMULA,
-    resolution: str = '1.00',
+    resolution: Optional[str] = None,
     source: Union[str, Sequence[str]] = 'woa23',
-    decade: str = DEFAULT_DECADE,
-    base_url: str = DEFAULT_BASE_URL,
+    decade: Optional[str] = None,
+    base_url: Optional[str] = None,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
     seafloor=None,
@@ -382,7 +401,10 @@ def fetch_ssp_transect(
     **distinct WOA23 cells** the great-circle crosses: the grid cell is the
     sample identity (computed analytically via ``_grid_index`` — no network),
     consecutive waypoints in the same cell collapse, and one column is fetched
-    **per distinct cell** (no duplicate column is ever fetched). This matches
+    **per distinct cell crossed**. A crossed cell with no water (a coastal
+    one) takes its nearest wet cell's column, which a neighbouring crossed
+    cell may also take, so two columns can come from one cell; each record
+    names the cell read and its distance. This matches
     WOA's native range resolution — neither over- nor under-sampling. Pass an
     integer to sample exactly that many evenly-spaced columns instead.
 
@@ -419,11 +441,16 @@ def fetch_ssp_transect(
     source : str or sequence of str, optional
         As on :func:`fetch_ssp`, without ``'argo'``. Default ``'woa23'``.
     resolution : {'1.00', '0.25'}, optional
-        WOA grid spacing in degrees. Default ``'1.00'``.
+        WOA grid spacing in degrees. ``None`` (default) is ``'1.00'``.
     decade : str, optional
-        WOA averaging period directory. Default ``'decav'``.
+        WOA averaging period directory. ``None`` (default) is
+        :data:`DEFAULT_DECADE` (``'decav'``).
     base_url : str, optional
-        The THREDDS root. Default NCEI's WOA23 tree.
+        The THREDDS root. ``None`` (default) is :data:`DEFAULT_BASE_URL`,
+        NCEI's WOA23 tree.
+        ``month``, ``resolution``, ``decade`` and ``base_url`` reach WOA23
+        only, and ``max_days`` Copernicus only: a set value the answering
+        source does not read gives a ``FallbackWarning`` naming it.
     timeout : float, optional
         Per-request network timeout in seconds.
     verbose : bool or str, optional
@@ -440,6 +467,7 @@ def fetch_ssp_transect(
         ``ProvenanceWarning``, as in :func:`fetch_ssp`.
     """
     formula = canonical_formula(formula, 'fetch_ssp_transect')
+    _checked_optional_resolution(resolution, 'fetch_ssp_transect')
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_ssp_transect')
     max_days = _checked_optional_max_days(max_days, 'fetch_ssp_transect')
     source = _checked_ssp_source(source, 'fetch_ssp_transect')
@@ -448,19 +476,26 @@ def fetch_ssp_transect(
         return _fetch_ssp_transect_backend(
             start, end, backend=backend, n_points=n_points,
             max_points=max_points, date=date, month=month, formula=formula,
-            resolution=resolution, decade=decade, base_url=base_url,
+            resolution=resolution or _DEFAULT_RESOLUTION,
+            decade=decade or DEFAULT_DECADE,
+            base_url=base_url or DEFAULT_BASE_URL,
             timeout=timeout, verbose=verbose, seafloor=seafloor,
             max_distance_km=max_distance_km)
 
     if isinstance(source, str) and source in WOA_SOURCES:
-        return _woa_cache_first(source, woa23_call)
-    return _ssp_chain_fetch(
-        source, (start, end), woa23_call,
-        dict(date=date, n_points=n_points, max_points=max_points,
-             formula=formula, max_days=max_days, timeout=timeout,
-             verbose=verbose, seafloor=seafloor, who='fetch_ssp_transect',
-             keyword='source', max_distance_km=max_distance_km),
-        who='fetch_ssp_transect')
+        profile, answered = _woa_cache_first(source, woa23_call), 'woa23'
+    else:
+        profile, answered = _ssp_chain_fetch(
+            source, (start, end), woa23_call,
+            dict(date=date, n_points=n_points, max_points=max_points,
+                 formula=formula, max_days=max_days, timeout=timeout,
+                 verbose=verbose, seafloor=seafloor, who='fetch_ssp_transect',
+                 keyword='source', max_distance_km=max_distance_km),
+            who='fetch_ssp_transect')
+    _unused_ssp_settings_notices(
+        'fetch_ssp_transect', answered, max_days=max_days, month=month,
+        resolution=resolution, decade=decade, base_url=base_url)
+    return profile
 
 
 def _assemble_range_dependent(columns, ranges) -> SoundSpeedProfile:
@@ -500,16 +535,15 @@ def _assemble_range_dependent(columns, ranges) -> SoundSpeedProfile:
     order = np.argsort(ranges, kind='stable')
     ranges = ranges[order]
     columns = [columns[i] for i in order]
-    # The union of every column's depth nodes: an axis taken from any ONE
-    # column drops the others' own nodes (their seafloor-extension samples
-    # included), and np.interp across the gaps re-flattens what the
-    # extension just fixed — measured -11 to -31 m/s. The union reproduces
-    # every column exactly (residual 0.0 across 68 real transects).
-    z = np.unique(np.concatenate([np.asarray(c.depths, dtype=float)
-                                  for c in columns]))
-    data = np.column_stack([
-        np.interp(z, col.depths, col.sound_speed[:, 0]) for col in columns
-    ])
+    # The union of every column's depth nodes (``from_casts``' stacking): an
+    # axis taken from any ONE column drops the others' own nodes (their
+    # seafloor-extension samples included), and np.interp across the gaps
+    # re-flattens what the extension just fixed — measured -11 to -31 m/s.
+    # The union reproduces every column exactly (residual 0.0 across 68 real
+    # transects).
+    stacked = SoundSpeedProfile.from_casts(
+        ranges, [np.column_stack([col.depths, col.sound_speed[:, 0]])
+                 for col in columns])
     # Union the columns' provenance through the carriers' own aggregator, as
     # ``Bottom``, ``Surface`` and ``Environment`` do: one record per column
     # read, each stamped with its column's range, so every column's offset
@@ -520,9 +554,10 @@ def _assemble_range_dependent(columns, ranges) -> SoundSpeedProfile:
     # rather than picking an arbitrary column's equation.
     formulas = {getattr(c, 'formula', None) for c in columns}
     formula = formulas.pop() if len(formulas) == 1 else None
-    return SoundSpeedProfile(depths=z, sound_speed=data, ranges=ranges,
-                             kind='measured', data_sources=sources,
-                             formula=formula)
+    return SoundSpeedProfile(depths=stacked.depths,
+                             sound_speed=stacked.sound_speed,
+                             ranges=stacked.ranges, kind='measured',
+                             data_sources=sources, formula=formula)
 
 
 def _woa_provenance(lat, lon, lat_idx, lon_idx, resolution, date, month, *,
@@ -1019,9 +1054,10 @@ _SSP_CHAIN = SourceChain(
 def _ssp_chain_fetch(source, where, woa23_call, request, *, who):
     """The first answer of the SSP chain ``source`` (a chain spec:
     ``'auto'``, ``'local'``, one id or a sequence) at ``where`` — the
-    point, or both ends of a transect. WOA23 is fetched by
-    ``woa23_call(backend)``, which carries the caller's WOA-only knobs; the
-    other sources by their chain fetch with ``request``."""
+    point, or both ends of a transect — and the id of the source that gave
+    it. WOA23 is fetched by ``woa23_call(backend)``, which carries the
+    caller's WOA-only knobs; the other sources by their chain fetch with
+    ``request``."""
     sources, cache_only = _SSP_CHAIN.resolve(source)
     attempts = _SSP_CHAIN.attempts(sources, cache_only=cache_only,
                                    who=who, keyword='source=')
@@ -1029,20 +1065,44 @@ def _ssp_chain_fetch(source, where, woa23_call, request, *, who):
     def call(src, backend):
         if src == 'woa23':
             return woa23_call(backend)
-        provider = _SSP_CHAIN.provider(src)
-        if len(where) == 1:
-            return provider.point(backend, *where, **request)
-        if provider.transect is None:
-            usable = ' or '.join(repr(p.id) for p in _SSP_CHAIN.providers
-                                 if p.transect is not None)
-            raise ConfigurationError(
-                f"{who}: source {src!r} has no transect fetch.",
-                remediation=f"Use {usable}.",
-            )
-        return provider.transect(backend, *where, **request)
+        return _SSP_CHAIN.fetch(src, backend, where, request, who=who,
+                                keyword='source=')
 
-    answer, _attempt = first_answer(attempts, call)
-    return answer
+    answer, (answered, _backend) = first_answer(attempts, call)
+    return answer, answered
+
+
+#: The SSP sources' names in the notices.
+_SSP_SOURCE_NAMES = {'woa23': 'WOA23', 'copernicus': 'Copernicus',
+                     'argo': 'Argo'}
+
+
+def _unused_ssp_settings_notices(who, answered, *, max_days, month,
+                                 resolution, decade, base_url):
+    """A ``FallbackWarning`` for each set SSP setting the answering source
+    ``answered`` does not read: ``max_days`` on WOA23 (a climatology keyed on
+    month), ``month`` and the WOA23 grid knobs on Argo or Copernicus."""
+    if answered == 'woa23':
+        unused = [('max_days', max_days,
+                   "WOA23 answered, a climatology keyed on month only")]
+    else:
+        why = (f"{_SSP_SOURCE_NAMES.get(answered, answered)} answered, and "
+               f"month, resolution, decade and base_url reach WOA23 only")
+        unused = [(name, value, why) for name, value in (
+            ('month', month), ('resolution', resolution),
+            ('decade', decade), ('base_url', base_url))]
+    unused_setting_notices(who, unused)
+
+
+def _checked_optional_resolution(resolution, who):
+    """Refuse a ``resolution`` that names no WOA23 grid, before any fetch
+    and whichever source then answers; ``None`` passes (the default grid)."""
+    if resolution is not None and (not isinstance(resolution, str)
+                                   or resolution not in _GRIDS):
+        raise ConfigurationError(
+            f"{who}: unknown resolution={resolution!r}.",
+            remediation=f"Use one of {sorted(_GRIDS)}, or None for "
+                        f"{_DEFAULT_RESOLUTION!r}.")
 
 
 #: Network columns already fetched in this process, keyed on everything
@@ -1199,7 +1259,7 @@ def _deep_increment(c_deepest: float, z_from: float, z_to: float,
 
 
 def extend_ssp_below_data(ssp, depth_max: float,
-                          latitude: float = REFERENCE_LATITUDE_DEG):
+                          latitude: float = REFERENCE_LATITUDE):
     """Extend ``ssp`` down to ``depth_max`` along its own deep gradient.
 
     Bathymetry (GEBCO, 15 arc-sec) and analysed T/S (WOA23, 1 deg) come from
@@ -1278,7 +1338,7 @@ def extend_ssp_below_data(ssp, depth_max: float,
 
 
 def extend_column_to_seafloor(column, seafloor, range: float,
-                              latitude: float = REFERENCE_LATITUDE_DEG):
+                              latitude: float = REFERENCE_LATITUDE):
     """One transect column, extended down to the seafloor under ``range``.
 
     Extension only: a column that already reaches past its local seafloor is
@@ -1321,13 +1381,13 @@ def extend_column_to_seafloor(column, seafloor, range: float,
 #: reflector and a kink as a false turning depth to a ray model). Core Argo
 #: floats stop near 2000 dbar, so for them the blend spans 1500-2000 m. The
 #: span is uacpy guidance, not a published value.
-CAST_BLEND_M = 500.0
+CAST_BLEND = 500.0
 
 
 def _blend_cast_onto_column(cast, column, *, verbose=False):
     """``cast`` continued below its deepest level by ``column``.
 
-    Over the cast's deepest :data:`CAST_BLEND_M` the profile blends from the
+    Over the cast's deepest :data:`CAST_BLEND` the profile blends from the
     cast to the column with a raised-cosine weight, at the union of both
     profiles' levels there; above that it is the cast and below the cast it
     is the column. The result cites both, and keeps the cast's ``formula``.
@@ -1340,7 +1400,7 @@ def _blend_cast_onto_column(cast, column, *, verbose=False):
     c_col = np.asarray(column.sound_speed, dtype=float)[:, 0]
     if z_col[-1] <= z_last:
         return cast
-    top = max(float(z_cast[0]), z_last - CAST_BLEND_M)
+    top = max(float(z_cast[0]), z_last - CAST_BLEND)
     above = z_cast < top
     blend_z = np.union1d(z_cast[(z_cast >= top) & (z_cast <= z_last)],
                          z_col[(z_col >= top) & (z_col <= z_last)])
@@ -1382,7 +1442,7 @@ def deepen_with_climatology(
     the deep isothermal layer down; a cast cut in the thermocline extends
     fast (30 m/s at 4.8 km for a 1000 m cast in the Bay of Biscay in July).
     This takes the analysed column instead. Over the cast's deepest
-    :data:`CAST_BLEND_M` metres (all of a shorter cast) the profile blends
+    :data:`CAST_BLEND` metres (all of a shorter cast) the profile blends
     from the cast to the column with a raised-cosine weight, so the join
     carries no step (a false reflector) and no gradient kink (a false turning
     depth for a ray model); below the cast it is the column. The result
@@ -1455,7 +1515,8 @@ def deepen_with_climatology(
             remediation="Deepen each column on its own point and stack them "
                         "with SoundSpeedProfile.from_casts(ranges, "
                         "[c.to_pairs() for c in columns]).")
-    if not isinstance(source, str) or source not in WOA_SOURCES:
+    # Source ids match in any case, as on every other fetcher.
+    if not isinstance(source, str) or source.lower() not in WOA_SOURCES:
         raise ConfigurationError(
             f"{who}: source={source!r} is not a climatology source.",
             remediation="Use 'woa23' (the installed grids, else NCEI "
@@ -1464,6 +1525,6 @@ def deepen_with_climatology(
     column = fetch_ssp(point, date=date, month=month,
                        formula=formula or ssp.formula
                        or DEFAULT_SOUND_SPEED_FORMULA,
-                       resolution=resolution, source=source,
+                       resolution=resolution, source=source.lower(),
                        timeout=timeout, verbose=verbose)
     return _blend_cast_onto_column(ssp, column, verbose=verbose)

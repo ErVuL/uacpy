@@ -20,7 +20,9 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 #: The hearing groups of Southall et al. (2019) whose weighting and
 #: thresholds are for sound in air, each with its in-water counterpart: their
 #: Tables 6-7 give "dB re (20 μPa)2 s in air (groups PCA and OCA only)"
-#: against "dB re 1 μPa2 s under water" (45_2_southall.md, Table 6 caption).
+#: against "dB re 1 μPa2 s under water" (Southall et al. 2019, "Marine
+#: Mammal Noise Exposure Criteria: Updated Scientific Recommendations for
+#: Residual Hearing Effects", Aquatic Mammals 45(2), Table 6 caption).
 _IN_AIR_GROUPS = {"PCA": "PCW", "OCA": "OCW"}
 
 #: Share of the energy a weighting TABLE may leave outside its span, where it
@@ -49,7 +51,7 @@ def warn_in_air_group_in_water(weighting, ref, who):
 
 
 def warn_table_leaves_energy_out(weighting, frequency, energy, who):
-    """Warn when a ``(frequencies_Hz, W_dB)`` weighting table leaves more
+    """Warn when a ``(frequencies, W_dB)`` weighting table leaves more
     than half of the energy outside its span, where it carries no weight:
     ``energy`` is the energy per bin at ``frequency`` (Hz). A table typed in
     kHz is the usual cause, and the warning says so when the same table in

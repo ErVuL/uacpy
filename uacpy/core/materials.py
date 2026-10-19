@@ -12,7 +12,7 @@ Key           Meaning
 sound_speed   Compressional wave speed ``c_p`` (m/s).
 density       Mass density (g/cm³). For the Jensen et al. Table 1.3 rows
               this is the table's ratio ρ_b/ρ_w times the package's one water
-              density (``DEFAULT_WATER_DENSITY_G_CM3``), so a run in default
+              density (``DEFAULT_WATER_DENSITY``), so a run in default
               water sees exactly the tabulated ratio; see the note below.
 attenuation   Compressional attenuation ``α_p`` (dB/λ_p).
 shear_speed   Shear wave speed ``c_s`` (m/s); 0 marks a fluid sediment.
@@ -47,7 +47,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional
 
-from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_WATER_DENSITY
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -166,9 +166,9 @@ def _entry(
 # in Hamilton's continental-terrace suite, so gravel takes TR 9407 Table 2's
 # "Sandy Gravel" row, Mz = -1.0 — the coarsest ϕ either model in
 # :mod:`uacpy.core.sediment` is fitted at — and moraine has no phi at all.
-# That the row's Mz is -1.0 does not rest on reading the scan: the report's
-# Eqs. 2-3 evaluated there give nu = 1.3370 and rho = 2.492, which are the
-# digits printed in that row (Mz = -1.5 would give 1.3686 / 2.5873).
+# The row's Mz of -1.0 is confirmed by the report's Eqs. 2-3, which give
+# nu = 1.3370 and rho = 2.492 there, the digits printed in that row
+# (Mz = -1.5 would give 1.3686 / 2.5873).
 #
 # Table 1.3's density column is the RATIO rho_b/rho_w (headed so in the
 # table), not an absolute density. Every deck divides the seabed density by
@@ -178,7 +178,7 @@ def _entry(
 # a textbook reproduction at rho_w = 1 passes the ratio itself as density.
 # The granite row is Ainslie's absolute 2650 kg/m3 and is not rescaled.
 def _table_1_3_density(ratio: float) -> float:
-    return ratio * DEFAULT_WATER_DENSITY_G_CM3
+    return ratio * DEFAULT_WATER_DENSITY
 
 
 _PRESETS: Dict[str, Dict] = {

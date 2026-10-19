@@ -13,7 +13,7 @@ acoustics: shading trades beamwidth for sidelobes, element spacing above
 lambda/2 folds a grating lobe back into the fan, and aperture sets how finely
 two arrivals can be separated.
 
-Uses: Receiver as a vertical array · acoustic_signal.steering_vectors ·
+Uses: Receiver as a vertical array ·
 shading_taper · beamform_field (BeamformedField.snr_dB) ·
 Modes.grazing_angles (the angles the peaks
 should land on) · Kraken
@@ -67,8 +67,7 @@ fig, axes = plt.subplots(1, 3, figsize=(16, 4.4))
 
 # ── 1. what the array hears, against what the waveguide can send ────────
 ax = axes[0]
-scan = beamform_field(p[:, 0], elements, angles, FREQ, sound_speed=C_REF,
-                      weights=shading_taper(n_el, 'boxcar'))
+scan = beamform_field(p[:, 0], elements, angles, FREQ, sound_speed=C_REF)
 beam = 10.0 * np.log10(scan.power / scan.power.max())   # for the arithmetic
 theta_max = float(mode_angles.max())
 # The honest claim. This array's main lobe (4.2 deg between its half-power
@@ -114,8 +113,7 @@ ax.grid(alpha=0.3)
 ax = axes[2]
 coarse = elements[::2]
 p_coarse = p[::2]
-aliased = beamform_field(p_coarse[:, 0], coarse, angles, FREQ, sound_speed=C_REF,
-                         weights=shading_taper(len(coarse), 'boxcar'))
+aliased = beamform_field(p_coarse[:, 0], coarse, angles, FREQ, sound_speed=C_REF)
 scan.plot(ax=ax, color='C0', lw=1.3, label=f'{HALF:.2f} m spacing (λ/2)')
 aliased.plot(ax=ax, color='C3', lw=1.3, alpha=0.85,
              label=f'{2 * HALF:.2f} m spacing (λ) — aliased')

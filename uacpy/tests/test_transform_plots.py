@@ -37,6 +37,83 @@ def test_plot_fk_returns_fig_ax():
     plt.close(fig2)
 
 
+class TestTheTimeFrequencyPanelsDrawDBReTheirPeak:
+    """``reference='peak'`` on the spectrogram, scalogram and f-k panels:
+    the level in dB re the panel's own largest value, 0 dB at the top of a
+    ``-dynamic_range_dB … 0`` window."""
+
+    FS = 4000.0
+
+    @classmethod
+    def _results(cls):
+        from uacpy.acoustic_signal import cwt, lfm_chirp, spectrogram
+        _, x = lfm_chirp(200.0, 1200.0, 0.1, sample_rate=cls.FS)
+        gather = np.array([np.roll(x, 3 * k) for k in range(16)]).T
+        spec = spectrogram(x, cls.FS, nperseg=128, noverlap=96)
+        return {
+            'spectrogram': (spec, 10.0 * np.log10(spec.power)),
+            'cwt': (cwt(x, cls.FS, np.linspace(100.0, 1500.0, 30)), None),
+            'fk': (fk_transform(gather, cls.FS, 2.0), None),
+        }
+
+    @staticmethod
+    def _panel(ax):
+        mappable = (ax.images or ax.collections)[0]
+        return mappable, np.asarray(mappable.get_array(), dtype=float)
+
+    @pytest.mark.parametrize('name', ['spectrogram', 'cwt', 'fk'])
+    def test_the_peak_reads_zero_on_the_requested_window(self, name):
+        result, _ = self._results()[name]
+        fig, ax = result.plot(reference='peak', dynamic_range_dB=40.0)
+        try:
+            mappable, drawn = self._panel(ax)
+            assert np.nanmax(drawn) == pytest.approx(0.0, abs=1e-9)
+            assert mappable.get_clim() == (-40.0, 0.0)
+            assert fig.axes[-1].get_ylabel().endswith('(dB re peak)')
+        finally:
+            plt.close(fig)
+
+    def test_the_spectrogram_shape_is_its_absolute_level_less_the_peak(self):
+        spec, level_dB = self._results()['spectrogram']
+        fig, ax = spec.plot(reference='peak')
+        try:
+            _, drawn = self._panel(ax)
+            np.testing.assert_allclose(drawn, level_dB - level_dB.max(),
+                                       atol=1e-9)
+        finally:
+            plt.close(fig)
+
+    @pytest.mark.parametrize('name, kwargs, match', [
+        ('spectrogram', {'reference': 'max'}, "None .* or 'peak'"),
+        ('fk', {'reference': 'peak', 'ref': 20e-6}, 'pass one of them'),
+        ('cwt', {'dynamic_range_dB': 40.0}, "reference='peak'"),
+    ])
+    def test_a_reference_the_panel_cannot_draw_is_refused(self, name, kwargs,
+                                                          match):
+        result, _ = self._results()[name]
+        with pytest.raises(ConfigurationError, match=match):
+            result.plot(**kwargs)
+        assert not plt.get_fignums()
+
+    def test_a_phase_panel_is_refused_naming_a_route_that_draws_it(self):
+        import uacpy
+        from uacpy.acoustic_signal import lfm_chirp, stft
+        from uacpy.visualization.plots.signal import plot_spectrogram
+        _, x = lfm_chirp(200.0, 1200.0, 0.1, sample_rate=self.FS)
+        r = stft(x, self.FS, nperseg=128)
+        with pytest.raises(ConfigurationError, match=r"plot\(value='phase'\)"):
+            plot_spectrogram(r.frequencies, r.times, np.angle(r.coefficients),
+                             mode='angle')
+        fig, ax = uacpy.Field(
+            data=r.coefficients,
+            coords={'frequency': r.frequencies, 'time': r.times}).plot(
+                value='phase')
+        try:
+            assert fig.axes[-1].get_ylabel() == 'Phase (rad)'
+        finally:
+            plt.close(fig)
+
+
 def test_plot_radon():
     d = np.zeros((256, 24))
     d[60, :] = 1.0
@@ -98,13 +175,13 @@ class TestRadonResultCarriesItsKind:
         from uacpy.core.exceptions import ConfigurationError
         with pytest.raises(ConfigurationError, match='kind must be one of'):
             RadonResult(np.zeros(2), np.zeros(3), np.zeros((2, 3)),
-                        kind='parabolix')
+                        kind='parabolix', sample_rate=1000.0, dx=1.0, nx=4)
 
 
 def test_plot_taup():
     d = np.zeros((256, 24))
     d[60, :] = 1.0
-    p, taus, tp = taup_transform(d, 1000.0, 10.0, n_slowness=41, p_max=1.5e-3)
+    p, taus, tp = taup_transform(d, 1000.0, 10.0, n_slownesses=41, p_max=1.5e-3)
     fig, ax = plot_taup(p, taus, tp, sound_speed=1500.0)
     assert ax.images
     plt.close(fig)
@@ -118,7 +195,7 @@ def test_the_slowness_label_stays_inside_the_axes():
     d[100, :] = 1.0
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')          # the aliasing notice
-        p, taus, tp = taup_transform(d, 1000.0, 10.0, n_slowness=301,
+        p, taus, tp = taup_transform(d, 1000.0, 10.0, n_slownesses=301,
                                      p_max=1 / 1200.0)
     fig, axes = plt.subplots(3, 2, figsize=(12, 14), constrained_layout=True)
     try:
@@ -134,18 +211,56 @@ def test_the_slowness_label_stays_inside_the_axes():
         plt.close(fig)
 
 
+def test_the_overlays_write_their_speed_only_when_asked_to_annotate():
+    """``annotate=`` is the bool that writes the speed beside the cone or
+    the slowness line; ``label`` is a legend string on every plotter and
+    no keyword of these two."""
+    from uacpy.plot import draw_slowness_line, draw_sound_cone
+    fig, ax = plt.subplots()
+    try:
+        draw_sound_cone(ax, 500.0, 2.0, 1500.0)
+        draw_slowness_line(ax, 1.0, 1500.0)
+        assert [t.get_text().strip() for t in ax.texts] == ['1500 m/s'] * 2
+        ax.texts[0].remove()
+        ax.texts[0].remove()
+        draw_sound_cone(ax, 500.0, 2.0, 1500.0, annotate=False)
+        draw_slowness_line(ax, 1.0, 1500.0, annotate=False)
+        assert not ax.texts
+        for draw, args in ((draw_sound_cone, (500.0, 2.0, 1500.0)),
+                           (draw_slowness_line, (1.0, 1500.0))):
+            with pytest.raises(TypeError, match='label'):
+                draw(ax, *args, label=False)
+    finally:
+        plt.close(fig)
+
+
+def test_the_frf_legend_entry_is_its_label():
+    """One keyword names the legend entry: ``label``, used as given."""
+    fig, (ax_mag, ax_phase) = plot_frf(
+        _FREQS3, np.array([1.0 + 1.0j, 2.0 + 0.0j, 0.5 - 0.5j]),
+        label='measured H1')
+    try:
+        assert [t.get_text() for t in ax_mag.get_legend().get_texts()] == [
+            'measured H1']
+        assert ax_phase.get_lines()[0].get_label() == 'measured H1'
+    finally:
+        plt.close(fig)
+    with pytest.raises(ConfigurationError, match="argument 'tag'"):
+        plot_frf(_FREQS3, np.ones(3, dtype=complex), tag='measured')
+
+
 _FREQS3 = np.array([10.0, 100.0, 1000.0])
 
 
 @pytest.mark.parametrize('fn, params, args', [
-    (plot_band_levels, ('centers', 'levels', 'ax', 'lower', 'upper'),
+    (plot_band_levels, ('centers', 'levels_dB', 'ax', 'lower', 'upper'),
      (BandLevels(np.array([63.0, 80.0, 100.0]), np.array([90.0, 95.0, 92.0]),
                  lower=np.array([56.2, 71.0, 89.1]),
                  upper=np.array([70.8, 89.1, 112.0]),
                  band_type='decidecade', ref=1e-6),)),
-    (plot_beam_power, ('angles_deg', 'power', 'ax', 'dB', 'label'),
+    (plot_beam_power, ('angles_deg', 'power', 'ax', 'value', 'label'),
      (np.linspace(-90.0, 90.0, 7), np.linspace(1.0, 2.0, 7))),
-    (plot_frf, ('frequencies', 'tf', 'ax', 'tag'),
+    (plot_frf, ('frequencies', 'tf', 'ax', 'label'),
      (_FREQS3, np.array([1.0 + 1.0j, 2.0 + 0.0j, 0.5 - 0.5j]))),
     (plot_coherence, ('frequencies', 'coherence', 'ax'),
      (_FREQS3, np.array([0.9, 0.95, 0.99]))),
@@ -160,7 +275,7 @@ def test_signal_plotter_signature_and_smoke(fn, params, args):
     sig = inspect.signature(fn)
     assert all(p in sig.parameters for p in params)
     fig, axes = fn(*args)
-    for ax in (axes if isinstance(axes, (list, tuple)) else [axes]):
+    for ax in (axes if isinstance(axes, (list, tuple, np.ndarray)) else [axes]):
         assert ax.has_data()
     plt.close(fig)
 
@@ -168,7 +283,8 @@ def test_signal_plotter_signature_and_smoke(fn, params, args):
 def test_one_beam_power_plotter_takes_a_result_or_arrays():
     """``plot_beam_power`` draws beam power in dB re its own maximum
     against look angle from a ``BeamformedField`` or from an angular
-    spectrum's two arrays (Bartlett, MVDR, MUSIC), labelled alike; ``dB=False``
+    spectrum's two arrays (Bartlett, MVDR, MUSIC), labelled alike;
+    ``value='power'``
     draws it linear, and ``label=`` overlays several processors."""
     angles = np.linspace(-90.0, 90.0, 7)
     fig, ax = plot_beam_power(angles, np.linspace(1.0, 2.0, 7),
@@ -180,7 +296,8 @@ def test_one_beam_power_plotter_takes_a_result_or_arrays():
     assert [t.get_text() for t in ax.get_legend().get_texts()] == [
         'Bartlett', 'MVDR']
     plt.close(fig)
-    fig, ax = plot_beam_power(angles, np.linspace(1.0, 2.0, 7), dB=False)
+    fig, ax = plot_beam_power(angles, np.linspace(1.0, 2.0, 7),
+                              value='power')
     np.testing.assert_allclose(ax.lines[0].get_ydata(),
                                np.linspace(1.0, 2.0, 7) / 2.0)
     assert ax.get_ylabel() == 'Beam power (re max)'
@@ -212,6 +329,23 @@ def test_a_null_look_angle_sits_on_the_floor_of_the_beam_plotter():
                               np.abs(response) ** 2)
     try:
         assert ax.lines[0].get_ydata()[2] == pytest.approx(-120.0)
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize('value, peak', [('dB', 0.0), ('power', 1.0)])
+def test_an_undefined_look_angle_is_a_gap_in_the_beam_curve(value, peak):
+    """A look angle the processor leaves undefined (NaN: an MVDR of a
+    covariance it cannot invert) is a gap; the rest of the curve is drawn
+    relative to the peak of the defined angles, in both views."""
+    power = np.array([1.0, 4.0, np.nan, 2.0, 1.0])
+    fig, ax = plot_beam_power(np.linspace(-60.0, 60.0, 5), power,
+                              value=value)
+    try:
+        drawn = np.asarray(ax.lines[0].get_ydata(), dtype=float)
+        assert np.isnan(drawn[2])
+        assert np.isfinite(drawn[[0, 1, 3, 4]]).all()
+        assert drawn[1] == pytest.approx(peak)
     finally:
         plt.close(fig)
 
@@ -311,8 +445,7 @@ class TestFixedYWindowsAreEscapable:
         for the spectrogram's frequency axis, whose level window is
         ``vmin``/``vmax`` like every image plotter's."""
         from uacpy.visualization import plots
-        for name in ('plot_psd', 'plot_constant_q_psd', 'plot_ppsd',
-                     'plot_constant_q_ppsd', 'plot_band_levels', 'plot_frf',
+        for name in ('plot_psd', 'plot_ppsd', 'plot_band_levels', 'plot_frf',
                      'plot_coherence', 'plot_wenz'):
             params = inspect.signature(getattr(plots, name)).parameters
             assert {'ymin', 'ymax'} <= set(params), name

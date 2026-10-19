@@ -441,13 +441,13 @@ class ParallelResult:
                                  who='ParallelResult.stack')
         return ResultStack(results, coord, coordinate_name=name)
 
-    def summary(self):
+    def to_dataframe(self):
         """One row per job as a ``pandas.DataFrame`` (optional extra
         ``uacpy[xarray]``): ``label``, ``ok``, ``error_type`` (the
         exception class, ``''`` for a job that finished) and ``n_warnings``,
         in job order."""
         from uacpy.core._export import require_extra
-        pandas = require_extra('pandas', 'ParallelResult.summary')
+        pandas = require_extra('pandas', 'ParallelResult.to_dataframe')
         n = len(self.results)
         return pandas.DataFrame({
             'label': list(self.labels),

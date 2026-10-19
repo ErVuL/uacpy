@@ -37,13 +37,10 @@ __all__ = ['land_polygons', 'download_coastline', 'NATURAL_EARTH_URL',
 # guessed one turns a working optional download into a permanent 404. The
 # cached GeoJSON in ``coastline/`` cannot settle it either: its only metadata
 # are ``name``/``crs``/``bbox``, with no version stamp to match against.
-# To do it, with network: list the repo's tags, confirm
-# ``geojson/ne_{110m,50m,10m}_land.geojson`` exist at the chosen one, swap
-# ``master`` for it, and re-run ``./install.sh --data coastline``.
-# Until then the exposure stays small: the cache is read first
-# (:func:`land_polygons`), an unreachable or malformed source only warns and
-# drops the land layer, and ``download_coastline`` parses before it writes so a
-# portal error page never reaches the cache.
+# The exposure is small: the cache is read first (:func:`land_polygons`), an
+# unreachable or malformed source only warns and drops the land layer, and
+# ``download_coastline`` parses before it writes so a portal error page never
+# reaches the cache.
 NATURAL_EARTH_URL = (
     'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/'
     'master/geojson/ne_{resolution}_land.geojson'
@@ -62,8 +59,7 @@ def _rings(data):
     layer is a backdrop drawn over the bathymetry to hide coastal grid-cell
     bleed (``maps.py``), and matplotlib's ``fill`` takes one closed path per
     call — punching the holes back out needs a compound ``Path`` with
-    per-ring ``CLOSEPOLY`` codes and correct winding. Revisit if a lake ever
-    has to read as water."""
+    per-ring ``CLOSEPOLY`` codes and correct winding."""
     rings = []
     for feat in data.get('features', []):
         geom = feat.get('geometry') or {}

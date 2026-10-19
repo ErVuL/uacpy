@@ -257,8 +257,39 @@ def test_the_wind_source_matches_in_any_case(wind_cache):
 @pytest.mark.parametrize('spelling, order', [
     ('AUTO', ('waverys', 'ww3')), ('WW3', ('ww3',)),
     (('WAVERYS', 'Ww3'), ('waverys', 'ww3'))])
-def test_the_wave_source_matches_in_any_case(spelling, order):
-    assert waves_mod._resolve_order(spelling) == order
+def test_the_wave_source_matches_in_any_case(monkeypatch, spelling, order):
+    tried = []
+
+    def record(src, backend, where, request, **kw):
+        tried.append(src)
+        raise DataFetchError('stubbed')
+    monkeypatch.setattr(waves_mod._WAVE_CHAIN.__class__, 'fetch',
+                        lambda self, *a, **kw: record(*a, **kw))
+    with pytest.raises(DataFetchError, match='stubbed'):
+        waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01', source=spelling)
+    assert tuple(tried) == order
+
+
+@pytest.mark.parametrize('fetch, spec, match', [
+    ('fetch_waves', 'local', "fetch_waves: unknown wave source 'local'"),
+    ('fetch_waves', ('ww3', 'nope'), "fetch_waves: unknown wave source 'nope'"),
+    ('fetch_sea_surface', 'nope',
+     "fetch_sea_surface: unknown sea surface source 'nope'"),
+    ('fetch_sea_surface', ('auto', 'ww3'),
+     "(?s)fetch_sea_surface: unknown sea surface source 'auto'.*pass it "
+     "alone"),
+])
+def test_an_unknown_sea_state_source_is_refused_before_any_request(
+        monkeypatch, fetch, spec, match):
+    """Wave sources have no cached twin, so 'local' is no wave preset; the
+    sea surface's own 'local' is the cached wind climatology."""
+    monkeypatch.setattr(ww3_live, 'http_get',
+                        lambda *a, **k: pytest.fail('a request was made'))
+    module = waves_mod if fetch == 'fetch_waves' else sea_surface
+    kw = {} if fetch == 'fetch_waves' else {'rmax': 5000.0}
+    with pytest.raises(ConfigurationError, match=match):
+        getattr(module, fetch)((50.0, 0.0), date='2020-01-01', source=spec,
+                               **kw)
 
 
 # ── waves ─────────────────────────────────────────────────────────────────────
@@ -349,6 +380,93 @@ def test_a_max_days_wavewatch_does_not_read_is_announced(monkeypatch, source,
                               max_days=5)
     unused = [w for w in caught if issubclass(w.category, FallbackWarning)
               and 'max_days=5 was not used' in str(w.message)]
+    assert len(unused) == notices
+
+
+_MIRROR = 'https://erddap.example.org/erddap/griddap'
+
+
+def _recording(server, urls):
+    """``server`` that also records every URL it is asked for."""
+    def fake(url, **kw):
+        urls.append(url)
+        return server(url, **kw)
+    return fake
+
+
+@pytest.mark.parametrize('base_url, root', [
+    (None, 'https://coastwatch.noaa.gov/erddap/griddap/'),
+    (_MIRROR, _MIRROR + '/'), (_MIRROR + '/', _MIRROR + '/')])
+def test_the_nbs_requests_go_to_base_url(monkeypatch, base_url, root):
+    """``base_url=None`` reads the module constant; a mirror receives every
+    request of the point and the transect fetch."""
+    urls = []
+    monkeypatch.setattr(wind_live, 'http_get', _recording(
+        _nbs_server({'u_wind': 3.0, 'v_wind': 4.0}), urls))
+    assert wind_live.fetch_wind((50.0, 0.0), date='2020-01-01',
+                                base_url=base_url) == pytest.approx(
+                                    ms_to_knots(5.0))
+    wind_live.fetch_wind_transect((50.0, 0.0), (50.5, 0.5),
+                                  date='2020-01-01', n_points=2,
+                                  base_url=base_url)
+    assert len(urls) == 6
+    assert all(u.startswith(root + 'noaacwBlendedWinds6hr') for u in urls)
+
+
+@pytest.mark.parametrize('fetch', ['fetch_wind', 'fetch_wind_transect'])
+def test_a_base_url_the_cached_wind_does_not_read_is_refused(monkeypatch,
+                                                              fetch):
+    monkeypatch.setattr(wind_live, 'http_get',
+                        lambda *a, **k: pytest.fail('a request was made'))
+    ends = ((50.0, 0.0),) if fetch == 'fetch_wind' else ((50.0, 0.0),
+                                                         (50.5, 0.5))
+    with pytest.raises(ConfigurationError,
+                       match=r"base_url= is the NBS ERDDAP griddap root"):
+        getattr(wind_live, fetch)(*ends, date='2020-01-01', source='local',
+                                  base_url=_MIRROR)
+
+
+@pytest.mark.parametrize('base_url, root', [
+    (None, 'https://pae-paha.pacioos.hawaii.edu/erddap/griddap/'),
+    (_MIRROR, _MIRROR + '/')])
+def test_the_wavewatch_request_goes_to_base_url(monkeypatch, base_url, root):
+    urls = []
+    monkeypatch.setattr(ww3_live, 'http_get',
+                        _recording(_ww3_server(2.4), urls))
+    out = waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01', source='ww3',
+                                base_url=base_url)
+    assert out.hs == pytest.approx(2.4)
+    assert urls and all(u.startswith(root + 'ww3_global') for u in urls)
+
+
+def test_a_base_url_no_wave_source_reads_is_refused(monkeypatch):
+    monkeypatch.setattr('uacpy.data.copernicus.fetch_waves_operational',
+                        lambda point, **kw: pytest.fail('a fetch was made'))
+    with pytest.raises(ConfigurationError,
+                       match=r"only source 'ww3' reads; source='waverys'"):
+        waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01',
+                              source='waverys', base_url=_MIRROR)
+
+
+@pytest.mark.parametrize('copernicus, notices', [(True, 1), (False, 0)])
+def test_a_base_url_waverys_answered_for_is_announced(monkeypatch,
+                                                      copernicus, notices):
+    """``'auto'`` reads WAVERYS first, which takes no base_url: when it
+    answers, the mirror changed nothing and a notice says so."""
+    from uacpy.core.exceptions import FallbackWarning
+
+    def waverys(point, **kw):
+        if not copernicus:
+            raise DataFetchError("no login")
+        return _waves_record(1.2)
+    monkeypatch.setattr('uacpy.data.copernicus.fetch_waves_operational',
+                        waverys)
+    monkeypatch.setattr(ww3_live, 'http_get', _ww3_server(1.8))
+    with recorded_warnings() as caught:
+        waves_mod.fetch_waves((50.0, 0.0), date='2020-01-01',
+                              base_url=_MIRROR)
+    unused = [w for w in caught if issubclass(w.category, FallbackWarning)
+              and f"base_url={_MIRROR!r} was not used" in str(w.message)]
     assert len(unused) == notices
 
 
@@ -460,15 +578,44 @@ def test_fetch_sea_surface_from_waves(monkeypatch):
 
 
 def test_fetch_sea_surface_wind_fallback(monkeypatch):
+    """The wind answers, and the surface carries the reading's own record —
+    the 0.25° cell read included, as fetch_wind_transect's records of the
+    same reading do."""
+    record = DataProvenance(source=SOURCES['nbs'], data_point=(50.0, 0.125),
+                            data_date='2020-01-01T00:00:00Z',
+                            requested_point=(50.0, 0.0),
+                            requested_date='2020-01-01', point_kind='cell',
+                            cell_size_deg=0.25)
     monkeypatch.setattr(waves_mod, 'fetch_waves',
                         lambda point, **kw: (_ for _ in ()).throw(DataFetchError("no waves")))
-    monkeypatch.setattr(wind_live, 'wind_at', lambda point, **kw: (
-        10.0, DataProvenance(source=SOURCES['nbs'],
-                             requested_point=tuple(point))))
+    monkeypatch.setattr(wind_live, 'wind_at',
+                        lambda point, **kw: (10.0, record))
     alt = sea_surface.fetch_sea_surface(
         (50.0, 0.0), date='2020-01-01', rmax=5000.0, n_points=32,
         rng=np.random.default_rng(2))
-    assert alt.data_sources[0].source.id == 'nbs' and alt.ranges.size == 32
+    assert alt.data_sources == (record,) and alt.ranges.size == 32
+
+
+@pytest.mark.parametrize('max_days, notices', [(5, 1), (None, 0)])
+def test_a_max_days_the_wind_does_not_read_is_announced(monkeypatch,
+                                                        max_days, notices):
+    """Only WAVERYS reads max_days; when the wind answers the sea surface,
+    a max_days= given changed nothing and says so."""
+    from uacpy.core.exceptions import FallbackWarning
+    monkeypatch.setattr(waves_mod, 'fetch_waves',
+                        lambda point, **kw: (_ for _ in ()).throw(
+                            DataFetchError("no waves")))
+    monkeypatch.setattr(wind_live, 'wind_at', lambda point, **kw: (
+        10.0, DataProvenance(source=SOURCES['nbs'],
+                             requested_point=tuple(point))))
+    with recorded_warnings() as caught:
+        sea_surface.fetch_sea_surface(
+            (50.0, 0.0), date='2020-01-01', rmax=5000.0, n_points=32,
+            rng=np.random.default_rng(2), max_days=max_days)
+    unused = [w for w in caught if issubclass(w.category, FallbackWarning)
+              and 'max_days=5 was not used: the NBS wind answered'
+              in str(w.message)]
+    assert len(unused) == notices
 
 
 def test_a_sea_surface_draws_from_the_generator_it_is_given(monkeypatch):
@@ -686,8 +833,8 @@ def test_sea_surface_holds_its_wave_height_at_every_transect_length(
     u = sea_surface._pm_wind_ms(hs)
     dx = rmax / (alt.ranges.size - 1)
     from uacpy.core.altimetry import SEA_SURFACE_SAMPLES_PER_PEAK
-    from uacpy.core.constants import STANDARD_GRAVITY_M_S2
-    assert dx <= (2 * np.pi * u ** 2 / STANDARD_GRAVITY_M_S2
+    from uacpy.core.constants import STANDARD_GRAVITY
+    assert dx <= (2 * np.pi * u ** 2 / STANDARD_GRAVITY
                   / SEA_SURFACE_SAMPLES_PER_PEAK)
 
 

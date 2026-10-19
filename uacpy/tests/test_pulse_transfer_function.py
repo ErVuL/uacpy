@@ -159,6 +159,24 @@ class TestAPulseOnlyInterferesWithWhatItOverlaps:
         cut = field.truncate_response(0.050)
         assert _ripple_dB(cut) == pytest.approx(_ripple_dB(field), abs=1e-6)
 
+    def test_an_unsolved_bin_makes_its_cell_no_data_and_says_so(self):
+        """A NaN bin is a frequency the model did not solve: the cell's cut
+        H is NaN throughout (no data), and the notice every synthesis gives
+        names the bin."""
+        field = _two_path_field()
+        holed = np.array(field.data)
+        holed[..., 7] = np.nan
+        with recorded_warnings() as record:
+            cut = field.replace(data=holed).truncate_response(0.020)
+        assert np.all(np.isnan(np.asarray(cut.data)))
+        said = [str(w.message) for w in record]
+        assert any(m.startswith('Field.truncate_response: 1 of 1 cell(s) of '
+                                'H(f) hold bins the model did not solve')
+                   and f'{FREQS[7]:g}' in m for m in said), said
+        with recorded_warnings() as record:
+            field.truncate_response(0.020)
+        assert not [w for w in record if 'did not solve' in str(w.message)]
+
     @pytest.mark.parametrize('fraction,keeps', [(0.98, False), (1.02, True)])
     def test_the_window_reaches_one_pulse_length_either_side(self, fraction,
                                                              keeps):

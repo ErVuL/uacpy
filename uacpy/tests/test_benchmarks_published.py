@@ -1,12 +1,15 @@
-"""Published range-dependent benchmarks — uacpy's engines measured against
-reference solutions computed by an independent code for the standard cases of
-the ocean-acoustics literature.
+"""Published benchmarks — uacpy's engines measured against reference solutions
+for the standard cases of the ocean-acoustics literature: COUPLE07 tables for
+the range-dependent cases, and for Bucker's range-independent waveguide a
+Scooter run through uacpy, checked against OAST (whose deck writer is separate
+from the one Kraken and Scooter share).
 
 The rest of the benchmark suite checks the engines against closed forms
 (``test_benchmarks_analytic.py``), against a mode-matching solution written in
 this repository (``test_benchmarks_coupled_mode.py``) and against each other.
 This module checks them against the cases the field uses to judge a
-range-dependent model, with references from a code uacpy does not wrap.
+propagation model, the range-dependent ones with references from a code uacpy
+does not wrap.
 
 Reference solutions
 -------------------
@@ -14,10 +17,12 @@ COUPLE07 (R. B. Evans, December 2007 version, OALIB ``Modes/couple/couple07.zip`
 is the stepwise coupled-mode code behind the published reference curves of the
 ASA benchmark wedge (Jensen & Ferla, JASA 87, 1499-1510, 1990). It was built
 outside this repository (gfortran ``-std=legacy`` plus stubs for the Lahey
-``TIMER``/``DATE`` intrinsics) and run on the test inputs it ships. Each table
-under ``tests/data/benchmarks/`` holds the TL it printed, with a header naming
-the problem, the run settings and the source. COUPLE carries no licence, so
-only those generated tables are shipped — never its source or its figures.
+``TIMER``/``DATE`` intrinsics) and run on the test inputs it ships. Each
+``*_couple07.txt`` table under ``tests/data/benchmarks/`` holds the TL it
+printed, with a header naming the problem, the run settings and the source.
+COUPLE carries no licence, so only those generated tables are shipped — never
+its source or its figures. ``bucker_waveguide_100hz_scooter.txt`` holds
+Scooter's TL, its header naming the run.
 
 Every reference here was computed with water of density 1.0 g/cm^3 (COUPLE's
 RHOW, the OASES Bucker deck), so every environment below is built with
@@ -469,8 +474,7 @@ def test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference
     sides rather than bounded from above: a change in either direction is
     news.
 
-    The cause is the one-way codes' condition at the vertical faces of the
-    steps. Kraken's coupled answer moves with the segment count, as on the
+    Kraken's coupled answer moves with the segment count, as on the
     ASA wedge: +2.83 dB at its automatic decomposition (thinned to 200
     profiles) and +4.02 dB with the 209 profiles the quarter-wavelength
     criterion asks for, where COUPLE07's own one-way pressure-matching run
@@ -479,11 +483,13 @@ def test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference
     sits at +4.70 dB at 2.5, +0.69 at 1.5 and -0.03 at 1.0 against COUPLE's
     two-way run of each (density 1.0: COUPLE07 rerun, not shipped)
     (test_the_pe_offset_beyond_the_corrugation_grows_with_the_bottom_density).
-    Collins & Siegmann, Parabolic Wave Equations with Applications, Sect. 2.6,
-    describe exactly this: conserving the dependent variable across stair-step
-    faces leaves an amplitude error that grows with the contrast, and an
-    energy-conserving or single-scattering condition at the faces removes
-    it. RAM 1.5's updat only re-forms the matrices when the bottom steps.
+    RAM marches p/alpha and only re-forms its matrices when the bottom steps
+    (updat and matrc in ramgeo1.5.f, matrc.f90 in mpiramS), so p/alpha is
+    continuous across the step faces: the small-angle form of the
+    energy-conservation condition (Collins & Siegmann, Parabolic Wave
+    Equations with Applications, Sect. 2.6.2, Eq. 2.56). The COUPLE
+    documentation notes that the 2.5 density makes the multiply scattered
+    field significant; no source attributes the PE offset to a cause.
 
     What is known. Over the flat guide the engines agree with COUPLE
     (COUPLE07 run on this input with the corrugation removed: mpirams
@@ -492,12 +498,12 @@ def test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference
     so the gap is the corrugation's. Grid and Pade order move the PE figure
     by under a decibel: over 36 grids, dr 1, 2, 5 and 10 m x dz 0.1, 0.25
     and 0.5 m x Pade 4, 6 and 8 with 1 m step faces, mpirams lands at +4.41
-    to +5.31 dB; and RAMS, the elastic PE with its own
+    to +5.31 dB; and RAMS, the elastic PE with its own approximate
     energy-flux correction, run on its automatic grid over a 50 m/s shear
     bottom lands at +5.81 dB. Three PE codes agree within 1.4 dB and sit
-    4.4-5.9 dB from the two-way field, where COA Sect. 6.7 places the one-way models'
-    treatment of vertical interfaces as their known weakness on stepped
-    bathymetry; COUPLE's own single-scatter run of this input
+    4.4-5.9 dB from the two-way field. A one-way solution satisfies only one
+    boundary condition at a vertical interface (COA Sect. 6.7); COUPLE's own
+    single-scatter run of this input
     (IOUT = -1) disagrees with its two-way run by 2.3 dB in the other
     direction, so the case is not a one-way benchmark in either code.
 
@@ -551,11 +557,12 @@ def test_the_pe_offset_beyond_the_corrugation_grows_with_the_bottom_density(
     the same corrugation with only the bottom density changed: the mean TL
     offset over 10-18.09 km is +0.69 dB at density 1.5 and +4.70 dB at 2.5
     (-0.03 dB at 1.0, against a COUPLE07 rerun at that density that is not
-    shipped). The PE keeps p across the step faces, whose error grows with
-    the density contrast (Collins & Siegmann Sect. 2.6). ramgeo (dr 0.5 m)
-    measured +0.94 / +5.82 dB, rams on its automatic grid over a 50 m/s
-    shear bottom +0.81 / +5.81 dB: its approximate energy-flux correction
-    does not remove it.
+    shipped). The PE keeps p/alpha continuous across the step faces, the
+    small-angle energy-conservation condition (Collins & Siegmann
+    Sect. 2.6.2, Eq. 2.56); no source attributes the offset to a cause.
+    ramgeo (dr 0.5 m) measured +0.94 / +5.82 dB, rams on its automatic grid
+    over a 50 m/s shear bottom +0.81 / +5.81 dB, with its own approximate
+    energy-flux correction.
 
     NULL CONTROL, asserted below: the flat guide sits at -0.99 dB at
     density 1.5 (-1.94 at 2.5), 0.89 dB below the density-1.5 bound, which

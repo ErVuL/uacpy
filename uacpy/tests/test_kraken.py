@@ -1467,7 +1467,7 @@ class TestFortranFatalErrorExitsZero:
         """An environment whose bottom attenuation trips ``AttenMod : CRCI``.
 
         The Acoustics-Toolbox deck writers refuse an attenuation past
-        ``MAX_ATTENUATION_DB_PER_WAVELENGTH`` (54.575 dB/wavelength, derived
+        ``MAX_ATTENUATION`` (54.575 dB/wavelength, derived
         from the same ``CRCI`` abort), so the guard is switched off here,
         standing in for a writer gap. That is the point of these two tests:
         the writer guard is the first line of defence and the ``.prt``/stderr
@@ -1626,6 +1626,38 @@ class TestElasticCLowDefault:
         assert _window.c_low_for(
             env, collapse=model._collapse,
             pinned_c_low=model.c_low) == pytest.approx(1450.0)
+
+    @staticmethod
+    def _limestone_notices(zs, zr, **kw):
+        """The Scholte-wave notices of a field run in 30 m of water over
+        the limestone preset (cp 3000, cs 1500 m/s), 30 Hz."""
+        env = Environment(
+            name='limestone', bathymetry=30.0, ssp=1500.0,
+            bottom=BoundaryProperties.from_preset('limestone', elastic=True))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            notices = Kraken(**kw).run_settings(
+                env, Source(depths=zs, frequencies=30.0),
+                Receiver(depths=zr, ranges=[250.0, 1000.0, 2000.0])
+            ).engine.notices
+        return [n.message for n in notices if 'Scholte' in n.message]
+
+    def test_the_derived_floor_over_shear_says_it_leaves_the_wave_out(self):
+        """The derived floor, the 1500 m/s water, lies above the 1240.4 m/s
+        Scholte wave (Brekhovskikh & Lysanov eq. 3.4.29); with source and
+        receiver 15 m from the bed, inside its 41.3 m wavelength at 30 Hz,
+        the run says so (measured: 140.9 / 231.2 dB at 1 / 2 km against
+        OAST's 66.6 / 72.8, docs/models/kraken.md)."""
+        said = self._limestone_notices(15.0, [15.0])
+        assert len(said) == 1, said
+        assert said[0].startswith(
+            'Kraken: the slowest phase speed the run reaches is the '
+            'mode-search floor c_low = 1500.0 m/s'), said[0]
+        assert 'between the water and the bottom half-space, 1240.4 m/s' \
+            in said[0]
+
+    def test_a_floor_under_the_wave_says_nothing(self):
+        assert self._limestone_notices(15.0, [15.0], c_low=1000.0) == []
 
     @pytest.mark.parametrize('cs_layer', [400.0, 600.0])
     def test_elastic_layer_tl_is_physical_by_default(self, cs_layer):
@@ -3457,10 +3489,10 @@ class TestAutoSegmentationIsWritableAtDeckResolution:
 
     def test_segment_axis_never_collapses_at_the_deck_quantum(self):
         from uacpy.models.kraken._segments import segment_environment_by_range
-        from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
+        from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION
         segments = segment_environment_by_range(self._env(4000.0000001))
         ranges = np.array([r for r, _e in segments], dtype=float)
-        assert np.all(np.diff(ranges) > DECK_RANGE_RESOLUTION_M)
+        assert np.all(np.diff(ranges) > DECK_RANGE_RESOLUTION)
 
     @pytest.mark.requires_binary
     def test_a_1e_7_metre_shift_in_a_break_range_does_not_change_the_field(self):
@@ -6194,7 +6226,7 @@ def test_the_check_solves_prt_warnings_stay_out_of_the_run(monkeypatch):
 
 
 class TestTheNearFieldIsAnnounced:
-    """RA-WAVE-7: an unpinned window that drops a path the receivers need is
+    """A window that drops a path the receivers need, derived or pinned, is
     said by ``run`` and ``run_settings``, never by ``validate_inputs``."""
 
     @staticmethod
@@ -6226,13 +6258,22 @@ class TestTheNearFieldIsAnnounced:
                 if 'keeps modes carrying paths up to' in str(w.message)]
         assert len(said) == 1 and 'from 164 m on no direct' in said[0], said
 
-    def test_validate_inputs_and_a_pinned_window_are_silent(self):
+    def test_validate_inputs_is_silent_and_a_pinned_window_is_said(self):
+        """The same 1890 m/s window pinned: said as pinned, as Scooter says
+        its pinned one; ``validate_inputs`` says neither."""
         env, src, rcv = self._geometry(100.0)
         with recorded_warnings() as caught:
             Kraken(verbose=False).validate_inputs(env, src, rcv)
-            Kraken(verbose=False, c_high=1890.0).run_settings(env, src, rcv)
+            Kraken(verbose=False, c_high=1890.0).validate_inputs(env, src,
+                                                                 rcv)
         assert not [w for w in caught if 'keeps modes carrying paths'
                     in str(w.message)]
+        with recorded_warnings() as caught:
+            Kraken(verbose=False, c_high=1890.0).run_settings(env, src, rcv)
+        said = [str(w.message) for w in caught
+                if 'keeps modes carrying paths' in str(w.message)]
+        assert len(said) == 1
+        assert said[0].startswith('Kraken: the pinned c_high = 1890.0 m/s')
 
 
 def test_a_thinned_automatic_decomposition_names_the_knob():
@@ -6595,6 +6636,26 @@ def test_krakens_steep_path_notice_points_to_the_docs():
                   if n.note and 'steeper than' in n.note]
     assert 'docs/models/kraken.md §6.4' in message
     assert 'against Scooter' not in message and ' dB' not in message
+
+
+@pytest.mark.parametrize('ranges, said', [([30.0, 400.0], True),
+                                           ([2000.0], False)])
+def test_a_pinned_c_high_that_cuts_steep_paths_is_announced(ranges, said):
+    """The notice Scooter gives a pinned ``c_high``: a receiver 30 m out
+    sees a 76.5 deg path, steeper than the 14.6 deg a pinned 1550 m/s
+    keeps over 1500 m/s water; the value is kept (the window's origin is
+    the pin), and a far receiver needs no steep path."""
+    settings = Kraken(verbose=False, c_high=1550.0).run_settings(
+        _pekeris(depth=100.0), Source(depths=50.0, frequencies=200.0),
+        Receiver(depths=[75.0], ranges=ranges))
+    notes = [n.message for n in settings.engine.notices
+             if n.note and 'steeper than' in n.note]
+    assert settings.engine.c_high_origin == 'Kraken(c_high=…)'
+    assert len(notes) == int(said)
+    if said:
+        assert notes[0].startswith('Kraken: the pinned c_high = 1550.0 m/s '
+                                   'keeps modes carrying paths up to 14.6°')
+        assert 'Raise c_high' in notes[0]
 
 
 def test_the_kraken_exe_notice_on_elastic_media_cites_the_source():

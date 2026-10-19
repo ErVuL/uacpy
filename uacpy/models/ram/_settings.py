@@ -30,7 +30,7 @@ class RamGrid(FrozenRecord):
         Depth points the binary marches over ``zmax``: mpiramS's
         ``icount = floor(zmax/dz - 0.5) + 2`` (``peramx.f90:391``), the
         Collins codes' ``nz = zmax/dz - 0.5`` (``ramgeo1.5.f:130``).
-    theta_deg : float or None
+    rams_rotation_angle_deg : float or None
         Padé rotation angle (degrees) a Collins deck carries: rams0.5 reads
         it on row 5, where the fluid codes read their stability terms
         instead. ``None`` on mpiramS.
@@ -51,14 +51,15 @@ class RamGrid(FrozenRecord):
     dz: float
     zmax: float
     n_depth_points: int
-    theta_deg: Optional[float] = None
+    rams_rotation_angle_deg: Optional[float] = None
     ndr: Optional[int] = None
     rmax_march: Optional[float] = None
     zmplt: Optional[float] = None
     zr_line: Optional[float] = None
 
     _REPR_UNITS = {'frequency': 'Hz', 'dr': 'm', 'dz': 'm', 'zmax': 'm',
-                   'theta_deg': '°', 'rmax_march': 'm', 'zmplt': 'm'}
+                   'rams_rotation_angle_deg': '°', 'rmax_march': 'm',
+                   'zmplt': 'm'}
 
     @classmethod
     def from_dict(cls, d) -> 'RamGrid':
@@ -68,8 +69,9 @@ class RamGrid(FrozenRecord):
         text = (f"{self.frequency:g} Hz: dr {self.dr:.4g} m, dz {self.dz:.4g} "
                 f"m, zmax {self.zmax:.5g} m, {self.n_depth_points} depth "
                 f"points")
-        if self.theta_deg is not None:
-            text += f", theta {self.theta_deg:g} deg"
+        if self.rams_rotation_angle_deg is not None:
+            text += (f", rotation angle {self.rams_rotation_angle_deg:g} "
+                     f"deg")
         if self.ndr is not None:
             text += f", ndr {self.ndr}"
         return text
@@ -188,8 +190,11 @@ class RamKnobs:
     (``RAM._knob_record``, read afresh per call: the attributes can be
     reassigned between runs). Each field is the model attribute of the
     same name, except ``accuracy`` (the resolved Lytaev accuracy),
-    ``accuracy_pinned`` (whether the caller set it) and ``rams_rotation``
-    (resolved: ``DEFAULT_RAMS_ROTATION`` when the attribute is ``None``)."""
+    ``accuracy_pinned`` (whether the caller set it), ``dr_pinned`` /
+    ``dz_pinned`` (whether the caller set ``dr`` / ``dz``, not a model
+    rebuilt from a run's record, ``PropagationModel._caller_set``) and
+    ``rams_rotation`` (resolved: ``DEFAULT_RAMS_ROTATION`` when the
+    attribute is ``None``)."""
     model_name: str
     backend: Optional[str]
     q_factor: Optional[float]
@@ -212,3 +217,5 @@ class RamKnobs:
     dr: Optional[float]
     zmax: Optional[float]
     c0: Optional[float]
+    dr_pinned: bool = False
+    dz_pinned: bool = False

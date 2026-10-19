@@ -21,7 +21,7 @@ from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import (
     refuse_non_finite_samples, require_finite_signal,
-    require_positive_finite_scalar, require_strictly_increasing,
+    require_positive_finite_scalar,
 )
 from uacpy.acoustic_signal._results import PlottedResult, level_unit
 from uacpy.acoustic_signal.spectral import (
@@ -470,13 +470,13 @@ def _band_estimate(data, sample_rate, *,
 # the same edges.
 # ──────────────────────────────────────────────────────────────────────
 
-class BandLevels(PlottedResult, namedtuple("BandLevels", "centers levels")):
+class BandLevels(PlottedResult, namedtuple("BandLevels", "centers levels_dB")):
     """Band levels on a standard ladder: the band ``centers`` (Hz) and one
-    ``levels`` value each (dB re ``ref²``, the band power), so
-    ``centers, levels = ...`` unpacks it; :meth:`plot` draws it with
+    ``levels_dB`` value each (dB re ``ref²``, the band power), so
+    ``centers, levels_dB = ...`` unpacks it; :meth:`plot` draws it with
     :func:`~uacpy.plot.plot_band_levels` against its own ``ref``.
 
-    ``levels`` carries the bands on its LAST axis: one value per band for one
+    ``levels_dB`` carries the bands on its LAST axis: one value per band for one
     spectrum, one band row per channel for a multichannel one (the layout
     :func:`welch` returns spectra in).
 
@@ -488,11 +488,11 @@ class BandLevels(PlottedResult, namedtuple("BandLevels", "centers levels")):
 
     _attrs = ("lower", "upper", "band_type", "ref")
     _plotter = "plot_band_levels"
-    _plot_fields = ("centers", "levels")
+    _plot_fields = ("centers", "levels_dB")
     _plot_defaults = ("ref", "band_type", "lower", "upper")
 
-    def __new__(cls, centers, levels, *, lower, upper, band_type, ref):
-        self = super().__new__(cls, centers, levels)
+    def __new__(cls, centers, levels_dB, *, lower, upper, band_type, ref):
+        self = super().__new__(cls, centers, levels_dB)
         self.lower = lower
         self.upper = upper
         self.band_type = str(band_type)
@@ -500,13 +500,13 @@ class BandLevels(PlottedResult, namedtuple("BandLevels", "centers levels")):
         return self
 
     def _field_units(self):
-        return {"centers": "Hz", "levels": level_unit(self.ref, "spectrum")}
+        return {"centers": "Hz", "levels_dB": level_unit(self.ref, "spectrum")}
 
     def _declared_dims(self):
         # The bands are the last axis whatever the channel count, so a
         # channel axis as long as the band axis is not read as the bands.
-        ndim = np.ndim(self.levels)
-        return {"levels": tuple(f"levels_dim{i}" for i in range(ndim - 1))
+        ndim = np.ndim(self.levels_dB)
+        return {"levels_dB": tuple(f"levels_dB_dim{i}" for i in range(ndim - 1))
                 + ("centers",)}
 
     def plot(self, *, channel=None, **kwargs):
@@ -514,32 +514,32 @@ class BandLevels(PlottedResult, namedtuple("BandLevels", "centers levels")):
         For a multichannel result, ``channel`` (an index, or a tuple of
         indices, into the axes before the bands) picks the row drawn.
         ``kwargs`` reach the plotter. Returns ``(fig, ax)``."""
-        levels = np.asarray(self.levels)
-        if channel is None and levels.ndim > 1:
+        levels_dB = np.asarray(self.levels_dB)
+        if channel is None and levels_dB.ndim > 1:
             raise ConfigurationError(
-                f"BandLevels.plot: levels holds one band row per channel "
-                f"(shape {levels.shape}, bands last), and one row is drawn.",
+                f"BandLevels.plot: levels_dB holds one band row per channel "
+                f"(shape {levels_dB.shape}, bands last), and one row is drawn.",
                 remediation="Pass channel=i (a tuple of indices for more "
                             "than one channel axis) to draw row i.")
         if channel is not None:
-            if levels.ndim < 2:
+            if levels_dB.ndim < 2:
                 raise ConfigurationError(
                     f"BandLevels.plot: channel={channel!r} selects a row of "
                     f"a multichannel result, and these levels are one band "
-                    f"row (shape {levels.shape}).",
+                    f"row (shape {levels_dB.shape}).",
                     remediation="Drop channel=.")
             try:
-                row = levels[channel]
+                row = levels_dB[channel]
             except (IndexError, TypeError) as exc:
                 raise ConfigurationError(
                     f"BandLevels.plot: channel={channel!r} is not a row of "
-                    f"levels shaped {levels.shape} (bands last).") from exc
+                    f"levels_dB shaped {levels_dB.shape} (bands last).") from exc
             if np.ndim(row) != 1:
                 raise ConfigurationError(
-                    f"BandLevels.plot: channel={channel!r} leaves levels of "
+                    f"BandLevels.plot: channel={channel!r} leaves levels_dB of "
                     f"shape {np.shape(row)}; index every axis before the "
-                    f"bands (levels shape {levels.shape}).")
-            return self._replace(levels=row).plot(**kwargs)
+                    f"bands (levels_dB shape {levels_dB.shape}).")
+            return self._replace(levels_dB=row).plot(**kwargs)
         return super().plot(**kwargs)
 
 
@@ -586,7 +586,6 @@ def _band_levels(psd, frequencies, band_type, ref, axis, who):
             f"{int(np.count_nonzero(np.diff(frequencies) <= 0))} "
             f"non-increasing step(s), first at index "
             f"{int(np.argmax(np.diff(frequencies) <= 0))}.")
-    require_strictly_increasing(frequencies, f"{who}: frequencies")
     if frequencies.size < 2:
         # A one-point axis has no width, so there is no band to integrate
         # over, however the ladder would place the point.

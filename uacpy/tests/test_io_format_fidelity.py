@@ -452,6 +452,99 @@ class TestOastTlMultiFrequency:
         assert 'plotted_frequencies' not in out['metadata']
 
 
+class TestOastTlErrorsAreTyped:
+    """A malformed ``.plp`` reaches the caller as :class:`FileFormatError`
+    (``parse_oast_tl`` and ``read_oast_tl`` carry ``@typed_format_error``,
+    DEV.md §13.4), and an empty ``receiver_depths`` beside a label-less file
+    — a good file the positional walk cannot place — as a
+    :class:`ConfigurationError` naming the argument."""
+
+    @pytest.mark.parametrize('reader', ['parse', 'read'])
+    def test_an_empty_depth_axis_on_a_label_less_file_names_the_argument(
+            self, tmp_path, reader):
+        from uacpy.io import read_oast_tl
+        from uacpy.io._parsers import parse_oast_tl
+        plp = _plp_tl_pair(tmp_path, [(None, None, 1.0, 0.5)] * 2)
+        call = parse_oast_tl if reader == 'parse' else read_oast_tl
+        with pytest.raises(ConfigurationError,
+                           match='receiver_depths is empty'):
+            call(plp, [])
+
+    def test_an_empty_depth_axis_on_a_labelled_file_reads(self, tmp_path):
+        from uacpy.io._parsers import parse_oast_tl
+        plp = _plp_tl_pair(tmp_path, [(100.0, 10.0, 1.0, 0.5),
+                                      (100.0, 20.0, 1.0, 0.5)])
+        assert parse_oast_tl(plp, [])['depths'].tolist() == [10.0, 20.0]
+
+    @pytest.mark.parametrize('reader', ['parse', 'read'])
+    def test_a_non_numeric_count_is_a_format_error(self, tmp_path, reader):
+        from uacpy.io import read_oast_tl
+        from uacpy.io._parsers import parse_oast_tl
+        plp = _plp_tl_pair(tmp_path, [(100.0, 10.0, 1.0, 0.5)])
+        text = plp.read_text()
+        record = f"{4:<19}N\n"
+        assert text.count(record) == 1
+        plp.write_text(text.replace(record, f"{'nan':<19}N\n"))
+        call = parse_oast_tl if reader == 'parse' else read_oast_tl
+        with pytest.raises(FileFormatError, match='could not parse'):
+            call(plp, [10.0])
+
+
+class TestOastDepthAverageCurves:
+    """Option ``'A'`` makes OAST write one depth-averaged TL curve per
+    frequency, tagged ``<param>TLDAV`` (oasfun22.f:403), after the TL
+    curves of that frequency and on their range grid (unoast31.f:681-688,
+    oasfun22.f:433); the reader returns it as ``'depth_average'``."""
+
+    def test_one_frequency_returns_its_curve(self, tmp_path):
+        from uacpy.io._parsers import parse_oast_tl
+        plp = _plp_tl_pair(
+            tmp_path, [(100.0, 10.0, 1.0, 0.5), (100.0, 20.0, 1.0, 0.5),
+                       (100.0, 0.0, 1.0, 0.5)],
+            tags=['NTLRAN', 'NTLRAN', 'NTLDAV'])
+        out = parse_oast_tl(plp, [10.0, 20.0])
+        assert out['tl'].shape == (2, 4)
+        assert out['depth_average'].tolist() == [200.0, 201.0, 202.0, 203.0]
+
+    def test_a_sweep_returns_one_curve_per_frequency(self, tmp_path):
+        from uacpy.io._parsers import parse_oast_tl
+        curves, tags = [], []
+        for f in (100.0, 200.0):
+            curves += [(f, 10.0, 1.0, 0.5), (f, 0.0, 1.0, 0.5)]
+            tags += ['NTLRAN', 'NTLDAV']
+        out = parse_oast_tl(_plp_tl_pair(tmp_path, curves, tags=tags),
+                            [10.0])
+        assert out['depth_average'].shape == (2, 4)
+        assert out['depth_average'][:, 0].tolist() == [100.0, 300.0]
+
+    def test_a_file_without_option_A_has_none(self, tmp_path):
+        from uacpy.io._parsers import parse_oast_tl
+        plp = _plp_tl_pair(tmp_path, [(100.0, 10.0, 1.0, 0.5)])
+        assert parse_oast_tl(plp, [10.0])['depth_average'] is None
+
+    def test_a_curve_off_the_tl_grid_is_refused(self, tmp_path):
+        from uacpy.io._parsers import parse_oast_tl
+        plp = _plp_tl_pair(
+            tmp_path, [(100.0, 10.0, 1.0, 0.5), (100.0, 0.0, 1.0, 0.25)],
+            tags=['NTLRAN', 'NTLDAV'])
+        with pytest.raises(FileFormatError, match="not the TL curves' range"):
+            parse_oast_tl(plp, [10.0])
+
+    def test_read_oast_tl_carries_it_as_a_component(self, tmp_path):
+        from uacpy.io import read_oast_tl
+        plp = _plp_tl_pair(
+            tmp_path, [(100.0, 10.0, 1.0, 0.5), (100.0, 0.0, 1.0, 0.5)],
+            tags=['NTLRAN', 'NTLDAV'])
+        field = read_oast_tl(plp, [10.0])[0]
+        average = field.components['depth_average']
+        assert list(average.coords) == ['range']
+        assert average.coords['range'].tolist() == \
+            field.coords['range'].tolist()
+        assert average.data.tolist() == [100.0, 101.0, 102.0, 103.0]
+        assert (average.kind, average.unit, average.coherent) == (
+            'pressure', 'dB', False)
+
+
 class TestOastTlIsAlwaysAListOfFieldsPerFrequency:
     """``read_oast_tl`` returns a list of TL Fields, one per frequency,
     whatever the file holds — length 1 for one frequency — each on its own
@@ -681,7 +774,7 @@ class TestOasnWhiteNoiseContract:
         write_oasn_input(p, env, Source(depths=10.0, frequencies=100.0),
                          Receiver(depths=[30.0, 50.0], ranges=[0.0]),
                          options='N J', n_wavenumbers=n_wavenumbers,
-                         noise=OasnNoise(surface_level=70.0, **noise_fields))
+                         noise=OasnNoise(surface_noise_level_dB=70.0, **noise_fields))
         return p.read_text()
 
     def test_default_writes_numerically_nil_level(self, tmp_path):
@@ -689,7 +782,7 @@ class TestOasnWhiteNoiseContract:
         assert '70.0 -200.0 0.0 0' in text
 
     def test_explicit_zero_writes_literal_zero_dB(self, tmp_path):
-        text = self._deck(tmp_path, white_level=0.0)
+        text = self._deck(tmp_path, white_noise_level_dB=0.0)
         assert '70.0 0.0 0.0 0' in text
 
     def test_noise_band_total_is_bounded_preflight(self, tmp_path):

@@ -93,9 +93,10 @@ from uacpy.data.graw_local import (
 )
 from uacpy.data.seaice_local import (
     download_seaice_db, fetch_sea_ice_concentration,
-    fetch_sea_ice_concentration_transect, sea_ice_grid, sea_ice_pixel,
+    fetch_sea_ice_concentration_transect, SeaIceGrid, sea_ice_grid,
+    sea_ice_pixel,
     sea_ice_surface, fetch_sea_ice_surface, sea_ice_surface_transect,
-    SEA_ICE_TYPICAL_ROUGHNESS_M,
+    SEA_ICE_TYPICAL_ROUGHNESS,
 )
 from uacpy.data.environment import (
     fetch_environment, fetch_bottom, fetch_bottom_transect,
@@ -171,11 +172,12 @@ __all__ = [
     'download_seaice_db',
     'fetch_sea_ice_concentration',
     'fetch_sea_ice_concentration_transect',
+    'SeaIceGrid',
     'sea_ice_grid',
     'sea_ice_pixel',
     'sea_ice_surface',
     'fetch_sea_ice_surface', 'sea_ice_surface_transect',
-    'SEA_ICE_TYPICAL_ROUGHNESS_M',
+    'SEA_ICE_TYPICAL_ROUGHNESS',
     # capstone
     'fetch_environment',
     # provenance / licensing

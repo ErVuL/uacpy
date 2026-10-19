@@ -55,7 +55,7 @@ LAMBDA_PER_DZ_FLOOR = 15.0
 #: Lytaev score (accumulated per-step error bound of the steepest scored
 #: component) at or above which a grid does not carry the seabed's trapped
 #: modes: the score saturates at τ ≤ 2 per step, so from 1 up it ranks
-#: nothing and the mode's phase is lost over the march. Measured on a 2400 m/s
+#: nothing and no longer bounds the mode's phase over the march. Measured on a 2400 m/s
 #: rock at 100 / 200 Hz over 5 km, 9 × 19 receivers: the λ/16 grid scores
 #: 8 / 16 and reads 2.8 / 6.3 dB rms from Kraken; the coarsest grid under 1
 #: (λ/45 / λ/64), with the seafloor placed a quarter cell below its node,
@@ -68,7 +68,8 @@ TRAPPED_MODE_SCORE_LIMIT = 1.0
 EPS_LADDER_CEILING = TRAPPED_MODE_SCORE_LIMIT
 #: Lytaev ε up to which a relaxation is routine (forced at and above ~500 Hz
 #: by the optimiser's own 0.01 m depth-ladder end) and reported as a log line
-#: at the default accuracy; a grid that needed a rung above it warns.
+#: at the default accuracy; a grid that needed a rung above it warns. uacpy
+#: guidance.
 ROUTINE_EPS_RELAXATION = 0.5
 
 
@@ -95,12 +96,13 @@ ROUTINE_EPS_RELAXATION = 0.5
 #: conditions are applied at node ``iz+1``, on the seafloor node itself,
 #: so it keeps the on-node placement (:func:`snap_dz_to_seafloor`).
 SEAFLOOR_CELL_OFFSET = 0.25
-#: How far (a fraction of a cell, either way round the cell) a pinned
-#: ``dz`` may put the shallowest seafloor from the quarter-cell placement
-#: :data:`SEAFLOOR_CELL_OFFSET` before the fluid backends warn
-#: (:func:`warn_if_pinned_dz_misplaces_the_seafloor`). uacpy's guidance, not
-#: a property of the binaries: they march the same seafloor for every depth
-#: inside one cell, and the tolerance is read off measurements — mpiramS
+#: How far (a fraction of a cell, either way round the cell) the shallowest
+#: seafloor may sit from the quarter-cell placement
+#: :data:`SEAFLOOR_CELL_OFFSET` when mpiramS's grid takes a ``dz`` that
+#: divides a pinned ``zmax`` (``mpirams.dz_dividing_the_domain``). uacpy's
+#: guidance, not a property of the binaries: they march the same seafloor
+#: for every depth inside one cell, and the tolerance is read off
+#: measurements — mpiramS
 #: against Kraken, rms dB over 9 x 16 receivers to 8 km, the seafloor ``d``
 #: of a cell from the quarter:
 #: 120 m / 120 Hz / cb 1680 reads 0.49 at the quarter, 0.78 / 0.97 at
@@ -110,17 +112,19 @@ SEAFLOOR_CELL_OFFSET = 0.25
 #: quarter stays under 0.7 dB, and past it grows about 5-7 dB per cell of
 #: distance. It is a rule of thumb, not a bound: on an 80 m / 150 Hz / cb
 #: 1600 channel the best placement sat at frac 0.375 (0.40 against 0.63 at
-#: the quarter), which it warns on.
+#: the quarter). A pinned ``dz`` is marched as given, with no notice: the
+#: placement is a preference measured against another model, not a
+#: property of the binaries; docs/models/ram.md holds the measurements.
 SEAFLOOR_QUARTER_TOLERANCE = 0.1
 #: ramsurf1.5 puts its pressure-release surface at ``floor(zsrf/dz)·dz``
 #: (:func:`surface_node_misfit`): the fraction of a cell the automatic
 #: grid leaves between the surface asked for at ``r = 0`` and the one
 #: marched, found by moving ``dz`` by at most ``SURFACE_ALIGN_WINDOW``
-#: (:func:`surface_aligned_layers`).
+#: (:func:`surface_aligned_layers`). Both values are uacpy guidance.
 SURFACE_NODE_TOLERANCE = 0.05
 SURFACE_ALIGN_WINDOW = 0.25
 #: Depth cells below which ramsurf1.5 staircases the altimetry's deepest
-#: depression too coarsely to leave it unsaid.
+#: depression too coarsely to leave it unsaid. uacpy guidance.
 MIN_SURFACE_RELIEF_CELLS = 4.0
 
 
@@ -228,11 +232,11 @@ def optimize_grid_relaxing(*, frequency, c_min, c_max, max_range,
                 res = optimize_grid(
                     frequency=float(frequency),
                     c_min=c_min, c_max=c_max,
-                    x_max=float(max_range),
+                    rmax=float(max_range),
                     c0=c0_pe,
                     angle_max_deg=float(theta_used),  # degrees
                     eps=eps_used,
-                    p=int(knobs.n_pade),
+                    n_pade=int(knobs.n_pade),
                     alpha=0.0,
                     tau_cache=tau_cache,
                     c_min_all=c_min_all, c_max_all=c_max_all,
@@ -268,7 +272,7 @@ def optimize_grid_relaxing(*, frequency, c_min, c_max, max_range,
             f"ε={eps_last:.3g} (the last rung tried below "
             f"{EPS_LADDER_CEILING:g}), "
             f"θ_max={theta_used:.0f}° for f={frequency:.1f} Hz, "
-            f"x_max={max_range:.0f} m{floor_note}. The accuracy band is "
+            f"rmax={max_range:.0f} m{floor_note}. The accuracy band is "
             f"the water column [{c_min:.0f}, {c_max:.0f}] m/s out to the "
             f"wider of the aperture and the critical angle of the "
             f"fastest medium ({c_top:.0f} m/s), and no (dr, dz) on the "
@@ -754,8 +758,8 @@ def grid_for_pinned_accuracy(
     theta = resolve_angle_max(env, knobs=knobs)
     score_kw = dict(
         frequency=float(freq), c_min=c_min, c_max=c_max,
-        x_max=float(max_range), c0=c0_pe, angle_max_deg=float(theta),
-        p=int(knobs.n_pade), alpha=0.0,
+        rmax=float(max_range), c0=c0_pe, angle_max_deg=float(theta),
+        n_pade=int(knobs.n_pade), alpha=0.0,
         c_min_all=c_min_all, c_max_all=c_max_all,
     )
     held = tuple(None if v is None else float(v)
@@ -928,8 +932,8 @@ def compute_grid_lytaev(
     # marched; every score below is recomputed on the grid in hand.
     score_kw = dict(
         frequency=float(freq), c_min=c_min, c_max=c_max,
-        x_max=float(max_range), c0=c0_pe, angle_max_deg=float(theta_used),
-        p=int(knobs.n_pade), alpha=0.0,
+        rmax=float(max_range), c0=c0_pe, angle_max_deg=float(theta_used),
+        n_pade=int(knobs.n_pade), alpha=0.0,
         c_min_all=c_min_all, c_max_all=c_max_all,
     )
 
@@ -1017,7 +1021,7 @@ def compute_grid_lytaev(
         msg = (
             f"RAM:{kind}: Lytaev relaxed {', '.join(moved)} to find a "
             f"feasible grid at f={freq:.1f} Hz, "
-            f"x_max={max_range:.0f} m. The grid returned "
+            f"rmax={max_range:.0f} m. The grid returned "
             f"(dr={dr_opt:.3g} m, dz={dz_opt:.3g} m) has a {err_note}, "
             f"against the default target of ε={eps0:.0e}.{floor_note}"
         )
@@ -1166,20 +1170,22 @@ def warn_if_trapped_modes_unresolved(env, freq, kind, dr, dz,
     the automatic refinement there.
 
     When the steepest scored component is the mode grazing the seabed at
-    its critical angle (``trapped_end_binds``) it carries the far field,
-    and a score at or above :data:`TRAPPED_MODE_SCORE_LIMIT` means its
-    phase is lost over the march — 2.8 / 6.3 dB rms against Kraken on a
-    2400 m/s rock at 100 / 200 Hz at λ/16, where sand is 1.0 dB. The
-    automatic grid refines ``dz`` past that, so this fires on a pinned
-    grid that cannot carry the modes, or on an automatic one the depth
-    budget cut short; a grid that scores under the limit is silent.
+    its critical angle (``trapped_end_binds``), its score is Lytaev's
+    (2023, §4.1) accumulated error bound, the per-step error ``τ(Δx, Δz)``
+    times the number of steps; at or above :data:`TRAPPED_MODE_SCORE_LIMIT`
+    that bound no longer constrains the mode's phase over the march. The
+    notice states the bound, not a verdict on the field (the measured
+    field error sits below the score, :data:`TRAPPED_MODE_SCORE_LIMIT`).
+    The automatic grid refines ``dz`` past it, so this fires on a pinned
+    grid, or on an automatic one the depth budget cut short; a grid that
+    scores under the limit is silent.
     """
     c0, c_min, c_max, c_min_all, c_max_all = band_speeds(
         env, knobs=knobs)
     kw = dict(frequency=float(freq), c_min=c_min, c_max=c_max,
-              x_max=float(max_range), c0=c0,
+              rmax=float(max_range), c0=c0,
               angle_max_deg=resolve_angle_max(env, knobs=knobs),
-              p=int(knobs.n_pade),
+              n_pade=int(knobs.n_pade),
               alpha=0.0, c_min_all=c_min_all, c_max_all=c_max_all)
     scores = optimize_grid(grid=(float(dr), float(dz)), **kw)
     err = scores.predicted_error
@@ -1209,10 +1215,12 @@ def warn_if_trapped_modes_unresolved(env, freq, kind, dr, dz,
         f"RAM:{kind}: the {c_max_all:.0f} m/s seabed traps modes out to "
         f"a {theta_c:.0f}° grazing angle, and on the grid being marched "
         f"(dr={dr:.3g} m, dz={dz:.3g} m = λ/{lam / dz:.0f}) the steepest "
-        f"of them accumulates a depth-operator error of {err:.2g} over "
-        f"{max_range:.0f} m — at or above {TRAPPED_MODE_SCORE_LIMIT:g}, "
-        f"its phase is lost and the field at range is wrong, not merely a "
-        f"decibel off.{remedy}",
+        f"of them has an accumulated error estimate of {err:.2g} over "
+        f"{max_range:.0f} m (Lytaev 2023, §4.1: the per-step error of the "
+        f"propagation operator on the (dr, dz) grid times the number of "
+        f"steps) — at or above "
+        f"{TRAPPED_MODE_SCORE_LIMIT:g}, so the grid no longer bounds that "
+        f"mode's phase over the march.{remedy}",
         NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
     )
     if need is not None:
@@ -1265,7 +1273,7 @@ def warn_if_receivers_see_paths_steeper_than_the_band(
         f"near-range field can be wrong; from {clear} m on no direct or "
         f"surface-reflected "
         f"path is steeper than the band. For the closer receivers run "
-        f"Scooter(c_high=1e9), which integrates from k = 0.",
+        f"Scooter, whose default c_high integrates from k = 0.",
         NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
@@ -1294,11 +1302,12 @@ def warn_if_pinned_angle_max_is_below_the_slope(env: Environment, *,
 def warn_if_pinned_rams_dr_factor_is_unused(backend: str, *, notices=None,
                                             knobs) -> None:
     """One notice when ``rams_dr_factor`` is pinned on a rams run whose
-    ``dr`` is pinned too: it divides the automatic ``dr`` only
+    ``dr`` the caller pinned too (``knobs.dr_pinned``: not a model rebuilt
+    from a run's record): it divides the automatic ``dr`` only
     (:func:`tighten_rams_dr`). Other backends' runs are named by
     ``RAM._warn_on_mpirams_only_overrides``."""
     if (backend == 'rams' and knobs.rams_dr_factor is not None
-            and knobs.dr is not None):
+            and knobs.dr_pinned):
         give_notice(notices,
             f"RAM:rams: rams_dr_factor={float(knobs.rams_dr_factor):g} "
             f"divides the automatic range step, and dr={float(knobs.dr):g} m "
@@ -1307,65 +1316,15 @@ def warn_if_pinned_rams_dr_factor_is_unused(backend: str, *, notices=None,
 
 
 def warn_if_pinned_accuracy_is_unused(*, notices=None, knobs) -> None:
-    """One notice when ``accuracy`` is pinned beside a pinned ``dr`` and
-    ``dz``: it chooses the grid, and both steps are already the
-    caller's."""
-    if (knobs.accuracy_pinned and knobs.dr is not None
-            and knobs.dz is not None):
+    """One notice when ``accuracy`` is pinned beside a ``dr`` and a ``dz``
+    the caller pinned (not a model rebuilt from a run's record): it
+    chooses the grid, and both steps are already the caller's."""
+    if knobs.accuracy_pinned and knobs.dr_pinned and knobs.dz_pinned:
         give_notice(notices,
             f"RAM: accuracy={knobs.accuracy:g} chooses the (dr, dz) grid, "
             f"and dr={float(knobs.dr):g} m and dz={float(knobs.dz):g} m are "
             f"both pinned, so it is not used.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-
-
-def warn_if_pinned_dz_misplaces_the_seafloor(env: Environment,
-                                              backend: str, *,
-                                              notices=None, knobs) -> None:
-    """Warn when a pinned ``dz`` puts the shallowest seafloor more than
-    :data:`SEAFLOOR_QUARTER_TOLERANCE` of a cell from the quarter-cell
-    placement :data:`SEAFLOOR_CELL_OFFSET` on a fluid backend, and name
-    the aligned value; ``dz`` is marched as given.
-
-    The fluid codes take nodes ``1..iz``, ``iz = int(1 + h/dz)``, as water
-    and start the seabed at node ``iz + 1`` (``ramgeo1.5.f:133``, matrc
-    ``:255-268``; ``ramsurf1.5.f:118``, ``:242-250``; mpiramS
-    ``ram.f90:101``, ``matrc.f90:50``), so the march sees the same
-    seafloor for every depth inside one cell and its Galerkin interface
-    lies in the element between those nodes. The quarter-cell placement
-    and the tolerance round it are uacpy's guidance, measured against
-    Kraken (docs/models/ram.md). Round values — ``dz = 1, 0.5, 0.25`` m
-    on a 100 m or 200 m channel — all land on a node, and so does every
-    rung of a halving ladder from them. rams0.5 applies its interface
-    conditions on the seafloor node itself and is not checked.
-    """
-    if knobs.dz is None or backend == 'rams':
-        return
-    h = seafloor_snap_depth(env)
-    dz = float(knobs.dz)
-    ratio = h / dz
-    frac = ratio - np.floor(ratio)
-    offset = abs(frac - SEAFLOOR_CELL_OFFSET)
-    distance = min(offset, 1.0 - offset)
-    if distance <= SEAFLOOR_QUARTER_TOLERANCE:
-        return
-    aligned = align_dz_with_seafloor(env, dz, kind=backend, knobs=knobs)
-    last_water = np.floor(ratio) * dz
-    give_notice(notices,
-        f"RAM:{backend}: the pinned dz={dz:g} m puts the {h:g} m "
-        f"seafloor {frac:.3g} of a cell below its last water node "
-        f"(h/dz = {ratio:.6g}), {distance:.3g} of a cell from the "
-        f"quarter cell the automatic grid uses. The fluid codes take the "
-        f"nodes down to int(1 + h/dz) as water and start the seabed at "
-        f"the next one (ramgeo1.5.f:133, :255-268), so the march sees "
-        f"the same seafloor, between its nodes at {last_water:.6g} m and "
-        f"{last_water + dz:.6g} m, for every depth in that cell. A "
-        f"quarter cell below a node, within {SEAFLOOR_QUARTER_TOLERANCE:g} "
-        f"of a cell, is uacpy's guidance (docs/models/ram.md). dz is "
-        f"marched as given; dz={aligned:.6g} m puts the seafloor a "
-        f"quarter cell below a node.",
-        NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
-    )
 
 
 def dz_putting_the_surface_on_a_node(env: Environment, dz: float, *,

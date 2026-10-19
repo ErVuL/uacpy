@@ -5,7 +5,7 @@ transform one Scooter deck."""
 import warnings
 from pathlib import Path
 from types import MappingProxyType
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Sequence, Union
 
 import numpy as np
 
@@ -16,7 +16,7 @@ from uacpy.models._launch import (
     BinarySearch, attach_prt_tail, require_output, run_prt_binary,
 )
 from uacpy.models.base import (
-    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
+    DEFAULT_RUN_TIMEOUT, PropagationModel, _host_options,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._conventions import (
@@ -40,7 +40,7 @@ from uacpy.io.oalib_writer import (
 )
 from uacpy.models.scooter._extract import assemble_field_from_grn
 from uacpy.models._window import (
-    DEFAULT_C_MAX_UNBOUNDED, interface_wave_notice, resolve_window,
+    DEFAULT_C_MAX_UNBOUNDED, scholte_wave_notice, resolve_window,
 )
 from uacpy.models.scooter._plan import (
     _BROADBAND_MODES, _deck_nk,
@@ -82,15 +82,16 @@ class Scooter(PropagationModel):
 
     Defaults auto-derived at ``run()`` time:
 
-    - ``c_low=None`` → the slowest speed of every medium (water, sediment
-      ``cP``, shear speeds, half-spaces) × 0.85 over an elastic half-space,
-      × 0.90 otherwise: the ``cMin`` rule of ``scooter.f90:193-259``
+    - ``c_low=None`` → 0.90 × the slowest wave of the problem (water,
+      sediment ``cP``, shear speeds, half-spaces, and every Scholte wave):
+      ``scooter.f90:258``'s margin
       (:func:`~uacpy.core.engine_defaults.default_c_low`)
     - ``c_high=None`` → the unbounded ``DEFAULT_C_MAX_UNBOUNDED`` (1e9 m/s,
       ``k_min = 0``) over every bottom, as Jensen et al. (*Computational
       Ocean Acoustics*, ch. 4 App. 1) recommend
     - Spectral ``RMax = receiver.range_max × rmax_factor``
-    - ``n_mesh=None`` → 0, Scooter picks from frequency / wavelength.
+    - ``n_mesh=None`` → 0, Scooter picks from frequency / wavelength, per
+      medium.
     - TopOpt position 4 reads ``env.absorption``.
 
     With ``verbose='info'`` the resolved ``c_low`` / ``c_high`` are logged.
@@ -167,7 +168,7 @@ class Scooter(PropagationModel):
         executable: Optional[Path] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
-        n_mesh: Optional[int] = None,
+        n_mesh: Optional[Union[int, Sequence[int]]] = None,
         rmax_factor: Optional[float] = None,
         interp_ssp: Optional[str] = None,
         wavenumber_spectrum: str = 'positive',
@@ -177,7 +178,7 @@ class Scooter(PropagationModel):
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         """
@@ -187,9 +188,10 @@ class Scooter(PropagationModel):
             Path to ``scooter.exe``. Auto-detected if ``None``.
         c_low, c_high : float, optional
             Phase-speed bounds (m/s), each positive and ``c_low < c_high``.
-            ``None`` ⇒ the slowest speed of every medium, shear speeds
-            included, × 0.85 over an elastic half-space and × 0.90
-            otherwise (``scooter.f90:193-259``;
+            ``None`` ⇒ 0.90 × the slowest wave of the problem: every
+            medium's speed, shear speeds included, and every Scholte wave
+            (Brekhovskikh & Lysanov eq. 3.4.29;
+            ``scooter.f90:258``;
             :func:`~uacpy.core.engine_defaults.default_c_low`) / the AT
             "unbounded" sentinel
             (1e9 m/s, ``doc/bounce.htm``: "CMax to 1.0E9") over every
@@ -203,15 +205,17 @@ class Scooter(PropagationModel):
             and a pinned ``c_high``
             is written as given; one that cuts a direct or surface-reflected
             path the receivers see warns. Over an elastic seabed the
-            default ``c_low`` reaches below the shear speed, so the interface
-            (Scholte) wave is integrated — about 14× the wavenumbers on
-            elastic sand (``1/c_low``: 1341/93.5 m/s; the run is 14× slower,
-            ``docs/models/scooter.md``, "Layered and elastic seabeds"). Over elastic layers on a fluid half-space its 0.90
-            factor can leave the wave out; the run then warns when the
-            geometry reaches within one of its wavelengths of the seabed.
-        n_mesh : int, optional
+            default ``c_low`` sits 10 % under the slowest Scholte wave, so that
+            wave is integrated — 15× the
+            wavenumbers of a water-only window on elastic sand
+            (``docs/models/scooter.md``, "Layered and elastic seabeds"). A
+            pinned ``c_low`` above a Scholte wave warns when the
+            geometry reaches within one of its wavelengths of that
+            interface.
+        n_mesh : int or sequence of int, optional
             Total number of mesh points PER MEDIUM used by the finite-element
-            spectral solver (AT's ``NG`` column on the SSP mesh line). 0 = let
+            spectral solver (AT's ``NG`` column on each medium line): one
+            count for every medium, or one per medium, water first. 0 = let
             Scooter pick automatically from frequency / wavelength, as
             ``doc/EnvironmentalFile.htm`` documents ("If you type 0 for the
             number of mesh points, the code will calculate NMESH
@@ -220,7 +224,10 @@ class Scooter(PropagationModel):
             Note: this is NOT a "points per wavelength" density — it is a total
             point count per medium. Default ``None``: 0, the automatic mesh
             (``SCOOTER_N_MESH``); a set value, 0 included, is written as
-            given.
+            given. A count under AT's floor for its medium at the deck's
+            frequency (``misc/ReadEnvironmentMod.f90:110-112``, "Mesh is
+            too coarse") is refused, as is a list whose length is not the
+            deck's number of media.
         rmax_factor : float, optional
             Multiplier on ``receiver.ranges.max()`` to set Scooter's spectral
             ``RMax``, which fixes the wavenumber sampling:
@@ -276,8 +283,9 @@ class Scooter(PropagationModel):
             COA's criterion is that the taper span "several periods" of
             ``exp(i k r)``, i.e. ``taper * (kMax-kMin) * r_max >> 2*pi``. One
             period is ``2*pi / ((kMax-kMin) * r_max)`` of the band: with the
-            default window that is a few per cent at a few kilometres and shrinks
-            as ``1/r_max`` — parts in a thousand at tens of kilometres.
+            default window (``kMax-kMin ≈ omega/c_low``) that is
+            ``c_low / (f * r_max)``, 0.67 % at 200 Hz and 1 km over a
+            ``c_low`` of 1341 m/s, scaling as ``1/(f * r_max)``.
             Values far above that attenuate real spectrum, which is occasionally
             what you want (the far evanescent tail is the least well conditioned
             part of the solve) and is never free. Measure it against something
@@ -366,7 +374,8 @@ class Scooter(PropagationModel):
         (:func:`~uacpy.models.scooter._plan.check_knobs`)."""
         check_knobs(taper=self.taper, c_low=self.c_low,
                     c_high=self.c_high,
-                    wavenumber_spectrum=self.wavenumber_spectrum)
+                    wavenumber_spectrum=self.wavenumber_spectrum,
+                    n_mesh=self.n_mesh, rmax_factor=self.rmax_factor)
 
     def _validate_engine(self, env, source, receiver, run_mode, *,
                          request=None) -> None:
@@ -403,7 +412,8 @@ class Scooter(PropagationModel):
         projected ``env``, and the refusals of a deck Scooter cannot run.
 
         Refused: a pinned ``n_mesh`` under AT's floor at the deck's
-        ``freq0``, a phase-speed window with ``c_low >= c_high`` once the
+        ``freq0``, or one count per medium for a different number of media,
+        a phase-speed window with ``c_low >= c_high`` once the
         unpinned bound is derived, fewer than two wavenumber samples, a
         Green's-function cube over the memory this host has free.
         """
@@ -472,11 +482,16 @@ class Scooter(PropagationModel):
                 n_mesh=n_mesh),
             (None if self.c_high is None else
              steep_path_notice(env, source, receiver, ch)),
-            (None if self.c_low is not None else
-             interface_wave_notice(
-                 env, source, receiver, cl,
-                 min(deck_frequencies if broadband else [freq0]),
-                 model_name='Scooter')),
+            scholte_wave_notice(
+                env, source, receiver, cl,
+                min(deck_frequencies if broadband else [freq0]),
+                model_name='Scooter',
+                edge_text=(f"c_low = {cl:.1f} m/s, k_max = ω/c_low "
+                           f"(scooter.f90:123-124)"),
+                remediation=("Leave c_low unset (its derived value sits "
+                             "under every Scholte wave) or pass c_low "
+                             "below the wave speed to include it, at the "
+                             "cost of more wavenumbers.")),
             headroom,
         ]
         notices = [n for n in notices if n is not None]
@@ -488,7 +503,8 @@ class Scooter(PropagationModel):
             rmax=rmax,
             rmax_factor=multiplier,
             rmax_factor_origin=multiplier_origin,
-            n_mesh=int(n_mesh),
+            n_mesh=(tuple(int(n) for n in n_mesh) if np.ndim(n_mesh)
+                    else int(n_mesh)),
             mesh_reference_frequency=freq0,
             deck_max_frequency=f_deck,
             n_wavenumbers=nk,

@@ -24,7 +24,7 @@ from uacpy.core.results._base import (PhaseReference, Result, _count,
 from uacpy.core.results.field import Field
 from uacpy.core.results.quantities import coordinate_unit
 from uacpy.core._repr import count
-from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_WATER_DENSITY
 
 
 @dataclass(frozen=True, eq=False)
@@ -255,7 +255,7 @@ class Modes(Result):
     """
 
     #: The plotter that draws this result (``.plot()``).
-    _plotter = 'plot_mode_shapes'
+    _plotter = '_plot_mode_shapes'
 
     #: The metadata spellings of the :class:`MediaTable` members: a
     #: ``metadata=`` carrying one is refused.
@@ -656,14 +656,22 @@ class Modes(Result):
         source. Mode shapes are interpolated onto the source depths from
         this result's tabulation.
 
-        A directional element shades this too. ``field.f90`` multiplies the
-        modal excitation by ``S(θₘ)`` before summing (``C = C * REAL(S)``),
+        A directional element shades this too: each mode's excitation is
+        multiplied by the element pattern at its grazing angle, ``S(θₘ)``,
         and every element of a uacpy ``Source`` shares one ``beam_pattern``
         and one mode angle, so ``S`` factors straight out of the array sum —
-        the product theorem again, in the modal domain. Pass
-        ``sound_speed`` to evaluate the mode angles it is read at; a source
-        that carries a pattern and is given no speed raises rather than
-        silently returning the omnidirectional answer.
+        the product theorem again, in the modal domain. This method reads
+        the pattern at ``θₘ = arccos(c / vₚ,ₘ)`` against the
+        ``sound_speed`` given: the physical angle at the source when that is
+        the speed there. Kraken's ``field.exe`` applies the same shading
+        (``C = C * REAL(S)``, ``KrakenField/field.f90:211``) but against a
+        hard-coded ``c0 = 1500`` m/s (``:203``), and shades every mode
+        slower than that at ``S(0°)`` (``:206``; see
+        :class:`~uacpy.models.Kraken`, Note): ``sound_speed=1500.0``
+        reproduces the engine's angles for the modes faster than 1500 m/s,
+        while this method returns NaN for the slower ones. A source that
+        carries a pattern and is given no speed raises rather than silently
+        returning the omnidirectional answer.
 
         Parameters
         ----------
@@ -672,8 +680,10 @@ class Modes(Result):
             gives that depth's mode shapes scaled by its one weight.
         sound_speed : float, optional
             Reference speed (m/s) for the mode grazing angles
-            ``θₘ = arccos(c / vₚ,ₘ)`` the element pattern is sampled at.
-            Required when ``source.beam_pattern`` is set, unused otherwise.
+            ``θₘ = arccos(c / vₚ,ₘ)`` the element pattern is sampled at: the
+            speed at the source depth for the physical angle, 1500.0 for
+            the angles Kraken's ``field.exe`` uses (see above). Required
+            when ``source.beam_pattern`` is set, unused otherwise.
 
         Returns
         -------
@@ -687,10 +697,11 @@ class Modes(Result):
         if sound_speed is None:
             raise ConfigurationError(
                 "Modes.excitation: this Source carries a beam_pattern, "
-                "which the engine applies to the modal excitation at each "
-                "mode's grazing angle — so the answer depends on the speed "
-                "those angles are measured against. Pass sound_speed= (the "
-                "speed at the source depth), or drop the pattern."
+                "which shades the modal excitation at each mode's grazing "
+                "angle — so the answer depends on the speed those angles "
+                "are measured against. Pass sound_speed= (the speed at the "
+                "source depth for the physical angle; 1500.0 for the "
+                "angles Kraken's field.exe shades at), or drop the pattern."
             )
         angles = self.grazing_angles(sound_speed)
         undefined = ~np.isfinite(angles)
@@ -700,11 +711,10 @@ class Modes(Result):
                 f"{angles.size} modes have a phase speed below the "
                 f"{float(sound_speed):g} m/s reference, so they are "
                 f"evanescent there and have no real grazing angle. Their "
-                f"excitation is returned as NaN rather than weighted by the "
-                f"beam pattern at a fabricated angle — clipping them to "
-                f"broadside attenuated one by a factor of 100 through a "
-                f"-40 dB notch, silently. Pass the speed at the source "
-                f"depth if these modes matter.",
+                f"excitation is returned as NaN: this method weights a mode "
+                f"by the beam pattern at its real grazing angle only. "
+                f"(Kraken's field.exe shades every mode slower than its "
+                f"1500 m/s reference at S(0°) instead.)",
                 ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
         weighted = modal_excitation(
             at_source, source.weights,
@@ -1005,7 +1015,7 @@ class Modes(Result):
             ``ρ(z)`` in **g/cm³** (matches :class:`BoundaryProperties`).
             ``None`` reads the water density the producing model recorded
             (``media.water_density``), and the package's one water
-            density ``DEFAULT_WATER_DENSITY_G_CM3`` when none is recorded.
+            density ``DEFAULT_WATER_DENSITY`` when none is recorded.
             A uniform water density cancels from the water-column integrals;
             it matters against ``bottom.density`` in the seabed tail.
         bottom : BoundaryProperties or Bottom, optional
@@ -1059,7 +1069,7 @@ class Modes(Result):
         # acoustics.modal_attenuation's. What this method adds is reading
         # its own k/phi/depths/f0 and re-wrapping the result as a Modes.
         if density_z is None:
-            density_z = (DEFAULT_WATER_DENSITY_G_CM3 if self.media is None
+            density_z = (DEFAULT_WATER_DENSITY if self.media is None
                          else self.media.water_density)
         # Without bottom=, the fluid half-space the media table records
         # (speed, density, attenuation) gives both the normalisation tail
@@ -1143,7 +1153,7 @@ class Modes(Result):
             the water column, the density of the sediment medium holding a
             deeper source (``media.tops`` / ``media.densities``, from the
             ``.mod``; :meth:`MediaTable.density_at`), and
-            ``DEFAULT_WATER_DENSITY_G_CM3`` when nothing is recorded — the
+            ``DEFAULT_WATER_DENSITY`` when nothing is recorded — the
             ``ρ(z_s)`` :class:`~uacpy.models.Kraken`'s own field divides by.
             Pass 1.0 to reproduce ``field.exe``'s own output, which omits
             the factor.
@@ -1230,7 +1240,7 @@ class Modes(Result):
         # this method adds is the depth interpolation above, the
         # out-of-tabulation masking below and the Field re-wrap.
         if source_density is None:
-            source_density = (DEFAULT_WATER_DENSITY_G_CM3 if self.media is None
+            source_density = (DEFAULT_WATER_DENSITY if self.media is None
                               else self.media.density_at(z_s))
         P = modal_field(self.k, phi_zs, phi_zr, r,
                         source_density=source_density)

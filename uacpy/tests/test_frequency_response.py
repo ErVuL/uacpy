@@ -2,13 +2,13 @@
 functions ``frf_welch``, ``etfe``, ``periodic_etfe`` and ``lsfir``, the
 ``FRFResult`` they return, and the ``FRF`` configuration that runs them.
 
-* **Which estimator ran.** ``H1``/``H2``/``ls_fir`` answer differently on the
+* **Which estimator ran.** ``H1``/``H2``/``lsfir`` answer differently on the
   same record, and the result carries the method, the selected model order
   and the conditioning of the fit rather than only the response.
 * **Per-call keywords stay per call.** A keyword passed to one
   ``FRF.compute`` does not survive into the next, so two calls on one object
   are two independent fits, and ``FRF`` keeps no result.
-* **A singular fit is reported, not smoothed over.** ``ls_fir`` falls back to
+* **A singular fit is reported, not smoothed over.** ``lsfir`` falls back to
   the minimum-norm solution exactly at the reciprocal-condition floor, and
   both sides of that threshold are reached by construction.
 * **Refusals.** A record whose rate, axis or shape the fit cannot use is
@@ -19,6 +19,7 @@ The waveform generators and the package-wide entry-point guards live in
 ``test_channel_response.py``.
 """
 
+import re
 import warnings
 
 import numpy as np
@@ -41,7 +42,7 @@ class TestFRF:
         u = rng.standard_normal(2000)
         g = np.array([1.0, -0.5, 0.25])                  # order-3 FIR
         y = np.convolve(u, g)[:u.size] + 0.01 * rng.standard_normal(2000)
-        frf = FRF(method='ls_fir', order=criterion)
+        frf = FRF(method='lsfir', order=criterion)
         result = frf.compute(u, y, 1000.0)
         assert np.isfinite(result.transfer_function).all()
         # every criterion recovers the true order-3 FIR at this SNR; the
@@ -102,7 +103,7 @@ class TestFRF:
         rng = np.random.default_rng(4)
         y = rng.standard_normal(300)
         with pytest.raises(ConfigurationError, match='no FIR order in'):
-            FRF(method='ls_fir', order='AIC', max_order=40).compute(
+            FRF(method='lsfir', order='AIC', max_order=40).compute(
                 np.zeros(300), y, 1000.0)
 
     def test_zero_row_input_raises_configurationerror(self):
@@ -112,19 +113,19 @@ class TestFRF:
         from uacpy.acoustic_signal.frf import FRF
         from uacpy.core.exceptions import ConfigurationError
         with pytest.raises(ConfigurationError, match='hold no measurements'):
-            FRF(method='ls_fir', order=4).compute(
+            FRF(method='lsfir', order=4).compute(
                 np.zeros((0, 100)), np.zeros((0, 100)), 1000.0)
 
     def test_each_result_carries_only_its_own_methods_values(self):
-        """The order and impulse response are ls_fir-only and the coherence
+        """The order and impulse response are lsfir-only and the coherence
         welch-only: each result holds its own method's values, and ``FRF``
         keeps none of them between runs."""
         rng = np.random.default_rng(11)
         u = rng.standard_normal(4096)
         y = np.convolve(u, [1.0, 0.5, -0.3])[:u.size]
-        frf = FRF(method='ls_fir', order='AIC', max_order=40)
+        frf = FRF(method='lsfir', order='AIC', max_order=40)
         fit = frf.compute(u, y, 1000.0)
-        assert fit.method == 'ls_fir' and fit.order is not None
+        assert fit.method == 'lsfir' and fit.order is not None
         assert fit.coherence is None and fit.estimator is None
         welch = FRF(nperseg=512).compute(u, y, 1000.0)
         assert welch.method == 'welch' and welch.estimator == 'H1'
@@ -192,10 +193,15 @@ class TestFRFEstimators:
     @pytest.mark.parametrize('bad', ['h2', 'bogus', None, 2])
     def test_an_unknown_estimator_is_refused_not_run_as_h1(self, bad):
         """``'h2'`` or a typo is refused rather than run as H1, whose
-        estimate is biased by input noise the caller asked H2 to reject."""
+        estimate is biased by input noise the caller asked H2 to reject.
+        ``FRF(estimator=None)`` is the unset default (H1 at the run)."""
         x = np.random.default_rng(0).standard_normal(4096)
-        with pytest.raises(ConfigurationError, match="FRF: unknown estimator"):
-            FRF(estimator=bad)
+        if bad is None:
+            assert FRF(estimator=None).compute(x, x, 1000.0).estimator == 'H1'
+        else:
+            with pytest.raises(ConfigurationError,
+                               match="FRF: unknown estimator"):
+                FRF(estimator=bad)
         with pytest.raises(ConfigurationError,
                            match="frf_welch: unknown estimator"):
             frf_welch(x, x, 1000.0, estimator=bad)
@@ -235,6 +241,45 @@ class TestFRFReservedKwargs:
         np.testing.assert_allclose(
             f_etfe, np.fft.rfftfreq(x.size, d=1 / 8000.0))
         assert f_welch.size == 8192 // 2 + 1      # the nperseg grid
+
+
+class TestFrfWelchSegmentIsWelchs:
+    """``frf_welch`` (and ``FRF(method='welch')``) resolve ``nperseg`` as
+    ``welch`` does: unset, a record shorter than 8192 samples is one
+    whole-record segment with none of scipy's three clamp warnings; an array
+    window is the segment; a given ``nperseg`` longer than the record is
+    refused by name."""
+
+    @staticmethod
+    def _pair(n=1000):
+        x = np.random.default_rng(5).standard_normal(n)
+        return x, np.convolve(x, [1.0, 0.5])[:n]
+
+    def test_the_default_takes_the_short_record_without_a_warning(self):
+        import inspect
+        assert inspect.signature(frf_welch).parameters['nperseg'].default \
+            is None
+        x, y = self._pair()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            got = frf_welch(x, y, 1000.0)
+            block = FRF().compute(x, y, 1000.0)
+            tapered = frf_welch(x, y, 1000.0, window=np.hanning(128))
+        assert got.frequencies.size == 501
+        np.testing.assert_array_equal(block.transfer_function,
+                                      got.transfer_function)
+        np.testing.assert_array_equal(
+            got.transfer_function,
+            frf_welch(x, y, 1000.0, nperseg=1000).transfer_function)
+        assert tapered.frequencies.size == 65
+
+    def test_a_given_segment_longer_than_the_record_is_refused(self):
+        x, y = self._pair()
+        with pytest.raises(ConfigurationError,
+                           match=r"^frf_welch: nperseg=1001 is longer than "
+                                 r"the record \(1000 samples\)"):
+            frf_welch(x, y, 1000.0, nperseg=1001)
+        assert frf_welch(x, y, 1000.0, nperseg=1000).frequencies.size == 501
 
 
 class TestLsFirCpReferenceFitReportsDegenerateInput:
@@ -423,11 +468,11 @@ class TestLsFirInfoRcondFloorBoundary:
 
 
 class TestAnLsFirResultCarriesTheConditioningOfItsFit:
-    def test_rcond_is_on_an_ls_fir_result_and_none_on_a_welch_one(self):
+    def test_rcond_is_on_an_lsfir_result_and_none_on_a_welch_one(self):
         rng = np.random.default_rng(11)
         u = rng.standard_normal(4096)
         y = np.convolve(u, [1.0, 0.5, -0.3])[:u.size]
-        assert 0.0 < FRF(method='ls_fir', order=8).compute(
+        assert 0.0 < FRF(method='lsfir', order=8).compute(
             u, y, 1000.0).rcond <= 1.0
         assert FRF(nperseg=512).compute(u, y, 1000.0).rcond is None
 
@@ -445,7 +490,7 @@ class TestTheOrderOnAnLsFirResult:
         holds each row's order, impulse response and conditioning, and each
         row's fit is the one ``lsfir`` returns for that row alone."""
         u, y = self._fir_records(rows=3)
-        result = FRF(method="ls_fir", order="AIC", max_order=40).compute(
+        result = FRF(method="lsfir", order="AIC", max_order=40).compute(
             u, y, 1000.0)
         assert result.order == (3, 3, 3) and result.criterion == "AIC"
         assert len(result.impulse_response) == len(result.rcond) == 3
@@ -459,7 +504,7 @@ class TestTheOrderOnAnLsFirResult:
 
     def test_a_criterion_on_one_record_gives_an_int_order(self):
         u, y = self._fir_records(rows=1)
-        fit = FRF(method="ls_fir", order="BIC", max_order=40).compute(
+        fit = FRF(method="lsfir", order="BIC", max_order=40).compute(
             u[0], y[0], 1000.0)
         assert isinstance(fit.order, int)
         assert fit.order == 3 and fit.criterion == "BIC"
@@ -527,8 +572,8 @@ class TestFRFComputeTakesTheRecordsOnly:
 
 
 class TestThePeriodicEtfeTakesItsOwnPeriod:
-    """``FRF(method='p_etfe', period=)``: the excitation period is its own
-    keyword, required by 'p_etfe' and refused by every other method; the
+    """``FRF(method='periodic_etfe', period=)``: the excitation period is its own
+    keyword, required by 'periodic_etfe' and refused by every other method; the
     Welch segment length ``nperseg`` plays no part in it."""
 
     FS = 8000.0
@@ -539,28 +584,33 @@ class TestThePeriodicEtfeTakesItsOwnPeriod:
         x = np.tile(rng.standard_normal(256), n // 256)
         return x, np.convolve(x, np.ones(5) / 5)[:n]
 
-    def test_the_grid_is_the_periods_whatever_nperseg_says(self):
+    def test_the_grid_is_the_periods_and_nperseg_is_refused(self):
+        """The period sets the grid; ``nperseg``, which periodic_etfe does not
+        read, is refused naming the methods that read it."""
         x, y = self._signals()
-        got = FRF(method='p_etfe', period=256, nperseg=4096).compute(
-            x, y, self.FS)
+        got = FRF(method='periodic_etfe', period=256).compute(x, y, self.FS)
         want = periodic_etfe(x, y, self.FS, period=256)
         assert got.frequencies.size == 129
         np.testing.assert_array_equal(got.transfer_function,
                                       want.transfer_function)
+        with pytest.raises(ConfigurationError,
+                           match=r"^FRF: method='periodic_etfe' does not read "
+                                 r"nperseg=\."):
+            FRF(method='periodic_etfe', period=256, nperseg=4096)
 
     def test_the_period_sets_the_grid(self):
         x, y = self._signals()
-        got = FRF(method='p_etfe', period=128).compute(x, y, self.FS)
+        got = FRF(method='periodic_etfe', period=128).compute(x, y, self.FS)
         assert got.frequencies.size == 65
-        assert repr(FRF(method='p_etfe', period=256)) == \
-            "FRF(method='p_etfe', period=256)"
+        assert repr(FRF(method='periodic_etfe', period=256)) == \
+            "FRF(method='periodic_etfe', period=256)"
 
-    def test_p_etfe_without_a_period_is_refused(self):
+    def test_periodic_etfe_without_a_period_is_refused(self):
         with pytest.raises(ConfigurationError,
-                           match=r"method='p_etfe' averages whole periods"):
-            FRF(method='p_etfe')
+                           match=r"method='periodic_etfe' averages whole periods"):
+            FRF(method='periodic_etfe')
 
-    @pytest.mark.parametrize('method', ['welch', 'etfe', 'ls_fir'])
+    @pytest.mark.parametrize('method', ['welch', 'etfe', 'lsfir'])
     def test_a_period_under_another_method_is_refused(self, method):
         with pytest.raises(ConfigurationError,
                            match=rf"^FRF: period= .*method='{method}'"):
@@ -573,11 +623,11 @@ class TestThePeriodicEtfeTakesItsOwnPeriod:
     ])
     def test_a_period_is_a_whole_number_of_samples(self, period, accepted):
         if accepted:
-            assert FRF(method='p_etfe', period=period).period == int(
+            assert FRF(method='periodic_etfe', period=period).period == int(
                 float(period))
         else:
             with pytest.raises(ConfigurationError, match=r"^FRF: "):
-                FRF(method='p_etfe', period=period)
+                FRF(method='periodic_etfe', period=period)
 
 
 def test_the_signal_guide_states_the_constructor_frf_contract():
@@ -602,9 +652,12 @@ def test_the_signal_guide_states_the_constructor_frf_contract():
     g = g / np.linalg.norm(g)
     clean = np.convolve(u, g)[:n]
     y = clean + 0.1 * np.std(clean) * rng.standard_normal(n)
-    frf = FRF(method='ls_fir', order='CP')
+    frf = FRF(method='lsfir', order='CP')
     assert frf.compute(u, y, 1000.0).order == 6
-    assert frf.order == 'CP' and FRF(method='ls_fir').order == 512
+    assert frf.order == 'CP'
+    # Unset, the object keeps None and the run fits order 512.
+    unset = FRF(method='lsfir')
+    assert unset.order is None and unset.compute(u, y, 1000.0).order == 512
 
 
 class TestTheFunctionsAreTheEstimatorsFRFRuns:
@@ -624,14 +677,15 @@ class TestTheFunctionsAreTheEstimatorsFRFRuns:
     @pytest.mark.parametrize('method, call', [
         ('welch', lambda x, y: frf_welch(x, y, 1000.0, nperseg=1024)),
         ('etfe', lambda x, y: etfe(x, y, 1000.0)),
-        ('p_etfe', lambda x, y: periodic_etfe(x, y, 1000.0, period=1024)),
-        ('ls_fir', lambda x, y: lsfir(x, y, 1000.0, order=6, nperseg=1024)),
+        ('periodic_etfe', lambda x, y: periodic_etfe(x, y, 1000.0, period=1024)),
+        ('lsfir', lambda x, y: lsfir(x, y, 1000.0, order=6, nperseg=1024)),
     ])
     def test_one_record_pair_gives_the_functions_result(self, method, call):
         x, y = self._pair()
-        period = {'period': 1024} if method == 'p_etfe' else {}
-        got = FRF(method=method, order=6, nperseg=1024,
-                  **period).compute(x, y, self.FS)
+        settings = {'welch': {'nperseg': 1024}, 'etfe': {},
+                    'periodic_etfe': {'period': 1024},
+                    'lsfir': {'order': 6, 'nperseg': 1024}}[method]
+        got = FRF(method=method, **settings).compute(x, y, self.FS)
         want = call(x, y)
         assert isinstance(got, FRFResult) and got.method == method
         for name in got._fields + got._attrs:
@@ -696,7 +750,7 @@ class TestTheFunctionsAreTheEstimatorsFRFRuns:
                       for _ in range(10)])
         y = (np.stack([np.convolve(row, h)[:row.size] for row in x])
              + 0.5 * rng.standard_normal(x.shape))
-        block = FRF(method='p_etfe', period=period).compute(x, y, fs)
+        block = FRF(method='periodic_etfe', period=period).compute(x, y, fs)
         Xa = np.fft.rfft(x.reshape(10, 8, period).mean(axis=1), axis=-1)
         Ya = np.fft.rfft(y.reshape(10, 8, period).mean(axis=1), axis=-1)
         pooled = np.sum(np.conj(Xa) * Ya, 0) / np.sum(np.abs(Xa) ** 2, 0)
@@ -707,10 +761,12 @@ class TestTheFunctionsAreTheEstimatorsFRFRuns:
         assert np.max(np.abs(ratios - pooled)) > 1e-3
 
     @pytest.mark.parametrize('method, period', [
-        ('etfe', None), ('p_etfe', 512), ('welch', None)])
+        ('etfe', None), ('periodic_etfe', 512), ('welch', None)])
     def test_a_one_row_block_is_the_functions_estimate(self, method, period):
         x, y = self._pair()
-        frf = FRF(method=method, nperseg=1024, period=period)
+        settings = {'welch': {'nperseg': 1024}, 'etfe': {},
+                    'periodic_etfe': {'period': period}}[method]
+        frf = FRF(method=method, **settings)
         block = frf.compute(x[np.newaxis], y[np.newaxis], self.FS)
         np.testing.assert_allclose(block.transfer_function,
                                    frf.compute(x, y, self.FS).transfer_function,
@@ -763,7 +819,7 @@ class TestTheFunctionsAreTheEstimatorsFRFRuns:
     @pytest.mark.parametrize('period', [0, -4, 2.5, True, '64', np.nan])
     def test_a_period_that_is_not_a_whole_count_is_refused_by_name(
             self, period):
-        """The plain function refuses what FRF(method='p_etfe') refuses,
+        """The plain function refuses what FRF(method='periodic_etfe') refuses,
         rather than truncating 2.5 to 2, True to 1 or '64' to 64."""
         x = np.random.default_rng(0).standard_normal(256)
         with pytest.raises(ConfigurationError,
@@ -779,14 +835,56 @@ class TestTheFunctionsAreTheEstimatorsFRFRuns:
 
 def test_frf_names_its_fir_settings_as_lsfir_does():
     """The constructor takes ``order``, ``max_order`` and ``stop_count``
-    under ``lsfir``'s names and defaults."""
+    under ``lsfir``'s names; unset (``None``), the run takes ``lsfir``'s
+    defaults, so the criterion search is lsfir's own."""
     import inspect
     from uacpy.acoustic_signal import lsfir
     ctor = inspect.signature(FRF.__init__).parameters
-    fit = inspect.signature(lsfir).parameters
     assert 'order' in ctor and 'm' not in ctor
-    for name in ('max_order', 'stop_count'):
-        assert ctor[name].default == fit[name].default
+    for name in ('estimator', 'order', 'max_order', 'stop_count'):
+        assert ctor[name].default is None
+    rng = np.random.default_rng(4)
+    u = rng.standard_normal(2000)
+    y = np.convolve(u, [1.0, -0.5, 0.25])[:2000]
+    got = FRF(method='lsfir', order='AIC').compute(u, y, 1000.0)
+    want = lsfir(u, y, 1000.0, order='AIC')
+    assert got.order == want.order
+    np.testing.assert_array_equal(got.transfer_function,
+                                  want.transfer_function)
+
+
+@pytest.mark.parametrize('method, kwargs, unread', [
+    ('welch', {'order': 64}, 'order='),
+    ('welch', {'max_order': 40}, 'max_order='),
+    ('etfe', {'window': 'flattop', 'nperseg': 128}, 'window=, nperseg='),
+    ('etfe', {'estimator': 'H2'}, 'estimator='),
+    ('lsfir', {'estimator': 'H2', 'order': 4}, 'estimator='),
+    ('lsfir', {'window': 'flattop'}, 'window='),
+    ('lsfir', {'noverlap': 10}, 'noverlap='),
+    ('lsfir', {'order': 4, 'max_order': 40}, 'max_order='),
+    ('lsfir', {'stop_count': 5}, 'stop_count='),
+    ('periodic_etfe', {'period': 64, 'order': 4}, 'order='),
+])
+def test_frf_refuses_a_setting_its_method_does_not_read(method, kwargs,
+                                                         unread):
+    """A setting the chosen method drops is refused, naming the method that
+    reads it — as ``period=`` is under another method — rather than
+    accepted and ignored. ``max_order``/``stop_count`` bound a criterion
+    search, so an integer order (512 when unset) does not read them."""
+    with pytest.raises(ConfigurationError,
+                       match=rf"^FRF: method='{method}'.* does not read "
+                             rf"{re.escape(unread)}\."):
+        FRF(method=method, **kwargs)
+
+
+@pytest.mark.parametrize('method, kwargs', [
+    ('welch', {'estimator': 'H2', 'nperseg': 512, 'window': 'hamming'}),
+    ('lsfir', {'order': 4, 'nperseg': 512}),
+    ('lsfir', {'order': 'AIC', 'max_order': 40, 'stop_count': 5}),
+    ('periodic_etfe', {'period': 64}),
+])
+def test_frf_takes_every_setting_its_method_reads(method, kwargs):
+    FRF(method=method, **kwargs)
 
 
 @pytest.mark.parametrize('kwargs, refused', [({'m': 4}, True),

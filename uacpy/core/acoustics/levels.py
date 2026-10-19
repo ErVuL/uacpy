@@ -33,6 +33,7 @@ from typing import Optional, Tuple
 
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._export import ExportRecord
+from uacpy.core._grid import interpolate_dB
 from uacpy.core._plotting import plotter
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.constants import (NO_ENERGY_DB, PRESSURE_FLOOR,
@@ -50,7 +51,7 @@ BAND_EDGE_RTOL = 1e-12
 
 __all__ = [
     'BAND_EDGE_RTOL',
-    'pressure_from_recording',
+    'pressure_from_recording', 'recording_from_pressure',
     'spl',
     'power_to_dB',
     'peak_level',
@@ -69,8 +70,8 @@ __all__ = [
 
 def pressure_from_recording(
     x: np.ndarray,
-    sensitivity: float,
-    gain: float,
+    sensitivity_dB: float,
+    gain_dB: float,
     volt_params: Optional[Tuple[int, float]] = None,
     x_scale: str = 'counts',
 ) -> np.ndarray:
@@ -90,12 +91,12 @@ def pressure_from_recording(
     ----------
     x : ndarray
         Signal in voltage or bit depth
-    sensitivity : float
+    sensitivity_dB : float
         Receiving sensitivity SH in dB re 1 V/µPa (hydrophone data sheets
         quote it this way; a typical value is -180). A positive value (more
         than 1 V per µPa) gives a ``ValidityWarning``: it is usually a sign
         slip.
-    gain : float
+    gain_dB : float
         Preamplifier gain in dB
     volt_params : tuple of (int, float), optional
         If provided, (nbits, v_ref) where nbits is number of bits per sample
@@ -120,11 +121,11 @@ def pressure_from_recording(
 
     Examples
     --------
-    With ``sensitivity=0`` and ``gain=0`` both scale factors are unity, so the
+    With ``sensitivity_dB=0`` and ``gain_dB=0`` both scale factors are unity, so the
     voltage is carried across by the µPa-to-Pa factor alone:
 
     >>> x_volt = np.array([0.0, 0.5, -0.5])
-    >>> pressure_from_recording(x_volt, sensitivity=0, gain=0)
+    >>> pressure_from_recording(x_volt, sensitivity_dB=0, gain_dB=0)
     array([ 0.e+00,  5.e-07, -5.e-07])
 
     A bit-depth input is divided by the full-scale count first, so half of
@@ -132,46 +133,25 @@ def pressure_from_recording(
     on the same 0.5 V:
 
     >>> x_bits = np.array([0, 16384, -16384])
-    >>> pressure_from_recording(x_bits, sensitivity=0, gain=0, volt_params=(16, 1.0))
+    >>> pressure_from_recording(x_bits, sensitivity_dB=0, gain_dB=0, volt_params=(16, 1.0))
     array([ 0.e+00,  5.e-07, -5.e-07])
 
     A 16-bit WAV as :func:`uacpy.io.read_wav` returns it, straight in:
 
     >>> x_wav = x_bits / (2**15 - 1)
-    >>> pressure_from_recording(x_wav, sensitivity=0, gain=0,
+    >>> pressure_from_recording(x_wav, sensitivity_dB=0, gain_dB=0,
     ...                         volt_params=(16, 1.0), x_scale='read_wav')
     array([ 0.e+00,  5.e-07, -5.e-07])
     """
-    if x_scale not in ('counts', 'read_wav'):
-        raise ConfigurationError(
-            f"pressure_from_recording: x_scale={x_scale!r} is not one of "
-            f"'counts' (ADC counts) or 'read_wav' (uacpy.io.read_wav's "
-            f"output).",
-            remediation="Pass x_scale='counts' or x_scale='read_wav'.")
-    if x_scale == 'read_wav' and volt_params is None:
-        raise ConfigurationError(
-            "pressure_from_recording: x_scale='read_wav' converts read_wav's "
-            "fractions of full scale back to counts, which needs the bit "
-            "depth, and no volt_params was given.",
-            remediation="Pass volt_params=(uacpy.io.read_wav_info(path).bits, "
-                        "v_ref).")
+    who = 'pressure_from_recording'
+    _check_recording_scale(volt_params, x_scale, who)
     x = _sequence_as_array(x)
-    if sensitivity > 0:
-        # RVS = 20 log10 |M|, M in V/µPa (Butler & Sherman, *Transducers
-        # and Arrays for Underwater Sound*, §6.1.1): a positive value is
-        # more than 1 V per µPa, a million volts for a 1 Pa wave. A sign
-        # slip (+165 for -165) reads the pressure 330 dB low.
-        warnings.warn(
-            f"pressure_from_recording: sensitivity={sensitivity:g} dB re "
-            f"1 V/µPa means {10 ** (sensitivity / 20):.3g} V per µPa; "
-            f"hydrophone sensitivities are negative (e.g. -201 dB re 1 "
-            f"V/µPa, Istepanian & Stojanovic, *Underwater Acoustic Digital "
-            f"Signal Processing and Communication Systems*, §3.2). Check its "
-            f"sign: the pressure returned is {2 * sensitivity:g} dB below "
-            f"what -{sensitivity:g} gives.",
-            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    nu = 10 ** (sensitivity / 20)
-    G = 10 ** (gain / 20)
+    _warn_positive_sensitivity(
+        sensitivity_dB, 'sensitivity_dB', who,
+        f"the pressure returned is {2 * sensitivity_dB:g} dB below what "
+        f"-{sensitivity_dB:g} gives")
+    nu = 10 ** (sensitivity_dB / 20)
+    G = 10 ** (gain_dB / 20)
 
     if volt_params is not None:
         nbits, v_ref = volt_params
@@ -182,6 +162,114 @@ def pressure_from_recording(
     # 1e-6: SH is quoted per micropascal, so the division lands in µPa and
     # this carries the result to the pascals everything downstream defaults to.
     return 1e-6 * x / (nu * G)
+
+
+def recording_from_pressure(
+    p: np.ndarray,
+    sensitivity_dB: float,
+    gain_dB: float,
+    volt_params: Optional[Tuple[int, float]] = None,
+    x_scale: str = 'counts',
+) -> np.ndarray:
+    """
+    Acoustic pressure in **pascals** → what the recorder reads: volts, or ADC
+    counts. The inverse of :func:`pressure_from_recording`.
+
+    ``x = 1e6 · p · 10**(SH/20) · 10**(G/20)``: the receiving voltage
+    sensitivity ``M`` (V/µPa) gives the hydrophone voltage ``V = M·p``, with
+    ``SH = 20·log10|M|`` dB re 1 V/µPa (Butler & Sherman, *Transducers and
+    Arrays for Underwater Sound*, §6.1.1), so the pressure goes in µPa —
+    the ``1e6`` — and the preamplifier gain multiplies the voltage.
+    ``10**(SH/20)`` without the µPa step reads 120 dB off.
+
+    Parameters
+    ----------
+    p : array_like
+        Acoustic pressure (Pa).
+    sensitivity_dB : float
+        Receiving sensitivity SH in dB re 1 V/µPa (negative; e.g. -165). A
+        positive value gives a ``ValidityWarning``, as on
+        :func:`pressure_from_recording`.
+    gain_dB : float
+        Preamplifier gain in dB.
+    volt_params : tuple of (int, float), optional
+        ``(nbits, v_ref)``, as on :func:`pressure_from_recording`: the
+        volts become ADC counts, ``V · 2**(nbits-1) / v_ref``. Without it
+        the result is in volts.
+    x_scale : {'counts', 'read_wav'}, optional
+        With ``volt_params``: ``'counts'`` (default) returns counts;
+        ``'read_wav'`` returns them as fractions of the symmetric full
+        scale ``2**(nbits-1) - 1``, the form :func:`uacpy.io.read_wav`
+        returns and :func:`uacpy.io.write_wav` takes.
+
+    Returns
+    -------
+    ndarray
+        Volts, counts or fractions of full scale, unrounded and unclipped:
+        an entry past the converter's full scale is one the recorder would
+        clip.
+
+    Examples
+    --------
+    0.5 µPa (5e-7 Pa) through a unity hydrophone and gain is 0.5 V, half of a
+    16-bit full scale against a 1 V reference:
+
+    >>> p = np.array([0.0, 5e-7, -5e-7])
+    >>> recording_from_pressure(p, sensitivity_dB=0, gain_dB=0)
+    array([ 0. ,  0.5, -0.5])
+    >>> recording_from_pressure(p, sensitivity_dB=0, gain_dB=0,
+    ...                         volt_params=(16, 1.0))
+    array([     0.,  16384., -16384.])
+    """
+    who = 'recording_from_pressure'
+    _check_recording_scale(volt_params, x_scale, who)
+    p = _sequence_as_array(p)
+    _warn_positive_sensitivity(
+        sensitivity_dB, 'sensitivity_dB', who,
+        f"the recording returned is {2 * sensitivity_dB:g} dB above what "
+        f"-{sensitivity_dB:g} gives")
+    x = 1e6 * p * 10 ** (sensitivity_dB / 20) * 10 ** (gain_dB / 20)
+    if volt_params is not None:
+        nbits, v_ref = volt_params
+        x = x * (2 ** (nbits - 1)) / v_ref
+        if x_scale == 'read_wav':
+            x = x / (2 ** (nbits - 1) - 1)
+    return x
+
+
+def _check_recording_scale(volt_params, x_scale, who):
+    """Refuse an ``x_scale`` that is not one of the two, and ``'read_wav'``
+    without the bit depth it needs."""
+    if x_scale not in ('counts', 'read_wav'):
+        raise ConfigurationError(
+            f"{who}: x_scale={x_scale!r} is not one of 'counts' (ADC counts) "
+            f"or 'read_wav' (uacpy.io.read_wav's output).",
+            remediation="Pass x_scale='counts' or x_scale='read_wav'.")
+    if x_scale == 'read_wav' and volt_params is None:
+        raise ConfigurationError(
+            f"{who}: x_scale='read_wav' relates read_wav's fractions of full "
+            f"scale to counts, which needs the bit depth, and no volt_params "
+            f"was given.",
+            remediation="Pass volt_params=(uacpy.io.read_wav_info(path).bits, "
+                        "v_ref).")
+
+
+def _warn_positive_sensitivity(sensitivity, name, who, consequence):
+    """Warn when a receiving sensitivity is positive, naming what a sign
+    slip does to the result (``consequence``)."""
+    if sensitivity > 0:
+        # RVS = 20 log10 |M|, M in V/µPa (Butler & Sherman, *Transducers
+        # and Arrays for Underwater Sound*, §6.1.1): a positive value is
+        # more than 1 V per µPa, a million volts for a 1 Pa wave. A sign
+        # slip (+165 for -165) puts the result 330 dB off.
+        warnings.warn(
+            f"{who}: {name}={sensitivity:g} dB re 1 V/µPa means "
+            f"{10 ** (sensitivity / 20):.3g} V per µPa; hydrophone "
+            f"sensitivities are negative (e.g. -201 dB re 1 V/µPa, "
+            f"Istepanian & Stojanovic, *Underwater Acoustic Digital Signal "
+            f"Processing and Communication Systems*, §3.2). Check its sign: "
+            f"{consequence}.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 _COMPLEX_RECORDS = ('analytic', 'baseband')
@@ -441,7 +529,7 @@ def sound_exposure_level(pressure, sample_rate: float,
     weighting : str, callable or (array_like, array_like), optional
         Frequency weighting, unweighted by default: a hearing group of
         :data:`~uacpy.noise.HEARING_GROUPS` (Southall et al. 2019), your own
-        function ``W(frequency_Hz) -> dB``, or a ``(frequencies_Hz, W_dB)``
+        function ``W(frequency) -> dB``, or a ``(frequencies, W_dB)``
         table (see :func:`~uacpy.acoustics.weighted_pressure`).
 
     Returns
@@ -544,7 +632,8 @@ def cumulative_sound_exposure_level(pressure, sample_rate: float,
     pressure : array_like
         Pressure record (Pa), time along ``axis``; a ``np.memmap`` streams.
     sample_rate : float
-        Sample rate (Hz).
+        Sample rate (Hz). A value below 1 Hz is refused as a sample interval
+        passed by mistake, as on :func:`sound_exposure_level`.
     ref : float, optional
         Reference pressure (default 1 µPa in water).
     step : float, default 1.0
@@ -563,7 +652,7 @@ def cumulative_sound_exposure_level(pressure, sample_rate: float,
     Returns
     -------
     CumulativeExposure
-        ``(times, levels)`` — it unpacks as the two arrays: the end of each
+        ``(times, levels_dB)`` — it unpacks as the two arrays: the end of each
         step (s from the first sample) and the accumulated SEL at each time,
         dB re ``ref²``·s, the curve on ``axis``; ``.plot()`` draws it.
 
@@ -633,34 +722,34 @@ def cumulative_sound_exposure_level(pressure, sample_rate: float,
     times = np.minimum((np.arange(n_steps) + 1) * step, n / fs)
     return CumulativeExposure(
         times=times,
-        levels=np.moveaxis(power_to_dB(running, ref, floor=floor), -1, axis),
+        levels_dB=np.moveaxis(power_to_dB(running, ref, floor=floor), -1, axis),
         ref=float(ref), axis=int(axis))
 
 
 @dataclass(frozen=True, eq=False)
 class CumulativeExposure(ExportRecord):
     """The sound exposure level accumulated over a record, what
-    :func:`cumulative_sound_exposure_level` returns: ``levels`` (dB re
+    :func:`cumulative_sound_exposure_level` returns: ``levels_dB`` (dB re
     ``ref²``·s) at each of ``times`` (s), the curve on ``axis`` of
-    ``levels``. ``times, levels = ...`` unpacks it; ``.plot()`` draws it
+    ``levels_dB``. ``times, levels_dB = ...`` unpacks it; ``.plot()`` draws it
     with :func:`uacpy.plot.plot_cumulative_exposure`.
     """
 
     times: np.ndarray
-    levels: np.ndarray
+    levels_dB: np.ndarray
     ref: float
     axis: int = -1
 
-    _ARRAY_FIELDS = ('times', 'levels')
-    _REPR_UNITS = {'levels': 'dB'}
+    _ARRAY_FIELDS = ('times', 'levels_dB')
+    _REPR_UNITS = {'levels_dB': 'dB'}
 
     def __iter__(self):
-        return iter((self.times, self.levels))
+        return iter((self.times, self.levels_dB))
 
     def _payload(self):
-        dims = ['channel_dim%d' % i for i in range(self.levels.ndim)]
+        dims = ['channel_dim%d' % i for i in range(self.levels_dB.ndim)]
         dims[self.axis] = 'time'
-        return {'levels': (self.levels, tuple(dims), 'dB')}
+        return {'levels_dB': (self.levels_dB, tuple(dims), 'dB')}
 
     def _coords(self):
         return {'time': (self.times, 's')}
@@ -676,7 +765,8 @@ _UNWEIGHTED_BLOCK = 2 ** 20
 
 
 def track_exposure(sel_dB, ranges, positions, *, closest_approach,
-                   along=None, axis: int = -1, event_duration=None):
+                   along=None, axis: int = -1, event_duration=None,
+                   per_event: bool = False):
     """Cumulative SEL of a source moving along a straight track: the energy
     sum, over every event on the track, of one event's SEL at that event's
     distance.
@@ -692,7 +782,13 @@ def track_exposure(sel_dB, ranges, positions, *, closest_approach,
 
     with ``SEL(r_i)`` interpolated linearly in range. This assumes the
     environment is the same along the track (range-independent, or one
-    bearing standing for all).
+    bearing standing for all). The interpolation is in dB, except next to a
+    no-energy cell of ``sel_dB`` (the -600 dB marker,
+    :func:`no_energy_mask`), which holds no level: there the energy is
+    interpolated, the cell counting as zero, so an event halfway between a
+    150 dB cell and a no-energy one counts 146.99 dB. An event between two
+    no-energy cells contributes nothing; a receiver all of whose events do
+    keeps the marker.
 
     This is the computation impact studies of survey lines make. Etter
     (*Underwater Acoustic Modeling and Simulation*, sect. 6.16.3) summarises
@@ -739,17 +835,26 @@ def track_exposure(sel_dB, ranges, positions, *, closest_approach,
     axis : int, default -1
         The range axis of ``sel_dB``. It is replaced by an ``along`` axis
         (when ``along`` is an array) followed by a ``closest_approach`` axis
-        (when that is an array); a scalar adds no axis.
+        (when that is an array), and with ``per_event`` by an event axis; a
+        scalar adds no axis.
     event_duration : float, optional
         Seconds each event lasts, for a continuous source: ``sel_dB`` is then
         a received level, and each event's SEL is that level plus
-        ``10·log10(event_duration / 1 s)``. ``None`` (default) reads
-        ``sel_dB`` as single-event SELs.
+        ``10·log10(event_duration / 1 s)``; a no-energy cell keeps the
+        marker. ``None`` (default) reads ``sel_dB`` as single-event SELs.
+    per_event : bool, default False
+        ``True`` returns each event's SEL at the receiver — the summands of
+        the cumulative SEL, interpolated as the sum interpolates them — on a
+        trailing event axis, one value per entry of ``positions``, instead
+        of their energy sum. With ``event_duration`` they include its
+        ``10·log10(event_duration / 1 s)``; subtract it for the received
+        level along the passage.
 
     Returns
     -------
     float or ndarray
-        Cumulative SEL, dB re 1 µPa²·s.
+        Cumulative SEL, dB re 1 µPa²·s; with ``per_event``, each event's
+        SEL (an array with the event axis last of the added axes).
 
     Raises
     ------
@@ -794,8 +899,9 @@ def track_exposure(sel_dB, ranges, positions, *, closest_approach,
     if event_duration is not None:
         held = require_positive_finite_scalar(event_duration, who,
                                               "event_duration", " s")
-        # SEL of a constant level held over the interval (Ainslie Eq. 3.155).
-        sel = sel + 10.0 * np.log10(held)
+        # SEL of a constant level held over the interval (Ainslie Eq. 3.155);
+        # a no-energy cell holds no level, so it keeps the marker.
+        sel = np.where(no_energy_mask(sel), sel, sel + 10.0 * np.log10(held))
     # One receiver row of the plan view at a time: the whole
     # (..., along, closest_approach, event) block can outgrow memory.
     rows = []
@@ -818,16 +924,22 @@ def track_exposure(sel_dB, ranges, positions, *, closest_approach,
         j = np.clip(np.searchsorted(r, dist, side='right') - 1, 0,
                     r.size - 2)
         t = np.clip((dist - r[j]) / (r[j + 1] - r[j]), 0.0, 1.0)
-        levels = sel[..., j] * (1.0 - t) + sel[..., j + 1] * t
-        rows.append(np.asarray(sum_levels_dB(levels, axis=-1)))
-    total = np.stack(rows, axis=-2)                  # (..., along, approach)
+        levels = interpolate_dB(
+            sel, lambda v: v[..., j] * (1.0 - t) + v[..., j + 1] * t,
+            method='linear', who=who)
+        rows.append(levels if per_event
+                    else np.asarray(sum_levels_dB(levels, axis=-1)))
+    # (..., along, approach), with per_event a trailing event axis.
+    events = int(bool(per_event))
+    total = np.stack(rows, axis=-2 - events)
+    lead = total.ndim - 2 - events                   # the along axis
     if d.ndim == 0:
-        total = total[..., 0]
+        total = np.take(total, 0, axis=lead + 1)
     if a.ndim == 0:
-        total = total[..., 0, :] if d.ndim else total[..., 0]
+        total = np.take(total, 0, axis=lead)
     if total.ndim == 0:
         return float(total)
-    added = a.ndim + d.ndim
+    added = a.ndim + d.ndim + events
     position = axis % sel.ndim
     return np.moveaxis(total, list(range(total.ndim - added, total.ndim)),
                        list(range(position, position + added)))
@@ -838,7 +950,7 @@ def transmission_loss_dB(pressure, *, floor: float = PRESSURE_FLOOR):
 
     The canonical conversion every uacpy result uses for a TL view
     (:attr:`~uacpy.Field.dB`, :meth:`~uacpy.Field.to_dB`, the metrics in
-    :mod:`uacpy.core.metrics`, and the RAM and ray plotters), exposed so a
+    :mod:`uacpy.metrics`, and the RAM and ray plotters), exposed so a
     complex field from anywhere else converts the same way.
 
     Note the **minus**: this is a loss, so a quiet cell is a LARGE number,
@@ -1037,7 +1149,11 @@ def band_level(level_density_dB, frequencies, freq_min=None,
     :func:`integrate_psd`.
 
     A band that carries no power (every level ``-inf``) is ``-inf``, the
-    level of an empty band throughout uacpy.
+    level of an empty band throughout uacpy. A band whose every density is
+    the no-energy marker (-600 dB, :func:`no_energy_mask`: a silent record's
+    spectrum) is the marker, as :func:`sum_levels_dB` keeps it: integrated,
+    -600 dB/Hz over 1 kHz would read -570 dB, a level the mask no longer
+    sees.
 
     Parameters
     ----------
@@ -1057,11 +1173,17 @@ def band_level(level_density_dB, frequencies, freq_min=None,
         The band level: a float for one spectrum, the input's shape without
         ``axis`` otherwise.
     """
-    power = integrate_psd(
-        10.0 ** (np.asarray(level_density_dB, dtype=float) / 10.0),
-        frequencies, freq_min, freq_max, axis=axis)
+    density = np.asarray(level_density_dB, dtype=float)
+    linear = 10.0 ** (density / 10.0)
+    power = integrate_psd(linear, frequencies, freq_min, freq_max, axis=axis)
+    # The power of the densities that are levels: none, while the markers
+    # carry some, means every density feeding the band is the marker.
+    levels_power = integrate_psd(np.where(no_energy_mask(density), 0.0, linear),
+                                 frequencies, freq_min, freq_max, axis=axis)
     with np.errstate(divide='ignore'):
         level = 10.0 * np.log10(power)
+    level = np.where((levels_power == 0.0) & (power > 0.0), -NO_ENERGY_DB,
+                     level)
     return float(level) if np.ndim(level) == 0 else level
 
 

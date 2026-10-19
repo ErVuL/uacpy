@@ -8,7 +8,7 @@ import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
 from uacpy.core._validate import (
-    require_finite, reject_complex, steps_are_uniform,
+    UNIFORM_STEP_RTOL, require_finite, reject_complex, steps_are_uniform,
 )
 from uacpy.core._weighting_inputs import (
     warn_in_air_group_in_water, warn_table_leaves_energy_out,
@@ -16,7 +16,7 @@ from uacpy.core._weighting_inputs import (
 from uacpy.acoustic_signal._synthesis import (require_source_waveform,
                                               waveform_spectrum_on,
                                               zero_no_mode_bins)
-from uacpy.core.constants import (DEFAULT_SOUND_SPEED, NO_ENERGY_DB,
+from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, NumericsWarning,
@@ -24,7 +24,7 @@ from uacpy.core.exceptions import (
 from uacpy.core._plotting import plotter
 from uacpy.core._grid import (INTERP_METHODS, coarse_axes, nearest_index_on_axis,
                               collapse_axis, finite_scalar_label,
-                              resample_depth_range)
+                              _resample_depth_range)
 from uacpy.core.bathymetry import mask_below_seafloor
 from uacpy.core.environment import Bathymetry, Environment
 from uacpy.core._warn_frames import USER_FRAME_SKIP
@@ -38,8 +38,9 @@ from uacpy.core.acoustics.levels import (
 )
 from uacpy.core.acoustics.weighting import frequency_weighting
 from uacpy.core.results import quantities as _quantities
-from uacpy.core._export import (units_attrs, encode_attrs, join_complex,
-                                read_only, require_extra)
+from uacpy.core._export import (_from_json, _to_json, units_attrs,
+                                encode_attrs, join_complex, read_only,
+                                require_extra)
 from uacpy.core.results._base import (Result, _integer_index,
                                      _window_pair, axis_match_tolerance,
                                      coordinate_axis)
@@ -132,7 +133,8 @@ class Field(Result):
     of a detection-probability map), :attr:`weighting` (the frequency
     weighting of an exposure map), :attr:`track_events` (how many
     events a track sum added), :attr:`reduction_speed` (the speed a
-    reduced-time axis is reduced by) and :attr:`superposed_sources`
+    reduced-time axis is reduced by), :attr:`removed_delay` (the delay
+    :meth:`remove_delay` took out of ``H(f)``) and :attr:`superposed_sources`
     (what :meth:`superpose` added). They are set when the Field is
     built and carried by :meth:`replace`; a ``metadata`` carrying one
     of them (or ``window``, the synthesis window's metadata spelling)
@@ -196,7 +198,7 @@ class Field(Result):
     #: ``__init__``, carried by :meth:`replace`, never metadata.
     _DERIVATION = ('band', 'synthesis_window', 'no_mode_bins',
                    'sonar_budget', 'sigma_dB', 'weighting', 'track_events',
-                   'reduction_speed', 'superposed_sources')
+                   'reduction_speed', 'removed_delay', 'superposed_sources')
     #: The metadata spelling of a derivation attribute whose name
     #: differs from it: a ``metadata=`` carrying it is refused.
     _METADATA_DERIVATION = {'window': 'synthesis_window'}
@@ -223,6 +225,7 @@ class Field(Result):
         weighting: Optional[str] = None,
         track_events: Optional[int] = None,
         reduction_speed: Optional[float] = None,
+        removed_delay: Optional[Dict[str, Optional[float]]] = None,
         superposed_sources: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
@@ -296,6 +299,7 @@ class Field(Result):
                               else int(track_events))
         self._reduction_speed = (None if reduction_speed is None
                                  else float(reduction_speed))
+        self._removed_delay = _removed_delay_record(removed_delay)
         self._superposed_sources = _superposed_record(superposed_sources)
         self._kind = str(kind) if kind else 'pressure'
         if not isinstance(coords, dict):
@@ -528,8 +532,8 @@ class Field(Result):
     def _storage_unit(self) -> str:
         """The unit this Field's storage implies, for a Field built with no
         unit tag: a kind with one registered unit has that unit; pressure —
-        the one kind with two — is linear Pa when the data is complex or
-        carries a ``time`` axis, and a level in dB otherwise."""
+        the one kind with several — is linear Pa when the data is complex
+        or carries a ``time`` axis, and a level in dB otherwise."""
         units = _quantities.quantity(self.kind).units
         if len(units) == 1:
             return next(iter(units))
@@ -596,7 +600,9 @@ class Field(Result):
     @property
     def unit(self) -> str:
         """What :attr:`data` is measured in — ``'Pa'`` or ``'dB'`` for
-        pressure, the registered unit for every other kind.
+        pressure (``'Pa·s'`` for the spectrum ``S·H`` of a received trace,
+        :meth:`to_transfer_function`), the registered unit for every other
+        kind.
 
         Decided once, when the Field is built: the ``unit=`` given, else
         read off the storage —
@@ -776,6 +782,21 @@ class Field(Result):
         return self._reduction_speed
 
     @property
+    def removed_delay(self) -> Optional[Dict[str, Optional[float]]]:
+        """The delay :meth:`remove_delay` took out of this ``H(f)``:
+        ``{'delay': τ0, 'sound_speed': c}``, the cell at range ``r``
+        advanced by ``τ0 + r/c`` (by ``τ0`` alone when ``c`` is ``None``).
+        Every synthesis from this field (:meth:`impulse_response`,
+        :meth:`to_time_trace`, :meth:`synthesize_time_series`, the time
+        series behind :meth:`sound_exposure_level` and
+        :meth:`peak_sound_pressure_level`) puts the delay back
+        first, so its record sits on the true time. ``None`` on any other
+        field. A copy: the field's own record cannot be edited through
+        it."""
+        record = self._removed_delay
+        return None if record is None else dict(record)
+
+    @property
     def superposed_sources(self) -> Optional[Dict[str, Any]]:
         """What :meth:`superpose` added into this field: ``{'depths':
         [...], 'weights': [...], 'coherent': bool}`` — the source depths
@@ -805,9 +826,11 @@ class Field(Result):
             out[tag] = kept if value is None else value
         if isinstance(out['sonar_budget'], str):
             out['sonar_budget'] = json.loads(out['sonar_budget'])
+        if isinstance(out['removed_delay'], str):
+            out['removed_delay'] = json.loads(out['removed_delay'])
         if isinstance(out['superposed_sources'], str):
-            out['superposed_sources'] = _superposed_from_json(
-                out['superposed_sources'])
+            out['superposed_sources'] = _from_json(
+                json.loads(out['superposed_sources']))
         return out
 
     # ── persistence ───────────────────────────────────────────────────
@@ -872,7 +895,7 @@ class Field(Result):
             'coords', 'kind', 'unit', 'coherent', 'pinned', 'reference',
             'reference_unit', 'speeds', 'synthesis_floor', 'band',
             'sigma_dB', 'sonar_budget', 'no_mode_bins', 'synthesis_window',
-            'reduction_speed', 'weighting', 'track_events',
+            'reduction_speed', 'removed_delay', 'weighting', 'track_events',
             'superposed_sources'))
         identity = cls._identity_from_dict(d)
         # The quantity the field held, not one re-read from the data.
@@ -918,8 +941,9 @@ class Field(Result):
         :attr:`speeds`, the run settings' waveguide included, as
         ``speeds_<member>``, and ``synthesis_floor``), the derivation record
         under its own names (:attr:`band` as a real array named in
-        ``attrs['tuple_attrs']``, :attr:`sonar_budget` as a JSON string,
-        the others as themselves; each where it is set), the source identity
+        ``attrs['tuple_attrs']``, :attr:`sonar_budget`,
+        :attr:`removed_delay` and :attr:`superposed_sources` as JSON
+        strings, the others as themselves; each where it is set), the source identity
         (``source_level_dB``, and :attr:`source_weights` written as a complex
         entry is) and every
         :attr:`metadata` entry a NetCDF attribute can hold: a string,
@@ -969,9 +993,12 @@ class Field(Result):
         if derivation['sonar_budget'] is not None:
             derivation['sonar_budget'] = json.dumps(
                 derivation['sonar_budget'])
+        if derivation['removed_delay'] is not None:
+            derivation['removed_delay'] = json.dumps(
+                derivation['removed_delay'])
         if derivation['superposed_sources'] is not None:
-            derivation['superposed_sources'] = _superposed_to_json(
-                derivation['superposed_sources'])
+            derivation['superposed_sources'] = json.dumps(
+                _to_json(derivation['superposed_sources']))
         encode_attrs({**(self.metadata or {}), **source, **derivation},
                      attrs,
                      skip=self._XARRAY_IDENTITY_ATTRS, who='Field.to_xarray')
@@ -1096,6 +1123,13 @@ class Field(Result):
                     or 'scalar')
         if self._reduction_speed is not None:
             bits.append(f"time reduced by r/{self._reduction_speed:g} m/s")
+        removed = self._removed_delay
+        if removed is not None:
+            terms = ([f"{removed['delay']:g} s"] if removed['delay']
+                     else []) + ([f"r/{removed['sound_speed']:g} m/s"]
+                                 if removed['sound_speed'] is not None
+                                 else [])
+            bits.append(f"delay {' + '.join(terms) or '0 s'} removed")
         if self.pinned:
             bits.append("at " + ", ".join(
                 f"{name}="
@@ -1453,18 +1487,25 @@ class Field(Result):
         return None if f is None else float(np.max(np.asarray(f, dtype=float)))
 
     @property
-    def dt(self) -> float:
-        """Time-axis sample spacing in seconds (``0.0`` if not time-resolved)."""
+    def dt(self) -> Optional[float]:
+        """Time-axis sample spacing in seconds: the axis span over its
+        intervals, ``(t[-1] − t[0]) / (n − 1)``; ``None`` without a time axis
+        or with one time sample, where no spacing exists. On an absolute
+        axis far from 0 the first step alone carries the rounding of the
+        start time (a relative error of 1.7e-9 for a 1 s record at 44.1 kHz
+        starting at 999.9 s); the span carries that of the whole record
+        (3.9e-14)."""
         t = self.coords.get('time')
         if t is None or t.size < 2:
-            return 0.0
-        return float(t[1] - t[0])
+            return None
+        return float((t[-1] - t[0]) / (t.size - 1))
 
     @property
-    def sample_rate(self) -> float:
-        """Sampling rate in Hz (``1/dt``; ``0.0`` if not time-resolved)."""
+    def sample_rate(self) -> Optional[float]:
+        """Sampling rate in Hz, ``1/dt``; ``None`` where :attr:`dt` is
+        ``None`` or the time axis does not increase."""
         dt = self.dt
-        return 1.0 / dt if dt > 0 else 0.0
+        return None if dt is None or dt <= 0.0 else 1.0 / dt
 
     # ── slicing ────────────────────────────────────────────────────────
 
@@ -1765,7 +1806,7 @@ class Field(Result):
         # coordinate along it still belongs to the same sample.
         return self.replace(coords=coords, aux_coords=self.aux_coords)
 
-    def remove_delay(self, seconds: Optional[float] = None, *,
+    def remove_delay(self, delay: Optional[float] = None, *,
                      sound_speed: Optional[float] = None) -> "Field":
         """Advance a transfer function: ``H(f) · exp(+2πi·f·τ)``.
 
@@ -1773,7 +1814,7 @@ class Field(Result):
         axis by ``-τ`` and removing a delay ``τ`` from ``H(f)`` are the same
         operation on the two representations.
 
-        Give **either** ``seconds`` (a signed delay; negative *adds* delay) or
+        Give **either** ``delay`` (s, signed; a negative one *adds* delay) or
         ``sound_speed``, which takes the delay from this field's own range as
         ``r/c``. There is no default: ``r/c`` is the delay worth removing, and
         a Field carries ``r`` but not ``c`` — the sound speed belongs to the
@@ -1793,21 +1834,28 @@ class Field(Result):
         the multipath residual, which the grid does resolve.
 
         The magnitude is untouched — this multiplies by a unit-modulus factor —
-        so ``|H|`` and any TL derived from it are unchanged. On plain arrays
+        so ``|H|`` and any TL derived from it are unchanged. The delay is
+        recorded in :attr:`removed_delay` (added to what an earlier call
+        removed), and every synthesis from the result puts it back first:
+        :meth:`impulse_response`, :meth:`to_time_trace` and
+        :meth:`synthesize_time_series` of the advanced ``H`` return the
+        record of the ``H`` it came from, on the true time. On plain arrays
         this is :func:`~uacpy.acoustic_signal.remove_delay`.
 
         Parameters
         ----------
-        seconds : float, optional
-            Delay to remove, signed. Mutually exclusive with ``sound_speed``.
+        delay : float, optional
+            Delay to remove (s), signed. Mutually exclusive with
+            ``sound_speed``.
         sound_speed : float, optional
             Reference speed in m/s; the delay becomes ``r/c`` from this field's
-            own range. Mutually exclusive with ``seconds``.
+            own range. Mutually exclusive with ``delay``.
 
         Returns
         -------
         Field
-            Same coords and identity; only the phase moves.
+            Same coords and identity; the phase moves and
+            :attr:`removed_delay` records the delay.
 
         Raises
         ------
@@ -1832,11 +1880,11 @@ class Field(Result):
         >>> np.round(np.angle(H.remove_delay(sound_speed=1500.0).data).ravel(), 6)
         array([0., 0.])
         """
-        if (seconds is None) == (sound_speed is None):
+        if (delay is None) == (sound_speed is None):
             raise ConfigurationError(
-                "Field.remove_delay: give exactly one of seconds= or "
+                "Field.remove_delay: give exactly one of delay= or "
                 "sound_speed=.",
-                remediation="seconds= removes a delay you already know; "
+                remediation="delay= removes a delay you already know; "
                             "sound_speed= takes it from this field's range as "
                             "r/c.")
         if not self.is_complex:
@@ -1865,13 +1913,13 @@ class Field(Result):
                 f"{list(self.coords)}.",
                 remediation="A delay lives in the phase of H(f). For a "
                             "time-domain field, move its axis instead: "
-                            "shift(time=-seconds).")
+                            "shift(time=-delay).")
 
-        if seconds is not None:
-            delay = float(seconds)
-            if not np.isfinite(delay):
+        if delay is not None:
+            tau = float(delay)
+            if not np.isfinite(tau):
                 raise ConfigurationError(
-                    f"Field.remove_delay: seconds={seconds!r} is not finite.",
+                    f"Field.remove_delay: delay={delay!r} is not finite.",
                     remediation="Pass the delay to remove in seconds, usually "
                                 "the geometric travel time r/c.")
         else:
@@ -1883,20 +1931,33 @@ class Field(Result):
                     remediation="Pass the reference speed in m/s, e.g. the "
                                 "water column's own c.")
             if 'range' in self.coords:
-                delay = _broadcast('range', self.coords['range']) / speed
+                tau = _broadcast('range', self.coords['range']) / speed
             elif 'range' in self.pinned:
-                delay = float(self.pinned['range']) / speed
+                tau = float(self.pinned['range']) / speed
             else:
                 raise ConfigurationError(
                     f"Field.remove_delay: no range to take r/c from; this "
                     f"field is over {list(self.coords)}.",
-                    remediation="Pass the delay directly with seconds=.")
+                    remediation="Pass the delay directly with delay=.")
 
+        # The delay is recorded with what an earlier call removed: τ0 + r/c,
+        # the slownesses of two speeds adding.
+        record = dict(self._removed_delay
+                      or {'delay': 0.0, 'sound_speed': None})
+        if delay is not None:
+            record['delay'] += tau
+        else:
+            slowness = 1.0 / speed + (0.0 if record['sound_speed'] is None
+                                      else 1.0 / record['sound_speed'])
+            record['sound_speed'] = 1.0 / slowness
+        if record == {'delay': 0.0, 'sound_speed': None}:
+            record = None
         # The phase factor is acoustic_signal.remove_delay's; this method
         # reads the delay from its arguments or its own range.
         from uacpy.acoustic_signal.channel import remove_delay
-        return self.replace(data=remove_delay(self.data, hertz, delay,
-                                              axis=axis))
+        return self.replace(data=remove_delay(self.data, hertz, tau,
+                                              axis=axis),
+                            removed_delay=record)
 
     def eval(self, **kwargs) -> "Field":
         """Interpolated slice — the interpolating counterpart of :meth:`at`.
@@ -1909,7 +1970,11 @@ class Field(Result):
         for the nearest stored sample when you must not fabricate values. Note
         that interpolating a real **TL (dB)** field happens in dB and smooths
         sharp interference nulls; slice complex pressure (or use ``at``) for
-        null-critical work.
+        null-critical work. Next to a no-energy cell (the ±600 dB marker,
+        :func:`~uacpy.acoustics.no_energy_mask`) a dB field is interpolated
+        in energy instead, the cell counting as zero, and ``'cubic'`` is
+        refused over the marker
+        (:func:`~uacpy.acoustics.resample_depth_range` with ``dB=True``).
 
         Parameters
         ----------
@@ -1934,10 +1999,12 @@ class Field(Result):
         coords = dict(self.coords)
         pinned = dict(self.pinned)
         order = list(self.coords)
+        dB = self.unit == 'dB' and not self.is_complex
         for name, value in labels.items():
             ax = order.index(name)
             data, vq = collapse_axis(data, coords[name], value, method,
-                                     axis=ax, name=name, who="Field.eval")
+                                     axis=ax, name=name, who="Field.eval",
+                                     dB=dB)
             pinned[name] = vq
             del coords[name]
             order.remove(name)
@@ -1990,6 +2057,68 @@ class Field(Result):
         idx = np.unravel_index(flat, self.data.shape)
         idx_map = {name: int(i) for name, i in zip(self.coords, idx)}
         return self._slice(idx_map)
+
+    def loudest_along(self, axis: str) -> "Field":
+        """The loudest value along ``axis`` at every other point: a Field
+        over the remaining axes, ``axis`` gone. ``sel.loudest_along('depth')``
+        is, per range, the loudest exposure over depth — the worst-case
+        receiver depth of an impact assessment, as a Field with its
+        coordinates, unit and kind.
+
+        "Loudest" is :meth:`max`'s rule, point by point: the largest ``|p|``
+        of linear or complex data (the sample itself is kept, sign and phase
+        with it), the least of a loss in dB (transmission loss, OASS
+        reverberation), the largest of a level in dB — ``np.nanmax`` along
+        the axis for a level. A point whose samples are all no data
+        (``NaN``) stays ``NaN``; one whose samples are all silent keeps the
+        no-energy marker (-600 dB on a level, 600 dB on a loss,
+        :func:`~uacpy.acoustics.no_energy_mask`), since any real sample is
+        louder than it.
+
+        Parameters
+        ----------
+        axis : str
+            The axis to reduce, one of :attr:`axes`.
+
+        Returns
+        -------
+        Field
+            The same quantity, identity and derivation record, ``axis``
+            dropped with the auxiliary coordinates along it. Which sample
+            won is not recorded: it differs from point to point.
+        """
+        who = "Field.loudest_along"
+        if axis not in self.coords:
+            raise ConfigurationError(
+                f"{who}: {axis!r} is not an axis of this field; its axes are "
+                f"{self.axes}.")
+        position = self.axes.index(axis)
+        data = np.asarray(self.data)
+        if data.shape[position] == 0:
+            raise ConfigurationError(
+                f"{who}: the {axis!r} axis has no samples to choose from.")
+        if self.is_complex or self.unit != 'dB':
+            strength = np.abs(data).astype(float)
+        elif _quantities.is_loss(self.kind):
+            strength = -data.astype(float)        # least loss = loudest
+        else:
+            strength = data.astype(float)         # a level: more is more
+        no_data = np.isnan(strength)
+        winner = np.argmax(np.where(no_data, -np.inf, strength),
+                           axis=position)
+        values = np.take_along_axis(
+            data, np.expand_dims(winner, position), axis=position
+        ).squeeze(position)
+        empty = np.all(no_data, axis=position)
+        if np.any(empty):
+            values = np.array(values, dtype=np.result_type(values, float))
+            values[empty] = np.nan
+        coords = {name: v for name, v in self.coords.items() if name != axis}
+        # Over source depths the result is no weighted sum: the weights,
+        # which superpose() applies, do not carry.
+        dropped = ({'source_weights': None} if axis == 'source_depth'
+                   else {})
+        return self.replace(data=values, coords=coords, **dropped)
 
     def _check_axes(self, kwargs: Dict[str, Any]) -> None:
         for name in kwargs:
@@ -2476,7 +2605,10 @@ class Field(Result):
         axis (a ``source_depth``, a ``frequency``, a ``time``) is carried
         through. Complex data is interpolated component-wise. Out-of-bound
         queries return NaN, and so does a query whose stencil touches a NaN
-        sample.
+        sample. On a dB field a query whose stencil touches a no-energy cell
+        (the ±600 dB marker, :func:`~uacpy.acoustics.no_energy_mask`) is
+        interpolated in energy, the cell counting as zero, and ``'cubic'``
+        is refused over the marker (``dB=True`` below).
 
         Keyword-only and depth-first, like every other axis pair on a
         :class:`Field`: passing the two vectors the other way round would
@@ -2495,8 +2627,9 @@ class Field(Result):
         interpolates freely.
 
         On plain arrays this is
-        :func:`~uacpy.acoustics.resample_depth_range`; what the method adds
-        is the undersampling check and the Field re-wrap.
+        :func:`~uacpy.acoustics.resample_depth_range`, with ``dB=True`` on
+        a dB field; what the method adds is the undersampling check and the
+        Field re-wrap.
 
         Parameters
         ----------
@@ -2523,10 +2656,11 @@ class Field(Result):
             self._warn_if_undersampled(who, axes=('depth', 'range'))
         new_depths = np.atleast_1d(np.asarray(depths, dtype=float))
         new_ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
-        new_data = resample_depth_range(
+        new_data = _resample_depth_range(
             self.data, self.coords['depth'], self.coords['range'],
             new_depths, new_ranges, method=method,
-            axis=(self.axes.index('depth'), self.axes.index('range')))
+            axis=(self.axes.index('depth'), self.axes.index('range')),
+            dB=self.unit == 'dB' and not self.is_complex, who=who)
         coords = {name: (new_depths if name == 'depth' else
                          new_ranges if name == 'range' else values)
                   for name, values in self.coords.items()}
@@ -2671,7 +2805,8 @@ class Field(Result):
         named in ``placeholder`` so the caller can drop it from the result's
         :attr:`pinned` rather than report a depth nobody gave. A missing
         ``range`` is refused, since the record's start is estimated from
-        it."""
+        it. Real (dB) data is refused, and a delay :meth:`remove_delay`
+        recorded is put back (:meth:`_with_removed_delay_restored`)."""
         f = self
         for axis in list(f.coords):
             if (axis not in self._SYNTHESIS_AXES
@@ -2691,6 +2826,15 @@ class Field(Result):
                             "and a band of frequencies= (docs/guide/"
                             "results.md, section 6a), and call this on that "
                             "field.")
+        if not f.is_complex:
+            # Real data on a frequency axis is a level (Field._storage_unit
+            # reads it as dB): transforming it would read decibels as
+            # pressure.
+            raise ConfigurationError(
+                f"{who}: needs complex H(f). A dB or TL field has no phase, "
+                f"so it has no impulse response or received signal to "
+                f"synthesise; call this on the complex pressure field the "
+                f"model returned, before .to_dB().")
         if list(f.coords) != present:
             # Axes in another order (a Field built by hand, or read from an
             # array in its own order) only need reordering; any other axis
@@ -2706,7 +2850,7 @@ class Field(Result):
                 + f"'depth' and 'range' axes before it in that order; got "
                 f"{list(self.coords)}. {remedy}")
         if list(f.coords) == list(order):
-            return f, (), ()
+            return f._with_removed_delay_restored(), (), ()
         if 'range' not in f.coords and 'range' not in f.pinned:
             raise ConfigurationError(
                 f"{who}: this field has no range axis and no pinned range, "
@@ -2731,7 +2875,27 @@ class Field(Result):
         coords['frequency'] = f.coords['frequency']
         pinned = {k: v for k, v in f.pinned.items() if k not in collapse}
         grid = f.replace(data=data, coords=coords, pinned=pinned)
-        return grid, tuple(collapse), tuple(placeholder)
+        return (grid._with_removed_delay_restored(), tuple(collapse),
+                tuple(placeholder))
+
+    def _with_removed_delay_restored(self) -> "Field":
+        """This ``(…, range, frequency)`` synthesis grid with the delay
+        :attr:`removed_delay` records put back, ``H(f)·exp(−2πi·f·τ)`` with
+        ``τ = τ0 + r/c`` per range, and no record left: the ``H`` that
+        :meth:`remove_delay` advanced, whose records the synthesis places
+        on the true time. A grid with no record is returned as it is."""
+        record = self._removed_delay
+        if record is None:
+            return self
+        delay = record['delay']
+        if record['sound_speed'] is not None:
+            delay = delay + (self.coords['range'][:, None]
+                             / record['sound_speed'])
+        from uacpy.acoustic_signal.channel import remove_delay
+        return self.replace(
+            data=remove_delay(self.data, self.coords['frequency'], -delay,
+                              axis=-1),
+            removed_delay=None)
 
     def truncate_response(self, duration: float, *,
                           origin: Union[str, float] = 'peak',
@@ -2850,7 +3014,7 @@ class Field(Result):
         return np.moveaxis(spectra.reshape(moved.shape), -1, axis)
 
     def broadband_loss(self, source_spectrum=None, *, source_waveform=None,
-                       sample_rate=None) -> "Field":
+                       sample_rate=None, weighting=None) -> "Field":
         """Propagation loss averaged over this field's band — the level a
         signal of finite bandwidth reaches, as a map.
 
@@ -2907,6 +3071,16 @@ class Field(Result):
             Requires ``sample_rate``.
         sample_rate : float, optional
             Rate (Hz) ``source_waveform`` is sampled at.
+        weighting : str, callable or (array_like, array_like), optional
+            Frequency weighting, unweighted by default: a hearing group of
+            :data:`~uacpy.noise.HEARING_GROUPS` (Southall et al. 2019), a
+            function ``W(frequency) -> dB``, or a ``(frequencies,
+            W_dB)`` table (:func:`~uacpy.acoustics.frequency_weighting`).
+            The band weights become ``w(f)·10**(W(f)/10)``, the weighted
+            energy spectrum, which is how the band route of a weighted
+            exposure counts it (Southall et al. 2019: the weighted spectrum
+            integrated across frequency); the map records it in
+            :attr:`weighting`, as :meth:`sound_exposure_level` does.
 
         Returns
         -------
@@ -2937,10 +3111,13 @@ class Field(Result):
         Raises
         ------
         ConfigurationError
-            No ``frequency`` axis, real data, a ``source_spectrum`` whose length is
+            No ``frequency`` axis, real data, the spectrum ``S·H`` of a
+            received trace (unit ``'Pa·s'``, :meth:`to_transfer_function`
+            of a pressure trace), a ``source_spectrum`` whose length is
             not the frequency axis's, a non-finite or zero-energy
-            ``source_spectrum``, both ``source_spectrum`` and ``source_waveform``, or a
-            ``source_waveform`` without a ``sample_rate``.
+            ``source_spectrum``, both ``source_spectrum`` and ``source_waveform``, a
+            ``source_waveform`` without a ``sample_rate``, or a ``weighting``
+            that carries no weight anywhere on the band.
 
         On plain arrays this is
         :func:`~uacpy.acoustic_signal.broadband_loss`; what the
@@ -2961,6 +3138,16 @@ class Field(Result):
                 f"{who}: needs complex H(f). A dB or TL field has lost the "
                 f"phase, so averaging it is an incoherent sum and not "
                 f"Eq. 11.46 — see the note on RunMode.INCOHERENT_TL.")
+        if self.unit == 'Pa·s':
+            raise ConfigurationError(
+                f"{who}: this field is the spectrum S·H of a received "
+                f"pressure trace (unit 'Pa·s'), not a transfer function H; "
+                f"its band mean carries the source spectrum and is no "
+                f"propagation loss.",
+                remediation="Transform an impulse response instead "
+                            "(impulse_response(...).to_transfer_function() "
+                            "is H), or give the source to the model's H with "
+                            "source_spectrum= or source_waveform=.")
         freqs = np.asarray(self.coords['frequency'], dtype=float)
         axis = list(self.coords).index('frequency')
         source_spectrum = waveform_spectrum_on(
@@ -2970,6 +3157,8 @@ class Field(Result):
         # argument source_spectrum.
         weights = (None if source_spectrum is None else
                    np.abs(np.asarray(source_spectrum)).astype(float) ** 2)
+        if weighting is not None:
+            weights = self._weighted_band(freqs, weights, weighting, who)
         # The weighted average and its dB step are
         # broadband_loss's, including the accumulate-per-map
         # memory behaviour; what this method adds is turning a waveform
@@ -2990,9 +3179,38 @@ class Field(Result):
         # it 2 kHz is the same defect Field.window's identity narrowing
         # exists to prevent — a legal frequency, and the wrong one. Uniform
         # weights still give the band centre.
-        return self._collapse_band(loss, coords,
-                                   spectral_centroid(freqs, weights),
-                                   'pressure')
+        result = self._collapse_band(loss, coords,
+                                     spectral_centroid(freqs, weights),
+                                     'pressure')
+        if weighting is None:
+            return result
+        return result.replace(weighting=_weighting_label(weighting))
+
+    def _weighted_band(self, freqs, weights, weighting, who: str):
+        """The band weights ``weights`` (``None``: uniform) times the power
+        gain ``10**(W/10)`` of ``weighting`` on ``freqs``; refused when the
+        weighting carries no weight on the band, and a table that leaves
+        most of the received energy outside its span is warned about
+        (:func:`~uacpy.core._weighting_inputs.warn_table_leaves_energy_out`)."""
+        base = (np.ones(freqs.size) if weights is None
+                else np.asarray(weights, dtype=float))
+        gain = 10.0 ** (frequency_weighting(freqs, weighting) / 10.0)
+        weighted = base * gain
+        if not np.any(weighted > 0.0):
+            raise ConfigurationError(
+                f"{who}: the weighting carries no weight on this band "
+                f"({freqs[0]:g}-{freqs[-1]:g} Hz), so the weighted band "
+                f"holds no energy to average.",
+                remediation="Check the weighting's frequencies are in Hz, "
+                            "or widen the band to where it counts.")
+        power = np.moveaxis(np.abs(np.asarray(self.data)) ** 2,
+                            self.axes.index('frequency'), -1)
+        power = power.reshape(-1, freqs.size)
+        live = np.all(np.isfinite(power), axis=-1)
+        received = base * (power[live].mean(axis=0) if np.any(live)
+                           else np.ones(freqs.size))
+        warn_table_leaves_energy_out(weighting, freqs, received, who)
+        return weighted
 
     def synthesize_time_series(
         self,
@@ -3019,7 +3237,8 @@ class Field(Result):
         BROADBAND run gives on its default grid). A record shorter than the
         waveform itself is refused: the result would be the waveform folded
         onto itself. :meth:`impulse_response` and :meth:`apply` convolve
-        instead, which holds a signal of any length.
+        instead, which holds a signal of any length. Real (dB or TL) data is
+        refused too: it has no phase, and its decibels are not pressure.
 
         Parameters
         ----------
@@ -3065,12 +3284,13 @@ class Field(Result):
 
     def _synthesized(self, source_waveform, sample_rate, *, t_start,
                      window, placement_checks: bool, who: str,
-                     exposure: bool = False,
+                     exposure: bool = False, weighting=None,
                      fold_report: Optional[dict] = None) -> "Field":
         """:meth:`synthesize_time_series`, with the checks on where the
         shared window sits switched by ``placement_checks``, its refusals
         and notices naming ``who``, the method the caller called, and the
-        band-edge notice worded for an exposure when ``exposure``.
+        band-edge notice worded for an exposure when ``exposure``, its share
+        of the energy judged under the exposure's ``weighting``.
         ``fold_report`` collects the shared record's fold findings (the late
         arrival, the range span, energy at an auto-placed record's edge)
         instead of warning them, for a caller that says them with what it
@@ -3087,7 +3307,7 @@ class Field(Result):
             sample_rate=sample_rate,
             t_start=t_start, window=window,
             placement_checks=placement_checks, who=who, exposure=exposure,
-            fold_report=fold_report,
+            weighting=weighting, fold_report=fold_report,
         )
         if collapse:
             traces = traces.isel(**{name: 0 for name in collapse})
@@ -3162,7 +3382,8 @@ class Field(Result):
             A Field without a ``frequency`` axis to transform, a
             non-uniform one, a non-positive ``sample_rate``, a record of
             more than 2**26 samples, a ``t_start`` other than a number,
-            ``None`` or ``'reduced'``, and a time-domain Field.
+            ``None`` or ``'reduced'``, a time-domain Field, and real (dB or
+            TL) data, which has no phase to synthesise from.
 
         On plain arrays this is
         :func:`~uacpy.acoustic_signal.impulse_response_from_transfer_function`
@@ -3357,15 +3578,24 @@ class Field(Result):
                             "rate) from a BROADBAND H(f), or Arrivals."
                             "impulse_response(sample_rate).")
         own = self.sample_rate
-        rate = float(sample_rate)
-        if not (np.isfinite(rate) and abs(rate - own) <= 1e-9 * own):
+        if own is None:
             raise ConfigurationError(
-                f"{who}: this response is sampled at {own:g} Hz and the "
+                f"{who}: this response's time axis holds "
+                f"{self.coords['time'].size} sample(s) and no increasing "
+                f"step, so it has no sample rate to play a signal at.",
+                remediation="Build the response over a record of two or "
+                            "more samples (Field.impulse_response).")
+        rate = float(sample_rate)
+        # Equal rates are equal steps: the package's one tolerance for that.
+        if not (np.isfinite(rate)
+                and abs(rate - own) <= UNIFORM_STEP_RTOL * own):
+            raise ConfigurationError(
+                f"{who}: this response is sampled at {own:.12g} Hz and the "
                 f"waveform at {sample_rate!r} Hz; a convolution needs both "
                 f"at one rate.",
                 remediation=f"Build the response at the waveform's rate "
-                            f"(impulse_response(sample_rate={rate:g})), or "
-                            f"resample the waveform to {own:g} Hz.")
+                            f"(impulse_response(sample_rate={rate:.12g})), or "
+                            f"resample the waveform to {own:.12g} Hz.")
         return own
 
     def sound_exposure_level(
@@ -3467,7 +3697,7 @@ class Field(Result):
         weighting : str, callable or (array_like, array_like), optional
             Frequency weighting, unweighted by default: a hearing group of
             :data:`~uacpy.noise.HEARING_GROUPS` (Southall et al. 2019), a
-            function ``W(frequency_Hz) -> dB``, or a ``(frequencies_Hz,
+            function ``W(frequency) -> dB``, or a ``(frequencies,
             W_dB)`` table (:func:`~uacpy.acoustics.frequency_weighting`).
             ``H(f)`` is multiplied by ``10**(W/20)`` before synthesis, which
             is the received pressure weighted in frequency — the
@@ -3503,18 +3733,35 @@ class Field(Result):
         -----
         NumericsWarning
             When the band holds more than 0.1 dB less than the waveform's
-            whole energy, stating the share it holds. Nothing warns about
+            whole energy, stating the share it holds; for a weighted map,
+            its whole WEIGHTED energy, the quantity the map integrates (a
+            VHF-weighted strike whose spectrum runs past the band is
+            otherwise read low). Nothing warns about
             the **channel** outlasting the record, and that gap is real —
             see the ``1/Δf`` record note in :meth:`synthesize_time_series`
             and "A fold corrupts this" in
             ``docs/theory/broadband_products.md``; size the grid
-            with :meth:`Arrivals.synthesis_band`.
+            with :meth:`Arrivals.synthesis_band` at ``margin=2`` or more,
+            since an energy product needs the record to beat twice the
+            delay spread (``dtau·df < 0.5``, same page), which the default
+            margin 1.2 does not give.
 
         On plain arrays the level itself is
         :func:`~uacpy.core.acoustics.sound_exposure_level`.
         """
         who = "Field.sound_exposure_level"
         if 'time' in self.axes:
+            if self.sample_rate is None:
+                # An exposure integrates over the time step; a peak needs
+                # none, so only this one refuses a stepless record.
+                raise ConfigurationError(
+                    f"{who}: this Field's time axis holds "
+                    f"{self.coords['time'].size} sample(s) and no increasing "
+                    f"step, so its record has no time step to integrate "
+                    f"over.",
+                    remediation="Integrate a record of two or more samples; "
+                                "for the level of one instant, use "
+                                "peak_sound_pressure_level().")
             return self._trace_level(
                 lambda pressure, axis: _sound_exposure_level(
                     pressure, self.sample_rate, ref, axis=axis,
@@ -3531,9 +3778,9 @@ class Field(Result):
                 f"the BROADBAND field; for an absolute level, scale the "
                 f"waveform to the source level rather than calling "
                 f"at_source_level() first (see above).")
-        # The integral and its dB step are acoustics.sound_exposure_level's;
-        # what this method adds is the synthesis, the band metadata and the
-        # no-energy marker on a silent cell (_level_of_finite_cells).
+        # The integral and its dB step are acoustics.sound_exposure_level's,
+        # a silent cell at the no-energy marker included; what this method
+        # adds is the synthesis and the band metadata.
         channel = self
         if weighting is not None:
             gain = 10.0 ** (frequency_weighting(
@@ -3546,7 +3793,7 @@ class Field(Result):
             lambda pressure, rate: _sound_exposure_level(pressure, rate,
                                                          ref),
             'sound_exposure', who, ref, source_waveform, sample_rate,
-            window=window, t_start=t_start)
+            window=window, t_start=t_start, weighting=weighting)
         if weighting is None:
             return result
         warn_in_air_group_in_water(weighting, ref, who)
@@ -3557,7 +3804,8 @@ class Field(Result):
         return result.replace(weighting=_weighting_label(weighting))
 
     def track_exposure(self, positions, *, closest_approach,
-                       along=None, event_duration=None) -> "Field":
+                       along=None, event_duration=None,
+                       per_event: bool = False) -> "Field":
         """Cumulative SEL of a source moving along a straight track, from
         this single-event SEL map — or, for a continuous source, from a
         received-level map held ``event_duration`` per event.
@@ -3595,15 +3843,22 @@ class Field(Result):
             Seconds each event lasts. Required on a received-level map
             (``kind='level'``), refused on an SEL map, which is already
             one event's energy.
+        per_event : bool, optional
+            ``True`` returns each event's SEL instead of their sum: the
+            summands of the total, on a ``position`` axis (m, the events'
+            along-track positions) after ``range``. ``.at(depth=z,
+            range=d)`` of it is the exposure of one receiver event by event
+            along the passage. Default ``False``.
 
         Returns
         -------
         Field
             ``kind='sound_exposure'`` on ``(depth, range)``, where **range is
             the closest-approach distance**, not the range from one source;
-            with ``along``, on ``(depth, along, range)``.
-            :attr:`track_events` holds the number of events summed, and a
-            weighted map keeps its :attr:`weighting`.
+            with ``along``, on ``(depth, along, range)``; with ``per_event``
+            a ``position`` axis follows. :attr:`track_events` holds the
+            number of events summed (unset per event), and a weighted map
+            keeps its :attr:`weighting`.
 
         Raises
         ------
@@ -3650,18 +3905,23 @@ class Field(Result):
         values = _track_exposure(self.data, self.ranges, events,
                                  closest_approach=distances, along=receivers,
                                  axis=self.axes.index('range'),
-                                 event_duration=event_duration)
+                                 event_duration=event_duration,
+                                 per_event=per_event)
         coords = {}
         for name, value in self.coords.items():
             if name == 'range' and receivers is not None:
                 coords['along'] = receivers
             coords[name] = distances if name == 'range' else value
+            if name == 'range' and per_event:
+                coords['position'] = events
         exposure = ({} if self.kind == 'sound_exposure' else dict(
             kind='sound_exposure', unit='dB',
             **_received_level_quantity('sound_exposure',
                                        REFERENCE_PRESSURE_WATER)))
-        return self.replace(data=values, coords=coords,
-                            track_events=int(events.size), **exposure)
+        return self.replace(
+            data=values, coords=coords,
+            track_events=None if per_event else int(events.size),
+            **exposure)
 
     def peak_sound_pressure_level(
         self,
@@ -3753,8 +4013,8 @@ class Field(Result):
                 f"one inverse-transforms the decibels AS pressure. Start "
                 f"from the BROADBAND field and scale the waveform to the "
                 f"source level rather than calling at_source_level().")
-        # acoustics.peak_level's, with a silent cell at the no-energy
-        # marker (_level_of_finite_cells).
+        # The level is acoustics.peak_level's, a silent cell at the
+        # no-energy marker included.
         return self._transient_level(
             lambda pressure, rate: _peak_level(pressure, ref, axis=-1),
             'peak_pressure', who, ref, source_waveform, sample_rate,
@@ -3808,13 +4068,15 @@ class Field(Result):
 
     def _transient_level(self, level, kind: str, who: str, reference: float,
                          source_waveform, sample_rate, *, window,
-                         t_start) -> "Field":
+                         t_start, weighting=None) -> "Field":
         """The per-cell level ``level(pressure, output_rate)`` of the
         waveform received through this field (:meth:`synthesize_time_series`),
         as the band-collapsed map of ``kind`` (:meth:`_collapse_band`),
         pinned at the waveform's spectral centroid on this band. The shared
         body of :meth:`sound_exposure_level` and
-        :meth:`peak_sound_pressure_level`."""
+        :meth:`peak_sound_pressure_level`. ``weighting`` is the frequency
+        weighting this field already carries (an exposure's), against which
+        the band's share of the waveform's energy is judged."""
         _require_reference_pressure(reference, who)
         if source_waveform is None or sample_rate is None:
             raise ConfigurationError(
@@ -3829,7 +4091,8 @@ class Field(Result):
         traces = self._synthesized(source_waveform, sample_rate,
                                    window=window, t_start=t_start,
                                    placement_checks=False, who=who,
-                                   exposure=(kind == 'sound_exposure'))
+                                   exposure=(kind == 'sound_exposure'),
+                                   weighting=weighting)
         # The synthesised trace is a real pressure history; taking .real of a
         # complex-typed one drops a numerically-zero imaginary part rather
         # than an analytic signal's quadrature, which would double the energy.
@@ -3930,9 +4193,15 @@ class Field(Result):
         -------
         Field
             Complex, with ``time`` replaced by ``frequency`` and the other
-            axes unchanged, so :meth:`plot_transfer_function`,
-            :meth:`broadband_loss` and :meth:`truncate_response` all take
-            it. It keeps the trace's :attr:`phase_reference`: a trace this
+            axes unchanged, so :meth:`plot_transfer_function` and
+            :meth:`truncate_response` take it. From an impulse response
+            (``kind='impulse_response'``, 1/s) it is ``H(f)``,
+            ``kind='pressure'`` in ``'Pa'`` per unit source as a model's,
+            which :meth:`broadband_loss` averages; from a received pressure
+            trace (``'Pa'``) it is the spectrum ``S(f)·H(f)``, a density in
+            ``'Pa·s'`` (captioned ``S·H``), not ``H``, which
+            :meth:`broadband_loss` refuses (its band mean carries the
+            source spectrum). It keeps the trace's :attr:`phase_reference`: a trace this
             package synthesised is ``TIME_DOMAIN_NATIVE``, and so is its
             transform, because the spectrum still carries the source
             spectrum (or band window) the trace was made with.
@@ -4033,10 +4302,13 @@ class Field(Result):
         # H(f) is another quantity than the trace: its coherence is decided
         # anew, as a frequency-domain pressure field's.
         # Its frequency axis states the band, so no band record carries
-        # over (a SPARC trace's marched band, say).
+        # over (a SPARC trace's marched band, say). An impulse response's
+        # transform is H, per unit source as a model's; a pressure trace's
+        # is S·H, Pa per hertz.
+        unit = 'Pa' if self.kind == 'impulse_response' else 'Pa·s'
         return self.replace(
             data=np.moveaxis(spectrum, -1, list(coords).index('frequency')),
-            coords=coords, kind='pressure', unit='Pa', coherent=None,
+            coords=coords, kind='pressure', unit=unit, coherent=None,
             reduction_speed=None, band=None,
             **_narrowed_identity({}, ['frequency'], coords=coords,
                                  pinned=self.pinned))
@@ -4061,8 +4333,9 @@ class Field(Result):
           (``plot_detection_probability``, its ``P_D`` contours labelled by
           value and its title), which ``plot_field`` draws neither of, so
           ``se.plot()`` and ``plot_signal_excess(se)`` are one picture;
-        - the difference map (``plot_field_difference``: a diverging map,
-          ±10 dB unless set) for a field of kind ``'difference'``, what
+        - the difference map (``plot_field_difference``: a diverging map
+          symmetric about zero, ±max|difference| unless ``vmax=`` sets it)
+          for a field of kind ``'difference'``, what
           :func:`uacpy.metrics.tl_difference` returns;
         - the ambiguity surface (``plot_matched_field``: 20 dB window re its
           peak, the peak marked) for an ambiguity field over ``depth`` and
@@ -4074,7 +4347,7 @@ class Field(Result):
                 and ('depth' in coords
                      or sum(v.size > 1 for v in coords.values()) > 2)):
             return '_plot_source_depth_panels'
-        if 'along' in coords:
+        if 'along' in coords and 'position' not in coords:
             return 'plot_track_exposure'
         if list(coords) == ['depth', 'range']:
             if self.kind == 'signal_excess':
@@ -4126,7 +4399,8 @@ class Field(Result):
         Pass ``ax=(ax_mag, ax_phase)`` to draw into existing axes. This one
         draws two panels, so ``ax`` takes a **pair**: anything that unpacks
         into two Axes, including the ndarray ``plt.subplots(2, 1)`` returns.
-        Returns ``(fig, (ax_mag, ax_phase))``. Draws through
+        Returns ``fig`` and the ``(ax_mag, ax_phase)`` pair as a numpy array
+        of Axes. Draws through
         :func:`uacpy.plot.plot_transfer_function`.
 
         What the panels show depends on the frequency grid. Each pair of
@@ -4317,24 +4591,28 @@ def _superposed_record(record) -> Optional[Dict[str, Any]]:
     return out
 
 
-def _superposed_to_json(record: Dict[str, Any]) -> str:
-    """:attr:`Field.superposed_sources` as the JSON :meth:`Field.to_xarray`
-    writes: complex weights as ``[re, im]`` pairs, flagged."""
-    weights = record['weights']
-    as_complex = any(isinstance(w, complex) for w in weights)
-    return json.dumps({
-        **record,
-        'weights': ([[complex(w).real, complex(w).imag] for w in weights]
-                    if as_complex else [float(w) for w in weights]),
-        'weights_complex': as_complex})
-
-
-def _superposed_from_json(text: str) -> Dict[str, Any]:
-    """The record :func:`_superposed_to_json` wrote."""
-    record = json.loads(text)
-    if record.pop('weights_complex', False):
-        record['weights'] = [complex(re, im) for re, im in record['weights']]
-    return record
+def _removed_delay_record(record) -> Optional[Dict[str, Optional[float]]]:
+    """``record`` (a :attr:`Field.removed_delay` mapping) as the plain dict
+    the Field holds — ``delay`` a finite delay (s), ``sound_speed`` a
+    positive finite speed (m/s) or ``None`` — or ``None``."""
+    if record is None:
+        return None
+    if not isinstance(record, dict) or set(record) != {'delay',
+                                                       'sound_speed'}:
+        raise ConfigurationError(
+            f"Field: removed_delay={record!r} is not a record of a removed "
+            f"delay.",
+            remediation="Pass {'delay': float, 'sound_speed': float or "
+                        "None}, as Field.remove_delay writes it.")
+    delay = float(record['delay'])
+    speed = (None if record['sound_speed'] is None
+             else float(record['sound_speed']))
+    if not np.isfinite(delay) or (speed is not None and not (
+            np.isfinite(speed) and speed > 0.0)):
+        raise ConfigurationError(
+            f"Field: removed_delay={record!r} needs a finite 'delay' and a "
+            f"'sound_speed' that is None or a positive finite speed (m/s).")
+    return {'delay': delay, 'sound_speed': speed}
 
 
 def _one_frequency_holds_no_band(selected) -> Dict[str, Any]:
@@ -4486,17 +4764,14 @@ def _level_of_finite_cells(level, pressure, axis: int = -1):
     ``axis``) whose traces are finite throughout, ``NaN`` at the rest: a
     cell no model output reached is no data on the map, where the plain
     level functions refuse a record holding NaN or inf. A cell whose trace
-    is exactly zero throughout received no energy and reads
-    ``-NO_ENERGY_DB``, the level view of the no-energy marker
-    (:func:`~uacpy.core.acoustics.levels.no_energy_mask`), as
-    :meth:`Field.at_source_level` gives it, rather than the plain
-    functions' floor, a level a real quiet cell could read."""
+    is exactly zero throughout reads ``-NO_ENERGY_DB``, the level view of
+    the no-energy marker (:func:`~uacpy.core.acoustics.levels.no_energy_mask`):
+    the level functions floor a silent record there for every ``ref``."""
     traces = np.moveaxis(np.asarray(pressure), axis, -1)
     finite = np.all(np.isfinite(traces), axis=-1)
     values = np.full(finite.shape, np.nan)
     if np.any(finite):
         values[finite] = level(traces[finite], -1)
-    values[finite & np.all(traces == 0.0, axis=-1)] = -NO_ENERGY_DB
     return values[()] if values.ndim == 0 else values
 
 

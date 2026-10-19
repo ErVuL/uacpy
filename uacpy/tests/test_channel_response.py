@@ -135,6 +135,19 @@ class TestChannel:
         with pytest.raises(ConfigurationError, match='delays must be >= 0'):
             impulse_response([1.0], [-0.01], sample_rate=FS)
 
+    @pytest.mark.parametrize('n_samples', [2.7, -1, 0, np.nan])
+    def test_a_length_that_is_not_a_whole_sample_count_is_refused(
+            self, n_samples):
+        # 2.7 was truncated to 2 samples; -1 raised a bare numpy error.
+        with pytest.raises(ConfigurationError,
+                           match="^impulse_response: n_samples must be a "
+                                 "whole number of samples, at least 1"):
+            impulse_response([1.0], [0.001], sample_rate=FS,
+                             n_samples=n_samples)
+        _, h = impulse_response([1.0], [0.001], sample_rate=FS,
+                                n_samples=64.0)
+        assert h.size == 64
+
 
 class TestFractionalDelayIsFlat:
     """A two-tap linear split is not a fractional delay: its response
@@ -752,14 +765,43 @@ class TestAnOffsetFrequencyGridIsNotInterpolated:
         )
         f = 100.25 + np.arange(100) * 1.0
         H = np.exp(-2j * np.pi * f * 0.0123)
-        with warnings.catch_warnings():
-            warnings.simplefilter('error')
+        with recorded_warnings() as rec:
             t, h = impulse_response_from_transfer_function(
                 H, frequencies=f, sample_rate=1000.0, n_samples=1500)
         direct = (2.0 * np.real(np.exp(2j * np.pi * np.outer(t, f)) @ H)
                   * (1.0 / 1000.0))
         assert h.size == 1500
         assert np.max(np.abs(h - direct)) < 1e-12 * np.max(np.abs(direct))
+        # The continuation repeats every arrival once per record, and says so.
+        (said,) = [str(w.message) for w in rec]
+        assert 'n_samples=1500 spans 1.5 records' in said
+        assert 'each arrival appears again once per record' in said
+
+    @pytest.mark.parametrize('n_samples, warns', [(1000, False), (1001, True),
+                                                  (999, False), (None, False)])
+    def test_a_response_longer_than_one_record_says_it_repeats(self, n_samples,
+                                                              warns):
+        """One arrival at 0.25 s, 1 Hz grid at 1 kHz: one record is 1000
+        samples; 3000 put the arrival at 0.25, 1.25 and 2.25 s with three
+        times the energy. Up to one record nothing is said."""
+        from uacpy.acoustic_signal.channel import (
+            impulse_response_from_transfer_function,
+        )
+        f = np.arange(100.0, 201.0)
+        H = np.exp(-2j * np.pi * f * 0.25)
+        with recorded_warnings() as rec:
+            t, h = impulse_response_from_transfer_function(
+                H, frequencies=f, sample_rate=1000.0, n_samples=n_samples)
+        said = [str(w.message) for w in rec if 'records of 1/Δf' in
+                str(w.message)]
+        assert bool(said) is warns, said
+        if n_samples is None:
+            assert h.size == 1000
+        with recorded_warnings():
+            t, h = impulse_response_from_transfer_function(
+                H, frequencies=f, sample_rate=1000.0, n_samples=3000)
+        peaks = t[np.sort(np.argsort(np.abs(h))[-3:])]
+        np.testing.assert_allclose(peaks, [0.25, 1.25, 2.25], atol=1e-9)
 
 
 class TestAnOffsetGridRoundTripsExactly:
@@ -1009,6 +1051,52 @@ class TestAnArrivalGridSharesOneClock:
         assert np.all(traces[0, 1] == 0.0)
         assert np.all(H_grid[0, 1] == 0.0)
         assert np.all(h_grid[0, 1] == 0.0)
+
+    @pytest.mark.parametrize('imag, phases', [([-1e-6], [0.0, 0.0, 0.0]),
+                                              ([0.0] * 3, [0.1]),
+                                              ([0.0] * 2, [0.0] * 3)])
+    def test_received_amplitudes_take_one_entry_per_arrival(self, imag,
+                                                            phases):
+        """Three amplitudes with one Im tau or one phase broadcast that
+        one to every arrival; each column holds one entry per arrival."""
+        from uacpy.acoustic_signal import received_amplitudes
+        with pytest.raises(ConfigurationError,
+                           match=r"^received_amplitudes: (delays_imag|phases) "
+                                 r"holds \d value\(s\) for 3 amplitude"):
+            received_amplitudes([1.0, 0.5, 0.2], imag, phases, 1000.0)
+        assert received_amplitudes([1.0, 0.5, 0.2], [0.0] * 3, [0.0] * 3,
+                                   1000.0).shape == (3,)
+
+    @pytest.mark.parametrize('rows, match', [
+        ([[0], [1, 2]], r"cells\[1\] holds 2 arrival list\(s\) and cells\[0\] "
+                        r"holds 1"),
+        ([[0, 1], [2]], r"cells\[1\] holds 1 arrival list\(s\) and cells\[0\] "
+                        r"holds 2"),
+        ([], "cells holds no receiver"),
+        ([[]], "cells holds no receiver")])
+    def test_a_ragged_or_empty_grid_is_refused_by_every_grid_function(
+            self, rows, match):
+        """A grid shaped by its first row would drop a longer row's extra
+        arrival list silently, and index past a shorter one."""
+        from uacpy.acoustic_signal import (
+            arrival_grid_impulse_response, arrival_grid_transfer_function,
+            simulate_arrival_grid)
+        lists = [self._cell([0.10]), self._cell([0.20]), self._cell([0.30])]
+        cells = [[lists[k] for k in row] for row in rows]
+        calls = {
+            'simulate_arrival_grid': lambda: simulate_arrival_grid(
+                cells, source_waveform=self._pulse(), sample_rate=self.FS,
+                trace_frequency=self.FC),
+            'arrival_grid_impulse_response':
+                lambda: arrival_grid_impulse_response(cells,
+                                                      sample_rate=self.FS),
+            'arrival_grid_transfer_function':
+                lambda: arrival_grid_transfer_function(
+                    np.linspace(900.0, 1100.0, 5), cells),
+        }
+        for name, call in calls.items():
+            with pytest.raises(ConfigurationError, match=f"^{name}: {match}"):
+                call()
 
     def test_echoes_outside_a_pinned_window_are_named_once(self):
         from uacpy.acoustic_signal.channel import _simulate_arrival_grid
@@ -1268,6 +1356,24 @@ class TestAStreamedSignalIsTheWholeConvolution:
         with pytest.raises(ConfigurationError, match="block 1 must be"):
             list(apply_impulse_response_blocks(
                 [1.0, 0.5], [np.ones(4), np.ones((2, 2))]))
+
+    @pytest.mark.parametrize('h, block_size, match', [
+        ([], None, "h has no taps"), (1.0, None, "got a scalar"),
+        ([1.0, 0.5], -2, "block_size must be a whole number"),
+        ([1.0, 0.5], 2.5, "block_size must be a whole number")])
+    def test_the_channel_and_block_size_are_refused_at_the_call(
+            self, h, block_size, match):
+        """Refused when called, before any block is read — not at the
+        first block a reader pulls, possibly far from the call."""
+        from uacpy.acoustic_signal import apply_impulse_response_blocks
+        read = []
+
+        def blocks():
+            read.append(True)
+            yield np.ones(4)
+        with pytest.raises(ConfigurationError, match=match):
+            apply_impulse_response_blocks(h, blocks(), block_size=block_size)
+        assert read == []
 
 
 class TestTheResponseFromHHasItsOwnStart:

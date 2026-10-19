@@ -13,7 +13,7 @@ from uacpy.core.source import Source
 from uacpy.io.bellhop_writer import (
     BELLHOP_RAY_BOX_FACTOR, bellhop_ray_box, cerveny_knobs,
 )
-from uacpy.core.deck_limits import NO_RECEIVER_RANGE_FALLBACK_M
+from uacpy.core.deck_limits import NO_RECEIVER_RANGE_FALLBACK
 from uacpy.io.oalib_writer import resolve_ssp_interp
 from uacpy.models._band import _real_pulse
 from uacpy.models._defaults import (
@@ -99,6 +99,26 @@ _ANGLEMOD_C0 = 1500.0
 # required accuracy." (``doc/bellhop.htm``).
 _STEP_PER_DEPTH = 50.0
 
+#: The steps one ray may take, per build: bellhopcuda / bellhopcxx stop a
+#: ray at ``MaxN`` = 100 000 points (``bhc/structs.hpp:66``,
+#: ``src/trace.hpp:467-471``, raising ``BHC_WARN_ONERAY_OUTOFMEMORY``), the
+#: Fortran BELLHOP at ``MaxN`` = 1 000 000 (``bellhopMod.f90:4``,
+#: ``bellhop.f90:578-579``, "Insufficient storage for ray trajectory"). A
+#: ray cut there leaves the field past it without its energy.
+_MAX_RAY_STEPS = {'cuda': 100_000, 'cxx': 100_000, 'fortran': 1_000_000}
+
+#: How far under its build's limit an unset ray step keeps a ray: ``r_box /
+#: step`` at most ``MaxN / _RAY_STEP_HEADROOM``, room for a ray's arc longer
+#: than its range and for the steps BELLHOP shortens to land on each
+#: boundary. The manual ties the step to the "range of receivers" among
+#: other factors (``doc/bellhop.htm``, STEP) and names no value, so this is
+#: uacpy guidance, measured: 50 m of water over sand, 125 Hz, receivers to
+#: 150 km (``r_box`` 180 km) — the depth/50 step of 1 m (180 000 steps)
+#: cut every ray on bellhopcuda and read the 600 dB no-energy marker from
+#: 100 km on, while 2 m (90 000 steps) and 10 m read the Fortran build's
+#: 75.7 / 80.5 / 81.8 / 83.4 dB at 50 / 100 / 120 / 150 km.
+_RAY_STEP_HEADROOM = 2.0
+
 
 #: Ray-receiver pairs above which an EIGENRAYS run is warned about. The
 #: engine writes a whole trajectory once per (beam, receiver) hit
@@ -154,42 +174,20 @@ def launch_source(inputs: StageInputs) -> Source:
         inputs.settings.engine.fc)
 
 
-def band_origin(mode, source, kwargs, *, n_frequencies,
-                bandwidth_factor) -> Optional[str]:
+def band_origin(mode, source, kwargs) -> Optional[str]:
     """BROADBAND only: where the frequency grid came from — a
     ``frequencies=`` passed to the run (``kwargs``, the call's keywords), a
     multi-frequency Source that is the band, or the package's expansion of
-    one carrier by the ``n_frequencies`` / ``bandwidth_factor`` knobs.
-    ``None`` on every other mode."""
+    one carrier (:func:`~uacpy.models._band.broadband_band`). ``None`` on
+    every other mode."""
     if mode != RunMode.BROADBAND:
         return None
     if kwargs.get('frequencies') is not None:
         return _BAND_FROM_CALL
     if np.atleast_1d(source.frequencies).size > 1:
         return _BAND_FROM_SOURCE
-    n = DEFAULT_BROADBAND_N_FREQUENCIES if n_frequencies is None else n_frequencies
-    bw = (DEFAULT_BROADBAND_BANDWIDTH_FACTOR if bandwidth_factor is None
-          else bandwidth_factor)
-    return f"{n} bins over fc*(1 +/- {bw:g}/2)"
-
-
-def unused_band_knobs_notice(mode, band, *, n_frequencies,
-                             bandwidth_factor) -> Optional[str]:
-    """A notice when ``n_frequencies`` / ``bandwidth_factor`` are set but
-    the run does not expand a band with them — any mode but BROADBAND, or a
-    BROADBAND band the call or the Source names (``band``, from
-    :func:`band_origin`) — else ``None``."""
-    pinned = [f"{name}={value:g}" for name, value in
-              (('n_frequencies', n_frequencies),
-               ('bandwidth_factor', bandwidth_factor)) if value is not None]
-    if not pinned or (mode == RunMode.BROADBAND
-                      and band not in (_BAND_FROM_CALL, _BAND_FROM_SOURCE)):
-        return None
-    why = (f"the band is the run's {band}" if band is not None
-           else f"a {getattr(mode, 'name', mode)} run expands no band")
-    return (f"Bellhop({', '.join(pinned)}) is not used: {why}. The knobs "
-            f"shape only the band a BROADBAND run expands from a "
-            f"one-frequency Source without frequencies=.")
+    return (f"{DEFAULT_BROADBAND_N_FREQUENCIES} bins over fc*(1 +/- "
+            f"{DEFAULT_BROADBAND_BANDWIDTH_FACTOR:g}/2)")
 
 
 def pulse_samples(mode, kwargs) -> Optional[int]:
@@ -205,30 +203,65 @@ def pulse_samples(mode, kwargs) -> Optional[int]:
     return int(pulse.size)
 
 
-def resolve_ray_step(env, *, ray_step) -> float:
+def _range_step(r_box, backend) -> float:
+    """The step (m) that keeps a ray across ``r_box`` under the
+    ``backend`` build's limit (:data:`_MAX_RAY_STEPS`) with
+    :data:`_RAY_STEP_HEADROOM`; 0 for a build whose limit is not known."""
+    limit = _MAX_RAY_STEPS.get(backend)
+    if limit is None or not np.isfinite(r_box) or r_box <= 0.0:
+        return 0.0
+    return _RAY_STEP_HEADROOM * float(r_box) / limit
+
+
+def ray_storage_remedy(*, backend, ray_step, r_box) -> str:
+    """The sentence a run whose rays ran out of storage gets: the
+    ``backend`` build's per-ray limit (:data:`_MAX_RAY_STEPS`), the steps
+    the deck's ``ray_step`` needs across the ``r_box`` box, and the two
+    remedies; ``''`` for a build whose limit is not known."""
+    limit = _MAX_RAY_STEPS.get(backend)
+    if limit is None:
+        return ''
+    need = (f"; the deck's {ray_step:g} m step needs about "
+            f"{float(r_box) / ray_step:.0f} across the {r_box:g} m ray box"
+            if ray_step > 0 else '')
+    return (f"The {backend} build stores at most {limit} steps per ray "
+            f"(bhc/structs.hpp:66){need}, so a longer ray is cut short and "
+            f"the field past it misses that ray's energy. Pass "
+            f"Bellhop(ray_step=…) of at least "
+            f"{_RAY_STEP_HEADROOM * float(r_box) / limit:.3g} m, or "
+            f"backend='fortran' ({_MAX_RAY_STEPS['fortran']} steps per ray, "
+            f"bellhopMod.f90:4).")
+
+
+def resolve_ray_step(env, *, ray_step, r_box, backend) -> float:
     """Ray step (m) for the deck: the caller's when pinned, ``0``
     included — the value with which BELLHOP chooses its own ``depth/10``
-    (``bellhop.f90:170-174``) — else ``env.depth / _STEP_PER_DEPTH``.
-    Without a positive depth to scale by, the deck carries ``0`` and the
-    binary chooses."""
+    (``bellhop.f90:170-174``) — else ``env.depth / _STEP_PER_DEPTH``, or
+    the coarser step that keeps a ray across the ``r_box`` box under the
+    ``backend`` build's limit (:func:`_range_step`). Without a positive
+    depth to scale by, the deck carries ``0`` and the binary chooses."""
     if ray_step is not None:
         return float(ray_step)
     depth = float(env.depth)
     if not np.isfinite(depth) or depth <= 0.0:
         return 0.0
-    return depth / _STEP_PER_DEPTH
+    return max(depth / _STEP_PER_DEPTH, _range_step(r_box, backend))
 
 
-def ray_step_origin(resolved, *, ray_step) -> str:
+def ray_step_origin(resolved, *, ray_step, r_box, backend) -> str:
     """Where the deck's ray step ``resolved`` (:func:`resolve_ray_step`) came
     from, given the ``ray_step`` knob: the constructor, ``env.depth /
-    _STEP_PER_DEPTH``, or the binary's own when there is no positive depth
-    to scale by."""
+    _STEP_PER_DEPTH``, the range rule (:func:`_range_step`), or the
+    binary's own when there is no positive depth to scale by."""
     if ray_step is not None:
         return 'Bellhop(ray_step=…)'
-    if resolved:
-        return f"env.depth / {_STEP_PER_DEPTH:g}"
-    return "the binary's own (no positive env.depth)"
+    if not resolved:
+        return "the binary's own (no positive env.depth)"
+    if resolved == _range_step(r_box, backend):
+        return (f"{_RAY_STEP_HEADROOM:g} × r_box / MaxN: {r_box:g} m over "
+                f"the {backend} build's {_MAX_RAY_STEPS[backend]} steps per "
+                f"ray (coarser than env.depth / {_STEP_PER_DEPTH:g})")
+    return f"env.depth / {_STEP_PER_DEPTH:g}"
 
 
 def resolve_ray_box(env, receiver, *, z_box,
@@ -248,7 +281,7 @@ def resolve_ray_box(env, receiver, *, z_box,
     elif receiver.range_max > 0:
         r_origin = f'{BELLHOP_RAY_BOX_FACTOR:g} x receiver.range_max'
     else:
-        r_origin = (f'{NO_RECEIVER_RANGE_FALLBACK_M / 1000.0:g} km '
+        r_origin = (f'{NO_RECEIVER_RANGE_FALLBACK / 1000.0:g} km '
                     f'(every receiver range is 0)')
     return float(box_z), z_origin, float(box_r), r_origin
 
@@ -687,8 +720,7 @@ def geometry_notices(env, source, receiver, mode, *, launch_angles_deg, grid_typ
                      beam_type, n_beams, model_name, ray_step, memory_backed):
     """The stage-3 notices of the geometry, in the order they are
     announced: a receiver the launch fan cannot reach, a first range at
-    r = 0, a water column too shallow for ray theory, an eigenray file
-    that will be large."""
+    r = 0, an eigenray file that will be large."""
     notices = [message_notice(fan_miss_notice(source, receiver, launch_angles_deg=launch_angles_deg,
                                            grid_type=grid_type, model_name=model_name),
                            NumericsWarning)]

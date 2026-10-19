@@ -67,25 +67,25 @@ env = uacpy.Environment(name="Continental shelf", bathymetry=bathymetry,
                         ssp=uacpy.SoundSpeedProfile.from_pairs(ssp_pairs),
                         bottom=bottom, absorption=absorption)
 source = uacpy.Source(depths=50.0, frequencies=50.0)
-# Ranges start at 1 km: closer in, paths to the deepest shelf receivers are
+# Ranges start at 1.5 km: closer in, direct and surface-reflected paths are
 # steeper than the 18° the segmented runs' mode window carries (below).
 receiver = uacpy.Receiver(depths=np.linspace(5, 380, 60),
-                          ranges=np.linspace(1000, 20000, 96))
+                          ranges=np.linspace(1500, 20000, 96))
 
 # The two ends of the guide, each as a range-independent environment.
 shelf_env = uacpy.Environment(
     name="Shelf (100 m)", bathymetry=100.0,
     ssp=uacpy.SoundSpeedProfile.from_pairs(ssp_pairs[ssp_pairs[:, 0] <= 100]),
-    bottom=bottom.halfspace_at(range=0, interp='nearest'),
+    bottom=bottom.halfspace_at(range=0, method='nearest'),
     absorption=absorption)
 slope_env = uacpy.Environment(
     name="Slope (400 m)", bathymetry=400.0,
     ssp=uacpy.SoundSpeedProfile.from_pairs(ssp_pairs),
-    bottom=bottom.halfspace_at(range=20000, interp='nearest'),
+    bottom=bottom.halfspace_at(range=20000, method='nearest'),
     absorption=absorption)
 
 # The slope bottom has shear, which is what krakenc adds over kraken. Its
-# Scholte wave travels at about 0.85 × the 600 m/s shear speed (JKPS §5.10.5),
+# Scholte wave travels below the 600 m/s shear speed (uacpy.acoustics.scholte_wave_speed),
 # below the slowest water speed where the derived window opens, so c_low is
 # set under it.
 # The segmented runs keep the mode search under the slowest seabed speed,
@@ -146,7 +146,7 @@ fig, _ = env.plot()
 fig.savefig(OUT / 'example_06_bottom.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-# Mode shapes at both ends. On the slope, krakenc numbers the interface wave
+# Mode shapes at both ends. On the slope, krakenc numbers the Scholte wave
 # first (highest Re(k)); its phase speed is below the water sound speed, so
 # filtering on that leaves the water-borne modes the shelf panel shows.
 phase_speed = slope_modes.phase_speeds      # ω / Re(k), m/s

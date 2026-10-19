@@ -83,8 +83,7 @@ t_ir, h = impulse_response_from_transfer_function(H, frequencies=freqs,
 f_back, H_back = transfer_function_from_impulse_response(
     h, fs, band=(freqs[0], freqs[-1]))
 reference = np.interp(f_back, freqs, H.real) + 1j * np.interp(f_back, freqs, H.imag)
-shaped = pulse_shaped_taps(amplitudes, delays, 2000.0,
-                           pulse='rrc', rolloff=0.25, span=8)
+shaped = pulse_shaped_taps(amplitudes, delays, 2000.0, pulse='rrc')
 print(f"\nD. H -> h -> H: max|error| {np.abs(H_back - reference).max():.2e}; "
       f"{shaped.taps.size} root-raised-cosine taps at 2000 Bd")
 
@@ -155,7 +154,7 @@ axes[0, 1].set(xlabel='Frequency (kHz)', ylabel='|H| (dB)',
                      f'{band_loss:.1f} dB, gated {gated_loss:.1f} dB')
 axes[0, 1].legend(fontsize=8)
 
-uacpy.plot.plot_waveform(record, fs, axes[1, 0], time_units='ms', lw=0.6,
+uacpy.plot.plot_waveform(record, fs, axes[1, 0], time_unit='ms', lw=0.6,
                          title=f'C. A record: rms {spl(record):.1f}, peak '
                                f'{peak_level(record):.1f}, SEL '
                                f'{sound_exposure_level(record, fs):.1f} dB')

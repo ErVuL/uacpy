@@ -264,9 +264,9 @@ def dsp_plotters():
     uacpy.plot.plot_constellation(constellation('16qam'), ax=axes[1][0],
                                   scheme='16qam',
                                   title='plot_constellation — 16-QAM map')
-    uacpy.plot.plot_scatter(symbols, ax=axes[1][1],
-                            ideal=constellation('16qam'),
-                            title='plot_scatter — received, 18 dB SNR')
+    uacpy.plot.plot_received_symbols(symbols, ax=axes[1][1],
+                                     ideal=constellation('16qam'),
+                                     title='plot_received_symbols — received, 18 dB SNR')
     for ax in axes.ravel():
         ax.title.set_fontsize(10)
     fig.suptitle('Free plotters take arrays — there is no object to hang '

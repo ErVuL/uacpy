@@ -95,10 +95,11 @@ def test_sparc_deconvolved_spectrum_matches_the_rigid_guide_modal_sum():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         ts = SPARC(verbose=False, pulse_type='PN+N', output_mode='S',
-                   n_time_samples=2048, time_max=_T_MAX, freq_min=5.0, freq_max=75.0,
+                   n_time_samples=2048, freq_min=5.0, freq_max=75.0,
                    rmax_factor=7.0, timeout=600.0).run(
             env, Source(depths=_ZS, frequencies=_FC),
-            Receiver(depths=_ZR, ranges=_RANGES), run_mode=RunMode.TIME_SERIES)
+            Receiver(depths=_ZR, ranges=_RANGES), run_mode=RunMode.TIME_SERIES,
+            output_duration=_T_MAX)
     times = np.asarray(ts.coords['time'], dtype=float)
     dt = float(times[1] - times[0])
     traces = np.asarray(ts.data)                      # (n_depth, n_range, n_t)
@@ -179,12 +180,12 @@ def test_sparc_p_of_t_is_the_unit_source_image_sum(output_mode):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         result = SPARC(verbose=False, pulse_type='FN+N', freq_min=5.0,
-                       freq_max=400.0, n_time_samples=2048, time_max=0.4,
+                       freq_max=400.0, n_time_samples=2048,
                        output_mode=output_mode).run(
             env, Source(depths=_IMG_ZS, frequencies=_IMG_FP),
             Receiver(depths=[_IMG_ZR], ranges=[_IMG_RANGE]),
             run_mode=RunMode.TIME_SERIES, source_waveform=waveform,
-            sample_rate=_IMG_FS)
+            sample_rate=_IMG_FS, output_duration=0.4)
     t = np.asarray(result.coords['time'], dtype=float)
     p = np.asarray(result.data, dtype=float)[0, 0]
     ref = rigid_guide_image_sum(t, _IMG_ZS, _IMG_ZR, _IMG_RANGE, _IMG_DEPTH,

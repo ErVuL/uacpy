@@ -441,13 +441,23 @@ def check_run_signature(cls, name: str, body) -> None:
             )
 
 
-def validate_geometry(model, env, source, receiver, run_mode=None) -> None:
+def validate_geometry(model, env, source, receiver, run_mode) -> None:
     """The source/receiver geometry of a call to engine ``model`` checked
     against what it resolves (the default of
     :meth:`~uacpy.models.base.PropagationModel._validate_geometry`): the beam
     pattern it reads or not, a multi-depth source on a mode that stacks
     none, the source depths (``model._check_source_depths``), a source on
-    the pressure-release surface, and the receiver grid."""
+    the pressure-release surface, and the receiver grid.
+
+    A REFLECTION run reads none of it, so nothing is checked: a plane-wave
+    reflection coefficient is independent of where the source and the
+    receivers sit — BOUNCE's driver stops after ``TopOpt``, the SSP,
+    ``BotOpt``, ``cLow``/``cHigh`` and ``RMax`` and never calls
+    ``ReadSzRz`` (``bounce.f90``), and OASR reads only
+    ``source.frequencies`` — so one ``Source`` can be reused across
+    models. ``run_mode`` is the call's resolved mode."""
+    if run_mode == RunMode.REFLECTION:
+        return
     if (source.beam_pattern is not None
             and not model._supports_source_beam_pattern):
         raise ConfigurationError(
@@ -463,17 +473,15 @@ def validate_geometry(model, env, source, receiver, run_mode=None) -> None:
     # mode of that same engine which stacks nothing (Kraken MODES).
     n_depths = len(np.atleast_1d(source.depths))
     if n_depths > 1:
-        mode = (run_mode if run_mode is not None
-                else model._default_run_mode())
-        if not model._stacks_source_depths(mode):
+        if not model._stacks_source_depths(run_mode):
             raise ConfigurationError(
                 f"{model.model_name} takes a single source depth per "
-                f"{mode.name} run; got {n_depths}: "
+                f"{run_mode.name} run; got {n_depths}: "
                 f"{np.asarray(source.depths).tolist()}. A multi-depth "
                 f"Source stacks "
                 f"only in the field modes (COHERENT_TL / INCOHERENT_TL "
                 f"/ SEMICOHERENT_TL / BROADBAND / TIME_SERIES); for "
-                f"{mode.name} loop over single-depth Sources externally."
+                f"{run_mode.name} loop over single-depth Sources externally."
             )
 
     resolvable_depth = model._check_source_depths(env, source)

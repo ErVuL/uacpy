@@ -322,10 +322,13 @@ def _merged_components(slabs, coordinate, coordinate_name, who):
     return merged
 
 
-def _check_labels(slabs, coordinate, coordinate_name: str, who: str) -> None:
+def _check_labels(slabs, coordinate, coordinate_name: str, who: str, *,
+                  noun: str = 'field') -> None:
     """Refuse a non-finite label, a label used twice (on an axis that
     lists an identity, two within a deck's rounding of each other), and a
-    label that contradicts the field it labels: on an axis that lists an
+    label that contradicts the result it labels — ``slabs`` the joined
+    results, named ``noun`` (a Field of :func:`stack_fields`, a slab of a
+    :class:`ResultStack`, one rule for both joins): on an axis that lists an
     identity (``source_depth``,
     ``frequency``), a field whose own identity there is one value — a
     one-depth run's ``source_depths``, a one-frequency field's
@@ -338,7 +341,7 @@ def _check_labels(slabs, coordinate, coordinate_name: str, who: str) -> None:
         raise ConfigurationError(
             f"{who}: the {coordinate_name} labels {coordinate.tolist()} hold "
             f"a non-finite value; a label is a position on the new axis.",
-            remediation="Give each field a finite label.")
+            remediation=f"Give each {noun} a finite label.")
     attr = _AXIS_IDENTITY_ATTR.get(coordinate_name)
     # On an identity axis two labels within a deck's rounding of each other
     # are one position, as the identity check below reads them; a sweep's
@@ -351,12 +354,12 @@ def _check_labels(slabs, coordinate, coordinate_name: str, who: str) -> None:
         raise ConfigurationError(
             f"{who}: the {coordinate_name} labels "
             f"{coordinate.tolist()} repeat {sorted(set(repeated))}; "
-            f"each field is one position on the new axis.",
-            remediation="Give each field its own label.")
+            f"each {noun} is one position on the new axis.",
+            remediation=f"Give each {noun} its own label.")
     if attr is None:
         return
     for i, (slab, label) in enumerate(zip(slabs, coordinate)):
-        own = slab.pinned.get(coordinate_name)
+        own = (getattr(slab, 'pinned', None) or {}).get(coordinate_name)
         if own is None:
             held = getattr(slab, attr, None)
             if held is None or np.size(held) != 1:
@@ -364,11 +367,12 @@ def _check_labels(slabs, coordinate, coordinate_name: str, who: str) -> None:
             own = float(np.asarray(held).ravel()[0])
         if abs(own - label) > axis_match_tolerance(coordinate, label):
             raise ConfigurationError(
-                f"{who}: fields[{i}] is the field of {coordinate_name} "
+                f"{who}: {noun}s[{i}] is the {noun} of {coordinate_name} "
                 f"{own:g} but is labelled {label:g}.",
-                remediation=f"Label each field with its own {coordinate_name}"
-                            f", in the order of the fields: "
-                            f"[f.{attr}[0] for f in fields].")
+                remediation=f"Label each {noun} with its own "
+                            f"{coordinate_name}, in the order of the "
+                            f"{noun}s: [{noun[0]}.{attr}[0] for {noun[0]} "
+                            f"in {noun}s].")
 
 
 def _check_one_grid(slabs, who: str) -> None:

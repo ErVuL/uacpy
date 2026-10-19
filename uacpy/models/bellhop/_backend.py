@@ -220,7 +220,7 @@ def arrivals_need_merge(*, backend, exe, model_name) -> bool:
 
 
 def warn_on_engine_stdout_warnings(stdout: str, *, model_name,
-                                   backend) -> None:
+                                   backend, ray_storage_remedy='') -> None:
     """Re-emit the run-time diagnoses bellhopcxx / bellhopcuda print
     to stdout as one ``IOWarning``.
 
@@ -243,14 +243,19 @@ def warn_on_engine_stdout_warnings(stdout: str, *, model_name,
         Run: 0.379620 ms
 
     The engine's lines are passed through verbatim, as the ``.prt``
-    path does.
+    path does; after ``BHC_WARN_ONERAY_OUTOFMEMORY`` (a ray cut at the
+    build's per-ray step limit) the run's ``ray_storage_remedy`` follows
+    (:func:`~uacpy.models.bellhop._plan.ray_storage_remedy`).
     """
     lines = [line.strip() for line in stdout.splitlines()
              if _BHC_DIAGNOSTIC_LINE.match(line.strip())]
     if not lines:
         return
     joined = "\n  ".join(dict.fromkeys(lines))
+    remedy = (f"\n{ray_storage_remedy}" if ray_storage_remedy and any(
+        line.startswith('BHC_WARN_ONERAY_OUTOFMEMORY') for line in lines)
+        else '')
     warnings.warn(
         f"{model_name} ({backend}) reported {len(lines)} "
-        f"non-fatal warning(s):\n  {joined}",
+        f"non-fatal warning(s):\n  {joined}{remedy}",
         IOWarning, skip_file_prefixes=USER_FRAME_SKIP)

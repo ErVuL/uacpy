@@ -112,7 +112,7 @@ uacpy.plot.plot_field(kraken_tl, axes[0, 0], vmin=50, vmax=100,
 uacpy.plot.plot_field(scooter_tl, axes[0, 1], vmin=50, vmax=100,
                  title='2: Scooter (BOUNCE .brc)')
 residual.plot(
-    ax=axes[0, 2], diff_vmax=max(5, max_diff),
+    ax=axes[0, 2], vmax=max(5, max_diff),
     title=f'Kraken − Scooter (mean |Δ| {mean_diff:.2f} dB)')
 
 # The BOUNCE result plots itself: |R| against grazing angle.

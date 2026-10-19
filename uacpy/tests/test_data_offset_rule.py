@@ -416,6 +416,30 @@ def test_a_transect_keeps_each_columns_date_offset():
     assert '0–5 days from requested' in citations(ssp)
 
 
+def test_a_transects_fetched_line_keeps_the_period_below_the_split():
+    """WOA23 columns continued by the annual mean below 1500 m: the
+    one-record line says so, and so does the line summing a transect, with
+    how many of its points the splice concerns."""
+    from uacpy.core.provenance import _fetch_summary_line
+
+    def column(split):
+        return DataProvenance(
+            source=SOURCES['woa23'], data_date='month 07 (climatology)',
+            requested_date='2025-07-14',
+            split_depth=1500.0 if split else None,
+            period_below='annual mean' if split else None)
+    records = [column(False), column(True), column(True)]
+    splice = 'above 1500 m, annual mean below'
+    assert splice in records[1]._fetch_line()
+    line = _fetch_summary_line(records)
+    assert (f'date month 07 (climatology) {splice} on 2 of 3 points'
+            in line), line
+    every = _fetch_summary_line([column(True), column(True)])
+    assert f'date month 07 (climatology) {splice}' in every
+    assert 'of 2 points' not in every
+    assert 'below' not in _fetch_summary_line([column(False)] * 2)
+
+
 def test_the_date_fields_survive_the_dict_and_netcdf_round_trips(tmp_path):
     import uacpy
     rec = DataProvenance(source=SOURCES['woa23'],

@@ -26,7 +26,7 @@ from uacpy.acoustic_signal.windows import _taper
 #: s — the silent lead-in :func:`make_mseq_probe` puts before the
 #: first m-sequence period: ``lead_time = 0.2`` in the Acoustics Toolbox's
 #: ``Matlab/waveforms/makemseq.m`` (vendored), which it is translated from.
-MSEQ_PROBE_LEAD_TIME_S = 0.2
+MSEQ_PROBE_LEAD_TIME = 0.2
 
 #: :func:`synthesize_noise_from_psd`'s default IFFT chunk (uacpy guidance):
 #: 2**16 samples, 1.4 s at 48 kHz.
@@ -59,7 +59,9 @@ def sparc_pulse(
         The pulse's characteristic frequency ``F`` (Hz); the shapes are
         written in ``omega = 2*pi*F``
     pulse_type : str
-        Single letter code indicating pulse type. Each entry gives AT's own
+        Single letter code indicating pulse type (upper or lower case; a
+        longer string is refused, so ``'sinc'`` is not read as ``'S'``, the
+        single sine). Each entry gives AT's own
         **spectral** label — the frequency of the spectral peak and the band
         occupied — then the time interval the code gates the pulse to:
         - 'P': Pseudo gaussian; peak at 0, band [0, 3F]; t in (0, 1/F]
@@ -125,12 +127,18 @@ def sparc_pulse(
     times = np.asarray(times, dtype=float)
     s = np.zeros(times.shape)
 
-    if not isinstance(pulse_type, str) or not pulse_type:
+    # AT selects the pulse on ONE character (cans.f90:15 ``Pulse*1``), so a
+    # word is refused rather than keyed on its first letter: 'sinc' would
+    # read as 'S', the single sine.
+    if not isinstance(pulse_type, str) or len(pulse_type) != 1:
         raise ConfigurationError(
-            f"sparc_pulse: pulse_type must be a non-empty string whose first "
-            f"letter names the pulse (one of P, R, A, S, H, N, M, G, T, C, E); "
-            f"got {pulse_type!r}.")
-    pulse_key = pulse_type[0].upper()
+            f"sparc_pulse: pulse_type must be a single-letter code naming "
+            f"the pulse (one of P, R, A, S, H, N, M, G, T, C, E); got "
+            f"{pulse_type!r}.",
+            remediation="Pass the letter: 'C' is the sinc, 'S' the single "
+                        "sine, 'R' the Ricker wavelet, 'G' the Gaussian (see "
+                        "the docstring for every code).")
+    pulse_key = pulse_type.upper()
 
     if pulse_key == "P":  # Pseudo gaussian
         ii = (times > 0) & (times <= 1 / F)
@@ -234,15 +242,15 @@ def ricker_wavelet(times: np.ndarray, frequency: float,
     commonly used in seismic and acoustic applications. Uses the AT
     ``Ricker.m`` centring ``u = 2πFt − 8``; SPARC's internal Ricker
     (``cans.f90``, documented in ``models/sparc/_pulse.py``) centres at
-    ``ωT − 5`` — the two "Ricker" pulses are offset in times.
+    ``ωT − 5`` — the two "Ricker" pulses are offset in time.
 
     ``delay`` overrides that fixed centring and places the wavelet's centre at
-    a times you choose, which is what a gather needs: one pulse per trace at a
-    moveout-dependent times. It broadcasts against ``times``, so a whole gather
+    a time you choose, which is what a gather needs: one pulse per trace at a
+    moveout-dependent time. It broadcasts against ``times``, so a whole gather
     is one call. Omitting it keeps AT's centring exactly, and
     ``delay=4/(pi*frequency)`` reproduces that same wavelet to within
     floating-point round-off (~1e-15 of the lobe amplitude: the two
-    dimensionless-times expressions are algebraically equal but not
+    dimensionless-time expressions are algebraically equal but not
     bit-identical).
 
     Parameters
@@ -261,7 +269,7 @@ def ricker_wavelet(times: np.ndarray, frequency: float,
     Returns
     -------
     s : ndarray
-        Ricker wavelet times series
+        Ricker wavelet time series
 
     Notes
     -----
@@ -292,7 +300,7 @@ def ricker_wavelet(times: np.ndarray, frequency: float,
                                                "frequency", " Hz")
     times = np.asarray(times, dtype=float)
     if delay is None:
-        u = 2 * np.pi * frequency * times - 8  # Dimensionless times
+        u = 2 * np.pi * frequency * times - 8  # Dimensionless time
     else:
         centre = np.asarray(delay, dtype=float)
         if not np.isfinite(centre).all():
@@ -301,7 +309,7 @@ def ricker_wavelet(times: np.ndarray, frequency: float,
                 remediation="A non-finite centre puts the whole wavelet at "
                             "NaN. Omit delay for the Acoustics-Toolbox "
                             "centring at 4/(pi*frequency).")
-        # Same dimensionless times, centred where the caller asked: at
+        # Same dimensionless time, centred where the caller asked: at
         # delay = 4/(pi*frequency) this is identical to the branch above.
         u = 2 * np.pi * frequency * (times - centre)
     s = 0.5 * (0.25 * u**2 - 0.5) * np.sqrt(np.pi) * np.exp(-0.25 * u**2)
@@ -627,7 +635,7 @@ def nwave(times: np.ndarray, frequency: float) -> np.ndarray:
 
     ``Nwave.m``'s own label "peak at F, support [0, 4F], [0,3F] also OK" is
     spectral (see :func:`ricker_wavelet`): the spectrum peaks near ``frequency``
-    and is essentially spent by 3-4 times it. The *times* extent is the gate
+    and is essentially spent by 3-4 times it. The *time* extent is the gate
     below, ``[0, 1/frequency]``.
 
     Translated from ``third_party/Acoustics-Toolbox/Matlab/waveforms/Nwave.m``
@@ -949,7 +957,7 @@ def make_mseq_probe(freq_min: float, freq_max: float, *, sample_rate: float, dur
     >>> print(f"Probe length: {len(probe)} samples")
     Probe length: 100000 samples
     """
-    lead_time = MSEQ_PROBE_LEAD_TIME_S
+    lead_time = MSEQ_PROBE_LEAD_TIME
     sample_rate = require_positive_finite_scalar(
         sample_rate, "make_mseq_probe", "sample_rate", " Hz")
     duration = require_positive_finite_scalar(
@@ -1032,7 +1040,7 @@ def make_mseq_probe(freq_min: float, freq_max: float, *, sample_rate: float, dur
 # ──────────────────────────────────────────────────────────────────────
 
 def synthesize_noise_from_psd(psd, frequencies, duration=1, *,
-                              nfft=NOISE_SYNTH_DEFAULT_NFFT, sample_rate=None, interp='linear',
+                              nfft=NOISE_SYNTH_DEFAULT_NFFT, sample_rate=None, method='linear',
                               rng=None):
     """
     Spectral Synthesis of Random Processes.
@@ -1050,7 +1058,8 @@ def synthesize_noise_from_psd(psd, frequencies, duration=1, *,
     frequencies : array_like
         Frequency array in Hz, strictly increasing. Need not be uniform.
     duration : float
-        Duration of the generated signal in seconds.
+        Duration of the generated signal in seconds. Default 1 (uacpy
+        guidance).
     nfft : int, optional
         IFFT chunk size, used as given: any even integer of at least 4
         (the frequency resolution of the synthesis is ``sample_rate/nfft``).
@@ -1062,7 +1071,7 @@ def synthesize_noise_from_psd(psd, frequencies, duration=1, *,
         ``sample_rate/2`` cannot be synthesised: it is dropped with a warning
         naming the fraction of band power lost, and a target lying entirely
         above it raises.
-    interp : {'linear', 'log', 'pchip', 'nearest'}, optional
+    method : {'linear', 'log', 'pchip', 'nearest'}, optional
         How to resample ``psd(frequencies)`` onto the FFT-native grid. ``'log'``
         interpolates ``log10(psd)`` vs ``log10(f)`` — recommended for
         broadband PSDs spanning many decades. Frequencies outside
@@ -1086,7 +1095,7 @@ def synthesize_noise_from_psd(psd, frequencies, duration=1, *,
     >>> f = np.logspace(0, 4, 64)
     >>> psd = 1e-6 / (1 + (f / 100) ** 2)
     >>> t, x = synthesize_noise_from_psd(psd, f, duration=10,
-    ...                                  sample_rate=40_000, interp='log')
+    ...                                  sample_rate=40_000, method='log')
     """
     psd = np.asarray(psd, dtype=float)
     frequencies = np.asarray(frequencies, dtype=float)
@@ -1153,7 +1162,7 @@ def synthesize_noise_from_psd(psd, frequencies, duration=1, *,
     N = nfft // 2 - 1
     dF = sample_rate / nfft
     f_grid = np.arange(1, N + 1) * dF
-    Pxx_grid = _resample_psd(psd, frequencies, f_grid, interp)
+    Pxx_grid = _resample_psd(psd, frequencies, f_grid, method)
     # Per-bin variance of each complex draw below. The band power of a
     # one-sided PSD is psd*dF, split evenly between +f and -f of the real
     # signal, and w = (vi + i*vq)*sqrt(v) carries E|w|^2 = 2v — hence v =
@@ -1220,7 +1229,7 @@ def _resample_psd(Pxx, Fxx, f_target, method):
     if method == 'log':
         if Fxx[0] <= 0 or np.any(Pxx <= 0):
             raise ConfigurationError(
-                "synthesize_noise_from_psd: interp='log' requires strictly "
+                "synthesize_noise_from_psd: method='log' requires strictly "
                 f"positive Pxx and Fxx; got Fxx[0]={Fxx[0]:g} and "
                 f"{int(np.count_nonzero(Pxx <= 0))} non-positive Pxx value(s) "
                 f"(minimum {Pxx.min():g})"
@@ -1244,7 +1253,7 @@ def _resample_psd(Pxx, Fxx, f_target, method):
         return np.maximum(out, 0.0)
 
     raise ConfigurationError(
-        f"synthesize_noise_from_psd: unknown interp={method!r}; "
+        f"synthesize_noise_from_psd: unknown method={method!r}; "
         "valid: 'linear', 'log', 'pchip', 'nearest'."
     )
 
@@ -1376,7 +1385,8 @@ def make_bandlimited_noise(
     -----
     White Gaussian noise is passed through a zero-phase (forward-backward,
     ``sosfiltfilt``) 4th-order Butterworth bandpass whose single-pass -3 dB
-    edges are ``fc ± bandwidth/2``, then scaled to unit RMS. The double pass
+    edges are ``fc ± bandwidth/2`` (the filter type and order are uacpy
+    guidance), then scaled to unit RMS. The double pass
     squares the power response, so ``fc ± bandwidth/2`` are the -6 dB points
     of the result and its noise-equivalent bandwidth is about 0.90 ×
     ``bandwidth`` (0.898 at ``fc=10`` kHz, ``bandwidth=2`` kHz,

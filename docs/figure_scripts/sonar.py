@@ -161,7 +161,7 @@ def signal_excess_field():
 
 def detection_range():
     """The figure of merit as a TL budget, and the range profile it implies."""
-    _, tl, se = _passive_shelf()
+    _, _, se = _passive_shelf()
     fom = sonar.figure_of_merit(**PASSIVE_SHELF)
     cut = se.at(depth=CUT_DEPTH)
     r_det = sonar.detection_ranges_field(cut)
@@ -170,26 +170,17 @@ def detection_range():
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.2))
 
-    ax = axes[0]
-    tl_cut = tl.at(depth=CUT_DEPTH)
-    ax.plot(tl_cut.coords['range'] / 1e3, tl_cut.data, color='C0', lw=1.2,
-            label='one-way TL')
-    ax.axhline(fom, color='C3', ls='--', lw=1.5, label=f'FOM = {fom:.1f} dB')
-    ax.axvline(r_det / 1e3, color='k', ls=':', lw=1.2,
-               label=f'detection range = {r_det / 1e3:.2f} km')
-    ax.set_xlabel('Range (km)')
-    ax.set_ylabel('Transmission loss (dB)')
-    ax.set_title(f'TL against the figure of merit, {CUT_DEPTH:.0f} m',
-                 fontsize=10)
-    ax.invert_yaxis()
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8, loc='upper right')
+    # The signal-excess view of a range cut draws SE = 0 and shades the
+    # detected ranges (SE = FOM - TL).
+    cut.plot(ax=axes[0],
+             title=f'Signal excess at {CUT_DEPTH:.0f} m (FOM {fom:.1f} dB − '
+                   f'TL): {r_det / 1e3:.2f} km')
 
     ax = axes[1]
     ax.plot(ranges / 1e3, depths, color='C0', lw=1.4)
     ax.set_xlabel('Detection range (km)')
     ax.set_ylabel('Receiver depth (m)')
-    ax.set_title('Detection range vs depth (SE = 0)', fontsize=10)
+    ax.set_title('Detection range vs depth (SE = 0)')
     ax.set_xlim(0.0, 5.0)
     ax.invert_yaxis()
     ax.grid(True, alpha=0.3)

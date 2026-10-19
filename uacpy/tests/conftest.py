@@ -1,6 +1,6 @@
 """Pytest configuration and fixtures for UACPY tests.
 
-Three **autouse** fixtures below apply to every test in the suite whether or
+Four **autouse** fixtures below apply to every test in the suite whether or
 not the test names them, so a test file cannot see them from its own source:
 
 * ``_seed_numpy`` reseeds ``numpy.random`` before each test. Under
@@ -13,8 +13,13 @@ not the test names them, so a test file cannot see them from its own source:
 * ``_redirect_tempdir`` points ``tempfile.tempdir`` at the per-test
   ``tmp_path``. Models built with ``work_dir=None`` allocate their scratch
   directory through ``tempfile``, so this is what makes pytest reap them.
+* ``_no_outbound_connection`` fails a test that opens a socket to any host but
+  this machine, unless it carries ``requires_network``: the data-layer tests
+  stub their services, and a stub the code under test goes around would
+  otherwise reach the live service and pass (or fail) on its answer. Only
+  Python sockets are guarded; a ``curl`` subprocess is not.
 
-Those three, and the module-private helpers, have no textual callers: pytest
+Those four, and the module-private helpers, have no textual callers: pytest
 registers a fixture from its decorator, so a static "unused symbol" scan will
 flag them. They are all live — do not delete them.
 
@@ -87,6 +92,40 @@ def _release_matplotlib_figures():
     yield
     import matplotlib.pyplot as plt
     plt.close('all')
+
+
+def _is_this_machine(address):
+    """Whether a socket ``address`` is this machine: a Unix socket path, a
+    loopback IP, or ``localhost``."""
+    import ipaddress
+    if not isinstance(address, tuple):
+        return True                          # AF_UNIX path (or bytes)
+    host = address[0]
+    if host in ('localhost', ''):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False                         # a host name: resolved outward
+
+
+@pytest.fixture(autouse=True)
+def _no_outbound_connection(request, monkeypatch):
+    """Fail the test at the first socket connect to another machine,
+    unless it carries ``requires_network``. ``pytest.fail`` is no
+    ``Exception``, so no fetcher's fallback chain can take it for a service
+    that did not answer."""
+    if request.node.get_closest_marker('requires_network') is not None:
+        return
+    connect = socket.socket.connect
+
+    def guarded(sock, address):
+        if not _is_this_machine(address):
+            pytest.fail(f"{request.node.nodeid} opened a connection to "
+                        f"{address!r}: a test without requires_network must "
+                        f"stub every service it reaches.", pytrace=False)
+        return connect(sock, address)
+    monkeypatch.setattr(socket.socket, 'connect', guarded)
 
 
 @pytest.fixture(autouse=True)

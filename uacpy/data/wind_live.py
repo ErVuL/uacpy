@@ -51,16 +51,28 @@ def _check_source(source):
                    "climatology; see install.sh --data wind).")
 
 
-def _griddap_url(var, when, lat, lon):
-    return erddap_griddap_url(ERDDAP_URL, DATASET, var, when, lat, lon,
-                              level=10.0)
+def _griddap_url(var, when, lat, lon, base_url=None):
+    return erddap_griddap_url(
+        ERDDAP_URL if base_url is None else str(base_url).rstrip('/'),
+        DATASET, var, when, lat, lon, level=10.0)
 
 
-def _fetch_var(var, when, lat, lon, *, timeout, verbose):
+def _refuse_an_unread_base_url(base_url, source, who):
+    """Refuse a ``base_url`` with ``source='local'``: the cached
+    climatology reads no host."""
+    if base_url is not None and source == 'local':
+        raise ConfigurationError(
+            f"{who}: base_url= is the NBS ERDDAP griddap root, which only "
+            f"source='nbs' reads; source='local' reads the cached "
+            f"climatology.",
+            remediation="Drop base_url=, or pass source='nbs'.")
+
+
+def _fetch_var(var, when, lat, lon, *, timeout, verbose, base_url=None):
     """``(value, node, time)``: ``var`` at the grid node NBS selected for the
     query, that node's ``(lat, lon)`` (``None`` when unnamed) and the time
     step read (ISO 8601 UTC, ``None`` when unnamed)."""
-    url = _griddap_url(var, when, lat, lon)
+    url = _griddap_url(var, when, lat, lon, base_url)
     body = http_get(url, timeout=timeout, verbose=verbose, source='wind',
                     user_agent=_USER_AGENT).decode('utf-8', 'replace')
     point = erddap_point(body)
@@ -68,7 +80,7 @@ def _fetch_var(var, when, lat, lon, *, timeout, verbose):
     return point.value, node, point.time
 
 
-def _wind_speed(lat, lon, when, *, timeout, verbose):
+def _wind_speed(lat, lon, when, *, timeout, verbose, base_url=None):
     """``(speed, node, time)``: the 10 m wind speed (m/s) at a cell,
     √(u²+v²), else a scalar speed var, the ``(lat, lon)`` of the node read
     and the time step read."""
@@ -76,9 +88,10 @@ def _wind_speed(lat, lon, when, *, timeout, verbose):
     for u_var, v_var in _COMPONENT_VARS:
         try:
             u, node, step = _fetch_var(u_var, when, lat, lon,
-                                       timeout=timeout, verbose=verbose)
+                                       timeout=timeout, verbose=verbose,
+                                       base_url=base_url)
             v, _, _ = _fetch_var(v_var, when, lat, lon, timeout=timeout,
-                                 verbose=verbose)
+                                 verbose=verbose, base_url=base_url)
         except DataFetchError as exc:
             last_exc = exc
             continue
@@ -92,7 +105,8 @@ def _wind_speed(lat, lon, when, *, timeout, verbose):
     for var in _SPEED_VARS:
         try:
             speed, node, step = _fetch_var(var, when, lat, lon,
-                                           timeout=timeout, verbose=verbose)
+                                           timeout=timeout, verbose=verbose,
+                                           base_url=base_url)
         except DataFetchError as exc:
             last_exc = exc
             continue
@@ -108,15 +122,17 @@ def _wind_speed(lat, lon, when, *, timeout, verbose):
 
 
 def wind_at(point, *, date, source='nbs', timeout=60.0, verbose=False,
-            max_distance_km=None, who='fetch_wind'):
+            max_distance_km=None, who='fetch_wind', base_url=None):
     """``(speed in knots, the 'nbs' DataProvenance of the cell read)`` at a
     ``(lat, lon)`` point: the reading :func:`fetch_wind` returns and the
     record :func:`uacpy.data.fetch_sea_surface` stamps, through the offset
     rule (a warning once the cell read is not the point's own 0.25° cell, a
     refusal past ``max_distance_km``). The record's ``data_date`` is the step
-    read (live) or the climatology's month and reference period (cached)."""
+    read (live) or the climatology's month and reference period (cached).
+    ``base_url`` is the NBS griddap root (``None``: :data:`ERDDAP_URL`)."""
     source = lower_source_spec(source)
     _check_source(source)
+    _refuse_an_unread_base_url(base_url, source, who)
     lat, lon = as_coordinate(point)
     if source == 'local':
         from uacpy.data import wind_local
@@ -126,7 +142,7 @@ def wind_at(point, *, date, source='nbs', timeout=60.0, verbose=False,
                 f"{wind_local.climatology_period()}")
     else:
         speed, node, step = _wind_speed(lat, lon, date, timeout=timeout,
-                                        verbose=verbose)
+                                        verbose=verbose, base_url=base_url)
     prov = checked_offset(
         DataProvenance(source=SOURCES['nbs'], data_point=node,
                        data_date=step,
@@ -141,7 +157,7 @@ def wind_at(point, *, date, source='nbs', timeout=60.0, verbose=False,
 
 
 def fetch_wind(point, *, date, source='nbs', timeout=60.0, verbose=False,
-               max_distance_km=None):
+               max_distance_km=None, base_url=None):
     """10 m wind speed (knots) at a ``(lat, lon)`` point and date: the
     source's m/s, converted here.
 
@@ -149,9 +165,8 @@ def fetch_wind(point, *, date, source='nbs', timeout=60.0, verbose=False,
     (a time of day in ``date`` is ignored; the record
     :func:`uacpy.data.fetch_sea_surface` stamps names the step read in its
     ``data_date``); ``source='local'``
-    reads the cached monthly climatology (``install.sh --data wind``). The
-    NBS host is the module constant :data:`ERDDAP_URL`; reassign it to read
-    a mirror. Raises
+    reads the cached monthly climatology (``install.sh --data wind``).
+    ``base_url=`` reads NBS from a mirror. Raises
     ``DataFetchError`` where no wind is available (land / out of range).
 
     The value is raw and carries no provenance;
@@ -173,10 +188,15 @@ def fetch_wind(point, *, date, source='nbs', timeout=60.0, verbose=False,
     max_distance_km : float, optional
         Refuse a cell standing farther than this (km) from ``point`` (the
         offset rule); ``None`` (default) sets no limit beyond its warning.
+    base_url : str, optional
+        The NBS ERDDAP griddap root (a mirror); ``None`` (default) reads the
+        module constant :data:`ERDDAP_URL`. Refused with ``source='local'``,
+        which reads no host.
     """
     speed, _prov = wind_at(point, date=date, source=source, timeout=timeout,
                            verbose=verbose, max_distance_km=checked_max_distance(
-                               max_distance_km, 'fetch_wind'))
+                               max_distance_km, 'fetch_wind'),
+                           base_url=base_url)
     return speed
 
 
@@ -184,7 +204,7 @@ def fetch_wind(point, *, date, source='nbs', timeout=60.0, verbose=False,
                        record="the result's .provenance")
 def fetch_wind_transect(start, end, *, date, n_points=None, max_points=None,
                         source='nbs', timeout=60.0, verbose=False,
-                        max_distance_km=None):
+                        max_distance_km=None, base_url=None):
     """The 10 m wind speed (knots) sampled along ``start`` → ``end``, as an
     :class:`~uacpy.data.AlongTrack` (``'wind_speed'``) with one ``'nbs'``
     record per waypoint: the cell read, its offset, the requested date and
@@ -217,11 +237,14 @@ def fetch_wind_transect(start, end, *, date, n_points=None, max_points=None,
     max_distance_km : float, optional
         Refuse a waypoint whose cell stands farther than this (km) from it;
         ``None`` (default) sets no limit beyond the per-waypoint warning.
+    base_url : str, optional
+        As in :func:`fetch_wind`.
     """
     who = 'fetch_wind_transect'
     limit = checked_max_distance(max_distance_km, who)
     source = lower_source_spec(source)
     _check_source(source)
+    _refuse_an_unread_base_url(base_url, source, who)
     if isinstance(n_points, str) and n_points == 'auto' and source != 'local':
         raise ConfigurationError(
             f"{who}: n_points='auto' probes the cells of the cached "
@@ -236,7 +259,8 @@ def fetch_wind_transect(start, end, *, date, n_points=None, max_points=None,
     lats, lons, ranges = along_track_waypoints(
         start, end, n_points, max_points, who=who, cell_of=cell_of)
     readings = [wind_at((la, lo), date=date, source=source, timeout=timeout,
-                        verbose=verbose, max_distance_km=limit, who=who)
+                        verbose=verbose, max_distance_km=limit, who=who,
+                        base_url=base_url)
                 for la, lo in zip(lats, lons)]
     return AlongTrack(ranges=np.asarray(ranges), lats=np.asarray(lats),
                       lons=np.asarray(lons),

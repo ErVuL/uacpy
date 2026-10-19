@@ -188,6 +188,20 @@ class TestTablesAreDataFrames:
         with pytest.raises(ConfigurationError, match='gridded'):
             MAKERS[name]().to_dataframe()
 
+    @pytest.mark.parametrize('name', ['Environment', 'Source'])
+    def test_a_type_with_no_array_says_so_rather_than_gridded(self, name):
+        """An Environment or a Source holds no array: the refusal points to
+        ``to_dict`` and a held carrier's table, not to a flattened
+        ``to_xarray`` that holds no data variable."""
+        from uacpy.core.source import Source
+        carrier = (_environment() if name == 'Environment'
+                   else Source(depths=10.0, frequencies=100.0))
+        with pytest.raises(ConfigurationError,
+                           match=rf"an? {name} holds no array") as err:
+            carrier.to_dataframe()
+        assert 'gridded' not in str(err.value)
+        assert 'to_dict()' in str(err.value)
+
     def test_the_arrival_table_places_each_arrival_at_its_receiver(self):
         pytest.importorskip('pandas')
         df = MAKERS['Arrivals']().to_dataframe()
@@ -513,6 +527,19 @@ class TestGriddedCarriersHaveLabelledForms:
         np.testing.assert_array_equal(back.data, a.data)
         assert not a.values().flags.writeable
 
+    def test_an_absorption_keeps_its_water_records_through_export(self):
+        """A fetched law's ``data_sources`` reach its table and survive
+        ``to_dict`` / ``from_dict`` on both."""
+        import uacpy
+        from uacpy.data.sources import SOURCES, DataProvenance
+        woa = (DataProvenance(source=SOURCES['woa23']),)
+        law = uacpy.FrancoisGarrison(10.0, 35.0, 8.0, data_sources=woa)
+        table = law.table([1000.0, 2000.0])
+        assert table.data_sources == woa
+        for carrier in (law, table):
+            back = type(carrier).from_dict(carrier.to_dict())
+            assert [p.source.id for p in back.data_sources] == ['woa23']
+
     @pytest.mark.parametrize('name, kwargs, coords', [
         ('Source', dict(depths=[10.0, 30.0], frequencies=[100.0, 200.0, 400.0],
                         weights=[1.0, -1.0]),
@@ -595,15 +622,18 @@ def test_a_receiver_grid_is_depth_first():
     assert Z[1, 0] == 2.0 and R[0, 2] == 30.0
 
 
-def test_a_parallel_result_summarises_its_jobs():
+def test_a_parallel_result_tabulates_its_jobs():
     pytest.importorskip('pandas')
     from uacpy.parallel import ParallelResult
     pr = ParallelResult(results=[object(), None], errors={1: ValueError('x')},
                         labels=['a', 'b'], warnings={0: [(UserWarning, 'w')]})
-    df = pr.summary()
+    df = pr.to_dataframe()
     assert list(df['ok']) == [True, False]
     assert list(df['error_type']) == ['', 'ValueError']
     assert list(df['n_warnings']) == [1, 0]
+    # summary() is a one-line string on every other record; the table has
+    # the export protocol's name.
+    assert not hasattr(ParallelResult, 'summary')
 
 
 # ── signal results ─────────────────────────────────────────────────────────
@@ -655,8 +685,8 @@ class TestSignalResultsExport:
         pw = probabilistic_welch(np.tile(self._x(), 4), 1000.0, nperseg=256,
                                  segment_duration=0.5)
         ds = pw.to_xarray()
-        assert 'level_edges' in ds.data_vars
-        assert ds['level_edges'].dims == ('level_edges_dim0',)
+        assert 'level_edges_dB' in ds.data_vars
+        assert ds['level_edges_dB'].dims == ('level_edges_dB_dim0',)
 
     def test_the_dict_round_trip_keeps_the_attributes(self, tmp_path):
         # An attribute other than its default, so a round trip that dropped
@@ -978,7 +1008,7 @@ class TestSignalResultsExportTheirAxesByName:
     @pytest.mark.parametrize('level_max_dB', [128, 129, 150])
     def test_a_histograms_level_axis_is_never_named_frequencies(
             self, level_max_dB):
-        """129 frequencies: 128 levels makes level_edges as long as the
+        """129 frequencies: 128 levels makes level_edges_dB as long as the
         frequency axis, 129 makes the pdf's level axis as long."""
         pytest.importorskip('xarray')
         import warnings
@@ -990,7 +1020,7 @@ class TestSignalResultsExportTheirAxesByName:
             warnings.simplefilter('ignore')        # segment_levels_dB is 2-D
             ds = pw.to_xarray()
         assert ds['pdf'].dims == ('level', 'frequencies')
-        assert ds['level_edges'].dims == ('level_edges_dim0',)
+        assert ds['level_edges_dB'].dims == ('level_edges_dB_dim0',)
         assert ds['frequencies'].dims == ('frequencies',)
 
     def test_a_beamformed_field_exports_on_its_angles_grid_and_band(self):
@@ -1080,3 +1110,15 @@ def test_the_identity_keys_are_what_every_result_writes():
     from uacpy.core.results import Result
     x = _field()
     assert set(Result._IDENTITY_KEYS) == set(x._identity_dict())
+
+
+def test_the_covariance_names_both_receiver_axes():
+    """xarray forbids a repeated dimension: rows run along ``receiver``,
+    which carries the positions, columns along ``receiver_column``."""
+    pytest.importorskip('xarray')
+    cov = MAKERS['Covariance']()
+    da = cov.to_xarray()['covariance']
+    assert da.dims == ('frequency', 'receiver', 'receiver_column')
+    assert da['receiver_z'].dims == ('receiver',)
+    back = Covariance.from_xarray(cov.to_xarray())
+    np.testing.assert_array_equal(back.covariance, cov.covariance)

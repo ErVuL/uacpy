@@ -236,6 +236,47 @@ def test_plot_time_snapshots_grid_shape():
     plt.close(fig)
 
 
+def _modelled(field, model, source_id):
+    """``field`` as the result of ``model``, carrying its catalogue entry."""
+    from uacpy.models.provenance import model_provenance
+    return field.replace(model=model, backend=model.lower(),
+                         model_source=model_provenance(source_id))
+
+
+def test_the_snapshot_grid_credits_each_rows_model():
+    """Every row's model is credited once in the figure's footnote, one line
+    per model, as compare_models credits its panels."""
+    import matplotlib.pyplot as plt
+    from uacpy.plot import plot_time_snapshots
+    field = _make_synthetic_field(n_t=40, t_max=1.0)
+    fig, _ = plot_time_snapshots(
+        {'SPARC': _modelled(field, 'SPARC', 'acoustics_toolbox'),
+         'RAM': _modelled(field, 'RAM', 'collins_ram'),
+         'SPARC again': _modelled(field, 'SPARC', 'acoustics_toolbox')},
+        times=(0.2, 0.5))
+    try:
+        lines = fig.get_supxlabel().splitlines()
+        assert lines[0] == ('Model: SPARC — Michael B. Porter, '
+                            'Acoustics Toolbox')
+        assert len(lines) == 2 and lines[1].split()[0] == 'RAM', lines
+    finally:
+        plt.close(fig)
+
+
+def test_the_animation_credits_its_model():
+    import matplotlib.pyplot as plt
+    from uacpy.visualization.plots import animate_field
+    field = _modelled(_make_synthetic_field(n_t=40, t_max=1.0), 'SPARC',
+                      'acoustics_toolbox')
+    fig, ax = plt.subplots()
+    try:
+        animate_field(field, ax=ax)
+        assert fig.get_supxlabel() == ('Model: SPARC — Michael B. Porter, '
+                                       'Acoustics Toolbox')
+    finally:
+        plt.close(fig)
+
+
 def test_plot_time_snapshots_empty_raises():
     from uacpy.plot import plot_time_snapshots
 

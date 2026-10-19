@@ -110,7 +110,7 @@ def test_the_absorption_column_reads_the_casts_columns(monkeypatch):
         (30.0, -40.0), date='2024-06-04', ssp_source='argo',
         ssp_backend=None, cache_only=False, resolution=None, timeout=1.0,
         verbose=False)
-    assert out == ('absorption', 'argo', None)
+    assert out == ('absorption', ('argo',), None)
     np.testing.assert_array_equal(
         seen['depths'], pressure_dbar_to_depth(np.array([5.0, 100.0, 1000.0]),
                                                30.1))

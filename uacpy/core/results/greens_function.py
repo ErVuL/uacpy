@@ -19,6 +19,7 @@ from uacpy.core.results._base import (Result, axis_match_tolerance,
                                       coordinate_axis)
 from uacpy.core.results.quantities import coordinate_unit
 from uacpy.core.results.field import Field
+from uacpy.core.results._superposition import _stack_fields
 
 
 class GreensFunction(Result):
@@ -223,6 +224,19 @@ class GreensFunction(Result):
             return float(k[1] - k[0])
         return header_atten
 
+    def _every_source(self, one_source, source_depth_idx, *, who) -> Field:
+        """``one_source(source_depth_idx)``; or, for ``None``, the field of
+        every source of the file on one leading ``source_depth`` axis
+        (:func:`~uacpy.core.results.stack_fields`, ruling 4's multi-source
+        form), a one-source file giving its one field."""
+        if source_depth_idx is not None:
+            return one_source(source_depth_idx)
+        fields = [one_source(i) for i in range(len(self.source_depths))]
+        if len(fields) == 1:
+            return fields[0]
+        return _stack_fields(fields, self.source_depths,
+                             coordinate_name='source_depth', who=who)
+
     def _check_source_depth_idx(self, source_depth_idx: int) -> None:
         nsd = len(self.source_depths)
         if not (0 <= source_depth_idx < nsd):
@@ -310,7 +324,7 @@ class GreensFunction(Result):
         frequency: Optional[float] = None,
         source_type: str = 'point',
         spectrum: str = 'positive',
-        source_depth_idx: int = 0,
+        source_depth_idx: Optional[int] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
     ) -> Field:
@@ -342,8 +356,11 @@ class GreensFunction(Result):
             is asked, a request off that frequency warns the same way. The
             returned field is labelled with the slice's own frequency.
         source_type, spectrum : see :func:`~uacpy.core.acoustics.hankel_transform`.
-        source_depth_idx : int
-            Index into the source-depth axis. Defaults to the first source.
+        source_depth_idx : int, optional
+            Index into the source-depth axis: that source alone. ``None``
+            (default) transforms every source of the file into one Field
+            with a leading ``source_depth`` axis (:meth:`_every_source`); a
+            one-source file gives its one field.
         c_low, c_high : float, optional
             Phase-speed taper bounds (m/s).
 
@@ -365,27 +382,29 @@ class GreensFunction(Result):
                             "or use to_transfer_function for all of them.")
         ifreq = (0 if frequency is None
                  else self._nearest_frequency_index(frequency))
-        self._check_source_depth_idx(source_depth_idx)
+        if source_depth_idx is not None:
+            self._check_source_depth_idx(source_depth_idx)
         _warn_zero_ranges(ranges, source_type, context=self.title)
 
-        p_out = self._pressure_slice(
-            ranges, ifreq, source_depth_idx,
-            source_type=source_type, spectrum=spectrum, c_low=c_low, c_high=c_high,
-        )
-        return Field(
-            data=p_out,
-            coords={'depth': self.receiver_depths, 'range': ranges},
-            # Labelled with the frequency of the slab transformed.
-            **self._slab_identity(
-                source_depth_idx,
-                frequencies=float(self.frequencies[ifreq]),
-                phase_reference='travelling_wave',
-                metadata={
-                    "transform_method": "direct_dft",
-                    "source_type": source_type,
-                    "spectrum": spectrum,
-                }),
-        )
+        def one_source(isd):
+            return Field(
+                data=self._pressure_slice(
+                    ranges, ifreq, isd, source_type=source_type,
+                    spectrum=spectrum, c_low=c_low, c_high=c_high),
+                coords={'depth': self.receiver_depths, 'range': ranges},
+                # Labelled with the frequency of the slab transformed.
+                **self._slab_identity(
+                    isd,
+                    frequencies=float(self.frequencies[ifreq]),
+                    phase_reference='travelling_wave',
+                    metadata={
+                        "transform_method": "direct_dft",
+                        "source_type": source_type,
+                        "spectrum": spectrum,
+                    }),
+            )
+        return self._every_source(one_source, source_depth_idx,
+                                  who='GreensFunction.to_field')
 
     def to_transfer_function(
         self,
@@ -393,7 +412,7 @@ class GreensFunction(Result):
         *,
         source_type: str = 'point',
         spectrum: str = 'positive',
-        source_depth_idx: int = 0,
+        source_depth_idx: Optional[int] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
     ) -> Field:
@@ -412,7 +431,8 @@ class GreensFunction(Result):
             See :func:`~uacpy.core.acoustics.hankel_transform`. Default
             ``'point'`` and ``'positive'``.
         source_depth_idx : int, optional
-            Index into the source-depth axis. Default 0.
+            Index into the source-depth axis: that source alone. ``None``
+            (default) transforms every source, as :meth:`to_field` does.
         c_low, c_high : float, optional
             Phase-speed taper bounds (m/s).
 
@@ -423,33 +443,38 @@ class GreensFunction(Result):
             ``source_depth_idx`` out of range.
         """
         self._refuse_snapshot('to_transfer_function')
-        self._check_source_depth_idx(source_depth_idx)
+        if source_depth_idx is not None:
+            self._check_source_depth_idx(source_depth_idx)
         _warn_zero_ranges(ranges, source_type, context=self.title)
         nfreq = self.n_frequencies
-        pressure = np.zeros((len(self.receiver_depths), len(ranges), nfreq),
-                            dtype=np.complex128)
-        for ifreq in range(nfreq):
-            pressure[:, :, ifreq] = self._pressure_slice(
-                ranges, ifreq, source_depth_idx,
-                source_type=source_type, spectrum=spectrum,
-                c_low=c_low, c_high=c_high,
-            )
         freqs = self.frequencies.copy()
-        return Field(
-            data=pressure,
-            coords={
-                'depth': self.receiver_depths,
-                'range': ranges,
-                'frequency': freqs,
-            },
-            **self._slab_identity(
-                source_depth_idx, frequencies=freqs,
-                phase_reference='travelling_wave',
-                metadata={
-                    'source_type': source_type,
-                    'spectrum': spectrum,
-                }),
-        )
+
+        def one_source(isd):
+            pressure = np.zeros((len(self.receiver_depths), len(ranges),
+                                 nfreq), dtype=np.complex128)
+            for ifreq in range(nfreq):
+                pressure[:, :, ifreq] = self._pressure_slice(
+                    ranges, ifreq, isd,
+                    source_type=source_type, spectrum=spectrum,
+                    c_low=c_low, c_high=c_high,
+                )
+            return Field(
+                data=pressure,
+                coords={
+                    'depth': self.receiver_depths,
+                    'range': ranges,
+                    'frequency': freqs,
+                },
+                **self._slab_identity(
+                    isd, frequencies=freqs,
+                    phase_reference='travelling_wave',
+                    metadata={
+                        'source_type': source_type,
+                        'spectrum': spectrum,
+                    }),
+            )
+        return self._every_source(one_source, source_depth_idx,
+                                  who='GreensFunction.to_transfer_function')
 
     # ── snapshot transforms ────────────────────────────────────────────
 

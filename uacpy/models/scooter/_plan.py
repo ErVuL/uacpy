@@ -17,6 +17,7 @@ from uacpy.models._window import (
     check_pinned_window, steep_path_notice as _steep_path_notice,
 )
 from uacpy.models._budget import memory_budget
+from uacpy.models._knobs import positive_finite, whole_count
 from uacpy.core.run_settings import Notice
 
 
@@ -86,11 +87,17 @@ def _deck_nk(rmax: float, freq_max: float, c_low: float, c_high: float) -> int:
                * (1.0 / float(c_low) - 1.0 / float(c_high)))
 
 
-def check_knobs(*, taper, c_low, c_high, wavenumber_spectrum) -> None:
+def check_knobs(*, taper, c_low, c_high, wavenumber_spectrum, n_mesh,
+                rmax_factor) -> None:
     """Refuse a constructor knob no run could use: a taper outside
     ``[0, 0.5)``, a pinned phase-speed bound that is not a positive finite
     speed or two with ``c_low >= c_high``,
-    an unknown ``wavenumber_spectrum``.
+    an unknown ``wavenumber_spectrum``, an ``n_mesh`` count (one, or one per
+    medium) that is not a whole number of at least 0 (each medium's mesh
+    line is read into the INTEGER
+    ``NG``, ``ReadEnvironmentMod.f90:22``, :81-90, 0 meaning automatic,
+    :107-108), an ``rmax_factor``
+    that is not positive and finite (it scales the spectral ``RMax``).
 
     Run at construction and again by every run (the attributes can be
     reassigned in between). A single pinned bound is held to the other
@@ -103,6 +110,12 @@ def check_knobs(*, taper, c_low, c_high, wavenumber_spectrum) -> None:
             f"0 <= taper < 0.5; got {taper!r}."
         )
     check_pinned_window('Scooter', c_low=c_low, c_high=c_high)
+    if isinstance(n_mesh, (list, tuple, np.ndarray)):
+        for count in n_mesh:
+            whole_count('Scooter: each n_mesh count', count, 0)
+    elif n_mesh is not None:
+        whole_count('Scooter: n_mesh', n_mesh, 0)
+    positive_finite('Scooter: rmax_factor', rmax_factor, optional=True)
     if wavenumber_spectrum not in _WAVENUMBER_SPECTRA:
         raise ConfigurationError(
             f"Invalid wavenumber_spectrum '{wavenumber_spectrum}'. "
@@ -332,29 +345,36 @@ def reject_oversized_green_cube(
 def mesh_floor_notice(freq0, freqs, *,
                       n_mesh) -> Optional[Notice]:
     """The :class:`~uacpy.core.run_settings.Notice` when ``scooter.f90``
-    replaces a pinned ``n_mesh`` at some of ``freqs``, else ``None``.
+    replaces a pinned ``n_mesh`` (one count, or one per medium) at some of
+    ``freqs``, else ``None``.
 
     ``scooter.f90:106-111`` meshes each medium with
     ``N = MAX(INT(freq/freq0 * NG), 100)``, so wherever the scaled count
     falls below 100 the binary runs 100 points and the ``.prt`` still
     echoes the ``NG`` asked for. A convergence study over such values
     measures one mesh (scooter.md: ``n_mesh`` 34, 40, 70 and 100 give
-    bit-identical TL at 50 Hz).
+    bit-identical TL at 50 Hz). The smallest pinned count of a medium
+    list is the first to fall under the floor.
     """
-    if not n_mesh or n_mesh <= 0:
+    counts = [int(n) for n in np.atleast_1d(n_mesh) if int(n) > 0]
+    if not counts:
         return None
+    smallest = min(counts)
     freqs = np.atleast_1d(np.asarray(freqs, dtype=float))
-    scaled = (freqs / freq0 * n_mesh).astype(int)
+    scaled = (freqs / freq0 * smallest).astype(int)
     floored = freqs[scaled < 100]
     if floored.size == 0:
         return None
     where = (f"at {floored[0]:g} Hz" if floored.size == 1 else
              f"at {floored.size} of {freqs.size} frequencies "
              f"({floored.min():g}-{floored.max():g} Hz)")
+    pinned = (f"Scooter(n_mesh={n_mesh})" if np.ndim(n_mesh) == 0 else
+              f"The count {smallest} of Scooter(n_mesh="
+              f"{tuple(int(n) for n in n_mesh)})")
     return Notice(
-        f"n_mesh {n_mesh} is under the binary's 100-point floor "
+        f"n_mesh {smallest} is under the binary's 100-point floor "
         f"{where}",
-        f"Scooter(n_mesh={n_mesh}) has no effect {where}: "
+        f"{pinned} has no effect {where}: "
         f"scooter.f90:106-111 meshes each medium with "
         f"N = MAX(INT(freq/freq0 * n_mesh), 100), so the binary runs 100 "
         f"points there while the .prt echoes n_mesh. Step n_mesh above "

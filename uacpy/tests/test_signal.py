@@ -363,18 +363,18 @@ class TestDecidecadeBands:
         x[1] = 3.0 * x[0]
         est = welch(x, 8000.0, nperseg=1024)
         both = band_levels(est.power, est.frequencies)
-        assert both.levels.shape == (2, both.centers.size)
+        assert both.levels_dB.shape == (2, both.centers.size)
         for i in range(2):
             np.testing.assert_array_equal(
-                both.levels[i],
-                band_levels(est.power[i], est.frequencies).levels)
-        covered = np.isfinite(both.levels[0])
+                both.levels_dB[i],
+                band_levels(est.power[i], est.frequencies).levels_dB)
+        covered = np.isfinite(both.levels_dB[0])
         np.testing.assert_allclose(
-            both.levels[1][covered] - both.levels[0][covered],
+            both.levels_dB[1][covered] - both.levels_dB[0][covered],
             20 * np.log10(3.0), atol=1e-9)
         np.testing.assert_array_equal(
-            band_levels(est.power.T, est.frequencies, axis=0).levels,
-            both.levels)
+            band_levels(est.power.T, est.frequencies, axis=0).levels_dB,
+            both.levels_dB)
         with pytest.raises(ConfigurationError,
                            match=r'(?s)as long as psd along axis=0.*axis='):
             band_levels(est.power, est.frequencies, axis=0)
@@ -393,8 +393,8 @@ class TestDecidecadeBands:
             result.plot()
         fig, ax = result.plot(channel=1)
         heights = np.array([p.get_height() for p in ax.patches])
-        finite = np.isfinite(result.levels[1])
-        np.testing.assert_allclose(heights[finite], result.levels[1][finite])
+        finite = np.isfinite(result.levels_dB[1])
+        np.testing.assert_allclose(heights[finite], result.levels_dB[1][finite])
         plt.close(fig)
         with pytest.raises(ConfigurationError, match='Drop channel='):
             band_levels(psd[0], f).plot(channel=0)
@@ -1142,7 +1142,7 @@ class TestSampleRateGuards:
     def test_ambiguity_function_rejects_bad_sample_rate(self, bad):
         with pytest.raises(ConfigurationError,
                            match="ambiguity_function: sample_rate"):
-            ambiguity_function(np.ones(8), bad, n_doppler=3)
+            ambiguity_function(np.ones(8), bad, n_doppler_shifts=3)
 
     @pytest.mark.parametrize("bad", BAD_SCALARS)
     def test_instantaneous_frequency_rejects_bad_sample_rate(self, bad):
@@ -1309,7 +1309,7 @@ class TestNyquistGuardsSplitGeneratorsFromAnalysers:
          lambda f, fs: bpsk_modulate(np.array([1, -1, 1, -1]), f, sample_rate=fs, chip_rate=100.0)),
         ('fsk_modulate',
          lambda f, fs: _fsk_modulate(np.array([0, 1]), np.array([1000.0, f]),
-                                     0.01, fs)),
+                                     0.01, sample_rate=fs)),
         ('fsk_demodulate',
          lambda f, fs: _fsk_demodulate(np.zeros(1000),
                                        np.array([1000.0, f]), 0.01, fs)),
@@ -1471,7 +1471,7 @@ class TestScalarArgumentsAreRefusedByName:
         from uacpy.acoustic_signal import probabilistic_welch
         r = probabilistic_welch(self.X, 2000.0, segment_duration=0.5,
                                 nperseg=256, level_min_dB=50, level_max_dB=51)
-        assert r.level_edges.tolist() == [50.0, 51.0]
+        assert r.level_edges_dB.tolist() == [50.0, 51.0]
 
     def test_uniform_frequency_step_needs_two_frequencies(self):
         from uacpy.acoustic_signal.channel import uniform_frequency_step
@@ -1479,11 +1479,12 @@ class TestScalarArgumentsAreRefusedByName:
             uniform_frequency_step([100.0])
         assert uniform_frequency_step([100.0, 110.0]) == pytest.approx(10.0)
 
-    @pytest.mark.parametrize('method', ['welch', 'etfe', 'ls_fir', 'p_etfe'])
+    @pytest.mark.parametrize('method', ['welch', 'etfe', 'lsfir', 'periodic_etfe'])
     def test_frf_refuses_records_of_different_lengths(self, method):
-        period = {'period': 100} if method == 'p_etfe' else {}
+        settings = {'periodic_etfe': {'period': 100},
+                    'lsfir': {'order': 4}}.get(method, {})
         with pytest.raises(ConfigurationError, match='same length'):
-            FRF(method=method, order=4, **period).compute(
+            FRF(method=method, **settings).compute(
                 self.X[:1000], self.X[:900], 1000.0)
 
     @pytest.mark.parametrize('bad', [0.0, -1000.0, np.nan])
@@ -1491,12 +1492,30 @@ class TestScalarArgumentsAreRefusedByName:
         with pytest.raises(ConfigurationError, match='sample_rate must be'):
             FRF(method='etfe').compute(self.X, self.X, bad)
 
-    @pytest.mark.parametrize('bad', ['', None, 5])
-    def test_sparc_pulse_refuses_a_pulse_type_that_names_no_letter(self, bad):
+    @pytest.mark.parametrize('bad', ['', None, 5, 'sinc', 'Ricker', 'CC'])
+    def test_sparc_pulse_refuses_a_pulse_type_that_is_not_one_letter(self,
+                                                                    bad):
+        """AT selects the pulse on one character (cans.f90:15): a word is
+        refused, not keyed on its first letter ('sinc' would be 'S', the
+        single sine). One letter, either case, is accepted."""
         from uacpy.acoustic_signal.generate import sparc_pulse
+        t = np.linspace(0, 0.01, 10)
         with pytest.raises(ConfigurationError,
-                           match='pulse_type must be a non-empty string'):
-            sparc_pulse(np.linspace(0, 0.01, 10), 100.0, bad)
+                           match='pulse_type must be a single-letter code'):
+            sparc_pulse(t, 100.0, bad)
+        assert sparc_pulse(t, 100.0, 'c')[1] == sparc_pulse(t, 100.0, 'C')[1]
+
+    @pytest.mark.parametrize('bad', ['aic', 'Aic', 'foo'])
+    def test_lsfir_refuses_a_string_that_is_no_criterion(self, bad):
+        """A string that is not one of the criteria is refused typed,
+        naming them, not left to ``int()``'s bare ValueError."""
+        from uacpy.acoustic_signal import lsfir
+        x = np.random.default_rng(0).standard_normal(256)
+        with pytest.raises(ConfigurationError,
+                           match=rf"^lsfir: order='{bad}' is neither an FIR "
+                                 r"order nor a selection criterion") as e:
+            lsfir(x, x, 1000.0, order=bad)
+        assert "'AIC', 'BIC', 'FPE', 'CP'" in str(e.value)
 
     def test_simulate_reception_matches_the_direct_convolution(self):
         """A long transmit through a long channel takes scipy's FFT route; the
@@ -1571,19 +1590,23 @@ class TestSignalAxisGuardsRefuseAnEmptyAxis:
                 lambda f, n: band_levels(np.ones(n), frequencies=f),
         }
 
-    @pytest.mark.parametrize('name', ['modal_group_speeds',
-                                      'impulse_response_from_transfer_function',
-                                      'band_levels'])
-    def test_an_empty_axis_raises_a_typed_error_naming_the_axis(self, name):
+    @pytest.mark.parametrize('name, need', [
+        ('modal_group_speeds', 'needs at least 2 samples'),
+        ('impulse_response_from_transfer_function',
+         'must contain at least one value'),
+        ('band_levels', 'needs at least 2 samples')])
+    def test_an_empty_axis_raises_a_typed_error_naming_the_axis(self, name,
+                                                                need):
+        """``modal_group_speeds`` and ``band_levels`` need two samples (a
+        derivative, a band width), so their own two-sample refusal names the
+        empty axis; the third takes the shared one-value guard."""
         call = self._calls()[name]
-        with pytest.raises(
-                ConfigurationError,
-                match='frequencies must contain at least one value') as exc:
+        with pytest.raises(ConfigurationError,
+                           match=f'frequencies {need}') as exc:
             call(np.array([], dtype=float), 0)
         message = str(exc.value)
         assert name in message
-        assert 'frequencies' in message
-        assert 'at least one value' in message
+        assert 'got 0' in message or 'got an empty axis' in message
 
     @pytest.mark.parametrize('name', ['modal_group_speeds',
                                       'band_levels'])
@@ -1873,7 +1896,8 @@ def _signal_results():
         'CQSpectrogramResult': CQSpectrogramResult(x, x, x,
                                                    scaling='spectrum'),
         'WignerVilleResult': WignerVilleResult(x, x, x),
-        'CWTResult': CWTResult(x, x, x),
+        'CWTResult': CWTResult(x, x, x, sample_rate=1000.0, wavelet='paul',
+                               order=4),
         'Cepstrum': Cepstrum(x, x, sample_rate=2.0),
         'JanusReception': JanusReception(x, False, detected=True,
                                          start=3, doppler_scale=1e-4,
@@ -1887,11 +1911,12 @@ def _signal_results():
         'AmbiguityResult': AmbiguityResult(x, x, x),
         'Snapshots': Snapshots(100.0, np.ones((2, 3))),
         'Warped': Warped(x, x, sample_rate=1000.0, range=500.0,
-                         sound_speed=1490.0, interpolation='sinc'),
+                         sound_speed=1490.0, method='sinc'),
         'BeamformedField': BeamformedField(np.ones((2, 3)), x[:2], np.ones(3),
                                            None, grid_coords={'range': x[:3]}),
-        'RadonResult': RadonResult(x, x, x, kind='hyperbolic'),
-        'TauPResult': TauPResult(x, x, x),
+        'RadonResult': RadonResult(x, x, x, kind='hyperbolic',
+                                   sample_rate=1000.0, dx=2.0, nx=4, x0=1.0),
+        'TauPResult': TauPResult(x, x, x, sample_rate=1000.0, dx=2.0, nx=4),
         'FKResult': FKResult(x, x, x, x, scaling='raw'),
         'NoiseComponents': NoiseComponents(x, x, x, x, x, x),
     }
@@ -1946,10 +1971,10 @@ class TestSignalResultsShareOneBehaviour:
         assert r['SpectralEstimate'].units['power'] == 'Pa²·s'
         assert r['SpectralEstimate']._replace(
             scaling='density').units['power'] == 'Pa²/Hz'
-        assert r['ProbabilisticSpectralEstimate'].units['level_edges'] == \
+        assert r['ProbabilisticSpectralEstimate'].units['level_edges_dB'] == \
             'dB re 1 Pa²'
         assert r['ProbabilisticSpectralEstimate']._replace(
-            ref=1e-6, scaling='density').units['level_edges'] == \
+            ref=1e-6, scaling='density').units['level_edges_dB'] == \
             'dB re 1 µPa²/Hz'
         assert r['SpectrogramResult'].units['power'] == 'Pa²'
         assert r['STFTResult'].units['coefficients'] == 'Pa'
@@ -2034,10 +2059,10 @@ class TestASavedResultNamesWhatItLacks:
         from uacpy.acoustic_signal.bands import BandLevels
         d = self._bands().to_dict()
         BandLevels.from_dict(d)
-        del d['levels']
+        del d['levels_dB']
         with pytest.raises(ConfigurationError,
                            match=r"^BandLevels\.from_dict: the saved result "
-                                 r"holds no 'levels' field"):
+                                 r"holds no 'levels_dB' field"):
             BandLevels.from_dict(d)
 
     def test_a_dict_with_a_none_field_loads_it(self):
@@ -2048,11 +2073,11 @@ class TestASavedResultNamesWhatItLacks:
     def test_an_xarray_object_lacking_a_field_it_does_not_list_is_refused(self):
         pytest.importorskip('xarray')
         from uacpy.acoustic_signal.bands import BandLevels
-        ds = self._bands().to_xarray().rename({'levels': 'band_levels'})
+        ds = self._bands().to_xarray().rename({'levels_dB': 'band_levels'})
         ds.attrs['uacpy_result_fields'] = 'centers,band_levels'
         with pytest.raises(ConfigurationError,
                            match=r"^BandLevels\.from_xarray: the saved "
-                                 r"result holds no 'levels' field"):
+                                 r"result holds no 'levels_dB' field"):
             BandLevels.from_xarray(ds)
 
     def test_an_xarray_field_listed_and_not_written_was_none(self):
@@ -2071,8 +2096,8 @@ class TestASavedResultNamesWhatItLacks:
         _same_fields(self._bands(), BandLevels.from_xarray(ds))
         with pytest.raises(ConfigurationError,
                            match=r"^BandLevels\.from_xarray: the saved "
-                                 r"result holds no 'levels' field"):
-            BandLevels.from_xarray(ds.drop_vars('levels'))
+                                 r"result holds no 'levels_dB' field"):
+            BandLevels.from_xarray(ds.drop_vars('levels_dB'))
 
 
 

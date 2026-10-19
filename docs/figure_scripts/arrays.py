@@ -22,6 +22,7 @@ from uacpy.acoustic_signal import (
     shading_taper,
     steering_vectors,
 )
+from uacpy.plot import plot_beam_power
 from uacpy.sonar import csdm
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
@@ -393,7 +394,7 @@ def resolution():
                 ('Bartlett', bartlett(R, steering)),
                 ('MVDR', mvdr(R, steering)),
                 ('MUSIC (n_sources=2)', music_spectrum(R, steering, 2))):
-            ax.plot(angles, norm_dB(spectrum), lw=1.4, label=label)
+            plot_beam_power(angles, spectrum, ax=ax, label=label, lw=1.4)
         for bearing in bearings:
             ax.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
         ax.set_title(title, fontweight='bold', fontsize=10)
@@ -401,6 +402,8 @@ def resolution():
         ax.set_ylim(-35, 3)
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8, loc='upper right')
+    for ax in axes[:-1]:
+        ax.set_xlabel('')
     axes[-1].set_xlabel('Angle from broadside (deg)')
     axes[-1].set_xlim(-30, 30)
 
@@ -429,8 +432,8 @@ def snapshots():
         rng = np.random.default_rng(0)
         R = csdm(plane_wave_snapshots(
             positions, bearings, snr_dB=10.0, n_snapshots=k, rng=rng))
-        ax_spec.plot(angles, norm_dB(mvdr(R, steering)), lw=1.4,
-                     label=f'K = {k:3d}  (K/N = {k / n:g})')
+        plot_beam_power(angles, mvdr(R, steering), ax=ax_spec, lw=1.4,
+                        label=f'K = {k:3d}  (K/N = {k / n:g})')
     for bearing in bearings:
         ax_spec.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
     ax_spec.set_title('MVDR as the snapshot count falls — sources at ±2°, '
@@ -479,9 +482,9 @@ def snapshots():
         rng = np.random.default_rng(0)
         R = csdm(plane_wave_snapshots(
             positions, bearings, snr_dB=10.0, n_snapshots=12, rng=rng))
-        spectrum = norm_dB(
-            mvdr(R, wide_steering, diagonal_loading=loading))
-        ax_load.plot(wide, spectrum, lw=1.4, label=f'loading = {loading:g}')
+        plot_beam_power(wide, mvdr(R, wide_steering,
+                                   diagonal_loading=loading),
+                        ax=ax_load, lw=1.4, label=f'loading = {loading:g}')
     for bearing in bearings:
         ax_load.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
     ax_load.set_title('Diagonal loading at K = 12 (< N)',
@@ -527,10 +530,11 @@ def music_order():
 
     for n_sources, style in ((1, '-'), (2, '-'), (4, (0, (1.5, 1.5)))):
         label = {1: '1 — too few', 2: '2 — correct', 4: '4 — too many'}[n_sources]
-        ax_s.plot(angles, norm_dB(music_spectrum(R, steering, n_sources)),
-                  lw=1.6, ls=style, label=f'n_sources = {label}')
-    ax_s.plot(angles, norm_dB(bartlett(R, steering)), lw=1.0,
-              ls='--', color='0.45', label='Bartlett, for reference')
+        plot_beam_power(angles, music_spectrum(R, steering, n_sources),
+                        ax=ax_s, lw=1.6, ls=style,
+                        label=f'n_sources = {label}')
+    plot_beam_power(angles, bartlett(R, steering), ax=ax_s, lw=1.0,
+                    ls='--', color='0.45', label='Bartlett, for reference')
     for bearing in bearings:
         ax_s.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
     ax_s.set_xlabel('Angle from broadside (deg)')

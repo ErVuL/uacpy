@@ -26,7 +26,6 @@ DEFAULTS = [
     ('Bellhop', 'beam_width_type', None), ('Bellhop', 'beam_curvature', None),
     ('Bellhop', 'eps_multiplier', None), ('Bellhop', 'r_loop', None),
     ('Bellhop', 'n_image', None), ('Bellhop', 'ib_win', None),
-    ('Bellhop', 'n_frequencies', None), ('Bellhop', 'bandwidth_factor', None),
 ]
 
 
@@ -78,52 +77,106 @@ def _parameter_free(kind):
 
 
 def _cases():
+    """``(label, env, c_low, origin fragment)``: where the slowest medium
+    sets the edge, the fragment names it; where a Scholte wave sits
+    under it, the edge is 0.90 × that wave (its speed pinned to 0.1 m/s,
+    the root ``test_acoustics_check_values.py::
+    TestTheScholteWaveSpeedIsBrekhovskikhsRoot`` checks against
+    eq. 3.4.29)."""
     from uacpy.core import Bottom, SeabedColumn
+    rule = ' — the slowest speed of every medium'
+    wave = 'the Scholte wave between '
     return [
         ('vacuum bottom', _over(_parameter_free('vacuum')), 0.90 * 1490.0,
-         'the water'),
+         '0.9 × 1490 m/s, the water' + rule),
         ('rigid bottom, no medium', _over(_parameter_free('rigid')),
-         0.90 * 1490.0, 'the water'),
+         0.90 * 1490.0, '0.9 × 1490 m/s, the water' + rule),
         ('fluid half-space slower than the water', _over(_halfspace(1450.0)),
-         0.90 * 1450.0, 'the bottom half-space'),
+         0.90 * 1450.0, '0.9 × 1450 m/s, the bottom half-space' + rule),
         ('elastic half-space', _over(_halfspace(1800.0, 600.0)),
-         0.85 * 600.0, "the bottom half-space's shear speed"),
+         0.90 * 523.162, '0.9 × 523.2 m/s, ' + wave
+         + 'the water and the bottom half-space'),
         ('elastic layer on a fluid half-space',
-         _over(_sand_over(_halfspace(1800.0))), 0.90 * 110.0,
-         "a sediment layer's shear speed"),
+         _over(_sand_over(_halfspace(1800.0))), 0.90 * 92.926,
+         '0.9 × 92.9 m/s, ' + wave + 'a sediment layer and the bottom '
+         'half-space'),
         ('elastic layer on an elastic half-space',
          _over(_sand_over(_halfspace(5250.0, 3000.0, rho=2.65))),
-         0.85 * 110.0, "a sediment layer's shear speed"),
+         0.90 * 98.378, '0.9 × 98.4 m/s, ' + wave
+         + 'the water and a sediment layer'),
         ('elastic top half-space over fluid water',
          _over(_halfspace(1800.0), surface=_halfspace(3500.0, 1800.0,
                                                        rho=0.9)),
-         0.85 * 1490.0, 'the water'),
+         0.90 * 1217.225, '0.9 × 1217.2 m/s, ' + wave
+         + 'the top half-space and the water'),
+        ('a shear speed above the water\'s (granite)',
+         _over(_halfspace(5750.0, 3000.0, rho=2.65)), 0.90 * 1485.110,
+         '0.9 × 1485.1 m/s, ' + wave + 'the water and the bottom '
+         'half-space'),
         ('the slowest column of a range-dependent seabed',
          _over(Bottom.from_columns(
              [SeabedColumn(layers=[], halfspace=_halfspace(1800.0)),
               SeabedColumn(layers=[], halfspace=_halfspace(1460.0))],
-             ranges=[0.0, 5000.0])), 0.90 * 1460.0, 'the bottom half-space'),
+             ranges=[0.0, 5000.0])), 0.90 * 1460.0,
+         '0.9 × 1460 m/s, the bottom half-space' + rule),
     ]
 
 
-@pytest.mark.parametrize('case', range(8))
-def test_the_derived_c_low_is_the_slowest_speed_of_every_medium(case):
-    """``scooter.f90:193-259``: cMin over the water, each sediment layer
-    (its shear speed when elastic) and each acoustic half-space (shear when
-    elastic), × 0.85 when a half-space — bottom or top — is elastic and
-    × 0.90 otherwise; a rigid or vacuum boundary carries no medium. The
-    origin names the medium that set it."""
+@pytest.mark.parametrize('case', range(9))
+def test_the_derived_c_low_is_the_slowest_speed_or_scholte_wave(case):
+    """0.90 (``scooter.f90:258``) × the slowest wave of the problem: the
+    water, each sediment layer and each acoustic half-space (compressional
+    and shear speeds), and every Scholte wave a liquid carries against a
+    solid (Brekhovskikh & Lysanov eq. 3.4.29), which is the slowest in
+    every elastic case here — over granite too, where the shear speed is
+    above the water's and the wave sits just under the water speed (not
+    scooter.f90:256's 0.85 × the water); a rigid or vacuum boundary
+    carries no medium. The origin names the medium or the interface that
+    set it."""
     from uacpy.core.engine_defaults import default_c_low
-    label, env, expected, where = _cases()[case]
+    label, env, expected, origin_start = _cases()[case]
     c_low, origin = default_c_low(env)
-    assert c_low == pytest.approx(expected, rel=1e-12), label
-    assert f", {where} — the slowest speed of every medium" in origin
-    assert origin.startswith(
-        '0.85 × ' if expected in (0.85 * 600.0, 0.85 * 110.0, 0.85 * 1490.0)
-        else '0.9 × ')
+    assert c_low == pytest.approx(expected, rel=1e-5), label
+    assert origin.startswith(origin_start), origin
 
 
-def test_the_c_low_factors_are_scooters():
-    """``scooter.f90:256`` (0.85, an elastic half-space) and :258 (0.90)."""
-    from uacpy.core.engine_defaults import C_LOW_FACTOR, C_LOW_FACTOR_ELASTIC
-    assert (C_LOW_FACTOR, C_LOW_FACTOR_ELASTIC) == (0.90, 0.85)
+def test_a_shear_speed_near_the_waters_puts_the_wave_under_085_cs():
+    """The limestone preset (cp 3000, cs 1500 m/s) under 1500 m/s water:
+    the Scholte wave is 1240.4 m/s, 0.827 × the shear speed and slower
+    than the water, so the derived edge is 0.90 × 1240.4 m/s, under
+    scooter.f90:256's 0.85 × 1500 = 1275 m/s, and the wave is inside the
+    window."""
+    from uacpy.core import BoundaryProperties
+    from uacpy.core.engine_defaults import default_c_low, scholte_waves
+    env = uacpy.Environment(
+        name='limestone', bathymetry=30.0, ssp=1500.0,
+        bottom=BoundaryProperties.from_preset('limestone', elastic=True))
+    (wave,) = scholte_waves(env)
+    assert wave.speed == pytest.approx(1240.44, abs=0.01)
+    assert (wave.depth, wave.where) == (
+        30.0, 'between the water and the bottom half-space')
+    c_low, origin = default_c_low(env)
+    assert c_low == pytest.approx(0.90 * 1240.44, abs=0.01)
+    assert c_low < 0.85 * 1500.0
+    assert origin.startswith('0.9 × 1240.4 m/s, the Scholte wave between '
+                             'the water and the bottom half-space')
+
+
+def test_two_elastic_media_in_contact_carry_no_liquid_solid_wave():
+    """Eq. 3.4.29 is the liquid-solid interface: sand on granite gives the
+    water-sand wave only, and a fluid seabed none."""
+    from uacpy.core.engine_defaults import scholte_waves
+    waves = scholte_waves(_over(_sand_over(_halfspace(5250.0, 3000.0,
+                                                      rho=2.65))))
+    assert [(w.depth, w.where) for w in waves] == [
+        (100.0, 'between the water and a sediment layer')]
+    assert scholte_waves(_over(_halfspace(1800.0))) == []
+
+
+def test_the_c_low_factor_is_scooters():
+    """``scooter.f90:258`` (0.90), one factor for fluid and elastic
+    problems: the Scholte wave scooter.f90:256's 0.85 estimates is
+    solved instead."""
+    from uacpy.core import engine_defaults
+    assert engine_defaults.C_LOW_FACTOR == 0.90
+    assert not hasattr(engine_defaults, 'C_LOW_FACTOR_ELASTIC')

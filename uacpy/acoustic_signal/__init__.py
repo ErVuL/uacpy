@@ -87,8 +87,8 @@ _SUBMODULE_NAMES = ('generate', 'spectral', 'cqt', 'bands',
                     'dispersion')
 _SUBMODULES = frozenset(_SUBMODULE_NAMES)
 
-# Public name -> defining sub-module. Kept in sync with __all__ by the
-# consistency check at the bottom of this file (runs at import, costs nothing).
+# Public name -> defining sub-module; __all__ is derived from it at the
+# bottom of this file.
 _EXPORTS = {
     # generate: parametric waveforms
     'sparc_pulse': 'generate', 'gaussian_pulse': 'generate',

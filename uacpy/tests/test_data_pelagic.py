@@ -90,6 +90,21 @@ def test_transect_classifies_each_waypoint_from_its_own_cell():
     assert rdb.halfspace_sound_speed[1] != rdb.halfspace_sound_speed[0]
 
 
+def test_the_settings_a_pelagic_seabed_reads_give_no_notice():
+    """The pelagic rule is depth-driven and converts a grain size, so a
+    depth and a model given to it are used, point and transect alike."""
+    import warnings
+    from uacpy.data import fetch_bottom
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        fetch_bottom((0.0, -30.0), source='pelagic', depth=5000.0,
+                     model='hamilton', hamilton_fit='abyssal-plain')
+        fetch_bottom_transect((-60.0, -30.0), (0.0, -30.0), source='pelagic',
+                              n_points=3, depth=lambda la, lo: 4000.0,
+                              model='apl-uw')
+    assert not [w for w in caught if 'was not used' in str(w.message)]
+
+
 def test_the_depth_fetch_carries_a_finite_default_timeout(monkeypatch):
     seen = []
 

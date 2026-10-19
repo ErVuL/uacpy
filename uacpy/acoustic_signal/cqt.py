@@ -26,8 +26,8 @@ from uacpy.core._validate import (
 from uacpy.acoustic_signal._results import POWER_UNITS, PlottedResult
 from uacpy.acoustic_signal.timefreq import SpectrogramResult
 from uacpy.acoustic_signal.spectral import (
-    ProbabilisticSpectralEstimate, _BIN_SCALINGS, _split_records,
-    _warn_levels_outside_window, level_histogram,
+    ProbabilisticSpectralEstimate, _BIN_SCALINGS, _level_edges,
+    _split_records, _warn_levels_outside_window, level_histogram,
 )
 from uacpy.acoustic_signal.windows import _IMAGE_BIAS_WARN_DB
 
@@ -543,11 +543,11 @@ def _probabilistic_constant_q(data, sample_rate, *, window, scaling, who,
     does not contradict "broadband noise is not affected" above: the band
     *power* there is unchanged, and it is the shape of its distribution, hence
     the mean of the logs, that moves. ``probabilistic_welch`` carries the same bias wherever
-    its own ``nperseg`` is clamped to the ``segment_duration`` chunk, which is one
-    look too. Compare a target curve against ``constant_q``; ``mean_dB``
+    its own ``nperseg`` spans the whole ``segment_duration`` chunk (the unset
+    default on a chunk shorter than 8192 samples), which is one look too. Compare a target curve against ``constant_q``; ``mean_dB``
     is the centre of the histogram. Only frames whose
     window lay fully inside the signal contribute (per bin). Returns a
-    :class:`ProbabilisticSpectralEstimate` — ``(frequencies, level_edges,
+    :class:`ProbabilisticSpectralEstimate` — ``(frequencies, level_edges_dB,
     pdf)`` carrying ``.mean_dB``, ``.std_dB``, ``.ref``, ``.scaling`` and
     ``.method='constant_q'``;
     ``pdf`` is shaped ``(n_levels, n_frequencies)`` and density-normalised per
@@ -570,8 +570,8 @@ def _probabilistic_constant_q(data, sample_rate, *, window, scaling, who,
         powers = _cq_bin_powers(x, kernels, scaling)
         pooled = powers if pooled is None else [
             np.concatenate(pair) for pair in zip(pooled, powers)]
-    level_edges = np.arange(level_min_dB, level_max_dB + level_step_dB, level_step_dB)
-    pdf = np.zeros((level_edges.size - 1, freqs.size))
+    level_edges_dB = _level_edges(level_min_dB, level_max_dB, level_step_dB)
+    pdf = np.zeros((level_edges_dB.size - 1, freqs.size))
     mean_dB = np.full(freqs.size, np.nan)
     std_dB = np.full(freqs.size, np.nan)
     # Each bin's levels are computed once, here, and serve both the histogram
@@ -587,13 +587,13 @@ def _probabilistic_constant_q(data, sample_rate, *, window, scaling, who,
         if vals.size == 0:
             pdf[:, i] = np.nan
             continue
-        pdf[:, i], mean_dB[i], std_dB[i] = level_histogram(vals, level_edges)
-    _warn_levels_outside_window(who, levels, freqs, level_edges)
+        pdf[:, i], mean_dB[i], std_dB[i] = level_histogram(vals, level_edges_dB)
+    _warn_levels_outside_window(who, levels, freqs, level_edges_dB)
     # The reference, the scaling and the method are part of what the levels
     # MEAN, so they travel with them rather than being restated by every
     # consumer. ``segment_duration`` is None: each sample is one unaveraged frame,
     # and a frame here is per bin rather than one duration for the estimate.
     return ProbabilisticSpectralEstimate(
-        freqs, level_edges, pdf, mean_dB=mean_dB, std_dB=std_dB,
+        freqs, level_edges_dB, pdf, mean_dB=mean_dB, std_dB=std_dB,
         level_step_dB=level_step_dB, segment_duration=None, ref=float(ref),
         scaling=str(scaling), method="constant_q")

@@ -90,8 +90,9 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
 
 
 @typed_plot_error
-def plot_weighting(frequency, weighting_dB=None, ax=None, *, label=None,
-                   title=None, figsize=(8, 4), **mpl_kw):
+def plot_weighting(frequencies, weighting_dB=None, ax=None, *, label=None,
+                   title=None, ymin=-40.0, ymax=5.0, figsize=(8, 4),
+                   **mpl_kw):
     """Plot a marine-mammal auditory weighting curve ``W(f)`` (dB) on a log
     frequency axis, the values :func:`uacpy.noise.auditory_weighting`
     returns. Several groups share one axes through ``ax=``::
@@ -102,7 +103,7 @@ def plot_weighting(frequency, weighting_dB=None, ax=None, *, label=None,
 
     Parameters
     ----------
-    frequency : array_like
+    frequencies : array_like
         Frequencies (Hz).
     weighting_dB : array_like
         The weighting at each frequency (dB).
@@ -112,15 +113,20 @@ def plot_weighting(frequency, weighting_dB=None, ax=None, *, label=None,
         Legend label of the curve (the hearing group, say).
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
+    ymin, ymax : float, optional
+        Weighting-axis limits (dB). Default -40 and 5; the high-frequency
+        groups fall to -60 to -110 dB at the ends of 10 Hz-200 kHz, below
+        the default floor, so widen it (``ymin=-120``) to see the whole
+        curve.
     figsize : tuple, optional
         Size (inches) of the new figure, ``(8, 4)`` by default; unused when
         ``ax`` is given.
     **mpl_kw
         Matplotlib keywords for the curve.
     """
-    if isinstance(frequency, str) or (
-            isinstance(frequency, (list, tuple)) and frequency
-            and all(isinstance(g, str) for g in frequency)):
+    if isinstance(frequencies, str) or (
+            isinstance(frequencies, (list, tuple)) and frequencies
+            and all(isinstance(g, str) for g in frequencies)):
         raise ConfigurationError(
             "plot_weighting: draws a weighting curve it is handed, not a "
             "hearing group's name.",
@@ -131,9 +137,9 @@ def plot_weighting(frequency, weighting_dB=None, ax=None, *, label=None,
         raise ConfigurationError(
             "plot_weighting: pass the frequencies and the weighting at each, "
             "plot_weighting(f, uacpy.noise.auditory_weighting(f, group)).")
-    _require_nonempty('plot_weighting', frequency=frequency,
+    _require_nonempty('plot_weighting', frequencies=frequencies,
                       weighting_dB=weighting_dB)
-    f = np.asarray(frequency, dtype=float)
+    f = np.asarray(frequencies, dtype=float)
     w = np.asarray(weighting_dB, dtype=float)
     own_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
@@ -141,7 +147,7 @@ def plot_weighting(frequency, weighting_dB=None, ax=None, *, label=None,
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Weighting W(f) (dB)")
     ax.set_title(_title_or(title, "Marine-mammal auditory weighting"))
-    ax.set_ylim(-40, 5)
+    ax.set_ylim(ymin, ymax)
     ax.grid(which="both", alpha=0.3)
     if ax.get_legend_handles_labels()[0]:
         ax.legend()
@@ -154,14 +160,14 @@ def plot_weighting(frequency, weighting_dB=None, ax=None, *, label=None,
 
 
 @typed_plot_error
-def plot_source_level(frequency, level_dB, ax=None, *, label=None, title=None,
+def plot_source_level(frequencies, level_dB, ax=None, *, label=None, title=None,
                       figsize=(8, 4), **mpl_kw):
     """Plot a ship source-level spectrum (dB re 1 µPa²·m² vs band centre),
     the ISO 18405 unit :mod:`uacpy.noise` states its source levels in.
 
     Parameters
     ----------
-    frequency : array_like
+    frequencies : array_like
         Band centre frequencies (Hz).
     level_dB : array_like
         Source level per band (dB re 1 µPa²·m²).
@@ -177,8 +183,8 @@ def plot_source_level(frequency, level_dB, ax=None, *, label=None, title=None,
     **mpl_kw
         Matplotlib keywords for the line.
     """
-    _require_nonempty('plot_source_level', frequency=frequency, level_dB=level_dB)
-    f = np.asarray(frequency, dtype=float)
+    _require_nonempty('plot_source_level', frequencies=frequencies, level_dB=level_dB)
+    f = np.asarray(frequencies, dtype=float)
     lv = np.asarray(level_dB, dtype=float)
     own_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
@@ -298,7 +304,7 @@ def plot_cumulative_exposure(exposure, ax=None, *, criterion_dB=None,
             remediation="Compute it first: e = uacpy.acoustics."
                         "cumulative_sound_exposure_level(p, fs); then "
                         "e.plot().")
-    levels = np.asarray(exposure.levels, dtype=float)
+    levels = np.asarray(exposure.levels_dB, dtype=float)
     if levels.ndim != 1:
         raise ConfigurationError(
             f"{who}: this curve holds {levels.shape} values, a block of "

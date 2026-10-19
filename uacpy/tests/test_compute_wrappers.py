@@ -64,6 +64,20 @@ class TestComputeAPI:
         assert isinstance(result_bellhop, Field)
         assert isinstance(result_kraken, Field)
 
+    def test_compute_modes_says_a_source_weight_is_not_applied(self):
+        """``compute_modes`` is ``run(env, source, None,
+        run_mode=RunMode.MODES)``: a weighted Source gets the same notice on
+        both doors, since MODES returns no pressure field to scale."""
+        import uacpy
+        from uacpy.core.exceptions import FallbackWarning
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+        src = uacpy.Source(depths=[30.0], frequencies=[100.0], weights=[2.0])
+        for call in (lambda k: k.compute_modes(env, src),
+                     lambda k: k.run(env, src, None, run_mode=RunMode.MODES)):
+            with pytest.warns(FallbackWarning,
+                              match=r'is not applied in the MODES mode'):
+                call(Kraken(verbose=False))
+
     @pytest.mark.requires_binary
     def test_compute_modes_rejects_receiver_arg(self):
         # A mode solve has no receiver grid, so ``compute_modes`` takes the

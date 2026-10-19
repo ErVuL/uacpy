@@ -9,6 +9,10 @@ attribution required); served live (no download).
 Endpoints (no auth):
   * ``PointServer`` — elevation (m, +up) at one lon/lat.
   * ``GridServer?format=coards`` — a ``lon``/``lat``/``altitude`` NetCDF subset.
+
+Every fetch takes ``base_url=``, the services root both endpoints hang under
+(a mirror); ``None`` reads the module constants :data:`POINT_URL` and
+:data:`GRID_URL`.
 """
 
 import numpy as np
@@ -26,10 +30,20 @@ GRID_URL = 'https://www.gmrt.org/services/GridServer'
 _USER_AGENT = 'uacpy (+https://github.com/ErVuL/uacpy)'
 
 
-def _elevation(lat, lon, *, timeout, verbose):
+def _endpoint(base_url, server):
+    """The URL of ``server`` (``'PointServer'`` or ``'GridServer'``): under
+    the services root ``base_url``, or the module constant when it is
+    ``None``."""
+    if base_url is None:
+        return POINT_URL if server == 'PointServer' else GRID_URL
+    return f"{str(base_url).rstrip('/')}/{server}"
+
+
+def _elevation(lat, lon, *, timeout, verbose, base_url=None):
     """Elevation (m, positive up) at one point from the GMRT PointServer."""
     lon = normalize_lon(lon)
-    url = f"{POINT_URL}?longitude={lon}&latitude={lat}&format=text/plain"
+    url = (f"{_endpoint(base_url, 'PointServer')}?longitude={lon}"
+           f"&latitude={lat}&format=text/plain")
     body = http_get(url, timeout=timeout, verbose=verbose, source='bathymetry',
                     user_agent=_USER_AGENT).decode('utf-8', 'replace').strip()
     try:
@@ -43,25 +57,26 @@ def _elevation(lat, lon, *, timeout, verbose):
         )
 
 
-def point_depth(point, *, timeout=30.0, verbose=False):
+def point_depth(point, *, timeout=30.0, verbose=False, base_url=None):
     """Water depth (m, positive down) at a single point from GMRT."""
     lat, lon = as_coordinate(point)
     return depth_from_elevation(
-        _elevation(lat, lon, timeout=timeout, verbose=verbose), lat, lon,
-        dataset='GMRT')
+        _elevation(lat, lon, timeout=timeout, verbose=verbose,
+                   base_url=base_url), lat, lon, dataset='GMRT')
 
 
-def depths_along(lats, lons, *, timeout=30.0, verbose=False):
+def depths_along(lats, lons, *, timeout=30.0, verbose=False, base_url=None):
     """Depths (m) at paired ``lats``/``lons`` waypoints (one PointServer call each)."""
     out = np.empty(len(lats))
     for k, (la, lo) in enumerate(zip(lats, lons)):
         out[k] = depth_from_elevation(
-            _elevation(la, lo, timeout=timeout, verbose=verbose), la, lo,
-            dataset='GMRT')
+            _elevation(la, lo, timeout=timeout, verbose=verbose,
+                       base_url=base_url), la, lo, dataset='GMRT')
     return out
 
 
-def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=False):
+def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0,
+                verbose=False, base_url=None):
     """``(lats, lons, depth)`` over a region; land cells are NaN.
 
     Fetches a GMRT GridServer COARDS subset, then samples it (nearest node) onto
@@ -82,7 +97,8 @@ def region_grid(lat_range, lon_range, n_lat, n_lon, *, timeout=120.0, verbose=Fa
                         "the request at 180 deg.")
     lo0, lo1 = sorted((normalize_lon(lon_range[0]), normalize_lon(lon_range[1])))
     la0, la1 = sorted((float(lat_range[0]), float(lat_range[1])))
-    url = (f"{GRID_URL}?minlongitude={lo0}&maxlongitude={lo1}"
+    url = (f"{_endpoint(base_url, 'GridServer')}?minlongitude={lo0}"
+           f"&maxlongitude={lo1}"
            f"&minlatitude={la0}&maxlatitude={la1}&format=coards&resolution=high")
     blob = http_get(url, timeout=timeout, verbose=verbose, source='bathymetry',
                     user_agent=_USER_AGENT)

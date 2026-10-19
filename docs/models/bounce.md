@@ -24,7 +24,7 @@ R(θ) = |R(θ)| · e^{iφ(θ)}
 
 `|R|` is the fraction of amplitude returned (0 = perfectly absorbing, 1 =
 perfectly reflecting) and `φ` is the phase the boundary adds, in the Acoustics
-Toolbox's `e^{+iωt}` time convention (`index.htm:801`; the outgoing propagators
+Toolbox's `e^{+iωt}` time convention (`Acoustics-Toolbox/index.htm:801`; the outgoing propagators
 are `e^{−ikr}`): `rc.magnitude * exp(1j * rc.phase)` is exactly the coefficient BOUNCE
 computed. Both depend on the grazing angle θ, measured from
 the interface — **0° is a ray skimming along the seabed, 90° is normal
@@ -172,12 +172,12 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 |---|---|---|
 | `executable` | `None` | Path to `bounce`; auto-detected. |
 | `n_mesh` | `None` | Finite-difference points per sediment medium (`NPTS`), written as given: one count for every medium, or one per medium; `0` is the reader's automatic 20 points per wavelength (`doc/bounce.htm`). `None` = 100 points per wavelength of each medium's slowest wave, at least 100 — the manual's "perhaps 100 points/wavelength as a good balance between run time and accuracy" (10 per wavelength, the reader's floor, it calls "very poor"). A count under the reader's floor (`ReadEnvironmentMod.f90:110-112`, "Mesh is too coarse") is refused; over a bare half-space, which has no medium to mesh, a pinned count gets a notice. Use it to check `R(θ)` for mesh convergence. |
-| `interp_ssp` | `None` | SSP interpolation scheme written into the `.env`; unset → `'linear'` (AT `'C'`), the manual's choice when unsure (`doc/EnvironmentalFile.htm`: "If your not sure which option to take, I'd suggest you use 'C'."). |
+| `interp_ssp` | `None` | SSP interpolation scheme written into the `.env`; unset → `'linear'` (AT `'C'`), the manual's choice when unsure (`doc/EnvironmentalFile.htm`: "If your not sure which option to take, I'd suggest you use 'C'."). Over a bare half-space the deck carries no sediment medium to interpolate, so a set value is not used and a notice says so. |
 | `collapse` | `None` | Override the collapse policy (default `bottom_range='median'`). |
 | `use_tmpfs` | `False` | Stage scratch files in RAM. |
 | `work_dir` | `None` | Pin the scratch dir to keep `.brc` / `.irc` / `.env` / `.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
-| `timeout` | `600.0` | Subprocess timeout (s). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
+| `timeout` | `600.0` | Subprocess timeout (s), positive and finite, or `None` for no limit (anything else is refused at construction). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`. |
 
 ---

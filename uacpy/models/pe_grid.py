@@ -23,7 +23,7 @@ approximation of the propagator ``exp(ikΔx(√(1+ξ) − 1))``. This module:
 * Computes the Padé approximation error on the accuracy band and a
   Numerov vertical-FD error from ``Δz`` at that band's steepest component.
 * Searches for the coarsest ``(Δx, Δz)`` whose total error stays under a
-  user accuracy budget ``ε`` over ``n_steps = ⌈x_max/Δx⌉`` range steps.
+  user accuracy budget ``ε`` over ``n_steps = ⌈rmax/Δx⌉`` range steps.
 
 ``c₀`` is a user input; the optimizer picks ``(Δx, Δz)`` against that
 value. It is the *algorithmic* expansion point of the parabolic equation
@@ -85,7 +85,7 @@ class GridChoice(NamedTuple):
         Vertical wavenumber (rad/m) of the steepest scored component.
     alpha : float
         The vertical-FD scheme parameter.
-    p : int
+    n_pade : int
         The Padé order scored.
     xi_min, xi_max : float
         The accuracy band at ``c0``.
@@ -102,7 +102,7 @@ class GridChoice(NamedTuple):
     c0: float
     kz_max: float
     alpha: float
-    p: int
+    n_pade: int
     xi_min: float
     xi_max: float
     xi_stab_min: float
@@ -405,7 +405,7 @@ def _step_error(
     # limestone under a slope). A REAL sqrt returns NaN there, `abs(NaN - pq)`
     # is NaN, and `NaN > err_max` is False, so err_max would keep its 0.0
     # initialiser and EVERY candidate grid score a perfect zero: optimize_grid
-    # would take the coarsest rung of both ladders (dx = x_max/2,
+    # would take the coarsest rung of both ladders (dx = rmax/2,
     # dz = DZ_MAX), a march measured 360 dB rms from Scooter under a logged
     # "predicted error 0.00e+00". The complex branch evaluates the evanescent
     # propagator exp(-k0·dx·|Im√|) that belongs there.
@@ -453,7 +453,7 @@ def _step_error(
 
 
 def combined_error(
-    dx: float, dz: float, k0: float, p: int,
+    dx: float, dz: float, k0: float, n_pade: int,
     xi_min: float, xi_max: float,
     angle_max_deg: float, alpha: float = 0.0,
     n_xi: int = 161, n_offsets: int = 5,
@@ -473,7 +473,7 @@ def combined_error(
         Range and depth steps (m).
     k0 : float
         Reference wavenumber (rad/m).
-    p : int
+    n_pade : int
         Padé order.
     xi_min, xi_max : float
         The accuracy band of ``ξ``.
@@ -484,7 +484,7 @@ def combined_error(
     n_xi, n_offsets : int, optional
         Samples of the band and of the ``ξ`` spread. Defaults 161 and 5.
     pade : (ndarray, ndarray), optional
-        A ``(P, Q)`` already built at ``(dx, k0, p)``; ``None`` builds it.
+        A ``(P, Q)`` already built at ``(dx, k0, n_pade)``; ``None`` builds it.
     kz_max : float, optional
         Steepest component (rad/m) of the band, in place of
         ``k0 sin(angle_max_deg)``.
@@ -493,7 +493,7 @@ def combined_error(
         ``None`` takes the accuracy band.
     """
     return _step_error(
-        dx, dz, k0, p, xi_min, xi_max, np.deg2rad(float(angle_max_deg)),
+        dx, dz, k0, n_pade, xi_min, xi_max, np.deg2rad(float(angle_max_deg)),
         alpha=alpha, n_xi=n_xi, n_offsets=n_offsets, pade=pade,
         kz_max=kz_max, xi_stab_min=xi_stab_min, xi_stab_max=xi_stab_max)[0]
 
@@ -619,11 +619,11 @@ def optimize_grid(
     frequency: float,
     c_min: float,
     c_max: float,
-    x_max: float,
+    rmax: float,
     c0: float,
     angle_max_deg: float = 30.0,
     eps: float = 1e-3,
-    p: int = DEFAULT_N_PADE,
+    n_pade: int = DEFAULT_N_PADE,
     alpha: float = 0.0,
     tau_cache: Optional[dict] = None,
     c_min_all: Optional[float] = None,
@@ -631,7 +631,7 @@ def optimize_grid(
     grid: Optional[Tuple[float, float]] = None,
 ) -> GridChoice:
     """Find the coarsest ``(Δx, Δz)`` whose accumulated error stays under
-    ``ε`` over ``⌈x_max/Δx⌉`` march steps for the given ``c₀`` — or, with
+    ``ε`` over ``⌈rmax/Δx⌉`` march steps for the given ``c₀`` — or, with
     ``grid=(dr, dz)``, score that pair instead of searching.
 
     The search sees Lytaev's error model only. RAM applies its own
@@ -649,7 +649,7 @@ def optimize_grid(
         Slowest / fastest sound speeds anywhere in the domain, seabed
         included, bounding the stability band (:func:`_bands`).
         Default: the water bounds, i.e. one band as in Lytaev §4.1.
-    x_max : float
+    rmax : float
         Maximum range (m) the PE will march to.
     c0 : float
         Reference sound speed (m/s). The RAM wrapper resolves its
@@ -660,9 +660,9 @@ def optimize_grid(
     eps : float
         Total accuracy budget (max ``|τ · n_steps|``). Default 1e-3.
         Unused with ``grid``.
-    p : int
-        Padé order ``[p/p]``. Default :data:`DEFAULT_N_PADE` (8), the
-        order a default RAM run marches.
+    n_pade : int
+        Padé order ``p`` of the ``[p/p]`` approximant. Default
+        :data:`DEFAULT_N_PADE` (8), the order a default RAM run marches.
     alpha : float
         Vertical-FD scheme parameter. ``0.0`` = standard second-order
         tridiagonal (rams0.5 / ramsurf1.5). ``1/12`` = 4th-order Numerov
@@ -711,7 +711,7 @@ def optimize_grid(
 
     # Candidate ladders, scanned in full; the pair maximising ``dx·dz``
     # among those inside the budget wins.
-    dx_top = x_max * 0.5
+    dx_top = rmax * 0.5
     held = (None, None) if grid is None else tuple(grid)
     score_only = None not in held
     dx_candidates = ([float(held[0])] if held[0] is not None else
@@ -735,21 +735,21 @@ def optimize_grid(
     best = None
     best_product = -1.0
     for dx in dx_candidates:
-        n_steps = int(np.ceil(x_max / dx))
+        n_steps = int(np.ceil(rmax / dx))
         # One Padé build per Δx instead of one per (Δx, Δz): the approximant
-        # is a function of (dx, k0, p) alone (:func:`_propagator_pade`), while
+        # is a function of (dx, k0, n_pade) alone (:func:`_propagator_pade`), while
         # the ladder below moves only Δz. Built lazily so a retry whose whole
         # Δz ladder is already memoised builds nothing.
         pade = None
         for dz in dz_candidates:
-            key = (dx, dz, k0, p, xi_min, xi_max, xi_stab_min, xi_stab_max,
+            key = (dx, dz, k0, n_pade, xi_min, xi_max, xi_stab_min, xi_stab_max,
                    kz_max, alpha)
             scored = cache.get(key)
             if scored is None:
                 if pade is None:
-                    pade = _propagator_pade(dx, k0, p)
+                    pade = _propagator_pade(dx, k0, n_pade)
                 scored = cache[key] = _step_error(
-                    dx, dz, k0, p, xi_min, xi_max, angle_max_rad, alpha=alpha,
+                    dx, dz, k0, n_pade, xi_min, xi_max, angle_max_rad, alpha=alpha,
                     pade=pade, kz_max=kz_max,
                     xi_stab_min=xi_stab_min, xi_stab_max=xi_stab_max,
                 )
@@ -768,14 +768,14 @@ def optimize_grid(
         raise GridInfeasibleError(
             f"No (Δx, Δz) candidate satisfies ε={eps:.2e} for "
             f"f={frequency:.1f} Hz, c₀={c0_use:.0f} m/s, θ_max={float(angle_max_deg):.1f}°, "
-            f"x_max={x_max:.0f} m on the accuracy band "
+            f"rmax={rmax:.0f} m on the accuracy band "
             f"ξ ∈ [{xi_min:.3f}, {xi_max:.3f}] with the Δz ladder "
             f"[{dz_ladder_end(frequency, c_min):.3g}, {DZ_MAX:g}] m and "
             f"the Δx ladder "
             f"[{dx_candidates[-1]:.3g}, {dx_top:.3g}] m."
         )
     return GridChoice(
-        c0=c0_use, kz_max=float(kz_max), alpha=float(alpha), p=int(p),
+        c0=c0_use, kz_max=float(kz_max), alpha=float(alpha), n_pade=int(n_pade),
         **bands, **best,
     )
 
@@ -787,10 +787,10 @@ def grid_error(
     frequency: float,
     c_min: float,
     c_max: float,
-    x_max: float,
+    rmax: float,
     c0: float,
     angle_max_deg: float = 30.0,
-    p: int = DEFAULT_N_PADE,
+    n_pade: int = DEFAULT_N_PADE,
     alpha: float = 0.0,
     tau_cache: Optional[dict] = None,
     c_min_all: Optional[float] = None,
@@ -803,16 +803,16 @@ def grid_error(
     ----------
     dr, dz : float
         The range and depth steps (m).
-    frequency, c_min, c_max, x_max, c0 : float
+    frequency, c_min, c_max, rmax, c0 : float
         As in :func:`optimize_grid`.
-    angle_max_deg, p, alpha, tau_cache, c_min_all, c_max_all : optional
-        As in :func:`optimize_grid` (``angle_max_deg`` in degrees; ``p``
+    angle_max_deg, n_pade, alpha, tau_cache, c_min_all, c_max_all : optional
+        As in :func:`optimize_grid` (``angle_max_deg`` in degrees; ``n_pade``
         default :data:`DEFAULT_N_PADE`, RAM's own order).
     """
     return optimize_grid(
-        frequency=frequency, c_min=c_min, c_max=c_max, x_max=x_max, c0=c0,
-        angle_max_deg=angle_max_deg, p=p, alpha=alpha, tau_cache=tau_cache,
-        c_min_all=c_min_all, c_max_all=c_max_all,
+        frequency=frequency, c_min=c_min, c_max=c_max, rmax=rmax, c0=c0,
+        angle_max_deg=angle_max_deg, n_pade=n_pade, alpha=alpha,
+        tau_cache=tau_cache, c_min_all=c_min_all, c_max_all=c_max_all,
         grid=(dr, dz)).predicted_error
 
 
@@ -890,7 +890,7 @@ def rams_dz_shear_cap(c_shear_min: float, frequency: float,
 # attenuation; shear conversion only adds loss, so the estimate is
 # conservative on an elastic seabed. ``safety`` halves the leak the rule may
 # lean on, which leaves every measured grid on the side it was observed on
-# with a factor of 2 in hand.
+# with a factor of 2 in hand (uacpy guidance).
 #
 # ``ξ`` is measured against the PE reference k0 = ω/c0 throughout (the
 # operator rams0.5 steps is ``X = (k_r/k0)² − 1``), so a component's
@@ -902,7 +902,7 @@ RAMS_STABILITY_SAFETY = 2.0
 _RAMS_XI_GRID = np.linspace(-0.999, -1e-3, 2000)
 
 
-def rotated_pade_coefficients(n_pade: int, theta_deg: float):
+def rotated_pade_coefficients(n_pade: int, rams_rotation_angle_deg: float):
     """``(rot1, rot2, rot0)`` of rams0.5's ``rpade`` — the rotated
     rational-linear square root ``√(1+ξ) ≈ rot0 + Σ rot1 ξ/(1 + rot2 ξ)``
     (``rams0.5.f:859-892``, before the Crank-Nicolson step is folded in).
@@ -911,10 +911,10 @@ def rotated_pade_coefficients(n_pade: int, theta_deg: float):
     ----------
     n_pade : int
         Padé order.
-    theta_deg : float
+    rams_rotation_angle_deg : float
         Rotation angle (deg).
     """
-    tfact = np.exp(-1j * np.deg2rad(float(theta_deg)) / 2.0)
+    tfact = np.exp(-1j * np.deg2rad(float(rams_rotation_angle_deg)) / 2.0)
     den = float(2 * int(n_pade) + 1)
     rot0 = 1.0 + 0.0j
     rot1, rot2 = [], []
@@ -929,7 +929,7 @@ def rotated_pade_coefficients(n_pade: int, theta_deg: float):
 
 
 def rotated_cn_growth(xi, k0: float, dr: float, n_pade: int,
-                      theta_deg: float) -> np.ndarray:
+                      rams_rotation_angle_deg: float) -> np.ndarray:
     """Per-metre amplification ``ln|G(ξ)| / dr`` (Np/m) of one rams0.5 range
     step on the spectral component ``ξ = (k_r/k0)² − 1``: the product of the
     ``n_pade`` Crank-Nicolson factors ``(1 + pd1 ξ)/(1 + pd2 ξ)`` and the
@@ -946,11 +946,11 @@ def rotated_cn_growth(xi, k0: float, dr: float, n_pade: int,
         Range step (m).
     n_pade : int
         Padé order.
-    theta_deg : float
+    rams_rotation_angle_deg : float
         Rotation angle (deg).
     """
     xi = np.asarray(xi, dtype=float)
-    rot1, rot2, rot0 = rotated_pade_coefficients(n_pade, theta_deg)
+    rot1, rot2, rot0 = rotated_pade_coefficients(n_pade, rams_rotation_angle_deg)
     s = 0.5j * float(k0) * float(dr)
     log_g = np.full(xi.shape, np.log(abs(np.exp(1j * float(k0) * float(dr)
                                                     * rot0))))
@@ -961,7 +961,7 @@ def rotated_cn_growth(xi, k0: float, dr: float, n_pade: int,
 
 
 def rotated_growth_floor(xi, k0: float, n_pade: int,
-                         theta_deg: float) -> np.ndarray:
+                         rams_rotation_angle_deg: float) -> np.ndarray:
     """The part of :func:`rotated_cn_growth` no range step removes: the
     per-metre amplification ``−k0·Im s(ξ)`` (Np/m) of the rotated square
     root ``s(ξ)`` itself, which is what the Crank-Nicolson step converges
@@ -979,17 +979,17 @@ def rotated_growth_floor(xi, k0: float, n_pade: int,
         Reference wavenumber (rad/m).
     n_pade : int
         Padé order.
-    theta_deg : float
+    rams_rotation_angle_deg : float
         Rotation angle (deg).
     """
     xi = np.asarray(xi, dtype=float)
-    rot1, rot2, rot0 = rotated_pade_coefficients(n_pade, theta_deg)
+    rot1, rot2, rot0 = rotated_pade_coefficients(n_pade, rams_rotation_angle_deg)
     s = rot0 + sum(a * xi / (1.0 + b * xi) for a, b in zip(rot1, rot2))
     return -float(k0) * s.imag
 
 
 def seabed_leak_rate(xi, *, c0: float, water_sound_speed: float,
-                     water_density: float, seabed_speed: float,
+                     water_density: float, seabed_sound_speed: float,
                      seabed_density: float,
                      seabed_attenuation: float,
                      depth: float) -> np.ndarray:
@@ -1010,7 +1010,7 @@ def seabed_leak_rate(xi, *, c0: float, water_sound_speed: float,
         Water sound speed (m/s) at the seabed.
     water_density : float
         Water density (g/cm³).
-    seabed_speed : float
+    seabed_sound_speed : float
         Seabed compressional speed (m/s).
     seabed_density : float
         Seabed density (g/cm³).
@@ -1027,7 +1027,7 @@ def seabed_leak_rate(xi, *, c0: float, water_sound_speed: float,
     with np.errstate(divide='ignore', invalid='ignore'):
         r = np.abs(reflection_coeff(
             np.rad2deg(grazing),
-            sound_speed=float(seabed_speed),
+            sound_speed=float(seabed_sound_speed),
             density=float(seabed_density),
             attenuation=float(seabed_attenuation),
             water_sound_speed=float(water_sound_speed),
@@ -1036,16 +1036,16 @@ def seabed_leak_rate(xi, *, c0: float, water_sound_speed: float,
     return np.where(kr_over_kw < 1.0, leak, 0.0)
 
 
-def _rams_steep_band(c0: float, water_sound_speed: float, seabed_speed: float):
+def _rams_steep_band(c0: float, water_sound_speed: float, seabed_sound_speed: float):
     """The ``ξ`` grid of the steep band the stability rule is scored on:
     from just above cutoff up to the seabed's critical angle (the whole
     propagating band when the seabed is slower than the water). Below the
     critical angle the step's growth is a small accuracy error that the
     sediment's own loss masks — measured 0.06 dB bias against Kraken over
     5 km — not a stability question."""
-    if seabed_speed > water_sound_speed:
+    if seabed_sound_speed > water_sound_speed:
         # k_r = ω/c_s at the critical angle, so ξ = (k_r/k0)² − 1 = (c0/c_s)² − 1.
-        xi_crit = (float(c0) / float(seabed_speed)) ** 2 - 1.0
+        xi_crit = (float(c0) / float(seabed_sound_speed)) ** 2 - 1.0
     else:
         xi_crit = -1e-3
     xi_top = min(max(xi_crit, -0.999 + 1e-6), -1e-3)
@@ -1054,9 +1054,9 @@ def _rams_steep_band(c0: float, water_sound_speed: float, seabed_speed: float):
 
 def rams_growth_margin(dr: Optional[float], *, frequency: float, c0: float,
                        water_sound_speed: float, water_density: float,
-                       seabed_speed: float, seabed_density: float,
+                       seabed_sound_speed: float, seabed_density: float,
                        seabed_attenuation: float, depth: float,
-                       n_pade: int, theta_deg: float,
+                       n_pade: int, rams_rotation_angle_deg: float,
                        safety: float = RAMS_STABILITY_SAFETY) -> GrowthMargin:
     """How far the rams0.5 march at ``dr`` sits from divergence, as a
     :class:`GrowthMargin`: at the steep component where
@@ -1079,7 +1079,7 @@ def rams_growth_margin(dr: Optional[float], *, frequency: float, c0: float,
         Water sound speed (m/s) at the seabed.
     water_density : float
         Water density (g/cm³).
-    seabed_speed : float
+    seabed_sound_speed : float
         Seabed compressional speed (m/s).
     seabed_density : float
         Seabed density (g/cm³).
@@ -1089,21 +1089,21 @@ def rams_growth_margin(dr: Optional[float], *, frequency: float, c0: float,
         Water depth (m).
     n_pade : int
         Padé order.
-    theta_deg : float
+    rams_rotation_angle_deg : float
         Rotation angle (deg).
     safety : float, optional
         Factor the leak is divided by. Default
         :data:`RAMS_STABILITY_SAFETY`.
     """
-    xi = _rams_steep_band(c0, water_sound_speed, seabed_speed)
+    xi = _rams_steep_band(c0, water_sound_speed, seabed_sound_speed)
     k0 = 2.0 * np.pi * float(frequency) / float(c0)
     leak = seabed_leak_rate(
         xi, c0=c0, water_sound_speed=water_sound_speed,
         water_density=water_density,
-        seabed_speed=seabed_speed, seabed_density=seabed_density,
+        seabed_sound_speed=seabed_sound_speed, seabed_density=seabed_density,
         seabed_attenuation=seabed_attenuation,
         depth=depth)
-    floor = rotated_growth_floor(xi, k0, n_pade, theta_deg)
+    floor = rotated_growth_floor(xi, k0, n_pade, rams_rotation_angle_deg)
     floor_excess = floor - leak / float(safety)
     j = int(np.argmax(floor_excess))
     out = GrowthMargin(floor=float(floor[j]), floor_leak=float(leak[j]),
@@ -1111,7 +1111,7 @@ def rams_growth_margin(dr: Optional[float], *, frequency: float, c0: float,
                        floor_excess=float(floor_excess[j]))
     if dr is None:
         return out
-    growth = rotated_cn_growth(xi, k0, dr, n_pade, theta_deg)
+    growth = rotated_cn_growth(xi, k0, dr, n_pade, rams_rotation_angle_deg)
     excess = growth - leak / float(safety)
     i = int(np.argmax(excess))
     grazing = np.degrees(np.arccos(np.clip(
@@ -1123,9 +1123,9 @@ def rams_growth_margin(dr: Optional[float], *, frequency: float, c0: float,
 
 def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
                    water_sound_speed: float, water_density: float,
-                   seabed_speed: float, seabed_density: float,
+                   seabed_sound_speed: float, seabed_density: float,
                    seabed_attenuation: float, depth: float,
-                   n_pade: int, theta_deg: float,
+                   n_pade: int, rams_rotation_angle_deg: float,
                    safety: float = RAMS_STABILITY_SAFETY) -> Optional[float]:
     """The largest range step ``<= dr_max`` at which the rams0.5 rotated
     Crank-Nicolson march is predicted not to diverge: the step's growth rate
@@ -1134,7 +1134,7 @@ def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
     growth rate rises monotonically with ``dr`` (as ``dr²`` for small
     ``k0·dr``), so a bisection on ``log dr`` finds the boundary to 1 %.
     Returns ``None`` when the rotation's own growth already exceeds the leak
-    (``floor_excess > 0``): a smaller ``theta_deg`` or a higher order is then
+    (``floor_excess > 0``): a smaller ``rams_rotation_angle_deg`` or a higher order is then
     the only remedy — see :func:`rams_stable_theta`.
 
     Parameters
@@ -1149,7 +1149,7 @@ def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
         Water sound speed (m/s) at the seabed.
     water_density : float
         Water density (g/cm³).
-    seabed_speed : float
+    seabed_sound_speed : float
         Seabed compressional speed (m/s).
     seabed_density : float
         Seabed density (g/cm³).
@@ -1159,7 +1159,7 @@ def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
         Water depth (m).
     n_pade : int
         Padé order.
-    theta_deg : float
+    rams_rotation_angle_deg : float
         Rotation angle (deg).
     safety : float, optional
         Factor the leak is divided by. Default
@@ -1167,10 +1167,10 @@ def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
     """
     params = dict(frequency=frequency, c0=c0,
                   water_sound_speed=water_sound_speed,
-                  water_density=water_density, seabed_speed=seabed_speed,
+                  water_density=water_density, seabed_sound_speed=seabed_sound_speed,
                   seabed_density=seabed_density,
                   seabed_attenuation=seabed_attenuation,
-                  depth=depth, n_pade=n_pade, theta_deg=theta_deg,
+                  depth=depth, n_pade=n_pade, rams_rotation_angle_deg=rams_rotation_angle_deg,
                   safety=safety)
     if rams_growth_margin(None, **params).floor_excess > 0.0:
         return None
@@ -1212,12 +1212,12 @@ RAMS_THETA_LADDER_DEG = (45.0, 40.0, 30.0, 25.0, 20.0, 15.0, 10.0, 5.0)
 
 def rams_stable_theta(*, frequency: float, c0: float,
                       water_sound_speed: float, water_density: float,
-                      seabed_speed: float, seabed_density: float,
+                      seabed_sound_speed: float, seabed_density: float,
                       seabed_attenuation: float, depth: float,
-                      n_pade: int, theta_deg: float,
+                      n_pade: int, rams_rotation_angle_deg: float,
                       safety: float = RAMS_STABILITY_SAFETY) -> Optional[float]:
     """The largest rotation angle on :data:`RAMS_THETA_LADDER_DEG` at or
-    below the requested ``theta_deg`` whose own growth
+    below the requested ``rams_rotation_angle_deg`` whose own growth
     (:func:`rotated_growth_floor`) stays under the seabed's leak over
     ``safety``; ``None`` when none does (a higher ``n_pade``, or a
     wavenumber-integration model, is then the way out). The keywords are
@@ -1233,7 +1233,7 @@ def rams_stable_theta(*, frequency: float, c0: float,
         Water sound speed (m/s) at the seabed.
     water_density : float
         Water density (g/cm³).
-    seabed_speed : float
+    seabed_sound_speed : float
         Seabed compressional speed (m/s).
     seabed_density : float
         Seabed density (g/cm³).
@@ -1243,7 +1243,7 @@ def rams_stable_theta(*, frequency: float, c0: float,
         Water depth (m).
     n_pade : int
         Padé order.
-    theta_deg : float
+    rams_rotation_angle_deg : float
         The requested rotation angle (deg).
     safety : float, optional
         Factor the leak is divided by. Default
@@ -1251,13 +1251,13 @@ def rams_stable_theta(*, frequency: float, c0: float,
     """
     params = dict(frequency=frequency, c0=c0,
                   water_sound_speed=water_sound_speed,
-                  water_density=water_density, seabed_speed=seabed_speed,
+                  water_density=water_density, seabed_sound_speed=seabed_sound_speed,
                   seabed_density=seabed_density,
                   seabed_attenuation=seabed_attenuation,
                   depth=depth, n_pade=n_pade, safety=safety)
     for theta in RAMS_THETA_LADDER_DEG:
-        if theta > float(theta_deg) + 1e-9:
+        if theta > float(rams_rotation_angle_deg) + 1e-9:
             continue
-        if rams_growth_margin(None, theta_deg=theta, **params).floor_excess <= 0.0:
+        if rams_growth_margin(None, rams_rotation_angle_deg=theta, **params).floor_excess <= 0.0:
             return theta
     return None

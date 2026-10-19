@@ -194,6 +194,33 @@ class TestGreensFunctionCarriesItsAxes:
                            source_depths=[5.0], frequencies=[50.0, 60.0],
                            times=[0.0, 1.0, 2.0])
 
+    @pytest.mark.parametrize('transform', ['to_field',
+                                           'to_transfer_function'])
+    def test_a_multi_source_file_gives_every_source(self, transform):
+        """Left unset, ``source_depth_idx`` transforms every source of the
+        file onto a leading ``source_depth`` axis, each plane the field that
+        index alone gives."""
+        from uacpy.core.results import GreensFunction
+        rng = np.random.default_rng(2)
+        G = (rng.standard_normal((1, 2, 2, 32))
+             + 1j * rng.standard_normal((1, 2, 2, 32))).astype(np.complex64)
+        gf = GreensFunction(
+            data=G, phase_speeds=_uniform_k_phase_speeds(1700.0, 1400.0, 32,
+                                                         100.0),
+            receiver_depths=np.array([25.0, 75.0]),
+            source_depths=[30.0, 60.0], frequencies=100.0,
+            title="SCOOTER test")
+        ranges = np.array([100.0, 200.0, 300.0])
+        every = getattr(gf, transform)(ranges)
+        assert every.axes[0] == 'source_depth'
+        np.testing.assert_array_equal(every.coords['source_depth'],
+                                      [30.0, 60.0])
+        for i in range(2):
+            alone = getattr(gf, transform)(ranges, source_depth_idx=i)
+            np.testing.assert_array_equal(every.data[i], alone.data)
+            np.testing.assert_array_equal(alone.source_depths,
+                                          [gf.source_depths[i]])
+
     def test_a_snapshot_is_told_by_its_times(self):
         assert _snapshot_gf().is_snapshot
         assert not _scooter_gf([100.0], np.ones((1, 1, 2, 8))).is_snapshot

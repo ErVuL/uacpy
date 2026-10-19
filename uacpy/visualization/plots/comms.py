@@ -13,7 +13,7 @@ import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.visualization.plots._common import (
-    fig_ax, typed_plot_error, _carrier_or_arrays, _floored_dB,
+    _VALUE_LABELS, fig_ax, typed_plot_error, _carrier_or_arrays, _floored_dB,
     _plot_warn, _refuse_spread_carrier, _require_nonempty, _title_or)
 
 
@@ -164,7 +164,7 @@ def plot_channel_response(frequencies, response=None, ax=None, *,
             _floored_dB(response, dynamic_range_dB=dynamic_range_dB,
                         who='plot_channel_response'), **mpl_kw)
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel("|H(f)| (dB)")
+    ax.set_ylabel(_VALUE_LABELS['level'])
     ax.set_title(_title_or(title, "Frequency response"))
     ax.grid(alpha=0.3)
     return fig, ax
@@ -344,7 +344,7 @@ def plot_subcarriers(response, ax=None, *, title=None, figsize=(8, 3.5),
             _floored_dB(H, dynamic_range_dB=dynamic_range_dB,
                         who='plot_subcarriers'), **mpl_kw)
     ax.set_xlabel("Subcarrier index")
-    ax.set_ylabel("|H| (dB)")
+    ax.set_ylabel(_VALUE_LABELS['level'])
     ax.set_title(_title_or(title, "OFDM subcarrier response"))
     ax.grid(alpha=0.3)
     return fig, ax
@@ -361,10 +361,10 @@ def _iq_axes(ax) -> None:
 
 
 @typed_plot_error
-def plot_scatter(symbols, ax=None, *, ideal=None, title=None, figsize=(5, 5),
-                 **mpl_kw):
-    """Constellation/scatter plot of received ``symbols``; optional ``ideal``
-    constellation overlay.
+def plot_received_symbols(symbols, ax=None, *, ideal=None, title=None,
+                          figsize=(5, 5), **mpl_kw):
+    """The received ``symbols`` scattered on the I/Q plane; optional
+    ``ideal`` constellation overlay.
 
     Parameters
     ----------
@@ -490,14 +490,18 @@ _THEORY_BER_GID = 'uacpy-ber-theory'
 
 
 def _bound_ber_axis(ax) -> None:
-    """Rescale the BER axis to everything on ``ax``; with a theory line on
-    it, stop the axis one decade below the lowest rate any measured line on
-    ``ax`` resolved (its lowest BER, or a 1/n_bits caret). Reading every
-    measured line, not the last one drawn, keeps a second curve from
-    clipping the first."""
+    """Rescale the BER axis to everything on ``ax``, its top at most 1 (a
+    rate above 1 is not a value; the log axis' own margin over a theory
+    curve many decades deep reaches 10¹); with a theory line on it, stop
+    the axis one decade below the lowest rate any measured line on ``ax``
+    resolved (its lowest BER, or a 1/n_bits caret). Reading every measured
+    line, not the last one drawn, keeps a second curve from clipping the
+    first."""
     ax.relim()
     ax.autoscale(enable=True, axis='y')
     ax.autoscale_view(scalex=False)
+    if ax.get_ylim()[1] > 1.0:
+        ax.set_ylim(top=1.0)
     if not any(line.get_gid() == _THEORY_BER_GID for line in ax.lines):
         return
     measured = [np.asarray(line.get_ydata(), dtype=float)

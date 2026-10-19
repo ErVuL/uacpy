@@ -41,15 +41,15 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 # ``Tuple`` is read by name: it is in Biological's ``init_annotations``
 # string, which ``typing.get_type_hints`` evaluates in this namespace.
 from typing import Any, Dict, List, Optional, Tuple, Union  # noqa: F401
 
 from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, PH_MAX, PH_MIN, REFERENCE_PH,
-    REFERENCE_SALINITY_PSU, REFERENCE_TEMPERATURE_C)
-from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
+    REFERENCE_SALINITY, REFERENCE_TEMPERATURE)
+from uacpy.core.deck_limits import MAX_ATTENUATION
 from uacpy.core.exceptions import (
     ConfigurationError, NumericsWarning, ValidityWarning,
 )
@@ -69,6 +69,7 @@ from uacpy.core._carrier import (
     DeepCopyMixin, RevalidateOnAssignMixin, carrier,
 )
 from uacpy.core._export import CarrierExport
+from uacpy.core._provenance import coerce_data_sources
 
 __all__ = [
     'AbsorptionCoefficient',
@@ -200,6 +201,16 @@ class AbsorptionCoefficient(CarrierExport):
     #: ``FrancoisGarrison(**a.parameters)`` is the law again. ``None`` for a
     #: model that takes no values (Thorp) and for a measured table.
     parameters: Optional[Dict[str, Any]] = None
+    #: Where the water came from: the
+    #: :class:`~uacpy.core.provenance.DataProvenance` records of a fetched
+    #: law's temperature, salinity and pH, which :meth:`Absorption.table`
+    #: copies from :attr:`Absorption.data_sources`; ``()`` for water typed
+    #: by hand. The table's plot credits them.
+    data_sources: tuple = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, 'data_sources', coerce_data_sources(
+            self.data_sources, "AbsorptionCoefficient"))
 
     @property
     def is_depth_dependent(self) -> bool:
@@ -259,14 +270,14 @@ class AbsorptionCoefficient(CarrierExport):
                 raise ConfigurationError(
                     f"{who}: {where}pairs must have shape (N, 2) as "
                     f"(frequency, value); got shape {arr.shape}.",
-                    remediation="Pass [(frequency_Hz, value), ...].")
+                    remediation="Pass [(frequency, value), ...].")
             return arr[:, 0], arr[:, 1]
 
         if isinstance(pairs, dict):
             if not pairs:
                 raise ConfigurationError(
                     f"{who}: the depth mapping is empty.",
-                    remediation="Pass {depth: [(frequency_Hz, value), ...]}.")
+                    remediation="Pass {depth: [(frequency, value), ...]}.")
             depths = np.array(sorted(float(z) for z in pairs), dtype=float)
             by_depth = {float(z): v for z, v in pairs.items()}
             freqs, data = None, []
@@ -322,7 +333,7 @@ class AbsorptionCoefficient(CarrierExport):
         return AbsorptionCoefficient(
             frequencies=self.frequencies, data=out, units=units,
             model=self.model, depths=self.depths, depth=self.depth,
-            parameters=self.parameters)
+            parameters=self.parameters, data_sources=self.data_sources)
 
     #: The plotter :func:`uacpy.plot.plot_carrier` draws this table with.
     _plotter = 'plot_absorption'
@@ -385,12 +396,23 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     #: The source sentence the out-of-range depth notice quotes.
     _DEPTH_RANGE_NOTE = ""
 
+    #: Where the water came from: the
+    #: :class:`~uacpy.core.provenance.DataProvenance` records of the
+    #: temperature, salinity and pH a fetched law was built from
+    #: (``uacpy.data.fetch_environment(..., with_absorption=True)`` sets
+    #: them); ``()`` for water typed by hand. Keyword-only, after the law's
+    #: own values. :meth:`table` copies them onto its table, and
+    #: ``env.data_sources`` gathers them with the other carriers'.
+    data_sources: tuple = field(default=(), kw_only=True)
+
     def __post_init__(self):
         if type(self) is Absorption:
             raise ConfigurationError(
                 "Absorption is abstract; instantiate Thorp / "
                 "FrancoisGarrison / Biological / ConstantAbsorption."
             )
+        self.data_sources = coerce_data_sources(
+            self.data_sources, type(self).__name__)
 
     def _check_frequency_range(self, frequencies) -> None:
         """Check ``frequencies`` against the law's fitted band: one notice
@@ -494,8 +516,9 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     ) -> AbsorptionCoefficient:
         """The law's alpha over frequency, and over depth if asked, as an
         :class:`AbsorptionCoefficient` that records this law (its
-        :attr:`~AbsorptionCoefficient.model` and
-        :attr:`~AbsorptionCoefficient.parameters`) — the table to look at,
+        :attr:`~AbsorptionCoefficient.model`,
+        :attr:`~AbsorptionCoefficient.parameters` and
+        :attr:`~AbsorptionCoefficient.data_sources`) — the table to look at,
         plot or export. The law, not its table, is what an environment takes.
 
         Vectorised on **both** axes, so one call answers alpha(f, z): an
@@ -553,7 +576,8 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             data=grid if z_axis is not None else grid[0, :],
             units='dB/m', model=self._model_name(), depths=z_axis,
             depth=None if z_axis is not None else float(z_eval[0]),
-            parameters=self._carrier_parameters())
+            parameters=self._carrier_parameters(),
+            data_sources=self.data_sources)
         return carrier.to_units(units, sound_speed=sound_speed)
 
     def _model_name(self) -> str:
@@ -690,7 +714,7 @@ class Thorp(Absorption):
 #: measurements at 34-41 ‰ and the MgSO4 field data at 30-35 ‰ (APL-UW TR 9407
 #: §I.B); the seawater pH range is 7.7-8.3 (Mellen et al. 1987; TR 9407 puts
 #: the "extreme" values outside 7.7-8.2). Inclusive on both ends.
-_FG_TEMPERATURE_RANGE_C = (-2.0, 30.0)
+_FG_TEMPERATURE_RANGE_C = (-1.8, 30.0)
 _FG_SALINITY_RANGE_PSU = (30.0, 41.0)
 _FG_PH_RANGE = (7.7, 8.3)
 #: Hz. "The equation may not hold below 200 Hz, where the boric acid
@@ -733,7 +757,10 @@ class FrancoisGarrison(Absorption):
     law has no depth of its own: every evaluation takes the depth it is
     evaluated at — :meth:`table` at the depths asked or, given none, at the
     surface (0 m) for one water row and at the profile's own depths for a
-    profile — and every engine sees the same α(z).
+    profile — and every engine sees the same α(z). ``data_sources``
+    (keyword-only) records where fetched water came from
+    (:attr:`Absorption.data_sources`); ``uacpy.data.fetch_environment``
+    sets it.
 
     Notes
     -----
@@ -755,7 +782,7 @@ class FrancoisGarrison(Absorption):
     that it "may not hold below 200 Hz, where the boric acid contribution
     may be exceeded by a scattering loss"; the MgSO4 term comes from field
     data at 30–35 ‰ and 2–22 °C (APL-UW TR 9407 §I.B). The constructor
-    therefore warns for ``temperature`` outside −2..30 °C,
+    therefore warns for ``temperature`` outside −1.8..30 °C,
     ``salinity`` outside 30..41, the union of the two terms' data (a
     Mediterranean 38.5 ‰ lies inside the boric-acid data though past the
     MgSO4 term's 30–35 ‰; a Baltic 7 ‰ lies outside both, and the boric term
@@ -830,8 +857,8 @@ class FrancoisGarrison(Absorption):
     # Each water property takes a single value (constant water) or
     # (depth, value) pairs, an (M, 2) array; a law has no evaluation depth,
     # so an array of values alone is refused (_profile_values).
-    temperature: Union[float, np.ndarray] = REFERENCE_TEMPERATURE_C
-    salinity: Union[float, np.ndarray] = REFERENCE_SALINITY_PSU
+    temperature: Union[float, np.ndarray] = REFERENCE_TEMPERATURE
+    salinity: Union[float, np.ndarray] = REFERENCE_SALINITY
     pH: Union[float, np.ndarray] = REFERENCE_PH
     ph_scale: str = 'nbs'
 
@@ -1257,14 +1284,14 @@ class BiologicalLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         peak_dB_lambda = float(convert_attenuation_units(
             peak_dB_km, float(self.f0), 'dB/km', 'dB/wavelength',
             sound_speed=DEFAULT_SOUND_SPEED))
-        if peak_dB_lambda > MAX_ATTENUATION_DB_PER_WAVELENGTH:
+        if peak_dB_lambda > MAX_ATTENUATION:
             ceiling_dB_km = peak_dB_km * (
-                MAX_ATTENUATION_DB_PER_WAVELENGTH / peak_dB_lambda)
+                MAX_ATTENUATION / peak_dB_lambda)
             warnings.warn(
                 f"BiologicalLayer: the on-resonance peak a0*Q² = "
                 f"{peak_dB_km:g} dB/km is {peak_dB_lambda:g} dB/wavelength at "
                 f"f0={self.f0:g} Hz in {DEFAULT_SOUND_SPEED:g} m/s water, "
-                f"over the {MAX_ATTENUATION_DB_PER_WAVELENGTH:.4f} above which "
+                f"over the {MAX_ATTENUATION:.4f} above which "
                 f"misc/AttenMod.f90's CRCI (:116) finds an imaginary sound "
                 f"speed larger than the real part and aborts. A run at or near "
                 f"f0 will fail in every AT solver; the ceiling here is "
@@ -1298,6 +1325,9 @@ class Biological(Absorption):
     layers : list of BiologicalLayer or tuples
         Each entry can be a :class:`BiologicalLayer` or a 5-tuple
         ``(z_top, z_bottom, f0, Q, a0)``.
+    data_sources : tuple of DataProvenance, keyword-only
+        Where the layers' numbers came from (:attr:`Absorption.data_sources`).
+        Default ``()``.
 
     """
     layers: List[BiologicalLayer] = _LAYERS_NOT_GIVEN
@@ -1373,6 +1403,9 @@ class ConstantAbsorption(Absorption):
     ----------
     value : float
         Absorption coefficient (dB/wavelength). Non-negative.
+    data_sources : tuple of DataProvenance, keyword-only
+        Where the value came from (:attr:`Absorption.data_sources`). Default
+        ``()``.
 
     Notes
     -----
@@ -1509,7 +1542,8 @@ class _TabulatedAbsorption(Absorption):
                 f"{expected} (depth first, then frequency).")
         self.measured = AbsorptionCoefficient(
             frequencies=f, data=data, units=t.units, model=t.model,
-            depths=depths, depth=t.depth, parameters=t.parameters)
+            depths=depths, depth=t.depth, parameters=t.parameters,
+            data_sources=t.data_sources)
 
     def __repr__(self) -> str:
         return f"tabulated absorption (.measured = {self.measured!r})"
@@ -1633,7 +1667,8 @@ def _absorption_law(absorption) -> Optional[Absorption]:
     deck writer and result that evaluates ``env.absorption`` reads it
     through this."""
     if isinstance(absorption, AbsorptionCoefficient):
-        return _TabulatedAbsorption(measured=absorption)
+        return _TabulatedAbsorption(measured=absorption,
+                                    data_sources=absorption.data_sources)
     return absorption
 
 
@@ -1853,9 +1888,9 @@ def minimax_anchor_frequency(absorption: Optional[Union[
 
 
 #: Absorption error (dB per km of path) above which a run that freezes its
-#: water law at one frequency across a band says so. A threshold choice:
-#: 0.05 dB/km is 0.5 dB over a 10 km path, so a run that stays silent is off
-#: the law by less than half a decibel at that range.
+#: water law at one frequency across a band says so. uacpy guidance: 0.05
+#: dB/km is 0.5 dB over a 10 km path, so a run that stays silent is off the
+#: law by less than half a decibel at that range.
 _BAND_ABSORPTION_WARN_DB_PER_KM = 0.05
 
 #: Depths (evenly spaced, surface to the water depth) the band check scans,

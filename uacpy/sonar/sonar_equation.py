@@ -1,7 +1,8 @@
 """Passive and active sonar equations (Urick 1983, Ch. 2; Etter Ch. 11).
 
-All terms are in decibels. Sign and grouping follow Urick's table of sonar
-parameters (reproduced in Etter, Table 11.1):
+All terms are in decibels. The terms are Urick's sonar parameters
+(reproduced in Etter, Table 11.1) and the combinations follow Etter,
+Table 11.2 (echo signal level, signal excess, figure of merit):
 
 * Echo level (active):            ``EL = SL - 2*TL + TS``
 * Noise background:               ``NL - DI`` (or ``NL - AG``)
@@ -1157,6 +1158,11 @@ def detection_ranges(ranges, *, signal_excess_dB, axis=-1,
     separated by no-data (NaN) cells, the positive sample's range is returned
     as-is — a crossing inside a no-data hole has no modelled location to
     interpolate.
+
+    The same call gives the range an exposure criterion is reached at: pass
+    the level minus the criterion as the excess, e.g.
+    ``signal_excess_dB=sel - EXPOSURE_THRESHOLDS['VHF']['impulsive']['TTS']['SEL']``
+    (the impact recipe of the noise guide).
 
     Parameters
     ----------

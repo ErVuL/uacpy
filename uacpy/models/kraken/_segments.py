@@ -13,7 +13,7 @@ from typing import List, Tuple, Optional
 
 from uacpy.core.environment import Environment, SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
-from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
+from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io.oalib_writer import deck_depth
 
@@ -242,7 +242,7 @@ def segment_environment_by_range(
         candidates.sort()
         key_ranges_m = []
         for r in candidates:
-            if not key_ranges_m or r - key_ranges_m[-1] > DECK_RANGE_RESOLUTION_M:
+            if not key_ranges_m or r - key_ranges_m[-1] > DECK_RANGE_RESOLUTION:
                 key_ranges_m.append(r)
         # A profile axis that starts beyond r=0 would leave everything
         # shoreward of its first sample without a segment; anchor at 0 and let

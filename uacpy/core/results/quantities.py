@@ -72,11 +72,16 @@ class Quantity:
 #: Every quantity a Field may carry. The first unit listed is the default.
 QUANTITIES: Mapping[str, Quantity] = {
     q.name: q for q in (
-        # Pressure is the only quantity with two units: linear Pa (complex
-        # narrowband, H(f), or a real time trace) and dB, which *is*
-        # transmission loss. They are one quantity, which is why a RAM TL
-        # field and a Kraken complex field share a colour scale.
-        Quantity('pressure', {'Pa': 'Pressure (Pa)', 'dB': 'TL (dB)'}),
+        # Pressure is the only quantity with several units: linear Pa
+        # (complex narrowband, H(f), or a real time trace) and dB, which
+        # *is* transmission loss. They are one quantity, which is why a RAM
+        # TL field and a Kraken complex field share a colour scale. Pa·s is
+        # the spectrum of a received pressure trace
+        # (Field.to_transfer_function of p(t)): the source spectrum S(f)
+        # times H(f), a density in Pa per hertz, captioned for what it is so
+        # it is not read as a model's H(f).
+        Quantity('pressure', {'Pa': 'Pressure (Pa)', 'dB': 'TL (dB)',
+                              'Pa·s': 'S·H (Pa·s)'}),
         # A loss, not a level: OASES writes -10·log10 E[|p_scat|²], so the
         # axis rises as the scattered field weakens. Labelled for what the
         # numbers are, since the plot is where the direction is read off.
@@ -204,7 +209,7 @@ def label(kind: str, unit: str, *, reference=None) -> str:
 COORDINATE_UNITS: Mapping[str, str] = MappingProxyType({
     'depth': 'm', 'range': 'm', 'source_depth': 'm',
     'receiver_depth': 'm', 'receiver_range': 'm',
-    'x': 'm', 'y': 'm', 'z': 'm', 'along': 'm',
+    'x': 'm', 'y': 'm', 'z': 'm', 'along': 'm', 'position': 'm',
     'frequency': 'Hz', 'time': 's',
     'angle': 'deg', 'bearing': 'deg',
     'phase_speed': 'm/s', 'wavenumber': 'rad/m',

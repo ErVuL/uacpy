@@ -24,35 +24,36 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.oases_writer import (
     write_oassp_input, oases_wavenumber_bounds, bottom_interface_roughness,
-    oassp_bottom_interfaces,
+    oassp_bottom_interfaces, refuse_unintegrable_spectral_exponent,
+    refuse_unusable_correlation_length, refuse_unusable_integration_window,
 )
-from uacpy.io.oases_reader import OasesRhsHeader, read_oases_rhs_header
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, _host_options
+from uacpy.io.oases_reader import OasesRhsHeader
+from uacpy.models.base import DEFAULT_RUN_TIMEOUT, _host_options
 from uacpy.models.oases._common import (
     C_LOW_MATCH_RTOL,
     _check_n_wavenumbers_knob, _OASES_TRAITS, _OASS_MIN_MEAN_FIELD_ROUGHNESS, _OASS_SPECTRA,
+    _pinned_count_note,
     _geometry_options, _oases_binary, _option_letters,
     _reject_plane_geometry_letter_on_a_point_source,
-    _refuse_volume_scattering, _reject_unintegrable_spectral_exponent,
     _reject_unreadable_trf_options, _require_mean_field_rhs,
     _reject_wavenumber_overrun,
     SCATTERING_UNPINNED_FIELDS, resolve_spectral_exponent,
-    _roughness_notice, _warn_offset_ignored_under_auto_sampling,
+    _roughness_notice, _offset_ignored_notice, resolve_integration_window,
 )
 from uacpy.models.oases._sampling import (
     _OASSP_MAX_WAVENUMBERS, _oasp_fft_grid, _oassp_fitting_c_low,
-    _oassp_wavenumber_count, check_power_of_two_time_samples,
+    _oassp_wavenumber_count, _oassp_wavenumber_sampling,
+    check_power_of_two_time_samples,
 )
-from uacpy.models.oases._base import OASES
 from uacpy.io._parsers import oasp_trf_pressure
 from uacpy.models.oases.oasp import (
     OASP, _OASP_DEFAULT_OPTIONS, _read_trf_on_requested_ranges,
 )
-from uacpy.models.oases._mean_field import _MeanFieldRun, _mean_field_inputs
+from uacpy.models.oases._mean_field import _ScatteringPostProcessor
 from uacpy.models._notices import message_notice
 from uacpy.core.engine_defaults import (
     OASES_PRESSURE_LETTER, OASSP_INTEGRATION_OFFSET, OASSP_REALIZATION,
-    default_c_low,
+    default_c_low, scholte_waves,
 )
 from uacpy.models._projection import collapse_elastic_boundary, has_shear
 from uacpy.models._extract import (
@@ -114,12 +115,18 @@ class OASSPSettings(EngineSettings):
         (:func:`_fitted_c_low`).
     c_low_origin : str
         Where ``c_low`` came from.
-    c_high : float or None
-        Block VII's ``CMAX`` (m/s); ``None`` writes OASP's 1e8 "no upper
-        limit" (``unoasp22.f:169``), which cylindrical geometry replaces with
-        1e12 (``unoassp30.f:205-217``).
+    c_high : float
+        Block VII's ``CMAX`` (m/s), which cylindrical geometry (no ``'P'``)
+        replaces with 1e12 (``unoassp30.f:205-217``).
+    c_high_origin : str
+        Where ``c_high`` came from: the constructor, or OASES' "no upper
+        limit" 1e8 (:func:`~uacpy.io.oases_writer.oases_wavenumber_bounds`).
     n_wavenumbers : int or None
         Block VII's ``NW``; ``None`` is OASES' automatic sampling.
+    integration_window : tuple of (int, int) or None
+        Block VII's ``IC1 IC2`` on the OASSP deck: the given window, the
+        whole ``(1, NW)`` under a pinned ``n_wavenumbers``, ``None`` under
+        automatic sampling (where OASES sets them).
     integration_offset : float
         The contour offset (dB/wavelength) on the frequency line.
     mean_field : RunSettings
@@ -140,13 +147,18 @@ class OASSPSettings(EngineSettings):
     realization: int
     c_low: float
     c_low_origin: str
-    c_high: Optional[float]
+    c_high: float
+    c_high_origin: str
     n_wavenumbers: Optional[int]
+    integration_window: Optional[Tuple[int, int]]
     integration_offset: float
     mean_field: RunSettings
 
     def __post_init__(self):
-        # The to_dict form holds a list; the frozen record a tuple.
+        # The to_dict form holds lists; the frozen record tuples.
+        if self.integration_window is not None:
+            object.__setattr__(self, 'integration_window',
+                               tuple(int(v) for v in self.integration_window))
         object.__setattr__(self, 'mean_field_grid', tuple(
             t(v) for t, v in zip((int, float, float, float),
                                  self.mean_field_grid)))
@@ -172,8 +184,8 @@ def _check_oassp_knobs(*, correlation_length,
                        spectral_exponent, roughness_spectrum,
                        mean_field, mean_field_knobs, options,
                        scattered_only) -> None:
-    """Refuse an OASSP knob no run could use: a missing, negative (volume) or zero
-    correlation length, an unintegrable spectral exponent, an unknown
+    """Refuse an OASSP knob no run could use: a missing, negative (volume),
+    zero or non-finite correlation length, an unintegrable spectral exponent, an unknown
     roughness spectrum, a supplied ``mean_field`` whose option line has no
     ``'s'`` (:func:`~uacpy.models.oases._common._require_mean_field_rhs`),
     FFT knobs beside the ``mean_field`` that owns
@@ -188,16 +200,11 @@ def _check_oassp_knobs(*, correlation_length,
             remediation="Pass correlation_length in metres, e.g. "
                         "OASSP(correlation_length=5.0).",
         )
-    _refuse_volume_scattering('OASSP', correlation_length)
-    if correlation_length == 0.0:
-        raise ConfigurationError(
-            "OASSP(correlation_length=0) gives a degenerate roughness "
-            "power spectrum: OASSP forms r_l = |CLEN(INTFCE)| and hands "
-            "it to PV (unoassp30.f:606-614).",
-            remediation="Pass correlation_length > 0 (metres).",
-        )
+    # A negative length is OASES' volume-scattering switch; zero and a
+    # non-finite value are no length. The deck writer refuses the same.
+    refuse_unusable_correlation_length('OASSP', correlation_length)
     if spectral_exponent is not None:
-        _reject_unintegrable_spectral_exponent('OASSP', spectral_exponent)
+        refuse_unintegrable_spectral_exponent('OASSP', spectral_exponent)
     if str(roughness_spectrum).lower() not in _OASS_SPECTRA:
         raise ConfigurationError(
             f"OASSP(roughness_spectrum={roughness_spectrum!r}) is "
@@ -378,10 +385,15 @@ def _fitted_c_low(name, env, source, receiver, engine):
     a seabed without shear the two values are equal and nothing fits; a
     pinned ``n_wavenumbers`` fixes the count whatever ``c_low`` is. Either
     way :func:`_reject_roughness_wavenumber_overflow` then refuses the run.
-    The notice names oassp2's bound and the seabed interface (Scholte)
-    wave, whose phase speed is "generally about 0.85 times the minimum
-    shear-wave speed" (Jensen et al., *Computational Ocean Acoustics*,
-    §5.10.5), which a ``c_low`` above it leaves out of the integral.
+    The notice names oassp2's bound and where the fitted deck's window
+    stops: oassp2 fixes it in wavenumber at the band's top frequency,
+    ``WKMAX = 2π·FREQM/CMIN`` (``unoassp30.f:351-352``,
+    :class:`~uacpy.models.oases._sampling._OasspWavenumberSampling`), so
+    the slowest phase speed it reaches is ``2π·FREQM/WKMAX`` at FREQM and
+    falls in proportion to the frequency below it. A Scholte wave of
+    ``env`` (:func:`~uacpy.core.engine_defaults.scholte_waves`,
+    Brekhovskikh & Lysanov §3.4.2, eq. 3.4.29) slower than that edge at
+    FREQM is inside the window below ``v·WKMAX/2π`` and left out above it.
     """
     samplings = []
     for i in range(int(np.atleast_1d(source.depths).size)):
@@ -398,9 +410,21 @@ def _fitted_c_low(name, env, source, receiver, engine):
     if None in fitted:
         return None
     c_low = max(fitted)
-    count = max(_oassp_wavenumber_count(**{**s, 'c_low': c_low})
-                for s in samplings)
+    windows = [_oassp_wavenumber_sampling(**{**s, 'c_low': c_low})
+               for s in samplings]
+    count = max(w.count for w in windows)
+    k_max = min(w.k_max for w in windows)
+    freq_top = windows[0].freq_top
+    edge = 2.0 * np.pi * freq_top / k_max
     documented = engine.c_low
+    below = sorted(w.speed for w in scholte_waves(env) if w.speed < edge)
+    waves = ("; ".join(
+        f"the Scholte wave at {v:.1f} m/s is inside the window below "
+        f"{v * k_max / (2.0 * np.pi):.1f} Hz and left out above it"
+        for v in below) + " (Brekhovskikh & Lysanov §3.4.2, eq. 3.4.29)"
+        if below else
+        f"no Scholte wave of the environment is slower than that edge "
+        f"(Brekhovskikh & Lysanov §3.4.2, eq. 3.4.29)")
     origin = (f"{c_low:g} m/s, the lowest value whose oassp2 wavenumber "
               f"count fits its {_OASSP_MAX_WAVENUMBERS}; the documented "
               f"{documented:g} m/s ({engine.c_low_origin}) needs {needed}")
@@ -413,11 +437,13 @@ def _fitted_c_low(name, env, source, receiver, engine):
         f"count up to a power of two, unoassp30.f:542-544, and PV indexes "
         f"arrays of nnkr = 8192 up to twice that, oasvun31.f:2273, "
         f":2532-2533; comvol.f:3). The run takes c_low = {c_low:g} m/s, the "
-        f"lowest value whose count ({count}) fits, so phase speeds between "
-        f"{documented:g} and {c_low:g} m/s are left out of the integral: the "
-        f"seabed interface (Scholte) wave, about 0.85 × the minimum shear "
-        f"speed (Jensen et al., Computational Ocean Acoustics, §5.10.5), may "
-        f"be missed. Pin n_wavenumbers={_OASSP_MAX_WAVENUMBERS} to keep "
+        f"lowest value whose count ({count}) fits. oassp2 fixes the "
+        f"window in wavenumber at the band's top frequency, WKMAX = "
+        f"2π·FREQM/CMIN (unoassp30.f:351-352): at FREQM = {freq_top:.2f} Hz "
+        f"it reaches down to {edge:.1f} m/s and leaves slower phase speeds "
+        f"out, and at a frequency f below FREQM down to "
+        f"{edge:.1f}·f/{freq_top:.2f} m/s; {waves}. "
+        f"Pin n_wavenumbers={_OASSP_MAX_WAVENUMBERS} to keep "
         f"c_low = {documented:g} m/s on a coarser wavenumber step, or pin "
         f"c_low.", NumericsWarning)
     return c_low, origin, notice
@@ -550,13 +576,16 @@ def _check_rhs_matches_settings(rhs_header: OasesRhsHeader,
 
 
 def _write_oassp_deck(target, env, source, receiver, engine, *,
-                      warn: bool = True) -> None:
+                      c_high_given: bool = True, warn: bool = True) -> None:
     """Write the OASSP deck to ``target`` (a path or a text stream) with
     :func:`~uacpy.io.oases_writer.write_oassp_input`, from the settings
     ``engine`` alone: the one call behind the stage-3 wavenumber count
     and the deck the launch runs. ``warn=False`` writes it without the
     writer's warnings (the stage-3 count, whose deck the launch writes
-    again)."""
+    again). ``c_high_given=False`` (a ``c_high`` the caller did not set)
+    hands the writer ``None``, which writes the same 1e8 the record
+    carries, so the writer's notice of an unused ``c_high`` without
+    option ``'P'`` is for a value the caller set."""
     n_time, freq_min, freq_max, time_step = engine.mean_field_grid
     write_oassp_input(
         filepath=target,
@@ -576,8 +605,9 @@ def _write_oassp_deck(target, env, source, receiver, engine, *,
         fc=engine.mean_field.engine.fc,
         integration_offset=engine.integration_offset,
         n_wavenumbers=engine.n_wavenumbers,
+        integration_window=engine.integration_window,
         c_low=engine.c_low,
-        c_high=engine.c_high,
+        c_high=engine.c_high if c_high_given else None,
         warn=warn,
     )
 
@@ -585,8 +615,9 @@ def _write_oassp_deck(target, env, source, receiver, engine, *,
 def _oassp_settings(name: str, mean_settings, projection_notices, *,
                     options, correlation_length, spectral_exponent,
                     rms_roughness, realization, interface, c_low_pinned,
-                    c_high, n_wavenumbers, integration_offset, env,
-                    source, receiver) -> OASSPSettings:
+                    c_high, n_wavenumbers, integration_window,
+                    integration_offset, env, source,
+                    receiver) -> OASSPSettings:
     """The OASSP deck's option line (``options`` resolved) and Block
     IV/VII values, over ``mean_settings``, the mean field's own
     settings (its BROADBAND run on the same environment and receiver,
@@ -613,6 +644,14 @@ def _oassp_settings(name: str, mean_settings, projection_notices, *,
         c_low = oases_wavenumber_bounds(env)[0]
         origin = default_c_low(env)[1]
     options = _geometry_options(options, source)
+    if c_high is None:
+        c_high_origin = "1e8, OASES' no upper limit (oast.tex:487, :568)"
+        c_high = oases_wavenumber_bounds(env)[1]
+    else:
+        c_high_origin = f'{name}(c_high=…)'
+    if 'P' not in _option_letters(options):
+        c_high_origin += ("; without 'P' OASSP replaces it with 1e12 "
+                          "(unoassp30.f:205-217)")
     # 'g' is the Goff-Jordan spectrum; OASSP's 'G' is another option
     # (unoassp30.f:933, :1034).
     spectral_exponent, unused = resolve_spectral_exponent(
@@ -623,6 +662,8 @@ def _oassp_settings(name: str, mean_settings, projection_notices, *,
                           mean.freq_max, mean.time_step)
     mean_field_grid = (grid.n_time_samples, grid.freq_min,
                        grid.freq_max, grid.time_step)
+    window, window_notice = resolve_integration_window(
+        name, integration_window, n_wavenumbers, 'oassp.tex:494-500')
     engine = OASSPSettings(
         options=options,
         interface=interface,
@@ -634,8 +675,10 @@ def _oassp_settings(name: str, mean_settings, projection_notices, *,
         realization=realization,
         c_low=float(c_low),
         c_low_origin=origin,
-        c_high=c_high,
+        c_high=float(c_high),
+        c_high_origin=c_high_origin,
         n_wavenumbers=n_wavenumbers,
+        integration_window=window,
         integration_offset=integration_offset,
         mean_field=mean_settings,
         notices=(),
@@ -666,6 +709,11 @@ def _oassp_settings(name: str, mean_settings, projection_notices, *,
         rms_roughness, oass_index_space=False))
     if fitted is not None:
         notices.append(fitted[2])
+    # Same read gate as OASP (unoassp30.f:135-142, OFFDB=OFFDBIN at :375).
+    notices.append(_offset_ignored_notice(
+        name, integration_offset, n_wavenumbers, options,
+        offset_letters='Jd'))
+    notices.append(window_notice)
     engine = dataclasses.replace(
         engine, c_low=float(c_low), c_low_origin=origin,
         notices=tuple(n for n in notices if n is not None))
@@ -682,7 +730,7 @@ def _oassp_settings(name: str, mean_settings, projection_notices, *,
     return dataclasses.replace(engine, n_integrated_wavenumbers=tuple(counts))
 
 
-class OASSP(OASES):
+class OASSP(_ScatteringPostProcessor):
     """
     OASSP — OASES Scattered-Field Realization Model
 
@@ -703,7 +751,9 @@ class OASSP(OASES):
     correlation_length : float
         ``CL`` (m) of the interface roughness power spectrum. Required:
         ``oass.tex:182-183`` — the roughness statistics "must be specified.
-        These are not adopted from OASR or OAST".
+        These are not adopted from OASR or OAST". A positive finite length,
+        as on :class:`OASS`: zero, NaN and infinity are refused before the
+        mean field runs, a negative one is volume scattering.
     spectral_exponent : float, optional
         ``M`` of the same spectrum. Must exceed 1.5. ``None`` (default) is
         2.5, OASES' own Goff-Jordan exponent, as on :class:`OASS`; the
@@ -764,6 +814,10 @@ class OASSP(OASES):
     options : str, optional
         Raw OASSP option string, exclusive with the typed flags above.
         ``None`` derives the letters.
+    integration_window : (int, int), optional
+        As for :class:`OASP`, on the OASSP deck alone ("insignificant for
+        automatic sampling", oassp.tex:494-500); a mean field takes its own
+        through ``mean_field=OASP(integration_window=…)``.
     integration_offset, n_wavenumbers, c_low, c_high : optional
         As for :class:`OASP`, on both decks of the chain: oassp2 takes its
         incident spectrum from the mean field's ``.rhs`` alone
@@ -772,11 +826,14 @@ class OASSP(OASES):
         inert in cylindrical geometry (a point Source). The receiver ranges
         are ``receiver.ranges``. An unpinned ``c_low`` whose derived value
         makes oassp2 integrate on more than its 4096 wavenumbers (a shear
-        seabed's 0.85 × shear speed) is the lowest whole m/s whose count
-        fits, at most 0.90 × the slowest compressional speed, on both decks,
+        seabed's, set by its shear speed or its Scholte wave) is the
+        lowest whole m/s whose count fits, at most 0.90 × the slowest
+        compressional speed, on both decks,
         with a ``NumericsWarning`` (:func:`_fitted_c_low`); a pinned
         ``c_low`` or ``n_wavenumbers`` is written as given, and refused past
-        the bound.
+        the bound. A pinned ``n_wavenumbers`` gets an info-level note
+        (``verbose='info'``) that the manual leaves it to the convergence
+        test (oassp.tex:479-488, :511-515).
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -883,13 +940,14 @@ class OASSP(OASES):
         options: Optional[str] = None,
         integration_offset: float = OASSP_INTEGRATION_OFFSET,
         n_wavenumbers: Optional[int] = None,
+        integration_window: Optional[Tuple[int, int]] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         super().__init__(**_host_options(locals()))
@@ -937,24 +995,19 @@ class OASSP(OASES):
         self.options = options
         self.integration_offset = float(integration_offset)
         self.n_wavenumbers = n_wavenumbers
+        self.integration_window = integration_window
         self.c_low = float(c_low) if c_low is not None else None
         self.c_high = float(c_high) if c_high is not None else None
         self._check_knobs()
+        if self.n_wavenumbers is not None:
+            self._log(_pinned_count_note('OASSP', self.n_wavenumbers))
         self.roughness_spectrum = str(roughness_spectrum).lower()
-        # Same read gate as OASP (unoassp30.f:135-142, OFFDB=OFFDBIN at
-        # :375). :func:`_oassp_options` always emits 'J' unless a raw string
-        # replaces the line.
-        _warn_offset_ignored_under_auto_sampling(
-            'OASSP', self.integration_offset, self.n_wavenumbers,
-            options=_oassp_options(self.options, self.scattered_only,
-                                   self.roughness_spectrum),
-            offset_letters='Jd')
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
-        # install.sh:1157 copies the raw executables; bin/oases carries
-        # symlinks for oasn/oasp/oasr/oast but not for this one, so the
-        # name is 'oassp2', not 'oassp'.
+        # install.sh's ``POSSIBLE_OASES_BINS`` loop copies the raw executables;
+        # its compatibility symlinks cover oasn/oasp/oasr/oast but not this
+        # one, so the name is 'oassp2', not 'oassp'.
         self._exe = self._resolve_executable(
             executable, lambda: self._find_binary('oassp'),
         )
@@ -998,9 +1051,11 @@ class OASSP(OASES):
                         c_high=self.c_high,
                         verbose=self.verbose, timeout=self.timeout,
                         cleanup=self.cleanup, **kwargs)
-            # Set after construction: OASSP's own constructor has already
-            # said whether the offset reaches the binary.
+            # OASSP's own settings say whether the offset reaches the
+            # binaries (the same read gate), so the producer does not.
             mean.integration_offset = self.integration_offset
+            mean._offset_said_by_owner = True
+            mean._scholte_said_by_owner = True
             return mean
         return mean.copy(cleanup=self.cleanup)
 
@@ -1014,6 +1069,8 @@ class OASSP(OASES):
         reassigned in between."""
         _check_n_wavenumbers_knob(self.n_wavenumbers)
         check_pinned_window('OASSP', c_low=self.c_low, c_high=self.c_high)
+        refuse_unusable_integration_window('OASSP', self.integration_window,
+                                           self.n_wavenumbers)
         _check_oassp_knobs(
             correlation_length=self.correlation_length,
             spectral_exponent=self.spectral_exponent,
@@ -1112,6 +1169,7 @@ class OASSP(OASES):
                 realization=self.realization, interface=self.interface,
                 c_low_pinned=self.c_low, c_high=self.c_high,
                 n_wavenumbers=self.n_wavenumbers,
+                integration_window=self.integration_window,
                 integration_offset=self.integration_offset,
                 env=env, source=source, receiver=receiver)
 
@@ -1129,47 +1187,31 @@ class OASSP(OASES):
                     mean.engine, c_low_origin=engine.c_low_origin)))
         return engine
 
-    def _announce_engine_settings(self, env, source, receiver,
-                                  settings) -> None:
-        """Stage 3 (run and run_settings): the mean field's notices, then
-        OASSP's own."""
-        mean = settings.engine.mean_field
-        self._build_mean_field(
-            settings.frequencies is not None)._announce_engine_settings(
-            env, _mean_field_source(source), receiver, mean)
-        super()._announce_engine_settings(env, source, receiver, settings)
+    #: Why a missing .rhs means what it means, for the refusal.
+    _RHS_HINT = ("OPFILB opens unit 45 with STATUS='UNKNOWN' "
+                 "(oashun21.f:634), so an empty file here means the "
+                 "producer wrote no scattering right-hand sides.")
 
-    # ── stage 4: the mean field, then oassp2 ───────────────────────────
-
-    def _n_launches(self, settings) -> int:
-        """Two: the mean-field producer, then oassp2 on its ``.rhs``."""
-        return 2
-
-    def _prepare_launches(self, env, settings):
-        """The mean-field producer both launches' hooks call."""
+    def _producer_for(self, settings) -> 'OASP':
+        """The mean-field producer for a call with ``settings``: its band
+        set by the call when the call carries one
+        (:meth:`_build_mean_field`)."""
         return self._build_mean_field(settings.frequencies is not None)
 
-    def _mean_field_stage_inputs(self, inputs):
-        """The producer's stage inputs for this launch's source depth."""
-        return _mean_field_inputs(inputs, inputs.settings.engine.mean_field,
-                                  _mean_field_source(inputs.source))
+    def _mean_field_source(self, source):
+        """The Source the producer runs on (:func:`_mean_field_source`)."""
+        return _mean_field_source(source)
 
-    def _write_input(self, inputs) -> Path:
-        """Stage 4. Launch 0: the mean field's deck, written by the
-        producer's own :meth:`OASP._write_input`. Launch 1: the OASSP deck,
-        written from the settings alone (:func:`_write_oassp_deck`), once the
-        mean field's ``.rhs`` is held to them
-        (:func:`_check_rhs_matches_settings`): Block VIII (NT, FR1, FR2, DT)
-        and the scattering interface are the file's, which
+    # ── stage 4: oassp2 on the mean field's .rhs/.vol ──────────────────
+
+    def _write_scattering_deck(self, inputs) -> Path:
+        """Stage 4, launch 1: the OASSP deck, written from the settings
+        alone (:func:`_write_oassp_deck`), once the mean field's ``.rhs`` is
+        held to them (:func:`_check_rhs_matches_settings`): Block VIII (NT,
+        FR1, FR2, DT) and the scattering interface are the file's, which
         ``unoassp30.f:181-188`` substitutes anyway, and Block III's FRC is
         the carrier the mean field ran with — TRFHEAD writes it into the
         ``.trf`` header (``oasiun23.f:815``, ``:864-865``, ``:919``)."""
-        if inputs.launch == 0:
-            producer = inputs.prepared
-            self._log(f"Running {producer.model_name} for the mean field "
-                      f"(option 's')")
-            return producer._write_producer_deck(
-                self._mean_field_stage_inputs(inputs))
         engine = inputs.settings.engine
         _check_rhs_matches_settings(inputs.earlier[0].rhs_header, engine)
         deck = inputs.work_dir / f'{_OASSP_BASE_NAME}.dat'
@@ -1178,19 +1220,14 @@ class OASSP(OASES):
                   f"realization={engine.realization}, "
                   f"interface={engine.interface})")
         _write_oassp_deck(deck, inputs.env, inputs.source, inputs.receiver,
-                          engine)
+                          engine, c_high_given=self._caller_set('c_high'))
         return deck
 
-    def _launch(self, inputs, deck: Path) -> None:
-        """Stage 4. Launch 0: the producer's own :meth:`OASP._launch`.
-        Launch 1: ``oassp2`` on the deck, its FOR045/FOR046 pointed at the
-        mean field's kernel files (named after that run's stem, see
-        :meth:`OASES._execute`); refuse a run past OASES' wavenumber bound
-        or with no transfer function."""
-        if inputs.launch == 0:
-            inputs.prepared._launch_producer(
-                self._mean_field_stage_inputs(inputs), deck)
-            return
+    def _launch_scattering(self, inputs, deck: Path) -> None:
+        """Stage 4, launch 1: ``oassp2`` on the deck, its FOR045/FOR046
+        pointed at the mean field's kernel files (named after that run's
+        stem, see :meth:`OASES._execute`); refuse a run past OASES'
+        wavenumber bound or with no transfer function."""
         stem = inputs.earlier[0].stem
         proc = self._execute(deck.stem, inputs.work_dir, extra_env={
             'FOR045': f'{stem}.045', 'FOR046': f'{stem}.046',
@@ -1209,39 +1246,21 @@ class OASSP(OASES):
             what='a transfer-function file', process=proc,
         )
 
-    def _read_output(self, inputs, deck: Path):
-        """Stage 4. Launch 0: the mean field's own result (the producer's
-        stages 4-6, :meth:`~PropagationModel._run_producer_launch`) and the
-        header of the ``.rhs`` it wrote, with the ``.045``/``.046`` pair oassp2
-        opens required. Launch 1: the scattered transfer function on the
+    def _read_scattering_output(self, inputs, deck: Path):
+        """Stage 4, launch 1: the scattered transfer function on the
         requested axes (:func:`_read_trf_on_requested_ranges`)."""
-        if inputs.launch == 0:
-            return self._read_mean_field(inputs, deck)
         output_file = inputs.work_dir / f'{deck.stem}.trf'
         self._log(f"Reading OASSP output: {output_file}")
         return _read_trf_on_requested_ranges(output_file, inputs.receiver)
 
-    def _read_mean_field(self, inputs, deck: Path) -> _MeanFieldRun:
-        """The mean-field launch's output: the producer's own result, and
-        the header of the ``.rhs`` beside the ``.046`` oassp2 opens."""
-        result = inputs.prepared._run_producer_launch(
-            self._mean_field_stage_inputs(inputs), deck)
-        rhs_path = require_output(
-            self.model_name, [inputs.work_dir / f'{deck.stem}.045'],
-            what="a mean-field .rhs (option 's')",
-            hint=("OPFILB opens unit 45 with STATUS='UNKNOWN' "
-                  "(oashun21.f:634), so an empty file here means the "
-                  "producer wrote no scattering right-hand sides."),
-        )
+    def _require_mean_field_files(self, inputs, deck: Path) -> None:
+        """The ``.vol`` (FOR046) oassp2 opens beside the ``.rhs``."""
         require_output(
             self.model_name, [inputs.work_dir / f'{deck.stem}.046'],
             what="a mean-field .vol (FOR046)",
             hint=("OASSP opens unit 46 unconditionally (unoassp30.f:128) "
                   "and its IOER test only covers the last OPFILb (:130)."),
         )
-        return _MeanFieldRun(result=result,
-                             rhs_header=read_oases_rhs_header(rhs_path),
-                             stem=deck.stem)
 
     def _to_result(self, inputs, deck, raw) -> Field:
         """Stage 5: the scattered complex ``H(f)`` on ``(depth, range,

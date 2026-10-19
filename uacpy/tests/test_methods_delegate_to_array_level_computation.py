@@ -121,6 +121,36 @@ class TestThePowerDelayProfileStatisticsAreReachableWithoutArrivals:
     def test_a_flat_channel_has_unbounded_coherence_bandwidth(self):
         assert coherence_bandwidth([0.01], [1.0]) == float('inf')
 
+    @pytest.mark.parametrize('convention', ['rappaport_0.5', 'inverse_spread',
+                                            'bogus'])
+    def test_a_convention_and_a_factor_together_are_refused(self, convention):
+        """``convention`` and ``factor`` are two answers to the one k of
+        ``1/(k tau_rms)``: given together they are refused naming both, by
+        the functions and the Arrivals methods alike (an unknown convention
+        too, which the factor used to skip validating). Either alone runs;
+        the regime records which one it was judged under."""
+        a = _arrivals(self.DELAYS, self.AMPS)
+        match = (rf"convention='{convention}' and factor=2\.0 are two "
+                 r"answers to one question")
+        calls = [
+            lambda: coherence_bandwidth(self.DELAYS, self.POWERS,
+                                        convention=convention, factor=2.0),
+            lambda: channel_regime(self.DELAYS, self.POWERS, 100.0,
+                                   convention=convention, factor=2.0),
+            lambda: a.coherence_bandwidth(convention=convention, factor=2.0),
+            lambda: a.channel_regime(100.0, convention=convention,
+                                     factor=2.0)]
+        for call in calls:
+            with pytest.raises(ConfigurationError, match=match):
+                call()
+        spread = rms_delay_spread(self.DELAYS, self.POWERS)
+        assert coherence_bandwidth(self.DELAYS, self.POWERS, factor=2.0) == \
+            pytest.approx(1.0 / (2.0 * spread), rel=1e-15)
+        assert channel_regime(self.DELAYS, self.POWERS, 100.0,
+                              factor=2.0).convention == 'factor=2'
+        assert channel_regime(self.DELAYS, self.POWERS,
+                              100.0).convention == 'inverse_spread'
+
     @pytest.mark.parametrize('rate,selective', [(10.0, False), (5000.0, True)])
     def test_the_regime_compares_the_signal_band_with_the_coherence_band(
             self, rate, selective):
@@ -235,8 +265,8 @@ class TestTheArrivalSumHasOneImplementation:
         a = _arrivals([0.010, 0.030], [1.0, -0.6])
         for route in (lambda: a.received_amplitudes,
                       lambda: a.rms_delay_spread(),
-                      lambda: a.to_time_series(source_waveform=np.ones(32),
-                                               sample_rate=8000.0)):
+                      lambda: a.synthesize_time_series(source_waveform=np.ones(32),
+                                                       sample_rate=8000.0)):
             with pytest.raises(ConfigurationError, match='are negative'):
                 route()
 
@@ -982,7 +1012,7 @@ class TestTheCrossGridAgreementNumberIsObtainable:
 
     def test_the_table_is_the_metric_and_the_plotter_draws_it(self):
         import inspect
-        from uacpy.core import metrics as M
+        from uacpy.core.results import metrics as M
         from uacpy.visualization.plots import fields as F
         body = inspect.getsource(M.field_statistics).split('"""')[2]
         assert 'tl_rmse_on_shared_ranges(' in body
@@ -1110,7 +1140,7 @@ class TestTheCapabilitiesThatWereReachableOnlyThroughAModel:
         assert np.abs(waveform_spectrum_at(w, fs, freqs) - dtft).max() < 1e-12
         # and the chunked path, which splits the same sum into blocks
         from uacpy.acoustic_signal import spectrum_at
-        monkeypatch.setattr(spectrum_at, '_SCRATCH_BLOCK_ELEMS', 64)
+        monkeypatch.setattr(spectrum_at, '_BLOCK_ELEMENTS', 64)
         chunked = waveform_spectrum_at(w, fs, freqs)
         assert np.abs(chunked - dtft).max() < 1e-12
 
@@ -1456,6 +1486,33 @@ class TestTheP47ComputationsAreReachableWithoutACarrier:
         with pytest.warns(UserWarning, match='fold back'):
             synthesis_band(a.delays, a._arrival_power(), bandwidth=200.0,
                            fc=1000.0, output_duration=0.025)
+
+    def test_a_margin_the_stated_window_does_not_use_gets_a_notice(self):
+        """``margin`` is headroom on a DERIVED window: with
+        ``output_duration`` stating the window it is not used, and a given
+        one is named in a FallbackWarning (function and method alike) while
+        the grid is the stated window's. Unset, or with a derived window, the
+        call is silent."""
+        import warnings
+        from uacpy.acoustic_signal import synthesis_band
+        from uacpy.core.exceptions import FallbackWarning
+        a = _arrivals([0.010, 0.030, 0.050], [1.0, 0.6, 0.3])
+        args = (a.delays, a._arrival_power())
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            stated = synthesis_band(*args, bandwidth=200.0, fc=1000.0,
+                                    output_duration=0.06)
+            synthesis_band(*args, bandwidth=200.0, fc=1000.0, margin=2.0)
+        for call in (lambda: synthesis_band(*args, bandwidth=200.0, fc=1000.0,
+                                            output_duration=0.06, margin=2.0),
+                     lambda: a.synthesis_band(bandwidth=200.0, fc=1000.0,
+                                              output_duration=0.06,
+                                              margin=2.0)):
+            with pytest.warns(FallbackWarning,
+                              match=r"margin=2\.0 is headroom on a derived "
+                                    r"window, and output_duration=0\.06"):
+                got = call()
+            assert np.array_equal(got, stated)
 
     def test_the_miss_distance_matches_the_rays_method(self):
         from uacpy.core.acoustics import polyline_miss_distance

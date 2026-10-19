@@ -4,21 +4,21 @@ assemble one SPARC run."""
 
 from pathlib import Path
 from types import MappingProxyType
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Sequence, Union
 
 import numpy as np
 
 from uacpy.core.exceptions import (
-    ConfigurationError, UnsupportedFeatureError,
+    ConfigurationError, FallbackWarning, UnsupportedFeatureError,
 )
 from uacpy.core.results import PhaseReference
-from uacpy.core.run_settings import OutputSpec, RunMode
+from uacpy.core.run_settings import Notice, OutputSpec, RunMode
 from uacpy.io.grn_reader import read_grn_file
 from uacpy.io.oalib_reader import read_rts_file
 from uacpy.io.oalib_writer import (
     write_sparc_env_file, write_sparc_source_time_series,
     reject_unsupported_ssp_interp,
-    reject_biological_edges_under_neighbour_interp,
+    reject_biological_edges_under_neighbour_interp, reject_coarse_at_mesh,
     SOURCE_TYPE_CODE as _SOURCE_TYPE_CODE,
 )
 from uacpy.models._band import BandResolution
@@ -26,7 +26,7 @@ from uacpy.models._spec import EngineTraits, ModelSpec
 from uacpy.models._window import resolve_window
 from uacpy.models._launch import BinarySearch, require_output, run_prt_binary
 from uacpy.models.base import (
-    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
+    DEFAULT_RUN_TIMEOUT, PropagationModel, _host_options,
 )
 from uacpy.models.sparc._extract import (
     _output_times, launch_receiver, require_deck_time_grid,
@@ -116,6 +116,16 @@ class SPARC(PropagationModel):
       collapsed to fluid first; ``scooter.f90:193-259``'s rule,
       :func:`~uacpy.core.engine_defaults.default_c_low`); ``c_high`` → the unbounded
       ``SPARC_C_HIGH_UNBOUNDED`` (1e7 m/s).
+    - the record end ``time_max`` → ``run(output_duration=)`` when given,
+      else ``2.5 ×`` the direct travel time to the farthest receiver at the
+      slowest speed in the profile. That is a heuristic, not a bound on the
+      last arrival — a waveguide's tail is set by the slowest modal *group*
+      velocity, which falls to zero at cutoff — so a run whose trace is
+      still ringing at the end of the window emits a ``NumericsWarning``
+      saying the trace is truncated. uacpy guidance: the manual gives no
+      window; Jensen et al. (*Computational Ocean Acoustics*, Sect.
+      8.2.1.3) size it from the slowest modal group speed,
+      ``T >= r_max·(1/u_min − 1/c_max)``.
     - ``rmax`` written as ``r + 1.2·c_fast·time_max`` (``r`` the farthest
       receiver range), or ``receiver.range_max × rmax_factor`` when pinned.
     - ``dt`` / ``dr`` derived from CFL stability and the source pulse.
@@ -173,10 +183,10 @@ class SPARC(PropagationModel):
     )
     provenance_id = 'acoustics_toolbox'
 
-    #: The settings' ``n_mesh`` is one count per medium, derived from the
-    #: environment the call gives; a pinned knob is one count for every
-    #: medium, so as a knob it would not rebuild that mesh
-    #: (:meth:`from_run_settings`).
+    #: The settings' ``n_mesh`` is one count per medium; unpinned, it is
+    #: derived from the environment and band top of the call, so a model
+    #: rebuilt from the settings derives it again from its own call
+    #: (:meth:`from_run_settings`); a pinned knob is replayed as given.
     _UNPINNED_FIELDS = frozenset({'n_mesh'})
 
     _BINARIES = MappingProxyType({
@@ -196,12 +206,11 @@ class SPARC(PropagationModel):
         executable: Optional[Path] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
-        n_mesh: Optional[int] = None,
+        n_mesh: Optional[Union[int, Sequence[int]]] = None,
         interp_ssp: Optional[str] = None,
         output_mode: str = SPARC_OUTPUT_MODE,
         pulse_type: Optional[str] = None,
         n_time_samples: Optional[int] = None,
-        time_max: Optional[float] = None,
         march_start: float = -0.1,
         courant_factor: float = 0.999,
         max_launches: Optional[int] = None,
@@ -209,7 +218,7 @@ class SPARC(PropagationModel):
         freq_min: Optional[float] = None,
         freq_max: Optional[float] = None,
         window_sound_speed: Optional[float] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
@@ -235,11 +244,16 @@ class SPARC(PropagationModel):
             ``tslib/bandpassc.f90:16`` indexes that edge as an INTEGER that
             overflows at 1e9 on a long source series, silencing the source; a
             deck whose index overflows is refused.
-        n_mesh : int, optional
+        n_mesh : int or sequence of int, optional
             Total mesh points per medium (not per wavelength), written as
-            given: ``0`` asks AT for its automatic mesh, 20 points per
+            given: one count for every medium, or one per medium, water
+            first; ``0`` asks AT for its automatic mesh, 20 points per
             wavelength at the deck frequency
-            (``ReadEnvironmentMod.f90:101-106``). ``None`` (default) is the
+            (``ReadEnvironmentMod.f90:101-106``). A count under AT's floor
+            for its medium at the deck frequency
+            (``misc/ReadEnvironmentMod.f90:110-112``, "Mesh is too
+            coarse") is refused, as is a list whose length is not the
+            deck's number of media. ``None`` (default) is the
             toolbox's own automatic rule, 20 points per wavelength and at
             least 10 per medium (``misc/ReadEnvironmentMod.f90:103-105``),
             evaluated at the band top ``freq_max`` rather than the deck
@@ -304,18 +318,6 @@ class SPARC(PropagationModel):
             ``n_time_samples == 1`` would read only the ``0.0`` — the trailing ``time_max``
             never consumed, a single ``t = 0`` sample returned — so
             ``n_time_samples < 2`` raises :class:`ConfigurationError`.
-        time_max : float, optional
-            Maximum simulated time (s). ``None`` ⇒ ``run(output_duration=)``
-            when given, else ``2.5 ×`` the direct travel time at the slowest
-            speed in the profile. That is a heuristic, not a bound on the last
-            arrival — a waveguide's tail is set by the slowest modal *group*
-            velocity, which falls to zero at cutoff — so a run whose trace is
-            still ringing at the end of the window emits a ``NumericsWarning``
-            saying the trace is truncated. uacpy guidance: the manual gives
-            no window; Jensen et al. (*Computational Ocean Acoustics*, Sect.
-            8.2.1.3) size it from the slowest modal group speed,
-            ``T >= r_max·(1/u_min − 1/c_max)``. A pinned ``time_max`` beside
-            ``run(output_duration=)`` is refused: the deck carries one record.
         march_start : float, optional
             Time the march begins (s), ``time = march_start + (i-1)·Δt``
             (``sparc.f90:409``). ``cans.f90`` returns zero pulse amplitude for
@@ -357,8 +359,7 @@ class SPARC(PropagationModel):
             fold, with 1.2 uacpy's measured margin. Their rule read literally,
             ``RMax = c_fast·time_max``, puts the replica inside the record
             here; on the auto window the default is ``4 × r`` for a uniform
-            speed, and it lengthens with a pinned ``time_max`` /
-            ``run(output_duration=)``. Increasing ``RMax`` raises ``Nk`` (and
+            speed, and it lengthens with ``run(output_duration=)``. Increasing ``RMax`` raises ``Nk`` (and
             SPARC runtime) in proportion. A pinned margin that leaves the
             alias inside the output window emits a ``NumericsWarning`` naming
             the margin that clears it.
@@ -389,13 +390,13 @@ class SPARC(PropagationModel):
             carries one band.
         window_sound_speed : float, optional
             Water sound speed (m/s) used for the travel-time window
-            when ``time_max`` is auto. ``None`` (default) → the slowest
+            when ``run(output_duration=)`` is not given. ``None`` (default) → the slowest
             speed in ``env.ssp`` (uacpy guidance), which puts the *direct*
             arrival well inside the window; :data:`DEFAULT_SOUND_SPEED` only when the
             profile carries none.
         timeout : float, optional
             Subprocess timeout per run (s). Default
-            :data:`~uacpy.models.base.DEFAULT_RUN_TIMEOUT_S` (600 s): an
+            :data:`~uacpy.models.base.DEFAULT_RUN_TIMEOUT` (600 s): an
             ~85 s march slowed past 3x on a fully loaded CPU still finishes,
             while a hung binary still dies.
         use_tmpfs, verbose, work_dir, cleanup, collapse : optional
@@ -411,13 +412,12 @@ class SPARC(PropagationModel):
         self.pulse_type = (None if pulse_type is None
                            else _validate_pulse_type(pulse_type))
         self.n_time_samples = n_time_samples
-        self.time_max = time_max
         self.march_start = march_start
         self.courant_factor = courant_factor
         self.max_launches = max_launches
         self.rmax_factor = rmax_factor
         # Pulse band (``freq_min``/``freq_max``) and ``window_sound_speed`` (used for
-        # the travel-time window when ``time_max`` is auto) default to
+        # the travel-time window when ``output_duration`` is unset) default to
         # ``None`` and are resolved at ``run()`` time (see
         # :func:`~uacpy.models.sparc._pulse.resolve_pulse_band` and
         # :func:`~uacpy.models.sparc._plan.profile_speed_bounds`).
@@ -486,8 +486,8 @@ class SPARC(PropagationModel):
         pulse, one band and one record, so a run keyword that sets what a
         pinned knob already pins is refused, naming both: a
         ``source_waveform`` beside a pinned canned ``pulse_type``,
-        ``frequencies=`` beside ``SPARC(freq_min=, freq_max=)``, and
-        ``output_duration=`` beside ``SPARC(time_max=)``. A missing pair is
+        and ``frequencies=`` beside ``SPARC(freq_min=, freq_max=)``. The
+        record end is ``run(output_duration=)`` alone. A missing pair is
         legal for a canned pulse, so the synthesising engines' rule (a
         TIME_SERIES run needs a pulse) does not apply.
         """
@@ -527,14 +527,6 @@ class SPARC(PropagationModel):
                     "Drop frequencies= to march the pinned band, or leave "
                     "SPARC(freq_min=, freq_max=) unset to march the span of "
                     "frequencies=."))
-        if kw['output_duration'] is not None and self.time_max is not None:
-            raise ConfigurationError(
-                f"SPARC(time_max={self.time_max:g}) pins the end of the "
-                f"record and run(output_duration=) sets it too; the deck "
-                f"carries one record, so the two contradict each other.",
-                remediation=(
-                    "Drop output_duration= to keep the pinned record, or "
-                    "leave SPARC(time_max=) unset to take output_duration=."))
 
     def _check_knobs(self) -> None:
         """Refuse a knob no run could use
@@ -546,7 +538,7 @@ class SPARC(PropagationModel):
                     freq_max=self.freq_max,
                     courant_factor=self.courant_factor,
                     max_launches=self.max_launches, n_mesh=self.n_mesh,
-                    rmax_factor=self.rmax_factor, time_max=self.time_max,
+                    rmax_factor=self.rmax_factor,
                     window_sound_speed=self.window_sound_speed)
 
     def _validate_engine(self, env, source, receiver, run_mode, *,
@@ -673,9 +665,7 @@ class SPARC(PropagationModel):
         # fallback for an environment that declares no usable speed at all.
         c_slow, c_fast = profile_speed_bounds(env,
                                               window_sound_speed=self.window_sound_speed)
-        if self.time_max is not None:
-            time_max, time_max_origin = float(self.time_max), 'SPARC(time_max=…)'
-        elif time.output_duration is not None:
+        if time.output_duration is not None:
             time_max, time_max_origin = (time.output_duration,
                                    'run(output_duration=…)')
         else:
@@ -702,6 +692,24 @@ class SPARC(PropagationModel):
         notices = [multi_frequency_notice(
             source, band.freq_max_origin == canned_band_origin(pulse)),
             frequencies_span_notice(band, settings.frequencies, source)]
+        # A knob the caller set that this run does not read gets a notice:
+        # ``window_sound_speed`` sizes only the automatic ``time_max``, and
+        # ``max_launches`` caps only the looped 'R' / 'D' axes.
+        if (self._caller_set('window_sound_speed')
+                and time.output_duration is not None):
+            notices.append(Notice(
+                "window_sound_speed not used",
+                f"{self.model_name}: window_sound_speed="
+                f"{self.window_sound_speed!r} is not used: it sizes the "
+                f"automatic time_max, and time_max is {time_max_origin}.",
+                FallbackWarning))
+        if self._caller_set('max_launches') and self.output_mode == 'S':
+            notices.append(Notice(
+                "max_launches not used",
+                f"{self.model_name}: max_launches={self.max_launches!r} is "
+                f"not used: output_mode='S' runs one snapshot launch, and "
+                f"the cap applies to the looped axis of 'R' and 'D'.",
+                FallbackWarning))
         n_source_depths = (1 if settings.depth_loop == 'per_depth' else
                            int(np.atleast_1d(np.asarray(source.depths)).size))
         sts_samples, sts_rows = source_series_rows(
@@ -741,6 +749,9 @@ class SPARC(PropagationModel):
             receiver, nk, n_time_samples, output_mode=self.output_mode))
         notices.append(band_limit_notice(band))
         notices.append(lossless_march_notice(env))
+        if self.n_mesh is not None:
+            reject_coarse_at_mesh('SPARC', self.n_mesh, env, float(
+                np.atleast_1d(np.asarray(source.frequencies, dtype=float))[0]))
         n_mesh = checked_n_mesh(env, freq_max, pinned_n_mesh=self.n_mesh)
 
         notices = [n for n in notices if n is not None]
@@ -927,8 +938,7 @@ class SPARC(PropagationModel):
             ),
             cleanup=self.cleanup,
         )
-        pinned = (self.time_max is not None
-                  or settings.time.output_duration is not None)
+        pinned = settings.time.output_duration is not None
         warn_on_truncated_window(
             result, pinned_by=engine.time_max_origin if pinned else None)
         self._log("Simulation complete")

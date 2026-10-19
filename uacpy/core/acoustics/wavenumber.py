@@ -7,6 +7,7 @@ analytic kernel you wrote down. The methods of
 """
 
 import warnings
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -14,13 +15,16 @@ import numpy as np
 from uacpy.core.exceptions import (
     ConfigurationError, NumericsWarning, ValidityWarning,
 )
+from uacpy.core._export import ExportRecord
 from uacpy.core._fourier import dtft_at
+from uacpy.core._plotting import plotter
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = [
     'wavenumber_taper', 'hankel_transform', 'alias_period',
     'ranges_fit_alias_period', 'wavenumbers_from_phase_speeds',
-    'snapshot_frequency_component',
+    'snapshot_frequency_component', 'wavenumber_sampling',
+    'WavenumberSampling',
 ]
 
 
@@ -513,3 +517,146 @@ def ranges_fit_alias_period(delta_k: float, rmax: float) -> bool:
             f"ranges_fit_alias_period: rmax must be a non-negative, finite "
             f"range in metres; got {rmax!r}.")
     return r < alias_period(delta_k)
+
+
+@dataclass(frozen=True, eq=False)
+class WavenumberSampling(ExportRecord):
+    """The wavenumber axis a Hankel transform samples, what
+    :func:`wavenumber_sampling` returns; ``.plot()`` draws it with
+    :func:`uacpy.plot.plot_wavenumber_sampling`.
+
+    Attributes
+    ----------
+    frequency : float
+        Hz.
+    c_low, c_high : float
+        The phase-speed window (m/s).
+    delta_k : float
+        The wavenumber step (rad/m).
+    k_min, k_max : float
+        The sampled window ``omega/c_high`` … ``omega/c_low`` (rad/m).
+    alias_period : float
+        ``2*pi/delta_k`` (m), :func:`alias_period`.
+    rmax : float or None
+        The farthest receiver range tested (m).
+    fits : bool or None
+        Whether ``rmax`` lies inside the alias period
+        (:func:`ranges_fit_alias_period`); ``None`` without ``rmax``.
+    water_sound_speed, seabed_sound_speed : float or None
+        The water and seabed sound speeds (m/s) marked on the axis.
+    water_wavenumber, seabed_wavenumber : float or None
+        ``omega/c`` of each (rad/m); their interval is the trapped band when
+        the seabed is the faster medium.
+    """
+
+    frequency: float
+    c_low: float
+    c_high: float
+    delta_k: float
+    k_min: float
+    k_max: float
+    alias_period: float
+    rmax: Optional[float] = None
+    fits: Optional[bool] = None
+    water_sound_speed: Optional[float] = None
+    seabed_sound_speed: Optional[float] = None
+    water_wavenumber: Optional[float] = None
+    seabed_wavenumber: Optional[float] = None
+
+    _REPR_UNITS = {'frequency': 'Hz', 'c_low': 'm/s', 'c_high': 'm/s',
+                   'delta_k': 'rad/m', 'k_min': 'rad/m', 'k_max': 'rad/m',
+                   'alias_period': 'm', 'rmax': 'm',
+                   'water_sound_speed': 'm/s', 'seabed_sound_speed': 'm/s',
+                   'water_wavenumber': 'rad/m', 'seabed_wavenumber': 'rad/m'}
+
+    #: The plotter that draws this record (``.plot()``).
+    _plotter = 'plot_wavenumber_sampling'
+
+    def plot(self, **kwargs):
+        """Draw the sampled axis with
+        :func:`uacpy.plot.plot_wavenumber_sampling`; ``kwargs`` reach it.
+        Returns ``(fig, ax)``."""
+        return plotter('plot_wavenumber_sampling')(self, **kwargs)
+
+
+def wavenumber_sampling(frequency: float, *, c_low: float, c_high: float,
+                        delta_k: float, rmax: Optional[float] = None,
+                        water_sound_speed: Optional[float] = None,
+                        seabed_sound_speed: Optional[float] = None
+                        ) -> WavenumberSampling:
+    """The wavenumber window and step a Hankel transform samples, and whether
+    the requested ranges fit its alias period.
+
+    The inverse transform of a depth-separated Green's function ``G(k_r, z)``
+    back to range is a discrete sum, and both of its sampling choices can
+    ruin the answer silently:
+
+    * the **window** ``[omega/c_high, omega/c_low]`` decides which physics is
+      carried. Its low end holds the steep propagation angles, the
+      continuous spectrum at small ``k_r`` (JKPS §9.2.6.2: "the continuous
+      portion of the spectrum that corresponds to steep propagation
+      angles"), which matters at ranges shorter than typically 5-10 water
+      depths (JKPS §4.9.1). Lowering ``c_high`` raises that end and discards
+      it, and below the seabed speed also the trapped modes nearest cutoff.
+      Its high end holds the evanescent components, significant when source
+      and receiver are at about the same depth, the highest significant
+      ``k_r`` being omega over the lowest wave speed in the problem (JKPS
+      ch. 4, Appendix 1, "Wavenumber Integration", step 1; §4.5.2). Raising
+      ``c_low`` lowers that end and discards them, and past the slowest
+      water speed also the near-horizontal propagating components.
+    * the **step** ``Delta k`` sets the alias period ``r_wrap = 2*pi/Delta k``.
+      The discrete sum is the superposition of the true field and its images
+      repeated every ``r_wrap`` (JKPS §4.5.3), so a field that has not died
+      out within the window is wrapped into it and adds to the field there,
+      where nothing tells it apart from the field itself — an error that
+      reads as a physical result. ``fits`` is :func:`ranges_fit_alias_period`
+      for ``rmax``: necessary, not sufficient.
+
+    Parameters
+    ----------
+    frequency : float
+        Hz.
+    c_low, c_high : float
+        Phase-speed window (m/s). ``k`` runs from ``omega/c_high`` to
+        ``omega/c_low``, so ``c_low`` sets the LARGEST wavenumber.
+    delta_k : float
+        Wavenumber step (rad/m) of the sampled transform.
+    rmax : float, optional
+        Farthest receiver range (m), to test against the alias period.
+    water_sound_speed, seabed_sound_speed : float, optional
+        Water and seabed sound speeds (m/s), carried as ``omega/c`` so a
+        plot marks them; their interval is the trapped band.
+
+    Returns
+    -------
+    WavenumberSampling
+        The window, the alias period and the verdict; ``.plot()`` draws them.
+    """
+    who = 'wavenumber_sampling'
+    optional = (('rmax', rmax), ('water_sound_speed', water_sound_speed),
+                ('seabed_sound_speed', seabed_sound_speed))
+    for name, value in (('frequency', frequency), ('c_low', c_low),
+                        ('c_high', c_high), ('delta_k', delta_k),
+                        *((n, v) for n, v in optional if v is not None)):
+        if not np.isfinite(value) or value <= 0:
+            raise ConfigurationError(
+                f"{who}: {name} must be positive and finite, got {value!r}.")
+    if c_high <= c_low:
+        raise ConfigurationError(
+            f"{who}: c_high ({c_high:g}) must exceed c_low ({c_low:g}) -- "
+            f"they bracket a phase-speed window.")
+    omega = 2.0 * np.pi * float(frequency)
+    return WavenumberSampling(
+        frequency=float(frequency), c_low=float(c_low), c_high=float(c_high),
+        delta_k=float(delta_k), k_min=omega / float(c_high),
+        k_max=omega / float(c_low), alias_period=alias_period(delta_k),
+        rmax=None if rmax is None else float(rmax),
+        fits=None if rmax is None else ranges_fit_alias_period(delta_k, rmax),
+        water_sound_speed=(None if water_sound_speed is None
+                           else float(water_sound_speed)),
+        seabed_sound_speed=(None if seabed_sound_speed is None
+                            else float(seabed_sound_speed)),
+        water_wavenumber=(None if water_sound_speed is None
+                          else omega / float(water_sound_speed)),
+        seabed_wavenumber=(None if seabed_sound_speed is None
+                           else omega / float(seabed_sound_speed)))

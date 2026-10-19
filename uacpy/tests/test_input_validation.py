@@ -156,6 +156,73 @@ def test_a_carrier_is_under_construction_only_while_its_init_runs():
     assert len(seen) < 5000
 
 
+_MISTYPED_ASSIGNMENTS = [
+    (lambda: Environment(bathymetry=100.0), 'water_densty', 'water_density'),
+    (lambda: uacpy.Source(depths=10.0, frequencies=100.0), 'frequncies',
+     'frequencies'),
+    (lambda: uacpy.Receiver(depths=[10.0, 20.0], ranges=[1000.0]), 'depth',
+     'depths'),
+    (_ssp, 'soundspeed', 'sound_speed'),
+    (lambda: uacpy.Bathymetry(ranges=[0.0, 1000.0], depths=[100.0, 120.0]),
+     'depht', 'depths'),
+    (_halfspace, 'sound_sped', 'sound_speed'),
+    (_layer, 'thicknes', 'thickness'),
+    (_fg, 'temprature', 'temperature'),
+]
+
+
+@pytest.mark.parametrize('build, typo, meant', _MISTYPED_ASSIGNMENTS,
+                         ids=[row[1] for row in _MISTYPED_ASSIGNMENTS])
+def test_a_mistyped_setting_is_refused_naming_the_field_meant(build, typo,
+                                                              meant):
+    """A name that is neither a field nor declared by the class would be
+    stored as an attribute nothing reads, the run keeping the old value:
+    the assignment is refused, naming the nearest field, and the carrier is
+    left as it was."""
+    carrier = build()
+    before = repr(carrier)
+    with pytest.raises(ConfigurationError,
+                       match=f"no setting named '{typo}'.*Did you mean "
+                             f"'{meant}'"):
+        setattr(carrier, typo, 1.0)
+    assert typo not in vars(carrier)
+    assert repr(carrier) == before
+
+
+@pytest.mark.parametrize('build, meant', [
+    (lambda: uacpy.FrancoisGarrison(10.0, 35.0, ph=8.0), 'pH'),
+    (lambda: Environment(bathymetry=100.0, waterdensity=1.0),
+     'water_density'),
+    (lambda: uacpy.Source(depth=10.0, frequencies=100.0), 'depths'),
+    (lambda: SedimentLayer(thicknes=10.0, sound_speed=1650.0, density=1.9),
+     'thickness'),
+], ids=['pH', 'water_density', 'depths', 'thickness'])
+def test_a_mistyped_constructor_keyword_names_the_field_meant(build, meant):
+    """The engines' constructors name the knob a misspelt keyword meant;
+    so do the carriers', matching without case (``ph`` is ``pH``)."""
+    with pytest.raises(TypeError, match=f"unexpected keyword argument .*"
+                                        f"Did you mean '{meant}'"):
+        build()
+
+
+def test_a_declared_delegated_or_private_name_assigns():
+    """The refusal leaves alone what a carrier declares: the half-space
+    names a seabed forwards to its nodes, the CRUST1.0 fetcher's
+    ``sediment_thickness_source`` stamp, and leading-underscore
+    bookkeeping."""
+    env = Environment(bathymetry=100.0, bottom='sand')
+    env.bottom.sound_speed = 1600.0
+    assert env.bottom.columns[0].halfspace.sound_speed == 1600.0
+    column = env.bottom.columns[0]
+    assert column.sediment_thickness_source is None
+    column.sediment_thickness_source = 'globsed'
+    env.bottom.sediment_thickness_source = 'globsed'
+    assert (column.sediment_thickness_source,
+            env.bottom.sediment_thickness_source) == ('globsed', 'globsed')
+    env._note = 1
+    assert env._note == 1
+
+
 def test_an_assignment_is_normalised_as_the_constructor_normalises():
     """An accepted assignment is stored as the constructor would store it:
     a list of speeds becomes the ``(n_depth, 1)`` float array."""
@@ -1014,8 +1081,8 @@ class TestAttenuationCeiling:
             c_high=2000.0)
 
     def test_the_constant_is_the_one_the_fortran_implies(self):
-        from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
-        assert MAX_ATTENUATION_DB_PER_WAVELENGTH == pytest.approx(54.57505391,
+        from uacpy.core.deck_limits import MAX_ATTENUATION
+        assert MAX_ATTENUATION == pytest.approx(54.57505391,
                                                                  abs=1e-7)
 
     @pytest.mark.parametrize('alpha', [54.6, 60.0, 1e6])
@@ -1039,9 +1106,9 @@ class TestAttenuationCeiling:
         assert '60' in out.read_text()
 
     def test_the_at_deck_takes_the_ceiling_itself(self, tmp_path):
-        from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        from uacpy.core.deck_limits import MAX_ATTENUATION
         self._scooter_deck(
-            self._env(attenuation=MAX_ATTENUATION_DB_PER_WAVELENGTH),
+            self._env(attenuation=MAX_ATTENUATION),
             tmp_path / 's.env')
 
     @pytest.mark.parametrize('alpha', [0.0, 0.5, 2.0, 54.0])
@@ -1171,21 +1238,21 @@ class TestAxesMustSurviveTheDeckPrintResolution:
         """1 µm on a depth axis (metres at %.6f) and 1 mm on a range axis
         (kilometres at %.6f)."""
         from uacpy.core.deck_limits import (
-            DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
+            DECK_DEPTH_RESOLUTION, DECK_RANGE_RESOLUTION,
         )
-        assert DECK_DEPTH_RESOLUTION_M == 1e-6
-        assert DECK_RANGE_RESOLUTION_M == 1e-3
+        assert DECK_DEPTH_RESOLUTION == 1e-6
+        assert DECK_RANGE_RESOLUTION == 1e-3
 
     def test_the_writer_prints_at_the_resolution_the_carriers_admit(self):
         """The link the two numbers rest on, driven rather than restated.
 
-        The carriers admit a step of ``DECK_DEPTH_RESOLUTION_M`` because the
+        The carriers admit a step of ``DECK_DEPTH_RESOLUTION`` because the
         deck can print it; the writer's column format is what decides whether
         it can. Both sides of that threshold: one resolution apart must give
         two tokens, and anything below it must give one."""
         from uacpy.core.deck_limits import (
-            DECK_AXIS_DECIMALS, DECK_DEPTH_RESOLUTION_M,
-            DECK_RANGE_RESOLUTION_M,
+            DECK_AXIS_DECIMALS, DECK_DEPTH_RESOLUTION,
+            DECK_RANGE_RESOLUTION,
         )
         from uacpy.core.deck_limits import DECK_DEPTH_FMT
         from uacpy.core.units import m_to_km
@@ -1195,18 +1262,18 @@ class TestAxesMustSurviveTheDeckPrintResolution:
 
         depth = 100.0
         assert (token(depth, DECK_DEPTH_FMT)
-                != token(depth + DECK_DEPTH_RESOLUTION_M, DECK_DEPTH_FMT))
+                != token(depth + DECK_DEPTH_RESOLUTION, DECK_DEPTH_FMT))
         assert (token(depth, DECK_DEPTH_FMT)
-                == token(depth + DECK_DEPTH_RESOLUTION_M / 10.0,
+                == token(depth + DECK_DEPTH_RESOLUTION / 10.0,
                          DECK_DEPTH_FMT))
 
         range_fmt = f'.{DECK_AXIS_DECIMALS}f'
         r = 4000.0
         assert (token(float(m_to_km(r)), range_fmt)
-                != token(float(m_to_km(r + DECK_RANGE_RESOLUTION_M)),
+                != token(float(m_to_km(r + DECK_RANGE_RESOLUTION)),
                          range_fmt))
         assert (token(float(m_to_km(r)), range_fmt)
-                == token(float(m_to_km(r + DECK_RANGE_RESOLUTION_M / 10.0)),
+                == token(float(m_to_km(r + DECK_RANGE_RESOLUTION / 10.0)),
                          range_fmt))
 
 
@@ -1269,8 +1336,8 @@ class TestExtendToUsesTheReadersOwnEpsilon:
         assert float(np.asarray(out.depths)[-1]) == pytest.approx(base + delta)
 
     def test_the_epsilon_is_the_fortran_one(self):
-        from uacpy.core.deck_limits import AT_LAST_SSP_POINT_EPS_M
-        assert AT_LAST_SSP_POINT_EPS_M == pytest.approx(1.1920929e-05, rel=1e-9)
+        from uacpy.core.deck_limits import AT_LAST_SSP_POINT_EPS
+        assert AT_LAST_SSP_POINT_EPS == pytest.approx(1.1920929e-05, rel=1e-9)
 
     def test_a_snap_that_would_cross_the_previous_sample_raises(self):
         """The reader's window (1.19e-5 m) is wider than the legal minimum
@@ -1662,9 +1729,9 @@ def test_coerce_data_sources_none_is_empty_provenance():
 
 # --- base.py validate_inputs funnel: frequency / depth / surface guards ----
 #
-# Every concrete ``run()`` calls ``validate_inputs`` (Bounce overrides
-# ``_validate_geometry`` to a no-op — reflection decks read no geometry — so
-# it appears below only where its own guards fire). The tests call
+# Every concrete ``run()`` calls ``validate_inputs`` (a REFLECTION run reads
+# no geometry and checks none — ``_checks.validate_geometry`` — so Bounce
+# appears below only where its own guards fire). The tests call
 # ``validate_inputs`` directly where the guard lives there, and ``run()``
 # where the guard fires later on the run path but still before any deck is
 # written or binary launched.
@@ -1775,7 +1842,7 @@ def test_bounce_run_refuses_multi_frequency_source():
 
 @pytest.mark.parametrize('model_cls,mode', _model_mode_params([
     ('OASN', uacpy.RunMode.COVARIANCE),
-    ('OASN', uacpy.RunMode.REPLICA), ('OASR', uacpy.RunMode.REFLECTION),
+    ('OASN', uacpy.RunMode.REPLICA),
     ('OASS', uacpy.RunMode.REVERBERATION), ('OASS', uacpy.RunMode.COVARIANCE),
 ]))
 def test_multi_depth_source_refused_in_a_non_field_mode(model_cls, mode):
@@ -1784,13 +1851,35 @@ def test_multi_depth_source_refused_in_a_non_field_mode(model_cls, mode):
     modes raises
     'single source depth' from ``_validate_geometry`` and names the field
     modes that do stack. Bellhop declares ``multi_source_depth`` and is
-    excluded; Bounce's geometry validation is a no-op, so the guard
-    genuinely does not exist for it."""
+    excluded; a REFLECTION run reads no source geometry
+    (:func:`test_a_reflection_run_checks_no_geometry`)."""
     src = uacpy.Source(depths=[10.0, 20.0], frequencies=100.0)
     with pytest.raises(ConfigurationError,
                        match=f'single source depth per {mode.name} run'):
         model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
                                     run_mode=mode)
+
+
+@pytest.mark.requires_binary  # constructs the reflection engines
+@pytest.mark.parametrize('name', ['Bounce', 'OASR'])
+def test_a_reflection_run_checks_no_geometry(name):
+    """A plane-wave reflection coefficient reads no source or receiver
+    geometry (BOUNCE never calls ReadSzRz; OASR reads only the
+    frequencies), so both reflection engines take the same Source a field
+    engine takes — two depths, a depth below the seafloor, a beam pattern
+    — and the run makes one table."""
+    import uacpy.models as models
+    cls = getattr(models, name)
+    pattern = np.array([[-90.0, -30.0], [0.0, 0.0], [90.0, -30.0]])
+    for src in (uacpy.Source(depths=[20.0, 50.0], frequencies=100.0),
+                uacpy.Source(depths=[200.0], frequencies=100.0),
+                uacpy.Source(depths=[20.0], frequencies=100.0,
+                             beam_pattern=pattern)):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            settings = cls().run_settings(_guard_env(), src, _guard_rcv(),
+                                          run_mode=uacpy.RunMode.REFLECTION)
+        assert settings.depth_loop in ('engine', 'single')
 
 
 def test_a_rectangular_grid_over_a_slope_logs_its_buried_cells(capsys):

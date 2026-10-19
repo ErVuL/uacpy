@@ -211,6 +211,52 @@ def test_adapter_bank_localizes_planted_source(processor):
     assert np.unravel_index(np.nanargmax(surf.data), surf.shape) == (iz, ir)
 
 
+@pytest.mark.parametrize("processor", ["bartlett", "mvdr"])
+def test_the_surface_carries_the_engine_of_its_replicas(processor):
+    """A bank built from a model's field keeps the model's identity and the
+    processors hand it to their surface, so the surface's figure credits the
+    engine, as the OASN covariance surfaces do."""
+    from uacpy.models.provenance import model_provenance
+    engine = model_provenance('acoustics_toolbox')
+    z_arr = np.linspace(5, 95, 6)
+    cand_z = np.linspace(10, 90, 4)
+    cand_r = np.linspace(500, 4000, 5)
+    P = _random_bank(z_arr.size, cand_z.size, cand_r.size, seed=1)
+    stack = _over_source_depths(
+        [_pressure_field(P[:, i, :], depth=z_arr, range=cand_r)
+         for i in range(cand_z.size)], cand_z).replace(
+        model='Kraken', backend='krakenc', model_source=engine)
+    bank = replica_bank_from_field(stack, array_depths=z_arr)
+    assert (bank.model, bank.backend, bank.model_source) == (
+        'Kraken', 'krakenc', engine)
+    K = csdm(bank.replicas[0, 1, 2][:, None])
+    surf = bartlett(K, bank) if processor == "bartlett" else mvdr(K, bank)
+    assert (surf.model, surf.backend, surf.model_source) == (
+        'Kraken', 'krakenc', engine)
+    import matplotlib.pyplot as plt
+    fig, _ = surf.plot()
+    try:
+        assert fig.get_supxlabel() == (
+            'Model: Kraken (krakenc) — Michael B. Porter, Acoustics Toolbox')
+    finally:
+        plt.close(fig)
+
+
+def test_a_modal_bank_carries_the_engine_of_its_modes():
+    from uacpy.core.results import Modes
+    from uacpy.models.provenance import model_provenance
+    engine = model_provenance('acoustics_toolbox')
+    modes = Modes(k=np.array([0.40 + 1e-5j, 0.39 + 2e-5j]),
+                  phi=np.arange(6.0).reshape(3, 2),
+                  depths=np.array([1.0, 2.0, 3.0]), frequencies=100.0,
+                  model='Kraken', backend='krakenc', model_source=engine)
+    bank = replica_bank(modes, array_depths=np.array([1.5, 2.5]),
+                        candidate_depths=np.array([1.2, 2.8]),
+                        candidate_ranges=np.array([500.0, 900.0]))
+    assert (bank.model, bank.backend, bank.model_source) == (
+        'Kraken', 'krakenc', engine)
+
+
 # ── error contracts ──────────────────────────────────────────────────────
 
 def _modes():

@@ -5,7 +5,9 @@ sample times, without transforming the other frequencies.
 :func:`uacpy.acoustics.snapshot_frequency_component` and
 :func:`uacpy.acoustic_signal.tone_phasor` are this sum with their own gains,
 so the transform, its phase origin and its memory bound are one
-implementation.
+implementation. The many-frequencies form of the same sum, one waveform at
+an arbitrary frequency list, is the direct fallback of
+:func:`uacpy.acoustic_signal.waveform_spectrum_at`, blocked over frequency.
 
 This module sits in ``core`` because ``acoustic_signal`` and
 ``core.acoustics`` both call it and ``core`` must depend on neither.
@@ -13,9 +15,10 @@ This module sits in ``core`` because ``acoustic_signal`` and
 
 import numpy as np
 
-#: Complex128 elements of cast record per block on the windowed path
-#: (~64 MB), the scratch budget the synthesis chunking in
-#: ``acoustic_signal/_synthesis.py`` (``synthesize_cells``) works to.
+#: Complex128 elements of the largest scratch block a batched transform
+#: builds at once (~64 MB): the cast record per block on the windowed path,
+#: the synthesis chunking in ``acoustic_signal/_synthesis.py`` and the
+#: direct sum of ``waveform_spectrum_at``.
 _BLOCK_ELEMENTS = 4_000_000
 
 

@@ -86,6 +86,25 @@ def test_ph_profile_trims_at_seafloor(glodap_cache):
     assert ph.tolist() == [pytest.approx(8.10), pytest.approx(8.05)]
 
 
+def test_a_ph_column_read_at_another_cell_is_recorded_from_the_point(
+        glodap_cache):
+    """Read at the cell another dataset's column came from, the column is
+    that cell's, and the record still measures from the requested point —
+    so the offset is the real hop and the notice names it."""
+    from uacpy.core.exceptions import ProvenanceWarning
+    from uacpy.tests.conftest import recorded_warnings
+    with recorded_warnings() as caught:
+        profile = glodap_local._ph_profile((32.5, -40.5), read_at=(30.5, -40.5),
+                                           max_distance_km=None,
+                                           who='fetch_environment')
+    assert profile.depths.tolist() == [0.0, 500.0]
+    assert profile.provenance.requested_point == (32.5, -40.5)
+    assert profile.provenance.data_point == (30.5, -40.5)
+    assert profile.provenance.offset_km == pytest.approx(222.4, abs=0.1)
+    assert [w for w in caught if issubclass(w.category, ProvenanceWarning)
+            and '222.4 km' in str(w.message)]
+
+
 def test_ph_defaults_to_the_level_nearest_the_column_mid_depth(glodap_cache):
     # Levels 0 / 500 / 2000 m: the mid-depth 1000 m is nearest the 500 m
     # level.

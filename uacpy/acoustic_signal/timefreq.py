@@ -12,9 +12,12 @@ import math
 import numbers
 import warnings
 from collections import namedtuple
+from typing import Optional
 import numpy as np
 import scipy.signal as _sig
-from uacpy.core.exceptions import ConfigurationError, NumericsWarning
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, NumericsWarning,
+)
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.acoustics import power_to_dB
 from uacpy.core._warn_frames import USER_FRAME_SKIP
@@ -30,7 +33,7 @@ from scipy.special import gamma
 from uacpy.acoustic_signal.spectral import (
     _require_bin_scaling, _time_axis_last, _warn_two_sided,
 )
-from uacpy.acoustic_signal.windows import _DEFAULT_NPERSEG, _default_noverlap
+from uacpy.acoustic_signal.windows import _default_noverlap, _welch_nperseg
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -69,11 +72,26 @@ class CWTResult(PlottedResult,
     order :class:`SpectrogramResult` uses; :meth:`plot` is the one obvious
     way to draw it. A multichannel record's ``coefficients`` carry its
     channel axes first, then ``(frequencies, times)``.
+
+    The forward call's settings ride on attributes, which
+    :func:`inverse_cwt` reads back so the result goes back whole:
+    ``sample_rate`` (Hz), ``wavelet``, and the shape setting that wavelet
+    reads — ``w0`` for ``'morlet'``, ``order`` for ``'paul'`` / ``'dog'``,
+    the other ``None``. Filtered coefficients keep them through
+    ``result._replace(coefficients=filtered)``.
     """
 
-    __slots__ = ()
-
+    _attrs = ("sample_rate", "wavelet", "w0", "order")
     _plotter = "plot_cwt"
+
+    def __new__(cls, frequencies, times, coefficients, *, sample_rate,
+                wavelet, w0=None, order=None):
+        self = super().__new__(cls, frequencies, times, coefficients)
+        self.sample_rate = float(sample_rate)
+        self.wavelet = str(wavelet)
+        self.w0 = None if w0 is None else float(w0)
+        self.order = None if order is None else int(order)
+        return self
 
     def _field_units(self):
         return {"frequencies": "Hz", "times": "s", "coefficients": None}
@@ -249,11 +267,12 @@ def instantaneous_frequency(data, sample_rate: float, *, axis=-1):
 def _smoothing_window(spec, name):
     """Centered, odd-length smoothing window from a ``None`` / int / array spec.
 
-    ``None`` -> no smoothing. An int ``L`` -> a symmetric Hann window of odd length (``L-1`` for even ``L``). A 1-D
-    array is used verbatim when its length is odd; an even-length array has
-    its centre sample deleted, giving an odd length. Returns ``(w, half)`` with ``w`` of length
-    ``2*half+1`` centered at index ``half`` (so ``w[half+k]`` weights offset
-    ``k``); ``(None, 0)`` for no smoothing.
+    ``None`` -> no smoothing. An int ``L`` -> a symmetric Hann window of
+    length ``L``. A 1-D array is used verbatim. An even length, int or
+    array, is refused: an even window has no centre sample to put the peak
+    on. Returns ``(w, half)`` with ``w`` of length ``2*half+1`` centered at
+    index ``half`` (so ``w[half+k]`` weights offset ``k``); ``(None, 0)`` for
+    no smoothing.
     """
     if spec is None:
         return None, 0
@@ -262,26 +281,30 @@ def _smoothing_window(spec, name):
         if L < 1:
             raise ConfigurationError(
                 f"wigner_ville: {name} length must be >= 1; got {L}.")
-        # Generate an odd length directly: trimming an even symmetric
-        # window (hann(6)[:-1]) puts the peak off-centre, which breaks the
-        # acc(-tau) = conj(acc(tau)) symmetry the transform's .real relies
-        # on (measured up to 59 % error at L = 4).
-        w = _sig.get_window("hann", L - 1 if L % 2 == 0 else L,
-                            fftbins=False).astype(float)
+        size = L
     else:
         w = np.asarray(spec, dtype=float)
         if w.ndim != 1 or w.size < 1:
             raise ConfigurationError(
                 f"wigner_ville: {name} must be a 1-D window; "
                 f"got shape {w.shape}.")
-        if w.size % 2 == 0:
-            # Delete the centre sample, not the last one: an even symmetric
-            # window has two equal middle samples, so dropping one of them
-            # keeps the peak on-centre, while trimming the tail puts the peak
-            # off-centre and breaks the acc(-tau) = conj(acc(tau)) symmetry
-            # the transform's .real relies on (same reason the int path
-            # generates an odd length directly).
-            w = np.delete(w, w.size // 2)
+        size = w.size
+    if size % 2 == 0:
+        # The transform's .real relies on acc(-tau) = conj(acc(tau)), which
+        # a window holds only with its peak on a centre sample: trimming an
+        # even symmetric window (hann(6)[:-1]) puts the peak off-centre
+        # (measured up to 59 % error at L = 4), and any other odd window made
+        # from it would be a window the caller did not pass.
+        raise ConfigurationError(
+            f"wigner_ville: {name} is {size} samples long, an even length; "
+            f"the smoothing window must have an odd length, centred on its "
+            f"middle sample.",
+            remediation=f"Pass a window of {size - 1} or {size + 1} samples"
+                        + ("." if np.isscalar(spec)
+                           else ", e.g. np.delete(w, w.size // 2) to drop "
+                                "one of its two middle samples."))
+    if np.isscalar(spec):
+        w = _sig.get_window("hann", size, fftbins=False).astype(float)
     return w, w.size // 2
 
 
@@ -298,7 +321,7 @@ _MAX_WIGNER_CELLS = _MAX_SURFACE_BYTES // 8
 _WIGNER_NEGATIVE_ENERGY_MAX = 1e-3
 
 
-def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
+def wigner_ville(data, sample_rate: float, *, analytic: Optional[bool] = None,
                  lag_smoothing=None, time_smoothing=None, nfft=None):
     """Discrete (smoothed-pseudo-) Wigner-Ville distribution of a 1-D signal.
 
@@ -311,6 +334,11 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
     only for a signal whose spectrum sits in ``[0, fs/2)`` — the analytic
     signal of a real record, or a complex signal with no negative-frequency
     content.
+
+    The Wigner-Ville distribution is Mallat, *A Wavelet Tour of Signal
+    Processing*, §4.5.1, Eq. 4.108. Mallat's discrete computation (§4.5.4)
+    interpolates the signal at half-integer samples; this integer-lag kernel
+    keeps the samples and halves the alias-free band instead, as above.
 
     A quadratic energy distribution — there is no routine inverse (like a
     spectrogram, it maps a signal to a 2-D density, not reversibly).
@@ -326,22 +354,26 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
         subtract ``fs/4`` from the returned frequencies.
     sample_rate : float
         Sample rate (Hz).
-    analytic : bool
-        Use the analytic signal for real input (default), suppressing
-        cross-terms with the negative spectrum. ``False`` runs the raw
-        signal, whose ``-f`` image draws a second ridge at ``fs/2 - f`` and
-        whose ``±f`` cross-term draws a third at 0 Hz (a 100 Hz cosine at
-        ``fs = 1`` kHz shows ridges at 0, 100 and 400 Hz). Ignored when
-        ``data`` is already complex.
+    analytic : bool, optional
+        Use the analytic signal for real input (unset: ``True``),
+        suppressing cross-terms with the negative spectrum. ``False`` runs
+        the raw signal, whose ``-f`` image draws a second ridge at
+        ``fs/2 - f`` and whose ``±f`` cross-term draws a third at 0 Hz (a
+        100 Hz cosine at ``fs = 1`` kHz shows ridges at 0, 100 and 400 Hz).
+        Not read when ``data`` is already complex: a given one then gets a
+        ``FallbackWarning``.
     lag_smoothing : None, int, or 1-D array
         Lag-domain smoothing window ``h(tau)`` — the *pseudo*-WVD. Smooths
         along frequency and limits the lag extent (shorter window -> more
         cross-term suppression, coarser frequency resolution). ``None`` is the
-        full-lag WVD. An int gives a symmetric Hann window of odd length (L-1 for even L).
+        full-lag WVD. An int ``L`` gives a symmetric Hann window of length
+        ``L``. The window is centred on its middle sample, so an even
+        length (int or array) is refused.
     time_smoothing : None, int, or 1-D array
         Time-domain smoothing window ``g`` — the *smoothed*-pseudo-WVD. Averages
         the instantaneous autocorrelation over neighbouring times (more
         cross-term suppression, coarser time resolution). ``None`` disables it.
+        Odd lengths only, as ``lag_smoothing``.
     nfft : int, optional
         Zero-pad the lag FFT to ``nfft >= n`` bins (finer frequency spacing).
         ``None`` uses ``n``.
@@ -386,8 +418,14 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
                             "the returned frequencies, or pass the real "
                             "signal and let analytic=True form the "
                             "analytic signal.")
+        if analytic is not None:
+            warnings.warn(
+                f"wigner_ville: analytic={analytic!r} chooses how a REAL "
+                f"record is formed, and data is already complex, so analytic "
+                f"is not used.",
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
         z = xc
-    elif analytic:
+    elif analytic is None or analytic:
         z = analytic_signal(xc)
     else:
         z = xc.astype(complex)
@@ -447,6 +485,34 @@ def wigner_ville(data, sample_rate: float, *, analytic: bool = True,
     f = np.arange(NF) * fs / (2.0 * NF)
     t = np.arange(n) / fs
     return WignerVilleResult(f, t, W)
+
+
+#: The Morlet central (non-dimensional) frequency :func:`cwt` and
+#: :func:`inverse_cwt` take when ``w0`` is unset: Torrence & Compo (1998),
+#: Eq. 1, "here taken to be 6 to satisfy the admissibility condition".
+_MORLET_W0 = 6.0
+
+
+def _wavelet_settings(wavelet, w0, order, who):
+    """``(w0, order)`` as the transform reads them: unset, ``w0`` is
+    :data:`_MORLET_W0` and ``order`` 4 for ``'paul'``, 2 for ``'dog'``. The
+    Morlet wavelet reads ``w0`` alone and Paul / DOG read ``order`` alone,
+    so a given setting the chosen wavelet does not read gets a
+    FallbackWarning naming it, and the transform runs as if it were unset."""
+    if wavelet == "morlet" and order is not None:
+        warnings.warn(
+            f"{who}: wavelet='morlet' does not read order= (got {order!r}); "
+            f"the Morlet wavelet is set by w0 alone.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        order = None
+    if wavelet in ("paul", "dog") and w0 is not None:
+        warnings.warn(
+            f"{who}: wavelet={wavelet!r} does not read w0= (got {w0!r}); its "
+            f"shape is set by order alone.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        w0 = None
+    return (_MORLET_W0 if w0 is None else w0,
+            (4 if wavelet == "paul" else 2) if order is None else order)
 
 
 def _wavelet_fourier(wavelet, s, omega, w0, order):
@@ -516,7 +582,7 @@ def _reconstruction_constants(wavelet, w0, order):
     return float(np.sum(in_band / scales) * dj), float(psi0_zero)
 
 
-def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
+def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=None,
         order=None, n_frequencies=64, axis=-1):
     """Continuous wavelet transform with a selectable wavelet (FFT-based).
 
@@ -539,12 +605,14 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
         Analysing wavelet. ``'morlet'`` (complex, best frequency resolution),
         ``'paul'`` (complex, best time resolution), ``'dog'`` (real Derivative
         Of Gaussian; ``order=2`` is the Mexican-hat / Ricker wavelet).
-    w0 : float
+    w0 : float, optional
         Morlet central (non-dimensional) frequency; ``>= 5`` keeps it
-        admissible. Default 6.
+        admissible. Unset, 6 (Torrence & Compo 1998, Eq. 1). ``'paul'`` and
+        ``'dog'`` do not read it: a given one gets a ``FallbackWarning``.
     order : int, optional
-        Wavelet order ``m``. Default 4 for ``'paul'``, 2 for ``'dog'``; ignored
-        for ``'morlet'``.
+        Wavelet order ``m``. Unset, 4 for ``'paul'``, 2 for ``'dog'``.
+        ``'morlet'`` does not read it: a given one gets a
+        ``FallbackWarning``.
     n_frequencies : int
         Number of log-spaced frequencies when ``frequencies`` is None.
     axis : int, optional
@@ -577,8 +645,7 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
     xr = np.moveaxis(xr, axis, -1)
     fs = require_positive_finite_scalar(sample_rate, "cwt", "sample_rate",
                                         " Hz")
-    if order is None:
-        order = 4 if wavelet == "paul" else 2
+    w0, order = _wavelet_settings(wavelet, w0, order, "cwt")
     n = xr.shape[-1]
     channels = xr.shape[:-1]
     if frequencies is None:
@@ -623,55 +690,59 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
         # because `omega` is rad/sample: equal energy at every scale.
         psi_hat = np.sqrt(2.0 * np.pi * s) * psi_hat
         W[..., i, :] = np.fft.ifft(Xf * np.conj(psi_hat), axis=-1)
-    return CWTResult(frequencies, np.arange(n) / fs, W)
+    morlet = wavelet == "morlet"
+    return CWTResult(frequencies, np.arange(n) / fs, W, sample_rate=fs,
+                     wavelet=wavelet, w0=w0 if morlet else None,
+                     order=None if morlet else order)
 
 
-def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
-                order=None):
+def inverse_cwt(W):
     """Inverse CWT (Torrence & Compo 1998, eq. 11).
 
     ``x_n = dj/(C_delta*psi0(0)) * sum_j Re(W_n(s_j))/sqrt(s_j)`` with ``dj``
     the log2 scale spacing. The reconstruction constants ``C_delta`` and
     ``psi0(0)`` are derived for the wavelet order actually in use
     (:func:`_reconstruction_constants`), so non-default ``w0`` / ``order``
-    reconstruct at the right amplitude. Pass the same ``frequencies`` /
-    ``wavelet`` / ``w0`` / ``order`` used in :func:`cwt`; amplitude is
-    recovered to the accuracy of the scale coverage (a band-limited scale set
-    reconstructs only the band it spans). The quadrature assumes the scale
-    grid is **uniform in log2** — true of :func:`cwt`'s default log-spaced
+    reconstruct at the right amplitude. Amplitude is recovered to the
+    accuracy of the scale coverage (a band-limited scale set reconstructs
+    only the band it spans). The quadrature assumes the scale grid is
+    **uniform in log2** — true of :func:`cwt`'s default log-spaced
     frequencies; a non-uniform grid (e.g. linearly spaced frequencies, or a
     single frequency) biases the amplitude and raises a ``NumericsWarning``.
 
     Parameters
     ----------
-    W : ndarray
-        CWT coefficients ``(n_frequencies, n_time)`` from :func:`cwt`.
-    frequencies : array
-        The analysis frequencies returned by :func:`cwt`.
-    sample_rate : float
-        Sample rate (Hz).
-    wavelet : {'morlet', 'paul', 'dog'}, optional
-        The wavelet :func:`cwt` used. Default ``'morlet'``.
-    w0 : float, optional
-        Morlet central frequency, as passed to :func:`cwt`. Default 6.
-    order : int, optional
-        Wavelet order, as passed to :func:`cwt`; ``None`` is 4 for
-        ``'paul'`` and 2 otherwise.
+    W : CWTResult
+        What :func:`cwt` returned, whole: its ``coefficients`` (any leading
+        channel axes, then ``(n_frequencies, n_time)``) over its
+        ``frequencies``, with the ``sample_rate``, ``wavelet``, ``w0`` and
+        ``order`` the forward call used. Filtered coefficients go back as
+        ``W._replace(coefficients=filtered)``.
 
     Returns
     -------
     ndarray
-        Reconstructed 1-D signal.
+        The reconstructed signal, one per channel: the leading channel axes
+        of ``coefficients``, then time.
     """
-    Wc = np.asarray(W)
-    frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
-    if Wc.ndim != 2 or Wc.shape[0] != frequencies.size:
+    if not isinstance(W, CWTResult):
         raise ConfigurationError(
-            "inverse_cwt: W must be (n_frequencies, n_time) matching "
-            f"frequencies; got W shape {Wc.shape} and {frequencies.size} frequencies.")
-    if order is None:
-        order = 4 if wavelet == "paul" else 2
-    fs = require_positive_finite_scalar(sample_rate, "inverse_cwt",
+            f"inverse_cwt: takes the CWTResult cwt returned, which carries "
+            f"the sample rate and wavelet the inverse needs; got "
+            f"{type(W).__name__}.",
+            remediation="Pass the cwt result whole; for filtered "
+                        "coefficients, result._replace(coefficients="
+                        "filtered).")
+    Wc = np.asarray(W.coefficients)
+    frequencies = np.atleast_1d(np.asarray(W.frequencies, dtype=float))
+    if Wc.ndim < 2 or Wc.shape[-2] != frequencies.size:
+        raise ConfigurationError(
+            "inverse_cwt: coefficients must be (..., n_frequencies, n_time) "
+            f"matching frequencies; got coefficients shape {Wc.shape} and "
+            f"{frequencies.size} frequencies.")
+    wavelet = W.wavelet
+    w0, order = _wavelet_settings(wavelet, W.w0, W.order, "inverse_cwt")
+    fs = require_positive_finite_scalar(W.sample_rate, "inverse_cwt",
                                         "sample_rate", " Hz")
     _, factor = _wavelet_fourier(wavelet, 1.0, np.array([1.0]), w0, order)
     scales = factor * fs / frequencies
@@ -699,7 +770,7 @@ def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
             "with several log-spaced frequencies.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
     c_delta, psi0_zero = _reconstruction_constants(wavelet, float(w0), int(order))
-    return (np.sum(np.real(Wc) / np.sqrt(scales)[:, None], axis=0)
+    return (np.sum(np.real(Wc) / np.sqrt(scales)[:, None], axis=-2)
             * dj / (c_delta * psi0_zero))
 
 
@@ -976,22 +1047,23 @@ def _short_time_panel(data, sample_rate, *, window, nperseg, noverlap, nfft,
     if window is None:
         window = _SHORT_TIME_WINDOW
     _require_bin_scaling(scaling, who)
-    # nperseg=None would fail in int() below; scipy rejects the rest untyped.
-    if (isinstance(nperseg, bool) or not isinstance(nperseg, numbers.Integral)
-            or nperseg < 1):
+    # scipy rejects these untyped.
+    if nperseg is not None and (
+            isinstance(nperseg, bool)
+            or not isinstance(nperseg, numbers.Integral) or nperseg < 1):
         raise ConfigurationError(
             f"{who}: nperseg must be an integer number of samples of "
-            f"at least 1; got {nperseg!r}.")
+            f"at least 1, or None for the default; got {nperseg!r}.")
+    nperseg = _welch_nperseg(nperseg, window, np.shape(data)[-1], who)
     if noverlap is None:
-        noverlap = _default_noverlap(
-            window, min(int(nperseg), np.shape(data)[-1]))
+        noverlap = _default_noverlap(window, nperseg)
     return _sig.spectrogram(data, sample_rate, window=window,
                             nperseg=nperseg, noverlap=noverlap, nfft=nfft,
                             detrend=detrend, scaling=scaling, mode=mode)
 
 
 def spectrogram(data, sample_rate, *, window=_SHORT_TIME_WINDOW,
-                nperseg=_DEFAULT_NPERSEG, noverlap=None, nfft=None,
+                nperseg=None, noverlap=None, nfft=None,
                 detrend="constant", scaling="density", axis=None):
     """Short-time power spectral density. Returns a
     :class:`SpectrogramResult` ``(frequencies, times, power)``, in Pa²/Hz
@@ -1005,10 +1077,12 @@ def spectrogram(data, sample_rate, *, window=_SHORT_TIME_WINDOW,
     half a bin off centre reads 1.42 dB low under it, so read tone levels
     from ``welch(scaling='spectrum')``.
 
-    ``noverlap=None`` (default) is the window's overlap, as on :func:`welch`
-    (half a segment for hann), with ``nperseg`` first clamped to the record
-    length (as scipy clamps it), so a short signal does not raise; pass an
-    int to override. ``nfft`` (zero-pad length) and ``detrend`` mirror
+    ``nperseg=None`` (default) takes 8192 samples (uacpy guidance), or the
+    whole record when it is shorter, or an array ``window``'s own length, as
+    on :func:`welch`; a given ``nperseg`` is used as given, and refused when
+    longer than the record. ``noverlap=None`` (default) is the window's
+    overlap on that segment, as on :func:`welch` (half a segment for hann);
+    pass an int to override. ``nfft`` (zero-pad length) and ``detrend`` mirror
     :func:`uacpy.acoustic_signal.welch`: ``detrend`` is ``'constant'``
     (subtract each segment's mean, scipy's default), ``'linear'``, a
     callable, or ``False``. A segment holding part of a pulse has a mean the
@@ -1039,8 +1113,8 @@ def spectrogram(data, sample_rate, *, window=_SHORT_TIME_WINDOW,
         ``(name, *params)`` tuple, or an array. Default ``'hann'``, which
         ``None`` also selects; ``'boxcar'`` is no taper.
     nperseg : int, optional
-        Segment length, an integer number of samples. Default 8192 (uacpy
-        guidance), clamped to the record.
+        Segment length, an integer number of samples. Unset: 8192 (uacpy
+        guidance), or the whole record when shorter (see above).
     noverlap, nfft, detrend : optional
         Overlap, zero-pad length and per-segment detrending (see above).
     scaling : {'density', 'spectrum'}, optional
@@ -1056,7 +1130,7 @@ def spectrogram(data, sample_rate, *, window=_SHORT_TIME_WINDOW,
 
 
 def stft(data, sample_rate, *, window=_SHORT_TIME_WINDOW,
-         nperseg=_DEFAULT_NPERSEG, noverlap=None, nfft=None,
+         nperseg=None, noverlap=None, nfft=None,
          detrend="constant", scaling="density", axis=None):
     """Short-time Fourier transform on :func:`spectrogram`'s segments.
     Returns an :class:`STFTResult` ``(frequencies, times, coefficients)``.
@@ -1072,8 +1146,9 @@ def stft(data, sample_rate, *, window=_SHORT_TIME_WINDOW,
 
     Every parameter is :func:`spectrogram`'s, with the same defaults and the
     same meaning: ``window`` (``'hann'``, which ``None`` also selects;
-    ``'boxcar'`` is no taper), ``nperseg`` (8192, uacpy guidance, clamped to
-    the record), ``noverlap`` (the window's overlap), ``nfft``, ``detrend``
+    ``'boxcar'`` is no taper), ``nperseg`` (unset: 8192 samples, uacpy
+    guidance, or the whole record when shorter; a given one longer than the
+    record is refused), ``noverlap`` (the window's overlap), ``nfft``, ``detrend``
     (``'constant'``; pass ``False`` for pulses), ``scaling`` and ``axis``
     (the time axis of a multichannel ``data``: ``coefficients`` then carries
     ``(..., frequency, time)``).

@@ -15,9 +15,11 @@ after row 5; ``ramgeo`` uses the base layout.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Optional, Sequence, Tuple, Union
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 
 
 #: Block terminator. Every RAM-family block reader stops on a negative first
@@ -54,6 +56,27 @@ def _write_block(
     fh.write(_TERM)
 
 
+def _notice_unread_blocks(kind: str, surface, range_segments) -> None:
+    """Say which of the given profiles the ``kind`` deck does not carry:
+    only ``ramsurf`` reads a surface block (``ramsurf1.5.f:83``), and only
+    ``rams`` the shear speed and shear attenuation blocks
+    (``rams0.5.f:193``, ``:196``)."""
+    unread = []
+    if kind != 'ramsurf' and surface is not None and len(surface) > 0:
+        unread.append("surface (only kind='ramsurf' reads a surface block, "
+                      "ramsurf1.5.f:83)")
+    shear = sorted({key for seg in range_segments
+                    for key in ('bottom_cs', 'bottom_attns') if key in seg})
+    if kind != 'rams' and shear:
+        unread.append(f"the range segments' {', '.join(shear)} (only "
+                      f"kind='rams' reads shear blocks, rams0.5.f:193, :196)")
+    if unread:
+        warnings.warn(
+            f"write_ram_in(kind={kind!r}) does not write "
+            f"{'; '.join(unread)}.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
 def write_ram_in(
     filepath: Union[str, Path],
     *,
@@ -76,7 +99,7 @@ def write_ram_in(
     n_stability: int = 1,
     stability_range: float = 0.0,
     rams_rotation: int = 1,
-    rams_rotation_angle_deg: float = 60.0,
+    rams_rotation_angle_deg: float = 45.0,
     title: str = "uacpy ram.in",
 ) -> None:
     """
@@ -84,7 +107,7 @@ def write_ram_in(
 
     Parameters
     ----------
-    filepath : str
+    filepath : str or Path
         Destination file path. The filename is fixed per binary — each
         hardcodes its own OPEN: ``ramsurf1.5`` reads ``ram.in``
         (``ramsurf1.5.f:31``), ``ramgeo`` reads ``ramgeo.in``
@@ -136,16 +159,25 @@ def write_ram_in(
           A deck without it is byte-identical to one written before the
           block existed, so a stock binary still reads it.
     surface : list of (range, depth), optional
-        Surface profile (only used / required when ``kind='ramsurf'``).
+        Surface profile (only used / required when ``kind='ramsurf'``;
+        given with another kind it is not written, and a ``FallbackWarning``
+        says so, as for ``bottom_cs``/``bottom_attns`` outside ``'rams'``).
         ``depth`` ≥ 0 means how far below z=0 the pressure-release
         surface sits at that range. Self-extends to ``2*rmax`` like the
         bathymetry (``ramsurf1.5.f:87-88``).
     n_stability, stability_range : int, float
         Row-5 stability fields (``ramgeo`` and ``ramsurf``; ``rams`` takes
-        ``irot, theta`` in their place).
+        ``irot, theta`` in their place). Default ``ns = 1``, Collins' "ns =
+        1 or 2 is effective for most problems" (ram.pdf p.3), and ``rs =
+        0``, "for radius of stability constraint, leave at 0"
+        (``ramsurf/readme.orig:93``).
     rams_rotation, rams_rotation_angle_deg : int, float
         Row-5 elastic stability fields (``rams`` only). ``rams_rotation_angle_deg`` is the
-        Padé rotation angle in degrees (0 < theta < 90).
+        Padé rotation angle in degrees (0 < theta < 90). Default rotation
+        on at 45°, uacpy guidance: the values :class:`~uacpy.models.RAM`
+        (``backend='rams'``) writes when they are unset (no source gives
+        an angle; ``ramsurf/readme.orig:168-176`` says to raise theta until
+        the output stops showing NaN).
     title : str
         Header line (row 1). Free text, ignored by the binary.
     """
@@ -173,6 +205,7 @@ def write_ram_in(
             "when row 5 announces it, so a mixed deck would misread the "
             "next section's range line as a profile block.")
     iattw = 1 if all(with_water_attn) and with_water_attn else 0
+    _notice_unread_blocks(kind, surface, range_segments)
 
     Path(filepath).parent.mkdir(parents=True, exist_ok=True)
     with open(filepath, 'w') as fh:

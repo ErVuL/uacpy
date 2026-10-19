@@ -77,9 +77,9 @@ for group, animal in groups.items():
 fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
 uacpy.plot.plot_source_level(band_centers, monopole, ax=axes[0, 0],
                              title="(ISO 17208 monopole)")
-axes[0, 0].semilogx(band_centers, radiated, "--", color="gray",
-                    label="RNL (measured)")
-axes[0, 0].legend()
+uacpy.plot.plot_source_level(band_centers, radiated, ax=axes[0, 0],
+                             label="RNL (measured)", ls="--", color="gray",
+                             title="(ISO 17208 monopole)")
 
 f_weighting = np.logspace(1.0, 5.5, 400)
 for group in groups:

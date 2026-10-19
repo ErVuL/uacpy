@@ -4,8 +4,9 @@ The code here is the code shown on the page: each builder is the worked
 example, so a figure cannot drift from the snippet that claims to produce it.
 
 SPARC marches a pulse, so every run costs real time. The receivers below are
-kept deliberately sparse and ``time_max`` is always pinned — the auto window
-(2.5 x the travel time to ``RMax``) is far longer than these figures need.
+kept deliberately sparse and the record end is always given through
+``run(output_duration=)`` — the auto window (2.5 x the travel time to the
+farthest receiver) is far longer than these figures need.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ def record_section():
     """
     env, source = rigid_floor_channel()
     array = uacpy.Receiver(depths=50.0, ranges=np.linspace(200.0, 1200.0, 24))
-    p = SPARC(time_max=1.0, n_time_samples=2048).run(env, source, array)
+    p = SPARC(n_time_samples=2048).run(env, source, array, output_duration=1.0)
 
     section = p.at(depth=50.0)
     gained = section.replace(data=section.data * np.sqrt(section.ranges)[:, None])
@@ -63,15 +64,15 @@ def single_trace():
     """One receiver: the pulse that arrives, and the band it occupies."""
     env, source = rigid_floor_channel()
     point = uacpy.Receiver(depths=50.0, ranges=np.array([800.0]))
-    p = SPARC(time_max=0.8, n_time_samples=2048).run(env, source, point)
+    p = SPARC(n_time_samples=2048).run(env, source, point, output_duration=0.8)
     trace = p.at(depth=50.0, range=800.0)
 
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 6.0))
     trace.plot(ax=axes[0])
     axes[0].set_title('p(t) at (800 m, 50 m)', fontweight='bold', fontsize=11)
 
-    H = trace.to_transfer_function(band=(0.0, 700.0))
-    freqs, spectrum = H.coords['frequency'], H.data.ravel()
+    S_H = trace.to_transfer_function(band=(0.0, 700.0))
+    freqs, spectrum = S_H.coords['frequency'], S_H.data.ravel()
     axes[1].semilogy(freqs, np.abs(spectrum) + 1e-30, linewidth=1.0)
     band = p.run_settings.engine
     for edge, label in ((band.freq_min, f'freq_min = {band.freq_min:g} Hz'),
@@ -82,7 +83,7 @@ def single_trace():
                          color='crimson', fontsize=9)
     axes[1].set_xlim(0.0, 700.0)
     axes[1].set_xlabel('Frequency (Hz)')
-    axes[1].set_ylabel('|H(f)|')
+    axes[1].set_ylabel('|S·H| (Pa·s)')
     axes[1].grid(True, alpha=0.3)
     axes[1].set_title('and its spectrum — freq_min / freq_max bound the wavenumbers '
                       'marched', fontweight='bold', fontsize=11)
@@ -101,7 +102,7 @@ def vertical_array():
     env, source = rigid_floor_channel()
     vla = uacpy.Receiver(depths=np.linspace(2.0, 98.0, 33),
                          ranges=np.array([800.0]))
-    p = SPARC(output_mode='D', time_max=0.9, n_time_samples=2048).run(env, source, vla)
+    p = SPARC(output_mode='D', n_time_samples=2048).run(env, source, vla, output_duration=0.9)
     fig, ax = p.at(range=800.0).plot(
         stacked=True, figsize=TALL,
         title='SPARC — vertical array at 800 m (output_mode=\'D\')')
@@ -114,7 +115,7 @@ def snapshots():
     env, source = rigid_floor_channel()
     grid = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 40),
                           ranges=np.linspace(10.0, 500.0, 80))
-    p = SPARC(output_mode='S', time_max=0.36, n_time_samples=512).run(env, source, grid)
+    p = SPARC(output_mode='S', n_time_samples=512).run(env, source, grid, output_duration=0.36)
 
     times = (0.06, 0.14, 0.22, 0.30)
     late = np.asarray(p.data)[..., -1]
@@ -140,8 +141,8 @@ def pulse_shapes():
 
     fig, axes = plt.subplots(3, 1, figsize=(9.0, 7.0), sharex=True)
     for ax, (code, label) in zip(axes, pulses):
-        p = SPARC(pulse_type=code, time_max=0.7, n_time_samples=2048).run(
-            env, source, point)
+        p = SPARC(pulse_type=code, n_time_samples=2048).run(
+            env, source, point, output_duration=0.7)
         p.at(depth=50.0, range=600.0).plot(ax=ax)
         ax.set_title(f"pulse_type='{code}' — {label}",
                      fontweight='bold', fontsize=11)
@@ -170,7 +171,7 @@ def output_sampling():
     for ax, n_time_samples in zip(axes, (128, 2048)):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            p = SPARC(time_max=0.7, n_time_samples=n_time_samples).run(env, source, point)
+            p = SPARC(n_time_samples=n_time_samples).run(env, source, point, output_duration=0.7)
         p.at(depth=50.0, range=600.0).plot(ax=ax)
         fs = (n_time_samples - 1) / 0.7
         ax.set_title(f'n_time_samples={n_time_samples} → {fs:.0f} Hz sampling, '

@@ -3,12 +3,11 @@ its binaries."""
 
 import dataclasses
 import numpy as np
-import warnings
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Dict, Optional, Union
 from uacpy.models.base import (
-    DEFAULT_RUN_TIMEOUT_S, PropagationModel, StageInputs, _host_options,
+    DEFAULT_RUN_TIMEOUT, PropagationModel, StageInputs, _host_options,
 )
 from uacpy.models._launch import (
     BinarySearch, Launch, openmp_thread_env, require_output, run_launch,
@@ -27,8 +26,7 @@ from uacpy.core.environment import (
 from uacpy.core.boundary import BoundaryType
 from uacpy.core.results import PhaseReference
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, NumericsWarning,
-    UnsupportedFeatureError,
+    ConfigurationError, FallbackWarning, UnsupportedFeatureError,
 )
 from uacpy.io.mpirams_reader import read_psif
 from uacpy.models.ram._settings import RamKnobs, RamSettings
@@ -48,7 +46,6 @@ from uacpy.models.ram.grid import (
     warn_if_pinned_accuracy_is_unused,
     warn_if_pinned_angle_max_is_below_the_slope,
     warn_if_pinned_rams_dr_factor_is_unused,
-    warn_if_pinned_dz_misplaces_the_seafloor,
     warn_if_ramsurf_surface_unresolved,
     warn_if_receivers_see_paths_steeper_than_the_band,
 )
@@ -276,7 +273,8 @@ class RAM(PropagationModel):
                   'dz': [grid.dz for grid in grids],
                   'zmax': [grid.zmax for grid in grids]}
         if engine.backend == 'rams':
-            values['rams_rotation_angle_deg'] = [grid.theta_deg for grid in grids]
+            values['rams_rotation_angle_deg'] = [
+                grid.rams_rotation_angle_deg for grid in grids]
         return values
 
     def __init__(
@@ -297,7 +295,7 @@ class RAM(PropagationModel):
         absorber_attenuation: Optional[float] = None,
         n_sediment_points: Optional[int] = None,
         c0: Optional[float] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         # ``dr`` / ``dz`` are picked by the Lytaev (2023) Padé-error
         # optimizer when not set explicitly. ``accuracy`` is the per-run
         # error budget; ``angle_max_deg`` (degrees) bounds the PE spectrum.
@@ -353,15 +351,10 @@ class RAM(PropagationModel):
             ``MAX_DEPTH_POINTS`` grid points, and capped at λ_s/14 on rams;
             the search starts at c_min/(15·freq), ``LAMBDA_PER_DZ_FLOOR``,
             where the optimiser asks for finer, and refines below it until the
-            seabed's trapped modes score under ``TRAPPED_MODE_SCORE_LIMIT``). A pinned ``dz`` is used as given; on the
-            fluid backends (mpiramS, ramgeo, ramsurf) one that puts the
-            shallowest seafloor more than ``SEAFLOOR_QUARTER_TOLERANCE`` of a
-            cell from the quarter-cell placement — on a node, as round values
-            such as 1, 0.5 or 0.25 m do on a 100 m channel, or anywhere from
-            mid-cell to the next node — warns and names the aligned value
-            ``h/(n + SEAFLOOR_CELL_OFFSET)``, which the automatic grid would
-            use (the placement and its tolerance are uacpy's guidance,
-            measured in docs/models/ram.md). On ramsurf the automatic ``dz`` also puts the
+            seabed's trapped modes score under ``TRAPPED_MODE_SCORE_LIMIT``). A pinned ``dz`` is used as given,
+            wherever ``h/dz`` puts the seafloor in its cell; the automatic
+            grid's ``h/(n + SEAFLOOR_CELL_OFFSET)`` placement is uacpy's
+            guidance, measured in docs/models/ram.md. On ramsurf the automatic ``dz`` also puts the
             depressed surface at ``r = 0`` on a depth node: ramsurf1.5 zeroes
             every row down to ``int(1 + zsrf/dz)``, so its pressure-release
             surface sits at ``floor(zsrf/dz)·dz``, up to one cell above the one
@@ -413,9 +406,10 @@ class RAM(PropagationModel):
             is largely inert, which :meth:`RAM.run` warns about.
         q_factor : float, optional
             Q value for broadband mode (half-bandwidth = fc/q_factor, so the band
-            spans 2·fc/q_factor). ``1/q_factor`` is the HALF fractional width, where
-            Bellhop's ``bandwidth_factor`` is the full one: the same band is
-            ``q_factor = 2/bandwidth_factor``. Default: ``None``, resolved by
+            spans 2·fc/q_factor). ``1/q_factor`` is the HALF fractional width:
+            the default band of every other engine, full fractional width
+            ``b = DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (0.5), is
+            ``q_factor = 2/b``. Default: ``None``, resolved by
             :func:`_band.resolve_broadband_grid` from what the source carries:
 
             * a multi-frequency source or ``run(frequencies=…)`` — the
@@ -498,7 +492,7 @@ class RAM(PropagationModel):
             linearly from it to this value at the domain floor. Default
             ``None``: 10 dB/wavelength, the floor of Collins' sample ramp
             ``900.0 0.5`` / ``1000.0 10.0`` (``ram.pdf`` p.12, Fig. 2;
-            upstream mpiramS used 5, ``third_party/MODIFICATIONS.md:2431-2432``),
+            upstream mpiramS used 5, ``mpiramS/src/peramx_mpi.f90:391-395``),
             raised to the seabed's own attenuation at the top of the layer
             where that is higher, so the ramp never decreases ("the
             attenuation is increased over the lower few wavelengths",
@@ -537,7 +531,7 @@ class RAM(PropagationModel):
         timeout : float, optional
             Subprocess timeout (s) for each binary launch, on every
             backend. Default: 600.0.
-        use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
+        use_tmpfs, verbose, work_dir, cleanup, collapse : optional
             Standard plumbing (see :class:`PropagationModel`).
         accuracy : float, optional
             Lytaev optimiser's per-run accuracy budget (max
@@ -687,22 +681,6 @@ class RAM(PropagationModel):
             label=f"RAM:{backend or 'mpirams'}",
         )
 
-        # Warn on low absorbing-layer attenuation: values < 1 dB/wavelength
-        # let bottom reflections leak back into the PE domain and contaminate
-        # the field. The 1 dB/wavelength threshold is uacpy guidance; the
-        # "5-10" the message names are upstream mpiramS's 5
-        # (third_party/MODIFICATIONS.md:2431-2432) and the floor of Collins'
-        # sample ramp, 10 (ram.pdf p.12, Fig. 2).
-        if (self.absorber_attenuation is not None
-                and self.absorber_attenuation < 1.0):
-            warnings.warn(
-                f"RAM absorber_attenuation={self.absorber_attenuation} "
-                "dB/wavelength is low; spurious reflections from the PE "
-                "domain bottom may contaminate the field. Typical values "
-                "are 5-10 dB/wavelength.",
-                NumericsWarning,
-                skip_file_prefixes=USER_FRAME_SKIP
-            )
 
     def _check_knobs(self) -> None:
         """Refuse a constructor knob no run could use: an unknown backend,
@@ -749,8 +727,8 @@ class RAM(PropagationModel):
                 f"angle_max_deg is the source's maximum propagation angle in "
                 f"degrees from the horizontal, within (0, 90); got "
                 f"{angle_max_deg!r}.")
-        for name in ('timeout', 'absorber_width_wavelengths'):
-            positive_finite(name, getattr(self, name))
+        positive_finite('absorber_width_wavelengths',
+                        self.absorber_width_wavelengths)
         positive_finite('absorber_attenuation', self.absorber_attenuation,
                         optional=True)
         # ``profl`` lays out the sub-bottom as [surface, seafloor, nzs-3
@@ -836,7 +814,9 @@ class RAM(PropagationModel):
             dz=self.dz,
             dr=self.dr,
             zmax=self.zmax,
-            c0=self.c0)
+            c0=self.c0,
+            dr_pinned=self._caller_set('dr'),
+            dz_pinned=self._caller_set('dz'))
 
     # ── stages 1-2: the environment ─────────────────────────────────────
 
@@ -881,8 +861,7 @@ class RAM(PropagationModel):
             if src.size > 1:
                 return BandResolution(src, band.notice)
             return BandResolution(
-                broadband_band(source, *self._broadband_band_knobs(),
-                               model_name=self.model_name).frequencies,
+                broadband_band(source).frequencies,
                 band.notice)
         return band
 
@@ -990,9 +969,6 @@ class RAM(PropagationModel):
             # A pinned executable of another backend is refused before any
             # grid is resolved.
             self._collins_binary(backend)
-        warn_if_pinned_dz_misplaces_the_seafloor(env, backend,
-                                                 notices=notices,
-                                                 knobs=knobs)
         warn_if_pinned_accuracy_is_unused(notices=notices,
                                           knobs=knobs)
         warn_if_pinned_rams_dr_factor_is_unused(backend, notices=notices,
@@ -1199,8 +1175,8 @@ class RAM(PropagationModel):
         backend's family does (:meth:`_assemble_mpirams`,
         :meth:`_assemble_collins`) — complex pressure in
         the travelling-wave convention (``models/ram/_pe_phase.py``), NaN
-        inside the absorbing layer, with the grid in its metadata and the output
-        paths attached — and, for ``TIME_SERIES``, its synthesis with the
+        inside the absorbing layer, with the grid in its run settings and the
+        output paths attached — and, for ``TIME_SERIES``, its synthesis with the
         request's pulse."""
         settings = inputs.settings
         raw = raw if self._n_launches(settings) > 1 else [raw]

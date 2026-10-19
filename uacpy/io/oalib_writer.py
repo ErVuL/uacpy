@@ -71,7 +71,7 @@ from uacpy.core.surface import Surface
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
 from uacpy.core.deck_limits import (
-    DECK_DEPTH_FMT, DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
+    DECK_DEPTH_FMT, DECK_DEPTH_RESOLUTION, DECK_RANGE_RESOLUTION,
 )
 from uacpy.io.at_codes import (
     BOUNDARY_CODES, SSP_INTERP_CODES, AttenuationUnits,
@@ -114,8 +114,8 @@ SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
 # DO require is that a depth uacpy compares in Python is the depth the Fortran
 # parses, which means one format for every depth written. Six decimals sits two
 # orders below the tightest tolerance any reader applies
-# (sspMod.f90:353's 100 * EPSILON( 1.0e0 ) = 1.19e-05 m). The carriers admit a
-# step down to DECK_DEPTH_RESOLUTION_M on the strength of this column format,
+# (misc/sspMod.f90:353's 100 * EPSILON( 1.0e0 ) = 1.19e-05 m). The carriers admit a
+# step down to DECK_DEPTH_RESOLUTION on the strength of this column format,
 # so a deck printed coarser than the carriers admit would collapse two
 # admitted samples onto one token.
 
@@ -145,7 +145,7 @@ _MAX_BIO_LAYERS = 200
 # NOT misc/sspMod.f90:11: that line declares ``MaxSSP = 20001,
 # MaxMedia = 501``, a different name that nothing tests here.  (Upstream
 # knows: ReadEnvironmentMod.f90:16 is a FIXME saying "MaxMedium and
-# MaxMedia are essentially the same thing".)  sspMod.f90:11 IS the right
+# MaxMedia are essentially the same thing".)  misc/sspMod.f90:11 IS the right
 # address for the other bound taken from that line, MaxSSP = 20001, which
 # ``write_ssp_section`` enforces.
 _AT_MAX_MEDIA = 500
@@ -482,7 +482,7 @@ def _biological_edge_nodes(depths, sound_speed, absorption,
             added.append(e + _BIOLOGICAL_EDGE_PAIR_M)
     new = np.array([a for a in added
                     if z[0] < a < z[-1]
-                    and np.min(np.abs(z - a)) > DECK_DEPTH_RESOLUTION_M])
+                    and np.min(np.abs(z - a)) > DECK_DEPTH_RESOLUTION])
     if new.size == 0:
         return z, c
     columns = c.reshape(z.size, -1)
@@ -525,14 +525,41 @@ def reject_oversized_at_ssp(model: str, n_points: int) -> None:
                     "holds 100001.")
 
 
-def reject_coarse_at_mesh(model: str, n_mesh: int, env,
+def reject_coarse_at_mesh(model: str, n_mesh, env,
                           frequency: float) -> None:
-    """Reject a pinned ``n_mesh`` the shared AT env reader will refuse.
+    """Reject a pinned ``n_mesh`` the shared AT env reader will refuse:
+    one count for every medium, or one per medium of the deck
+    (:func:`at_env_media`, the water column first), each 0 (AT sizes that
+    medium) or at least the floor :func:`at_mesh_floor` gives that medium
+    at the deck's ``frequency``.
 
-    KRAKEN and SCOOTER both read their deck through
-    ``misc/ReadEnvironmentMod.f90``, so both hit the same *Mesh is too coarse*
-    stop — a bare Fortran fatal unless it is caught here.
+    KRAKEN, SCOOTER and SPARC all read their deck through
+    ``misc/ReadEnvironmentMod.f90``, so all hit the same *Mesh is too
+    coarse* stop (:110-112) — a bare Fortran fatal unless it is caught here.
     """
+    if isinstance(n_mesh, (list, tuple, np.ndarray)):
+        counts = tuple(int(n) for n in n_mesh)
+        media = at_env_media(env)
+        if len(counts) != len(media):
+            raise ConfigurationError(
+                f"{model}(n_mesh={counts}) gives {len(counts)} count(s) for "
+                f"the deck's {len(media)} media (the water column first, "
+                f"then each sediment layer).",
+                remediation="Pass one count per medium, one count for every "
+                            "medium, or leave n_mesh unset.")
+        for number, (count, medium) in enumerate(zip(counts, media), start=1):
+            floor = at_mesh_floor([medium], frequency)
+            if 0 < count < floor:
+                raise ConfigurationError(
+                    f"{model}(n_mesh={counts}) gives medium {number} {count} "
+                    f"points, below the {floor} "
+                    f"misc/ReadEnvironmentMod.f90:110-112 requires of it at "
+                    f"{frequency:.4g} Hz; the run would stop with 'Mesh is "
+                    f"too coarse'.",
+                    remediation=f"Pass at least {floor} for medium {number}, "
+                                f"0 to let the model size it, or leave "
+                                f"n_mesh unset.")
+        return
     if n_mesh <= 0:
         return
     floor = at_mesh_floor(at_env_media(env), frequency)
@@ -2028,7 +2055,7 @@ def write_fieldflp(
                 f"profile axis non-increasing.",
                 remediation=(
                     f"Separate the profile ranges by more than "
-                    f"{DECK_RANGE_RESOLUTION_M * 1e3:g} mm."
+                    f"{DECK_RANGE_RESOLUTION * 1e3:g} mm."
                 ),
             )
 

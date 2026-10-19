@@ -30,7 +30,7 @@ def _link():
 CARRIERS = {
     'ChannelRegime': _regime,
     'LinkResult': _link,
-    'OasnNoise': lambda: OasnNoise(surface_level=50.0, white_level=10.0,
+    'OasnNoise': lambda: OasnNoise(surface_noise_level_dB=50.0, white_noise_level_dB=10.0,
                                    discrete_sources=[{'depth': 10.0, 'x': 100.0,
                                                       'y': 0.0, 'level_dB': 120.0}]),
     'OasnReplicaGrid': lambda: OasnReplicaGrid(z=(10.0, 90.0, 9), c_low=1400.0),

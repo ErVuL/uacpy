@@ -33,7 +33,10 @@ so the total has an interior optimum at
 
     Δf* = (spacing(k_r)·v_g / (2π·|d²k_r/dω²|))**(1/3)
 
-whose ``|d²k_r/dω²|`` no *pair* of frequencies can see. A remedy phrased on the
+whose ``|d²k_r/dω²|`` no *pair* of frequencies can see (a step that trades a
+truncation error growing with it against a round-off error falling with it is
+the standard balance of numerical differentiation: Press et al., *Numerical
+Recipes*, 3rd ed., §5.7 "Numerical Derivatives"). A remedy phrased on the
 floor alone — "use the step that puts the floor at 1e-5" — is therefore a
 recommendation for one waveguide, and on five ideal guides it made the answer
 **worse in 14 of 30 firings, by up to 16x** (measured). What a whole sweep
@@ -43,7 +46,8 @@ the answer still moves by less than the floor, and stopping one doubling before
 it moves by more, lands below the optimum without ever estimating
 ``|d²k_r/dω²|``. That is :func:`coarser_step_multiple`, and over the same 30
 firings it was **never worse than the step in hand** and 3.3x better at the
-median.
+median. The walk, and the floor below, are uacpy guidance set from these
+measurements: no published method gives them.
 
 Upcasting ``k_r`` recovers nothing here — the bits were never written — so this
 module measures the difference rather than changing its dtype. It reads the
@@ -64,9 +68,9 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import NumericsWarning
 
 #: Relative accuracy above which the *storage* of ``k_r`` is worth reporting as
-#: a floor under ``dω/dk_r``. Placed at the optimum measured above: at 1e-5 the
-#: Pekeris control sits on its best achievable answer, at 1e-4 it is 6x worse
-#: than that, and at 1e-3 it is 85x worse. The comparison is a ratio of a
+#: a floor under ``dω/dk_r``; uacpy guidance, placed at the optimum measured
+#: above: at 1e-5 the Pekeris control sits on its best achievable answer, at
+#: 1e-4 it is 6x worse than that, and at 1e-3 it is 85x worse. The comparison is a ratio of a
 #: spacing to a difference of the same quantity, so it carries no unit and does
 #: not move with the wavenumber scale.
 GROUP_VELOCITY_REL_FLOOR = 1e-5
@@ -218,7 +222,9 @@ def warn_if_storage_under_resolves(kr_ref, dk, v_g, who, *, grid=None):
                 f"On this grid the answer stops moving by more than that "
                 f"floor once the frequency spacing is {multiple}x coarser "
                 f"(about {df:.3g} Hz), which is the widest step still on the "
-                f"storage-limited side of the optimum.")
+                f"storage-limited side of the optimum (uacpy guidance from "
+                f"measurement: never worse than the step in hand in 30 "
+                f"firings).")
 
     warnings.warn(
         f"{who}: the wavenumber difference spans as few as "

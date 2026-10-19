@@ -15,7 +15,9 @@ locations per request, ≤1 request/s, ≤1000 requests/day). Point a
 ``base_url`` at a self-hosted OpenTopoData instance to lift those limits. The
 other sources are ``'local'`` (the installed grid only), ``'gmrt'`` and
 ``'emodnet_dtm'`` (live, higher-resolution, regional coverage) — the same ids
-``fetch_environment`` and every provenance record use.
+``fetch_environment`` and every provenance record use. ``base_url=`` is the
+address of whichever live service the source reads (a mirror); ``None``
+reads that service's module constant.
 
 Bathymetry is static in time, so these fetches take coordinates only — the
 ``date`` axis enters the data layer at the sound-speed stage, not here.
@@ -32,7 +34,8 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from uacpy.core.geo import EARTH_RADIUS_M
+from uacpy.core.bathymetry import Bathymetry
+from uacpy.core.geo import EARTH_RADIUS
 from uacpy.core.exceptions import (
     ConfigurationError, DataFetchError, FallbackWarning, IOWarning,
 )
@@ -44,6 +47,7 @@ from uacpy.core.geo import (
 from uacpy.data._geo import (
     lon_linspace, checked_max_points, auto_budget, default_n_points,
     checked_n_points, checked_explicit_n_points, require_source,
+    cell_half_diagonal_km, checked_offset,
 )
 from uacpy.data import _cache
 from uacpy.data._chain import (SourceChain, SourceProvider, first_answer,
@@ -51,6 +55,7 @@ from uacpy.data._chain import (SourceChain, SourceProvider, first_answer,
 from uacpy.data._http import http_get
 from uacpy._log import log_message
 from uacpy.core._export import ExportRecord
+from uacpy.core._plotting import plotter
 from uacpy.data.sources import SOURCES, DataProvenance
 
 __all__ = ['fetch_bathy', 'fetch_bathy_transect', 'bathy_transect_sampling',
@@ -73,7 +78,7 @@ MAX_GRID_REQUESTS = 100          # safety cap for fetch_bathy_grid (≤10 000 po
 #: stays under the rate cap instead of bursting and tripping a 429 / IP block.
 #: Only applied to the public ``DEFAULT_BASE_URL``; a self-hosted ``base_url``
 #: lifts the limit (set to 0.0 there). Tests set it to 0.0 to run instantly.
-OPENTOPODATA_MIN_INTERVAL_S = 1.0
+OPENTOPODATA_MIN_INTERVAL = 1.0
 
 # Public source names: the catalogue ids ``fetch_environment`` and every
 # provenance record use, plus ``'local'`` (cached data only, no network). Each
@@ -116,16 +121,28 @@ def _check_public_source(source):
                    "Caribbean), or 'local' (the installed GEBCO grid only).")
 
 
-def _cache_first(source, call, *, who, chained=True,
-                 base_url=DEFAULT_BASE_URL):
+#: The live service each bathymetry source reads, by catalogue id: the one
+#: ``base_url=`` addresses.
+_LIVE_SERVICES = {'gebco': "OpenTopoData (its online fallback)",
+                  'gmrt': "GMRT", 'emodnet_dtm': "the EMODnet DTM ERDDAP"}
+
+
+def _opentopodata_root(base_url):
+    """The OpenTopoData service root a request reads: ``base_url``, or the
+    public :data:`DEFAULT_BASE_URL` when it is ``None``."""
+    return DEFAULT_BASE_URL if base_url is None else base_url
+
+
+def _cache_first(source, call, *, who, chained=True, base_url=None):
     """``(answer, (source id, backend))`` of the first backend ``source``
     names that answers ``call(backend)``, cached first, raising the most
     substantive error — the rule ``fetch_environment`` resolves by. Ids and
     presets match in any case. ``chained`` accepts a chain spec (``'auto'``
     or a sequence of ids) besides one id; ``who`` is named when the spec is
-    refused. A ``base_url`` other than the public OpenTopoData root is
-    refused when no attempt reads it (no ``'gebco'`` in the chain, or a
-    cache-only one), rather than ignored.
+    refused. A ``base_url`` is the address of one live service, so it is
+    refused when the chain reads none (``'local'``, a cache-only chain) or
+    more than one (``'auto'``, a sequence of live ids), rather than ignored
+    or sent to the wrong host.
 
     The installed grid falls through to the live service only when it is
     absent or unreadable (:func:`uacpy.data._cache.is_cache_miss`); a grid that
@@ -135,18 +152,22 @@ def _cache_first(source, call, *, who, chained=True,
     if not chained or (isinstance(source, str) and source != 'auto'):
         _check_public_source(source)
     sources, cache_only = _BATHY_CHAIN.resolve(source)
-    if (str(base_url).rstrip('/') != DEFAULT_BASE_URL.rstrip('/')
-            and (cache_only or 'gebco' not in sources)):
-        raise ConfigurationError(
-            f"{who}: base_url= is the OpenTopoData service root, which only "
-            f"'gebco' reads (its online fallback); source={source!r} does "
-            f"not read it.",
-            remediation="Drop base_url=, or include 'gebco' in source=. The "
-                        "GMRT and EMODnet DTM hosts are the module constants "
-                        "uacpy.data.gmrt_live.POINT_URL / GRID_URL and "
-                        "uacpy.data.emodnet_bathy_live.ERDDAP_URL; reassign "
-                        "them to read a mirror.",
-        )
+    if base_url is not None:
+        live = [] if cache_only else [s for s in sources
+                                      if s in _LIVE_SERVICES]
+        if len(live) != 1:
+            reads = ('no live service' if not live else
+                     f"{len(live)} live services ("
+                     + ', '.join(_LIVE_SERVICES[s] for s in live) + ")")
+            raise ConfigurationError(
+                f"{who}: base_url= is the address of the one live service "
+                f"the source reads; source={source!r} reads {reads}.",
+                remediation="Drop base_url=, or pass it with one live "
+                            "source: 'gebco' (the OpenTopoData root), "
+                            "'gmrt' (the GMRT services root) or "
+                            "'emodnet_dtm' (the EMODnet ERDDAP griddap "
+                            "root).",
+            )
     return first_answer(
         _BATHY_CHAIN.attempts(sources, cache_only=cache_only, who=who,
                               keyword='source='),
@@ -173,11 +194,12 @@ def _backend_module(backend):
         f'uacpy.data.{_BACKEND_MODULES[backend][0]}')
 
 
-def _network_kwargs(backend, timeout, verbose):
-    """The ``timeout``/``verbose`` a backend module's fetchers take: the
-    installed grid is read offline and takes neither."""
+def _network_kwargs(backend, timeout, verbose, base_url=None):
+    """The ``timeout``/``verbose``/``base_url`` a backend module's
+    fetchers take: the installed grid is read offline and takes none."""
     return {} if backend == 'local' else {'timeout': timeout,
-                                          'verbose': verbose}
+                                          'verbose': verbose,
+                                          'base_url': base_url}
 
 
 def _fetch_bathy_backend(
@@ -185,19 +207,30 @@ def _fetch_bathy_backend(
     *,
     backend: str = 'api',
     dataset: str = DEFAULT_DATASET,
-    base_url: str = DEFAULT_BASE_URL,
+    base_url: Optional[str] = None,
     timeout: float = 30.0,
     verbose: Union[bool, str] = False,
+    nodes: Optional[list] = None,
 ) -> float:
     """Backend of :func:`fetch_bathy`: ``backend`` is a backend token (``'api'``, ``'gmrt'``,
-    ``'emodnet'``, ``'local'``); ``fetch_environment`` resolves to these."""
+    ``'emodnet'``, ``'local'``); ``fetch_environment`` resolves to these.
+    ``nodes``, when given, receives the node read where the service names
+    one (the EMODnet DTM), else ``None``."""
     _check_source(backend)
+    if backend == 'emodnet' and nodes is not None:
+        depth, node = _backend_module(backend)._depth_and_node(
+            point, timeout=timeout, verbose=verbose, base_url=base_url)
+        nodes.append(node)
+        return depth
+    if nodes is not None:
+        nodes.append(None)              # the other services name no node
     if backend != 'api':
         return _backend_module(backend).point_depth(
-            point, **_network_kwargs(backend, timeout, verbose))
+            point, **_network_kwargs(backend, timeout, verbose, base_url))
     depths = _fetch_depths(
-        [as_coordinate(point)], dataset=dataset, base_url=base_url,
-        timeout=timeout, verbose=verbose,
+        [as_coordinate(point)], dataset=dataset,
+        base_url=_opentopodata_root(base_url), timeout=timeout,
+        verbose=verbose,
     )
     return float(depths[0])
 
@@ -207,7 +240,7 @@ def fetch_bathy(
     *,
     source: Union[str, Sequence[str]] = 'gebco',
     dataset: str = DEFAULT_DATASET,
-    base_url: str = DEFAULT_BASE_URL,
+    base_url: Optional[str] = None,
     timeout: float = 30.0,
     verbose: Union[bool, str] = False,
 ) -> float:
@@ -233,12 +266,18 @@ def fetch_bathy(
         OpenTopoData dataset name, read by ``'gebco'``'s online fallback
         only. Default ``'gebco2020'``.
     base_url : str, optional
-        OpenTopoData service root (override for a self-hosted instance),
-        read by ``'gebco'``'s online fallback only: with a source that never
-        reads it (``'gmrt'``, ``'emodnet_dtm'``, ``'local'``) it is refused.
-        The GMRT and EMODnet DTM hosts are the module constants
-        ``uacpy.data.gmrt_live.POINT_URL`` / ``GRID_URL`` and
-        ``uacpy.data.emodnet_bathy_live.ERDDAP_URL``.
+        The address of the live service the source reads (a mirror or a
+        self-hosted instance): the OpenTopoData service root for
+        ``'gebco'``'s online fallback, the GMRT services root (under which
+        ``PointServer`` and ``GridServer`` hang) for ``'gmrt'``, the ERDDAP
+        griddap root for ``'emodnet_dtm'``. ``None`` (default) reads the
+        service's module constant (:data:`DEFAULT_BASE_URL`,
+        ``uacpy.data.gmrt_live.POINT_URL`` / ``GRID_URL``,
+        ``uacpy.data.emodnet_bathy_live.ERDDAP_URL``). Refused with a source
+        that reads no live service (``'local'``), and with one that reads
+        more than one (``'auto'``, a sequence of live ids): the three
+        services take different requests, so one address cannot serve them
+        all, and which of them it is meant for would be a guess.
     timeout : float, optional
         Per-request network timeout in seconds.
     verbose : bool or str, optional
@@ -273,14 +312,17 @@ def _fetch_bathy_transect_backend(
     max_points: Optional[int] = None,
     backend: str = 'api',
     dataset: str = DEFAULT_DATASET,
-    base_url: str = DEFAULT_BASE_URL,
+    base_url: Optional[str] = None,
     timeout: float = 30.0,
     verbose: Union[bool, str] = False,
     who: str = 'fetch_bathy_transect',
+    nodes: Optional[list] = None,
 ) -> np.ndarray:
     """Backend of :func:`fetch_bathy_transect`: ``backend`` is a backend token (``'api'``, ``'gmrt'``,
     ``'emodnet'``, ``'local'``); ``fetch_environment`` resolves to these.
-    ``who`` is the public function its notices name."""
+    ``who`` is the public function its notices name. ``nodes``, when given,
+    receives the node the first waypoint read where the service names one
+    (the EMODnet DTM), else ``None``."""
     _check_source(backend)
     plan = _bathy_transect_sampling(start, end, n_points=n_points,
                                     max_points=max_points, who=who)
@@ -310,14 +352,23 @@ def _fetch_bathy_transect_backend(
             f"the first has no cell). Pass a smaller n_points, or use the "
             f"installed GEBCO grid (source='local').",
             IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    if backend != 'api':
+    start_node = None
+    if backend == 'emodnet' and nodes is not None:
+        depths, read = _backend_module(backend)._depths_and_nodes_along(
+            lats, lons, timeout=timeout, verbose=verbose, base_url=base_url)
+        start_node = read[0]
+    elif backend != 'api':
         depths = _backend_module(backend).depths_along(
-            lats, lons, **_network_kwargs(backend, timeout, verbose))
+            lats, lons, **_network_kwargs(backend, timeout, verbose,
+                                          base_url))
     else:
         depths = _fetch_depths(
-            list(zip(lats, lons)), dataset=dataset, base_url=base_url,
-            timeout=timeout, verbose=verbose,
+            list(zip(lats, lons)), dataset=dataset,
+            base_url=_opentopodata_root(base_url), timeout=timeout,
+            verbose=verbose,
         )
+    if nodes is not None:
+        nodes.append(start_node)
     return np.column_stack([ranges, depths])
 
 
@@ -329,7 +380,7 @@ def fetch_bathy_transect(
     max_points: Optional[int] = None,
     source: Union[str, Sequence[str]] = 'gebco',
     dataset: str = DEFAULT_DATASET,
-    base_url: str = DEFAULT_BASE_URL,
+    base_url: Optional[str] = None,
     timeout: float = 30.0,
     verbose: Union[bool, str] = False,
 ) -> np.ndarray:
@@ -382,20 +433,78 @@ def fetch_bathy_transect(
         verbose=verbose), who='fetch_bathy_transect', base_url=base_url)[0]
 
 
-def _point_depth(backend, point, *, timeout, verbose, **_request):
+#: The catalogue id of the source each backend token serves.
+_SOURCE_OF_BACKEND = {'local': 'gebco', 'api': 'gebco', 'gmrt': 'gmrt',
+                      'emodnet': 'emodnet_dtm'}
+
+
+def _point_depth(backend, point, *, timeout, verbose, max_distance_km=None,
+                 **_request):
     """A :data:`_BATHY_CHAIN` point fetch: the depth at ``point`` from one
-    backend."""
-    return _fetch_bathy_backend(point, backend=backend, timeout=timeout,
-                                verbose=verbose)
+    backend, as a :class:`~uacpy.core.environment.Bathymetry` stamped with
+    the record of the read (:func:`_bathymetry_record`)."""
+    nodes = []
+    seafloor = Bathymetry.coerce(_fetch_bathy_backend(
+        point, backend=backend, timeout=timeout, verbose=verbose,
+        nodes=nodes))
+    seafloor.data_sources = (_bathymetry_record(
+        backend, point, node=nodes[0] if nodes else None,
+        max_distance_km=max_distance_km),)
+    return seafloor
 
 
 def _depths_along(backend, start, end, *, n_points, max_points, timeout,
-                  verbose, who='fetch_environment', **_request):
-    """A :data:`_BATHY_CHAIN` transect fetch: ``[range, depth]`` rows
-    along ``start`` → ``end`` from one backend."""
-    return _fetch_bathy_transect_backend(
+                  verbose, who='fetch_environment', max_distance_km=None,
+                  **_request):
+    """A :data:`_BATHY_CHAIN` transect fetch: the depths along ``start``
+    → ``end`` from one backend, as a range-dependent
+    :class:`~uacpy.core.environment.Bathymetry` stamped with the record of
+    the start point's read."""
+    nodes = []
+    seafloor = Bathymetry.coerce(_fetch_bathy_transect_backend(
         start, end, n_points=n_points, max_points=max_points, backend=backend,
-        timeout=timeout, verbose=verbose, who=who)
+        timeout=timeout, verbose=verbose, who=who, nodes=nodes))
+    seafloor.data_sources = (_bathymetry_record(
+        backend, start, node=nodes[0] if nodes else None,
+        max_distance_km=max_distance_km),)
+    return seafloor
+
+
+def _bathymetry_record(backend, point, *, node=None, max_distance_km=None):
+    """The ``DataProvenance`` of the depth ``backend`` read at ``point``,
+    through the offset rule. It names the source, backend and vintage that
+    answered (the GEBCO DOI is per release, and a local GEBCO_2025.nc is not
+    the OpenTopoData service). The local GEBCO grid records the centre of
+    the cell read, and the EMODnet DTM the node its reply names (``node``);
+    GMRT's point query and OpenTopoData name no node, so they record the
+    point itself."""
+    source = _SOURCE_OF_BACKEND[backend]
+    lat, lon = (float(v) for v in as_coordinate(point))
+    vintage = _bathymetry_vintage(source, backend)
+    who = 'fetch_environment'
+    if backend == 'local':
+        from uacpy.data import gebco_local
+        try:
+            grid = gebco_local._grid()
+        except (ConfigurationError, DataFetchError):
+            grid = None             # no readable grid to read the node from
+        if grid is not None:
+            return grid.node_provenance(
+                'gebco', lat, lon, who=who,
+                max_distance_km=max_distance_km, data_date=vintage)
+        data_point, cell, warn_km = None, None, 0.0
+    elif node is not None:
+        from uacpy.data.emodnet_bathy_live import EMODNET_NATIVE_DEG
+        data_point, cell = tuple(node), EMODNET_NATIVE_DEG
+        warn_km = cell_half_diagonal_km(node[0], cell, cell)
+    else:
+        data_point, cell, warn_km = (lat, lon), None, 0.0
+    return checked_offset(
+        DataProvenance(source=SOURCES[source], data_date=vintage,
+                       data_point=data_point, requested_point=(lat, lon),
+                       point_kind=None if cell is None else 'cell',
+                       cell_size_deg=cell),
+        who=who, warn_km=warn_km, max_distance_km=max_distance_km)
 
 
 #: The bathymetry sources ``fetch_environment`` and the public fetchers
@@ -499,6 +608,19 @@ class BathyGrid(ExportRecord):
     _ARRAY_FIELDS = ('lats', 'lons', 'depths')
     _XARRAY_FIELDS = {'depth': 'depths', 'lat': 'lats', 'lon': 'lons'}
 
+    #: The plotter that draws this record (``.plot()``).
+    _plotter = 'plot_bathymetry_map'
+
+    def plot(self, ax=None, **kwargs):
+        """Draw the grid as a geographic map; returns ``(fig, ax)``.
+
+        The record's own view, :func:`uacpy.plot.plot_bathymetry_map` handed
+        the record whole (its credit names ``provenance``). ``ax`` draws into
+        an existing Axes; the remaining ``kwargs`` are that plotter's
+        (``transect=``, ``basemap=``, ``contours=`` …).
+        """
+        return plotter('plot_carrier')(self, ax=ax, **kwargs)
+
     def _payload(self):
         return {'depth': (self.depths, ('lat', 'lon'), 'm')}
 
@@ -515,7 +637,7 @@ def _fetch_bathy_grid_backend(
     n_lon: int = 50,
     backend: str = 'api',
     dataset: str = DEFAULT_DATASET,
-    base_url: str = DEFAULT_BASE_URL,
+    base_url: Optional[str] = None,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -544,7 +666,7 @@ def _fetch_bathy_grid_backend(
                     verbose=verbose)
         return _backend_module(backend).region_grid(
             lat_range, lon_range, n_lat, n_lon,
-            **_network_kwargs(backend, timeout, verbose))
+            **_network_kwargs(backend, timeout, verbose, base_url))
     n_requests = -(-(n_lat * n_lon) // MAX_LOCATIONS_PER_REQUEST)   # ceil-div
     if n_requests > MAX_GRID_REQUESTS:
         raise ConfigurationError(
@@ -558,7 +680,8 @@ def _fetch_bathy_grid_backend(
     coords = list(zip(lat_mesh.ravel(), lon_mesh.ravel()))
     log_message('bathymetry', f"GEBCO grid {n_lat}×{n_lon} over "
                 f"lat{lat_range} lon{lon_range}", verbose=verbose)
-    elev = _fetch_elevations(coords, dataset=dataset, base_url=base_url,
+    elev = _fetch_elevations(coords, dataset=dataset,
+                             base_url=_opentopodata_root(base_url),
                              timeout=timeout, verbose=verbose)
     depth = np.where(elev < 0.0, -elev, np.nan).reshape(n_lat, n_lon)
     return lats, lons, depth
@@ -572,7 +695,7 @@ def fetch_bathy_grid(
     n_lon: int = 50,
     source: str = 'gebco',
     dataset: str = DEFAULT_DATASET,
-    base_url: str = DEFAULT_BASE_URL,
+    base_url: Optional[str] = None,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
 ) -> BathyGrid:
@@ -611,9 +734,10 @@ def fetch_bathy_grid(
     dataset : str, optional
         OpenTopoData dataset name. Default ``'gebco2020'``.
     base_url : str, optional
-        OpenTopoData service root (a self-hosted instance for large grids),
-        as on :func:`fetch_bathy`: refused with ``'gmrt'``,
-        ``'emodnet_dtm'`` or ``'local'``, which never read it.
+        The address of the live service ``source`` reads, as on
+        :func:`fetch_bathy` (a self-hosted OpenTopoData for large grids);
+        ``None`` (default) reads the service's module constant. Refused with
+        ``'local'``, which reads no live service.
     timeout : float, optional
         Per-request network timeout in seconds.
     verbose : bool or str, optional
@@ -655,7 +779,7 @@ def transect_length(start: Coordinate, end: Coordinate) -> float:
     start, end : (lat, lon)
         Transect endpoints in decimal degrees.
     """
-    return central_angle(start, end) * EARTH_RADIUS_M
+    return central_angle(start, end) * EARTH_RADIUS
 
 
 def transect_waypoints(start: Coordinate, end: Coordinate, *, n_points: int
@@ -699,7 +823,7 @@ def _fetch_elevations(
     OpenTopoData per-call cap. Land is positive; ocean negative.
 
     Consecutive chunks against the public host are spaced to honour its
-    ≤1 request/s limit (see :data:`OPENTOPODATA_MIN_INTERVAL_S`); a self-hosted
+    ≤1 request/s limit (see :data:`OPENTOPODATA_MIN_INTERVAL`); a self-hosted
     ``base_url`` lifts the limit and is not throttled."""
     throttled = base_url.rstrip('/') == DEFAULT_BASE_URL.rstrip('/')
     elevations: List[float] = []
@@ -715,7 +839,7 @@ def _fetch_elevations(
 
 
 def _rate_limit() -> None:
-    """Block until at least ``OPENTOPODATA_MIN_INTERVAL_S`` has passed since the
+    """Block until at least ``OPENTOPODATA_MIN_INTERVAL`` has passed since the
     last public-host call, so chunked fetches stay under the ≤1 req/s limit.
 
     The lock spans the wait as well as the stamp, so concurrent callers queue
@@ -725,12 +849,12 @@ def _rate_limit() -> None:
 
     The state is per-process, so a fan-out across :mod:`uacpy.parallel` (a
     ``ProcessPoolExecutor``) still gets one budget *per worker*. Before
-    fetching in parallel, multiply ``OPENTOPODATA_MIN_INTERVAL_S`` by the
+    fetching in parallel, multiply ``OPENTOPODATA_MIN_INTERVAL`` by the
     worker count in each worker (4 workers: 4.0 s each, 1 request/s in all),
     or point ``base_url`` at a self-hosted OpenTopoData.
     """
     global _last_request_monotonic
-    interval = OPENTOPODATA_MIN_INTERVAL_S
+    interval = OPENTOPODATA_MIN_INTERVAL
     with _rate_limit_lock:
         if interval > 0.0:
             wait = interval - (time.monotonic() - _last_request_monotonic)

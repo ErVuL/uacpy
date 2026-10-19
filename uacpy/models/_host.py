@@ -14,8 +14,11 @@ import inspect
 from pathlib import Path
 from typing import Dict, Optional, Union
 
+import numpy as np
+
 from uacpy._log import _resolve_threshold
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.models._knobs import is_real_number
 from uacpy.models._projection import DEFAULT_COLLAPSE, VALID_COLLAPSE_METHODS
 
 
@@ -63,7 +66,7 @@ def set_host_options(
     verbose: Union[bool, str],
     work_dir: Optional[Path],
     cleanup: Optional[bool],
-    timeout: float,
+    timeout: Optional[float],
     collapse: Optional[Dict[str, str]],
 ) -> None:
     """Validate the host options a constructor of ``model`` forwards and
@@ -81,7 +84,15 @@ def set_host_options(
     # caller-supplied directory and deleting it.
     model._cleanup_explicit = cleanup is not None
     model.cleanup = (work_dir is None) if cleanup is None else bool(cleanup)
-    model.timeout = float(timeout)
+    # ``communicate(timeout=…)`` takes a positive finite number of seconds
+    # (inf overflows it, nan is refused by it, 0 kills every launch) or
+    # ``None``, its own "no limit", which every launch passes on as given.
+    if timeout is not None and not (
+            is_real_number(timeout) and np.isfinite(timeout) and timeout > 0):
+        raise ConfigurationError(
+            f"{type(model).__name__}: timeout (s) must be positive and "
+            f"finite, or None for no limit; got {timeout!r}.")
+    model.timeout = None if timeout is None else float(timeout)
     # Per-feature collapse policies applied by ``_project_environment``
     # when an env contains a feature this model doesn't support. Pass
     # ``collapse={'bathymetry': 'min', 'ssp': 'mean', ...}`` to override
@@ -93,9 +104,11 @@ def set_host_options(
     #
     # 'bathymetry'    : a range-dependent depth profile to one depth
     # 'ssp'           : a range-dependent sound-speed field to one column
-    # 'bottom_range'  : a range-dependent bottom to one column ('mean' and
-    #                   'median' are numeric, so an all-half-space bottom
-    #                   only — a layer stack cannot be averaged)
+    # 'bottom_range'  : a range-dependent bottom to one column ('mean'
+    #                   averages the half-spaces, so an all-half-space bottom
+    #                   only — a layer stack cannot be averaged; 'median' on
+    #                   a layered bottom takes the middle column, with a
+    #                   notice, Bottom.collapse_range)
     # 'bottom_layers' : each column's layer stack to a half-space; see
     #                   SeabedColumn.collapse_layers for what each method keeps
     # 'altimetry'     : a rough sea surface, dropped entirely

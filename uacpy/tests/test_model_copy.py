@@ -80,7 +80,8 @@ def test_bellhop_timeseries_requires_waveform(simple_env, source, receiver_small
 
 def test_abstract_run_encodes_fixed_keyword_contract():
     """The abstract ``PropagationModel.run`` is the source of truth for the
-    fixed, no-``**kwargs`` signature documented in CLAUDE.md / DEV.md. It must
+    fixed, no-``**kwargs`` signature every engine shares — an unknown
+    keyword raises Python's own ``TypeError`` at the call site. It must
     declare the keyword-only block (``frequencies``/``source_waveform``/
     ``sample_rate``/``output_duration``/``t_start``) and accept no ``**kwargs`` sink, so the
     contract is visible on the base class and not only in each subclass."""

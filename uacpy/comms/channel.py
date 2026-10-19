@@ -16,7 +16,8 @@ from uacpy.acoustic_signal.channel import (
 )
 from uacpy.comms.phy import rc_pulse, rrc_pulse
 from uacpy.core._validate import (
-    require_generator, require_positive_finite_scalar)
+    real_array_or_none, real_scalar_or_none, require_generator,
+    require_positive_finite_scalar)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._plotting import plotter
 from uacpy.core.exceptions import (
@@ -478,7 +479,13 @@ def fading_taps(n_taps, n_samples, doppler_shift_max, *, sample_rate, rician_k=0
     """
     rng = require_generator(rng, "fading_taps")
     fs = float(sample_rate)
-    n = int(n_samples)
+    n = real_scalar_or_none(n_samples)
+    if n is None or not np.isfinite(n) or n != int(n) or n < 1:
+        raise ConfigurationError(
+            f"fading_taps: n_samples must be a whole number of samples, at "
+            f"least 1 (it sets the Doppler resolution sample_rate/"
+            f"n_samples); got {n_samples!r}.")
+    n = int(n)
     # Written as the negation of the admissible condition so NaN is refused
     # too: `doppler_shift_max < 0` is False for NaN, and `|f| <= nan` is all-False,
     # which would make every tap NaN. `isfinite` is the other half —
@@ -547,11 +554,22 @@ def apply_fading_channel(signal, taps, delays_samples):
         ``(n_taps, >= len(signal))`` time-varying tap gains
         (:func:`fading_taps`).
     delays_samples : array_like of int
-        Each tap's delay in samples, >= 0.
+        Each tap's delay in samples, a whole number >= 0, one per tap (a
+        fractional or missing delay is refused, not truncated).
     """
     x = np.asarray(signal, dtype=complex)
     n = x.size
-    d = np.asarray(delays_samples, dtype=int)
+    given = real_array_or_none(delays_samples)
+    if (given is None or given.ndim != 1 or given.size == 0
+            or not np.all(np.isfinite(given))
+            or np.any(given != np.round(given))):
+        raise ConfigurationError(
+            f"apply_fading_channel: delays_samples must be a 1-D list of "
+            f"whole numbers of samples, one per tap; got {delays_samples!r}.",
+            remediation="Round each delay to the sample you mean (a "
+                        "fractional delay is a different channel: "
+                        "acoustic_signal.impulse_response places one).")
+    d = given.astype(int)
     taps = np.asarray(taps, dtype=complex)
     if taps.shape[0] != d.size:
         raise ConfigurationError(

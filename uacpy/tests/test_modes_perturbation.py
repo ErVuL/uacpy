@@ -1112,9 +1112,10 @@ def test_mode_excitation_refuses_a_keyword_it_does_not_use():
         plot_mode_excitation(pattern, totally_bogus=3)
 
 
-def test_mode_excitation_credits_only_a_figure_it_created():
-    """Into a caller's axes it adds no footnote and leaves the caller's
-    margins alone; on its own figure it credits the model."""
+def test_mode_excitation_credits_its_model_in_any_figure():
+    """The pattern's model joins the footnote of the figure it is drawn in:
+    once in a caller's figure however many axes it is drawn into, and on a
+    figure of its own."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -1126,11 +1127,12 @@ def test_mode_excitation_credits_only_a_figure_it_created():
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     pattern = modes.excitation_pattern(src, sound_speed=1500.0)
     fig, axes = plt.subplots(1, 2)
-    bottom = fig.subplotpars.bottom
     for ax in axes:
         plot_mode_excitation(pattern, ax=ax)
-    assert fig.texts == []
-    assert fig.subplotpars.bottom == bottom
+    (credit,) = fig.texts
+    assert credit.get_text().startswith('Model: ')
+    assert len(credit.get_text().splitlines()) == 1
+    assert 'kraken' in credit.get_text()
     plt.close(fig)
 
     own, _ = pattern.plot()

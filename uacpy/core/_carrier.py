@@ -12,11 +12,15 @@ from a rebuild on assignment — names the line the user wrote.
 
 import copy as _copy
 import dataclasses
+import difflib
 import inspect
 import threading
 from typing import Self, dataclass_transform
 
-__all__ = ['carrier', 'DeepCopyMixin', 'RevalidateOnAssignMixin']
+from uacpy.core.exceptions import ConfigurationError
+
+__all__ = ['carrier', 'DeepCopyMixin', 'RevalidateOnAssignMixin',
+           'refuse_unknown_attribute']
 
 # The ids of the carriers this thread is building: a store to one of them is
 # construction, a store to any other an assignment (RevalidateOnAssignMixin).
@@ -44,13 +48,21 @@ def _names(names) -> str:
     return ", ".join(quoted[:-1]) + f", and {quoted[-1]}"
 
 
+def _did_you_mean(name, names) -> str:
+    """`` Did you mean 'x'?`` naming the entry of ``names`` closest to
+    ``name`` — compared without case, so ``ph`` finds ``pH`` — or ``''``."""
+    lowered = {n.lower(): n for n in names}
+    close = difflib.get_close_matches(str(name).lower(), list(lowered), n=1)
+    return f" Did you mean {lowered[close[0]]!r}?" if close else ""
+
+
 def _carrier_init(cls):
     """The ``__init__`` of the carrier class ``cls``: the dataclass fields
     bound from the call as the generated ``__init__`` binds them (positional
     in field order, keyword-only fields by keyword, defaults and default
     factories for the rest), stored, then ``__post_init__`` run. A call the
     generated ``__init__`` would refuse raises the same ``TypeError`` with
-    the same message."""
+    the same message, an unknown keyword's naming the closest field."""
     fields = [f for f in dataclasses.fields(cls) if f.init]
     positional = [f for f in fields if not f.kw_only]
     names = {f.name for f in fields}
@@ -82,7 +94,7 @@ def _carrier_init(cls):
             if name not in names:
                 raise TypeError(
                     f"{qualname}() got an unexpected keyword argument "
-                    f"{name!r}.")
+                    f"{name!r}.{_did_you_mean(name, names)}")
             values[name] = value
         for kind, group in (('positional', positional),
                             ('keyword-only',
@@ -154,6 +166,23 @@ def carrier(cls=None, /, *, init_annotations=None, **options):
     return wrap if cls is None else wrap(cls)
 
 
+def refuse_unknown_attribute(carrier, name) -> None:
+    """Refuse an assignment to ``name`` on a built ``carrier`` when the name
+    is neither one of its fields nor one its class defines (a property, a
+    declared attribute): nothing reads such an attribute, so a mistyped
+    setting (``env.water_densty = 1.0``) would leave the run on the old value
+    with no notice. A leading-underscore name is the carrier's own
+    bookkeeping and passes."""
+    if name.startswith('_') or hasattr(type(carrier), name):
+        return
+    fields = list(carrier.__dataclass_fields__)
+    owner = type(carrier).__name__
+    raise ConfigurationError(
+        f"{owner}: no setting named {name!r}, so assigning it would change "
+        f"nothing the {owner} uses.{_did_you_mean(name, fields)}",
+        remediation=f"Assign one of its fields: {', '.join(fields)}.")
+
+
 class DeepCopyMixin:
     """``copy()`` shared by the carriers and the results."""
 
@@ -172,8 +201,9 @@ class RevalidateOnAssignMixin:
     returned, a store to a field is an assignment: the carrier is rebuilt
     from its current fields with the new value, so the assignment gets the
     constructor's normalisation and refusals, and a refused assignment leaves
-    the carrier unchanged. A copy or an unpickled carrier restores its
-    ``__dict__`` without calling ``__setattr__``.
+    the carrier unchanged. A store to a name that is not a field is refused
+    (:func:`refuse_unknown_attribute`). A copy or an unpickled carrier
+    restores its ``__dict__`` without calling ``__setattr__``.
     """
 
     def _fields_for_assignment(self, name, value) -> dict:
@@ -184,10 +214,12 @@ class RevalidateOnAssignMixin:
         return fields
 
     def __setattr__(self, name, value):
-        if (name in self.__dataclass_fields__
-                and id(self) not in _under_construction()):
-            checked = type(self)(**self._fields_for_assignment(name, value))
-            for f in self.__dataclass_fields__:
-                object.__setattr__(self, f, checked.__dict__[f])
-            return
+        if id(self) not in _under_construction():
+            if name in self.__dataclass_fields__:
+                checked = type(self)(**self._fields_for_assignment(name,
+                                                                   value))
+                for f in self.__dataclass_fields__:
+                    object.__setattr__(self, f, checked.__dict__[f])
+                return
+            refuse_unknown_attribute(self, name)
         object.__setattr__(self, name, value)

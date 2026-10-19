@@ -64,6 +64,127 @@ def test_unknown_collapse_key_raises():
         Bellhop(verbose=False, collapse={'bogus': 'value'})
 
 
+def _sloping_layered_env():
+    return Environment(
+        bathymetry=np.array([[0.0, 100.0], [3000.0, 150.0]]), ssp=1500.0,
+        bottom=SeabedColumn(
+            layers=[SedimentLayer(5.0, sound_speed=1600.0, density=1.6)],
+            halfspace=BoundaryProperties(acoustic_type='half-space',
+                                         sound_speed=1700.0, density=1.8,
+                                         attenuation=0.5)))
+
+
+def test_a_user_key_reducing_nothing_in_the_deck_is_said():
+    """A setting the run does not use gets a notice: a
+    ``collapse=`` key whose feature the environment carries and the model
+    reads natively reduces nothing; a key the projection uses says nothing
+    of the kind, and one whose feature the environment lacks is said
+    before the projection (:func:`absent_feature_notices`), not by it."""
+    from uacpy.models._projection import environment_projection
+    env = _sloping_layered_env()
+    kw = dict(model_name='M', collapse=dict(DEFAULT_COLLAPSE, bathymetry='min'),
+              user_collapse={'bathymetry': 'min'})
+    _, native = environment_projection(
+        env, supported=frozenset({'range_dependent_bathymetry',
+                                  'layered_bottom'}), **kw)
+    assert native == ("M: collapse['bathymetry']='min' reduces nothing in "
+                      "M's deck: M reads the range-dependent bathymetry "
+                      "natively.",)
+    _, reduced = environment_projection(
+        env, supported=frozenset({'layered_bottom'}), **kw)
+    assert len(reduced) == 1 and 'collapsed to 100.0 m' in reduced[0]
+    flat = Environment(bathymetry=100.0, ssp=1500.0)
+    _, absent = environment_projection(
+        flat, supported=frozenset({'range_dependent_bathymetry'}), **kw)
+    assert absent == ()
+
+
+def test_a_user_key_whose_feature_the_environment_lacks_is_said():
+    """Every ``collapse=`` key on an environment without its feature: a
+    flat, single-column, half-space, fluid environment with no altimetry
+    and one surface; keys whose feature it carries say nothing."""
+    from uacpy.models._projection import absent_feature_notices
+    flat = Environment(bathymetry=100.0, ssp=1500.0)
+    keys = dict(altimetry='drop', bathymetry='min', ssp='mean',
+                bottom_range='r0', bottom_layers='top_layer',
+                elastic='fluid', surface='r0')
+    said = absent_feature_notices(flat, model_name='M', user_collapse=keys)
+    assert said == (
+        "M: collapse['altimetry']='drop' reduces nothing: the environment "
+        "has no sea-surface altimetry.",
+        "M: collapse['bathymetry']='min' reduces nothing: the "
+        "environment's bathymetry is range-independent.",
+        "M: collapse['ssp']='mean' reduces nothing: the environment's SSP "
+        "is range-independent.",
+        "M: collapse['bottom_range']='r0' reduces nothing: the "
+        "environment's seabed is range-independent.",
+        "M: collapse['bottom_layers']='top_layer' reduces nothing: the "
+        "environment's seabed has no sediment layers.",
+        "M: collapse['elastic']='fluid' reduces nothing: the environment "
+        "has no elastic media.",
+        "M: collapse['surface']='r0' reduces nothing: the environment's "
+        "surface is range-independent.")
+    assert absent_feature_notices(
+        _sloping_layered_env(), model_name='M',
+        user_collapse={'bathymetry': 'min', 'bottom_layers': 'top_layer'}
+    ) == ()
+
+
+@pytest.mark.requires_binary  # constructs concrete models
+def test_a_run_says_a_user_key_its_environment_gives_nothing_to_reduce():
+    """One notice per run, from the caller's environment: a flat one draws
+    it whatever the model reads; a sloping one does not, even where
+    Kraken's MODES path reduces it before the projection."""
+    from uacpy.models import Kraken, Scooter
+
+    def said(model, env, **kw):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            model.run_settings(
+                env, Source(depths=30.0, frequencies=100.0),
+                None if kw else Receiver(depths=[30.0],
+                                         ranges=[1000.0, 3000.0]), **kw)
+        return [str(w.message) for w in caught
+                if "reduces nothing: the environment" in str(w.message)]
+
+    flat = Environment(bathymetry=100.0, ssp=1500.0)
+    assert said(Scooter(collapse={'bathymetry': 'min'}), flat) == [
+        "Scooter: collapse['bathymetry']='min' reduces nothing: the "
+        "environment's bathymetry is range-independent."]
+    assert said(Scooter(collapse={'bathymetry': 'min'}),
+                _sloping_layered_env()) == []
+    assert said(Kraken(collapse={'bathymetry': 'min'}),
+                _sloping_layered_env(), run_mode=RunMode.MODES) == []
+
+
+@pytest.mark.requires_binary  # constructs concrete models
+def test_a_run_says_which_user_keys_its_deck_reads_natively():
+    from uacpy.models import RAM, Kraken, Scooter
+
+    def said(model, **kw):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            model.run_settings(
+                _sloping_layered_env(), Source(depths=30.0, frequencies=100.0),
+                None if kw else Receiver(depths=[30.0],
+                                         ranges=[1000.0, 3000.0]), **kw)
+        return [str(w.message) for w in caught
+                if 'reduces nothing' in str(w.message)]
+
+    assert said(RAM(collapse={'bathymetry': 'min',
+                              'bottom_layers': 'top_layer'})) == [
+        "RAM: collapse['bathymetry']='min' reduces nothing in RAM's deck: "
+        "RAM reads the range-dependent bathymetry natively.",
+        "RAM: collapse['bottom_layers']='top_layer' reduces nothing in "
+        "RAM's deck: RAM reads the layered seabed natively."]
+    assert said(Scooter(collapse={'bathymetry': 'min'})) == []
+    # Kraken's MODES path reduces the range-dependent environment by the
+    # key before the projection (modes_single_profile), so it is used.
+    assert said(Kraken(collapse={'bathymetry': 'min'}),
+                run_mode=RunMode.MODES) == []
+    assert len(said(Kraken(collapse={'bathymetry': 'min'}))) == 1
+
+
 # ---------------------------------------------------------------------
 # bottom_range / bottom_layers — orthogonal axes
 # ---------------------------------------------------------------------
@@ -91,7 +212,7 @@ def _bare_model_factory(supports_layered: bool):
     """Build a minimal subclass that doesn't spawn any binary."""
     from uacpy.core.run_settings import RunMode
     from uacpy.models.base import (
-        DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
+        DEFAULT_RUN_TIMEOUT, PropagationModel, _host_options,
     )
     from uacpy.models._spec import ModelSpec
 
@@ -112,7 +233,7 @@ def _bare_model_factory(supports_layered: bool):
                      verbose: Union[bool, str] = False,
                      work_dir: Optional[Path] = None,
                      cleanup: Optional[bool] = None,
-                     timeout: float = DEFAULT_RUN_TIMEOUT_S,
+                     timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
                      collapse: Optional[Dict[str, str]] = None):
             super().__init__(**_host_options(locals()))
             self._supports_layered_bottom = supports_layered
@@ -173,6 +294,25 @@ def test_a_collapsed_seafloor_lies_inside_its_profile():
     assert proj.depth == 200.0
     assert proj.ssp.depths[-1] == 200.0
     assert proj.ssp.sound_speed[-1, 0] == 1490.0
+
+
+def test_a_collapsed_seafloor_keeps_its_provenance():
+    """The flat seafloor a projection writes is the fetched bathymetry
+    reduced, so its ``data_sources`` come with it and the projected
+    environment still credits them (``env.data_sources``), as the
+    collapsed SSP does."""
+    from uacpy.data.sources import SOURCES, DataProvenance
+    env = Environment(bathymetry=[(0.0, 100.0), (5000.0, 200.0)],
+                      ssp=1500.0)
+    gebco = (DataProvenance(source=SOURCES['gebco']),)
+    env.bathymetry.data_sources = gebco
+    bare = _bare_model_factory(supports_layered=False)()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        proj = bare._project_environment(env)
+    assert proj.bathymetry.varies_with_range is False
+    assert proj.bathymetry.data_sources == gebco
+    assert gebco[0] in proj.data_sources
 
 
 @pytest.mark.parametrize('bad_key,bad_val', [

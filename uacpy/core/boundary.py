@@ -23,7 +23,7 @@ from uacpy.core.exceptions import (
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 from uacpy.core._validate import (
-    DENSITY_UNITS_SUSPECT_G_CM3, warn_attenuation_past_at_ceiling,
+    DENSITY_UNITS_SUSPECT, warn_attenuation_past_at_ceiling,
     require_positive, require_non_negative, require_finite,
     require_real_scalar, warn_attenuation_beyond_seabeds,
     warn_speed_typed_in_km_per_s,
@@ -187,14 +187,17 @@ def _check_geoacoustic_plausibility(owner: str, density: float,
     """Refuse a density typed in kg/m³; warn on a value the constructor
     accepts but no seabed has.
 
-    A density over :data:`~uacpy.core._validate.DENSITY_UNITS_SUSPECT_G_CM3`
+    A density over :data:`~uacpy.core._validate.DENSITY_UNITS_SUSPECT`
     is a kg/m³ number in a g/cm³ slot and is refused, as
     :func:`~uacpy.core.acoustics.reflection_coeff` and the water density of
     :class:`~uacpy.core.environment.Environment` refuse it. Two plausibility
     bounds warn and never raise: a compressional speed typed in km/s
     (:func:`~uacpy.core._validate.warn_speed_typed_in_km_per_s`), and a shear
-    speed above the compressional speed (no real solid: Poisson's ratio
-    bounds ``c_s < c_p / sqrt(2)``).
+    speed above the compressional speed (no real solid has one: elastic
+    stability, ``-1 < ν < ½``, keeps ``c_s < (√3/2)·c_p``, and a
+    non-negative Poisson's ratio ``c_s < c_p/√2``, from
+    ``c_s/c_p = √((1-2ν)/(2(1-ν)))``; Garrett, *Understanding Acoustics*,
+    §4.2.3 and Eq. 15.64).
 
     Reached from both carriers' ``__post_init__`` below the user's constructor
     call or assignment. Both are built by ``@carrier``'s ``__init__``, so every
@@ -203,7 +206,7 @@ def _check_geoacoustic_plausibility(owner: str, density: float,
     ``layer.density = …`` and from the in-package factories
     (``Bottom.from_halfspaces``, the CRUST1 and GRAW readers,
     ``SeabedColumn.collapse_layers``) alike."""
-    if density > DENSITY_UNITS_SUSPECT_G_CM3:
+    if density > DENSITY_UNITS_SUSPECT:
         raise ConfigurationError(
             f"{owner}: density={density:g} reads as kg/m³; the argument is "
             f"g/cm³.",
@@ -213,9 +216,10 @@ def _check_geoacoustic_plausibility(owner: str, density: float,
         warnings.warn(
             f"{owner}: shear_speed={shear_speed:g} m/s exceeds "
             f"sound_speed={sound_speed:g} m/s. No real solid has a shear "
-            f"speed above its compressional speed (Poisson's ratio bounds "
-            f"c_s < c_p/sqrt(2) = {sound_speed / np.sqrt(2.0):g} m/s); check "
-            f"whether the two were swapped.",
+            f"speed above its compressional speed (for a non-negative "
+            f"Poisson's ratio c_s < c_p/sqrt(2) = "
+            f"{sound_speed / np.sqrt(2.0):g} m/s); check whether the two "
+            f"were swapped.",
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
@@ -656,7 +660,7 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
         # ``misc/ReadEnvironmentMod.f90:292`` aborts a half-space whose
         # compressional speed *or* density vanishes. The density half of that
-        # guard is the _require_positive above; this is the other half. Checked
+        # guard is the require_positive above; this is the other half. Checked
         # after the type is resolved because vacuum/rigid/file boundaries carry
         # placeholder speeds they never use, and reachable only here: an
         # explicitly-passed sound_speed forces 'half-space' or trips the

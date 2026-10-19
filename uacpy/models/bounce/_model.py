@@ -13,7 +13,7 @@ from uacpy.models._launch import (
     BinarySearch, attach_prt_tail, require_output, run_prt_binary,
 )
 from uacpy.models.base import (
-    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
+    DEFAULT_RUN_TIMEOUT, PropagationModel, _host_options,
 )
 from uacpy.core.source import VALID_SOURCE_TYPES
 from uacpy.models._spec import (
@@ -240,7 +240,7 @@ class Bounce(PropagationModel):
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         """
@@ -330,17 +330,6 @@ class Bounce(PropagationModel):
         self._exe = self._resolve_executable(
             executable, lambda: self._find_binary('bounce'),
         )
-
-    def _validate_geometry(self, env, source, receiver, run_mode=None) -> None:
-        """No-op: BOUNCE reads no source or receiver geometry.
-
-        Its Fortran driver stops after ``TopOpt``, the SSP, ``BotOpt``,
-        ``cLow``/``cHigh`` and ``RMax`` (``bounce.f90``) — it never calls
-        ``ReadSzRz``. The plane-wave reflection coefficient is independent of
-        source position, so the field models' depth and range-coverage checks
-        would reject and warn about geometry that never reaches the binary.
-        ``receiver`` is read only to auto-derive ``rmax``.
-        """
 
     def _multi_frequency_refusal(self, mode, source) -> Exception:
         """The base rule's refusal of a multi-frequency Source, naming
@@ -436,13 +425,19 @@ class Bounce(PropagationModel):
         n_mesh = resolve_n_mesh(env, frequency, self.n_mesh)
         self._log(f"mesh points per medium = {n_mesh}", level='debug')
         notices = []
-        if (self.n_mesh is not None and not n_mesh and 'n_mesh'
-                not in getattr(self, '_pinned_from_record', ())):
+        if self._caller_set('n_mesh') and not n_mesh:
             notices.append(Notice(
                 "n_mesh not used",
                 f"{self.model_name}: n_mesh={self.n_mesh!r} is not used: the "
                 f"seabed is a bare half-space, and BOUNCE meshes the sediment "
                 f"layers only.", FallbackWarning))
+        if self._caller_set('interp_ssp') and not n_mesh:
+            notices.append(Notice(
+                "interp_ssp not used",
+                f"{self.model_name}: interp_ssp={self.interp_ssp!r} is not "
+                f"used: the seabed is a bare half-space, so the BOUNCE deck "
+                f"carries no sediment medium whose speeds it interpolates "
+                f"(the deck omits the water column).", FallbackWarning))
         return BounceSettings(
             c_low=c_low,
             c_low_origin=('Bounce(c_low=…)' if self.c_low is not None else

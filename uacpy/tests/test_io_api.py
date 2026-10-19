@@ -103,6 +103,19 @@ def test_every_io_reader_and_writer_names_its_file_filepath():
     assert not offenders
 
 
+def test_no_io_reader_takes_a_logging_switch():
+    """A reader returns its record, which states what was read; none takes
+    ``verbose=`` (the models and writers keep theirs: they narrate a
+    run)."""
+    import inspect
+    import uacpy.io
+    offenders = [name for name in uacpy.io.__all__
+                 if name.startswith('read_')
+                 and 'verbose' in inspect.signature(
+                     getattr(uacpy.io, name)).parameters]
+    assert not offenders
+
+
 class TestTheIoSurfaceIsTheFormatsAUserNames:
     """``uacpy.io.__all__`` holds the readers and writers of files a user
     can name (decision 24). The deck blocks and staging helpers the model
@@ -167,3 +180,24 @@ class TestTheIoSurfaceIsTheFormatsAUserNames:
         first = next(iter(inspect.signature(
             uacpy.io.write_sparc_source_time_series).parameters))
         assert first == 'filepath'
+
+
+def test_the_model_deck_writers_take_their_options_by_keyword():
+    """After the file and the carriers, every option of a model's deck
+    writer is keyword-only, and the two RAM writers spell the source depth
+    alike (``zs``)."""
+    import inspect
+    import uacpy.io
+    carriers = {'write_bellhop_env_file': 4, 'write_kraken_env_file': 4,
+                'write_scooter_env_file': 4, 'write_sparc_env_file': 4,
+                'write_bounce_input_file': 3, 'write_mpirams_inpe': 1,
+                'write_ram_in': 1}
+    offenders = []
+    for name, n in carriers.items():
+        params = list(inspect.signature(getattr(uacpy.io, name)).parameters
+                      .values())
+        offenders += [f"{name}({p.name})" for p in params[n:]
+                      if p.kind not in (p.KEYWORD_ONLY, p.VAR_KEYWORD)]
+    assert not offenders
+    for name in ('write_mpirams_inpe', 'write_ram_in'):
+        assert 'zs' in inspect.signature(getattr(uacpy.io, name)).parameters

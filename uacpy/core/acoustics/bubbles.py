@@ -33,10 +33,10 @@ from typing import Union, Optional
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.units import knots_to_ms
-from uacpy.core._validate import DENSITY_UNITS_SUSPECT_G_CM3
+from uacpy.core._validate import DENSITY_UNITS_SUSPECT
 from uacpy.core.constants import (
-    DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3, STANDARD_ATMOSPHERE_PA,
-    STANDARD_GRAVITY_M_S2,
+    DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY, STANDARD_ATMOSPHERE,
+    STANDARD_GRAVITY,
 )
 
 
@@ -55,8 +55,8 @@ def bubble_resonance(
     radius: Union[float, np.ndarray],
     depth: float = 0.0,
     gamma: float = AIR_HEAT_CAPACITY_RATIO,
-    p0: float = STANDARD_ATMOSPHERE_PA,
-    water_density: float = DEFAULT_WATER_DENSITY_G_CM3,
+    p0: float = STANDARD_ATMOSPHERE,
+    water_density: float = DEFAULT_WATER_DENSITY,
 ) -> Union[float, np.ndarray]:
     """
     Calculate resonance frequency of freely oscillating gas bubble in water.
@@ -77,7 +77,7 @@ def bubble_resonance(
         101325)
     water_density : float, optional
         Density of water in g/cm³, the package's density unit (default:
-        ``DEFAULT_WATER_DENSITY_G_CM3``, 1.027). A value above 20 is
+        ``DEFAULT_WATER_DENSITY``, 1.027). A value above 20 is
         refused as a kg/m³ number.
 
     Returns
@@ -100,13 +100,13 @@ def bubble_resonance(
     eq. (8.2.13): ``f_h = (1/2πa)·√(3γ p_A/ρ_A)`` with ``p_A = p_A0 + ρ_A g z``.
     Valid while ``ka ≲ 1``.
     """
-    if water_density > DENSITY_UNITS_SUSPECT_G_CM3:
+    if water_density > DENSITY_UNITS_SUSPECT:
         raise ConfigurationError(
             f"bubble_resonance: water_density={water_density:g} reads as "
             f"kg/m³; the argument is g/cm³.",
             remediation=f"Pass water_density={water_density / 1000.0:g}.")
     rho_kg_m3 = water_density * 1000.0                    # g/cm³ → kg/m³
-    g = STANDARD_GRAVITY_M_S2
+    g = STANDARD_GRAVITY
     p_air = p0 + rho_kg_m3 * g * depth
     return (1 / (2 * np.pi * radius)
             * np.sqrt(3 * gamma * p_air / rho_kg_m3))

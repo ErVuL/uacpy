@@ -42,10 +42,11 @@ source = uacpy.Source(depths=1000.0,      # in the channel, 300 m above its axis
 receiver = uacpy.Receiver(depths=np.linspace(100, 5400, 54),
                           ranges=np.linspace(4000, 150000, 147))
 
-# OAST is the optional fourth: it needs the OASES binaries, and without them
-# the comparison runs on the other three.
-models = {'Bellhop': uacpy.Bellhop(backend='fortran'), 'Kraken': uacpy.Kraken(),
-          'Scooter': uacpy.Scooter()}
+# Bellhop's Gaussian beams keep the convergence-zone caustics finite. OAST is
+# the optional fourth: it needs the OASES binaries, and without them the
+# comparison runs on the other three.
+models = {'Bellhop': uacpy.Bellhop(backend='fortran', beam_type='B'),
+          'Kraken': uacpy.Kraken(), 'Scooter': uacpy.Scooter()}
 fields = {name: model.run(env, source, receiver)
           for name, model in models.items()}
 try:

@@ -12,13 +12,13 @@ from uacpy.core.exceptions import FallbackWarning
 
 from uacpy.acoustics import bottom_loss_curve
 from uacpy.core.acoustics import reflection_coeff
-from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_WATER_DENSITY
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import ReflectionCoefficient
 
 # The water density every deck writes (1.027 g/cm³), which is also the
 # wrapper's default; the closed forms below are evaluated against it.
-_RHO_W = DEFAULT_WATER_DENSITY_G_CM3
+_RHO_W = DEFAULT_WATER_DENSITY
 
 
 def _curve(material, **kwargs):
@@ -594,6 +594,18 @@ class TestTheCriticalAngleHasAnEntryPointOfItsOwn:
         with pytest.raises(ConfigurationError, match='must be > 0'):
             uacpy.acoustics.critical_angle(0.0, 1500.0)
 
+    def test_the_seabed_speed_is_spelled_as_on_reflection_coeff(self):
+        """`sound_speed` beside `water_sound_speed`, as `reflection_coeff`
+        and `BottomParameters.from_geoacoustics` spell them."""
+        import inspect
+        import uacpy
+        assert uacpy.acoustics.critical_angle(
+            sound_speed=1650.0, water_sound_speed=1500.0) == \
+            uacpy.acoustics.critical_angle(1650.0, 1500.0)
+        names = list(inspect.signature(
+            uacpy.acoustics.critical_angle).parameters)
+        assert names == ['sound_speed', 'water_sound_speed']
+
     def test_the_figure_rules_exactly_what_the_function_returns(self):
         """One formula: the table carries it, the plotter draws it."""
         import matplotlib
@@ -618,6 +630,72 @@ class TestTheCriticalAngleHasAnEntryPointOfItsOwn:
             assert len(ruled) == 2, 'clay must not be ruled'
         finally:
             plt.close(fig)
+
+
+class TestTheElasticCoefficientIsBrekhovskikhLysanov3422:
+    """``reflection_coeff(shear_speed=)``: B&L Eq. (3.4.22) — a fluid at
+    zero shear, the fluid value at normal incidence where no shear wave is
+    excited (§3.4.1 a), a softer boundary than the fluid one with the same
+    compressional speed (§3.4.1 c), and partial reflection past the
+    compressional critical angle while the shear wave is slower than the
+    water (§3.4.1 d)."""
+
+    ROCK = dict(sound_speed=3000.0, density=2.2, attenuation=0.1)
+
+    def test_no_shear_is_the_fluid(self):
+        from uacpy.core.acoustics import reflection_coeff
+        g = np.linspace(0.0, 90.0, 91)
+        np.testing.assert_array_equal(
+            reflection_coeff(g, shear_speed=0.0, **self.ROCK),
+            reflection_coeff(g, **self.ROCK))
+
+    def test_normal_incidence_excites_no_shear(self):
+        from uacpy.core.acoustics import reflection_coeff
+        assert reflection_coeff(90.0, shear_speed=1400.0, **self.ROCK) == \
+            pytest.approx(reflection_coeff(90.0, **self.ROCK), abs=1e-12)
+
+    def test_shear_softens_the_boundary(self):
+        """B&L §3.4.1 c: for a slow lossless solid the coefficient is real
+        and Z_in/Z1 < 1, so V = (Z_in - Z)/(Z_in + Z) is below the fluid's
+        at every oblique angle (0.181 against 0.197 at 60 deg grazing)."""
+        from uacpy.core.acoustics import reflection_coeff
+        slow = dict(sound_speed=1450.0, density=1.6)
+        g = np.linspace(5.0, 85.0, 17)
+        elastic = reflection_coeff(g, shear_speed=300.0, **slow)
+        fluid = reflection_coeff(g, **slow)
+        assert np.isrealobj(elastic) and np.isrealobj(fluid)
+        assert np.all(elastic < fluid)
+        assert reflection_coeff(60.0, shear_speed=300.0, **slow) == \
+            pytest.approx(0.1809, abs=1e-4)
+
+    def test_past_the_critical_angle_the_shear_wave_carries_energy(self):
+        """Lossless rock: the fluid totally reflects below its 60 deg
+        critical grazing angle; with a shear wave slower than the water,
+        |R| < 1 there; the grazing limit stays -1 and the critical angle
+        +1."""
+        from uacpy.core.acoustics import reflection_coeff
+        rock = dict(sound_speed=3000.0, density=2.2)
+        g = np.array([20.0, 40.0])
+        assert np.allclose(np.abs(reflection_coeff(g, **rock)), 1.0)
+        assert np.all(np.abs(reflection_coeff(g, shear_speed=1400.0,
+                                              **rock)) < 0.999)
+        assert reflection_coeff(0.0, shear_speed=1400.0, **rock) == \
+            pytest.approx(-1.0)
+        critical = 90.0 - np.degrees(np.arcsin(1500.0 / 3000.0))
+        assert reflection_coeff(critical, shear_speed=1400.0, **rock) == \
+            pytest.approx(1.0, abs=1e-6)
+
+    def test_shear_settings_are_checked(self):
+        from uacpy.core.acoustics import reflection_coeff
+        from uacpy.core.exceptions import FallbackWarning
+        with pytest.raises(ConfigurationError, match='shear_speed must be'):
+            reflection_coeff(30.0, shear_speed=-1.0, **self.ROCK)
+        with pytest.raises(ConfigurationError, match='shear_attenuation must'):
+            reflection_coeff(30.0, shear_speed=1400.0,
+                             shear_attenuation=-0.1, **self.ROCK)
+        with pytest.warns(FallbackWarning, match='shear_attenuation=0.2 is '
+                                                 'not used'):
+            reflection_coeff(30.0, shear_attenuation=0.2, **self.ROCK)
 
 
 class TestBottomLossCurveReadsTheSeabedCarriers:

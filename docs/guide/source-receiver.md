@@ -67,6 +67,16 @@ Receiver(100 depths 1–99 m, 250 ranges 50–5000 m)
 (1.0, 99.0, 50.0, 5000.0)
 ```
 
+Both save to NetCDF and read back, as `Environment` does, so the geometry of a
+run can be kept beside its result:
+
+```python
+source.to_netcdf('source.nc')
+receiver.to_netcdf('receiver.nc')
+source = uacpy.Source.from_netcdf('source.nc')
+receiver = uacpy.Receiver.from_netcdf('receiver.nc')
+```
+
 ---
 
 ## 2. The receiver grid *is* the shape of the `Field`
@@ -414,7 +424,7 @@ run mode:
 | Run mode | What `frequencies` must be |
 |---|---|
 | `COHERENT_TL`, `INCOHERENT_TL`, `SEMICOHERENT_TL`, `RAYS`, `EIGENRAYS`, `ARRIVALS`, `MODES` | exactly **one** element |
-| `BROADBAND`, `TIME_SERIES` | the band. A vector **is** the grid; a single value auto-expands to `fc·(1 ± bandwidth/2)` |
+| `BROADBAND`, `TIME_SERIES` | the band. A vector **is** the grid; a single value expands to the engine's default band — on Bellhop, Kraken, Scooter and RAM 128 bins over `fc·(1 ± 0.25)` (RAM's `q_factor` sets another width; any other band is `run(frequencies=)`); each model guide states its own |
 
 **A multi-element `frequencies` does not by itself select a broadband run.**
 Left to itself, every frequency-domain field model in the package defaults to
@@ -589,8 +599,13 @@ A **receiver is an output**. Asking for a value under the seabed is a
 legitimate question — you want the transmitted field, or you are gridding
 uniformly and do not want to special-case the seafloor — and every model has a
 defined answer down there. So uacpy accepts it, warns once, and hands back the
-per-engine answer: Kraken and the OASES models mesh the sediment and return the
-physical transmitted / evanescent field; Scooter and SPARC compute through the
+per-engine answer: the OASES models mesh the sediment and return the
+physical transmitted / evanescent field; Kraken does the same in a fluid
+sediment, returns `NaN` in or below an elastic sediment layer, and below an
+elastic half-space returns the interface pressure continued with the
+compressional decay alone, a value of its own that `field.exe` itself flags
+("Receiver below depth of bottom", relayed as an `IOWarning`;
+[kraken.md](../models/kraken.md)); Scooter and SPARC compute through the
 sediment layers and return `NaN` only below the deepest modelled interface,
 where their mesh stops; RAM marches through the sediment and returns its field
 down to the top of its absorbing layer, which the PE places "deep within the
@@ -598,7 +613,8 @@ sediment" (Collins & Siegmann, *Parabolic Wave Equations with Applications*,
 §1.2.5) — inside that layer, whose attenuation is artificial, it returns `NaN`
 with a warning; Bellhop returns `NaN` below the local seafloor
 (`Field.mask_below_seafloor`, the call that puts any engine on the water
-column alone).
+column alone). `field.plot(env=env, seabed='line')` draws the seafloor as a
+line, so the values under it show; the default fill covers them.
 
 A **source is an input**. It injects the energy the whole solution is built
 from, and a model has no defined behaviour for energy injected outside the
@@ -606,10 +622,10 @@ domain it discretised. There is no answer to hand back, so it raises:
 
 ```python
 >>> Bellhop().run(env, uacpy.Source(depths=150.0, frequencies=200.0), receiver)
-InvalidDepthError: Source depth (150.0m) exceeds resolvable depth (100.0m)
+InvalidDepthError: Source depth (150 m) exceeds resolvable depth (100 m), the deepest point the model's domain reaches: the seafloor, or the bottom of the modelled sediment for a solver that computes the field in the sediment
 
 How to fix:
-Set source depth to ≤ 100.0m
+Set source depth to ≤ 100 m
 ```
 
 "Resolvable depth" rather than "water depth" because the two differ:

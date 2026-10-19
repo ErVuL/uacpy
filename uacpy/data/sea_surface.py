@@ -16,29 +16,19 @@ first, then the cached NBS monthly climatology.
 import numpy as np
 
 from uacpy.core.altimetry import Altimetry
-from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.altimetry import SEA_SURFACE_CALM_WIND_MPS, generate_sea_surface
+from uacpy.core.altimetry import SEA_SURFACE_CALM_WIND, generate_sea_surface
 from uacpy.core.units import knots_to_ms, ms_to_knots
 from uacpy._log import log_message
 from uacpy.core.geo import as_coordinate
 from uacpy.data._geo import checked_max_days, checked_max_distance
-from uacpy.data._chain import first_answer, lower_source_spec
-from uacpy.core.geo import parse_date
-from uacpy.data.sources import SOURCES, DataProvenance
+from uacpy.data._chain import (SourceChain, SourceProvider,
+                               unused_setting_notices)
 from uacpy.data._provenance_notice import one_provenance_notice
+from uacpy.data.wind_live import WIND_SOURCES
 
 __all__ = ['fetch_sea_surface', 'hs_to_pm_wind', 'SEA_SURFACE_SOURCES']
 
 SEA_SURFACE_SOURCES = ('waverys', 'ww3', 'nbs', 'local', 'auto')
-#: The rung each source token tries: ``(rung, backend)``. ``'waverys'`` and
-#: ``'ww3'`` build from the wave height, ``'nbs'`` from the live 10 m wind;
-#: ``'local'`` is the cached NBS monthly climatology (``install.sh --data
-#: wind``) — a mean state, not the day's, so it is the last rung of
-#: ``'auto'`` rather than the cache-first rung the other axes use: for sea
-#: state the date-specific product is the better answer.
-_RUNGS = {'waverys': ('waves', 'waverys'), 'ww3': ('waves', 'ww3'),
-          'nbs': ('nbs', 'nbs'), 'local': ('nbs', 'local')}
-_AUTO_ORDER = ('waverys', 'ww3', 'nbs', 'local')
 #: Pierson-Moskowitz fully-developed significant wave height Hs = 0.21·U²/g
 #: with U at the 19.5 m reference height, the relation used by
 #: :func:`generate_sea_surface`. Etter, *Underwater Acoustic Modeling and
@@ -125,7 +115,9 @@ def fetch_sea_surface(point, *, date, rmax, n_points=None, rng=None,
         (no network — a mean state, so it understates day-to-day sea state).
         ``'auto'`` (default) is ``('waverys', 'ww3', 'nbs', 'local')``.
     max_days : int, optional
-        Time tolerance forwarded to the wave source.
+        Time tolerance forwarded to the wave source (only WAVERYS reads it);
+        set when a wind source answers, it gives a ``FallbackWarning`` that
+        it was not used.
     timeout : float, optional
         Per-request network timeout in seconds. Default 120.
     verbose : bool or str, optional
@@ -148,58 +140,75 @@ def fetch_sea_surface(point, *, date, rmax, n_points=None, rng=None,
         it read (the live NBS and WaveWatch III fields are read at 00:00 UTC
         of ``date``), beside the ``requested_date``.
     """
-    lat, lon = as_coordinate(point)            # validate before any request
+    as_coordinate(point)                       # validate before any request
     limit = checked_max_distance(max_distance_km, 'fetch_sea_surface')
     if max_days is not None:
         max_days = checked_max_days(max_days, 'fetch_sea_surface')
-    source = lower_source_spec(source)
-    order = (_AUTO_ORDER if source == 'auto'
-             else (source,) if isinstance(source, str) else tuple(source))
-    unknown = [s for s in order if s not in _RUNGS]
-    if not order or unknown:
-        raise ConfigurationError(
-            f"fetch_sea_surface: unknown source {source!r}.",
-            remediation=f"Use one of {sorted(SEA_SURFACE_SOURCES)}, or a "
-                        f"sequence of {sorted(_RUNGS)}.",
-        )
-    # A wave rung answers with the finished surface; a wind rung answers
-    # with the 10 m wind, from which the surface is built below.
-    attempts = [_RUNGS[s] for s in order]
+    request = dict(date=date, max_days=max_days, timeout=timeout,
+                   verbose=verbose, max_distance_km=limit, rmax=rmax,
+                   n_points=n_points, rng=rng)
+    surface, (answered, _backend) = _SEA_SURFACE_CHAIN.answer(
+        source,
+        lambda src, backend: _SEA_SURFACE_CHAIN.fetch(
+            src, backend, (point,), request, who='fetch_sea_surface',
+            keyword='source='),
+        who='fetch_sea_surface', keyword='source=')
+    if answered in WIND_SOURCES:
+        unused_setting_notices('fetch_sea_surface', [(
+            'max_days', max_days,
+            "the NBS wind answered, which takes no time tolerance (only "
+            "WAVERYS reads max_days)")])
+    return surface
 
-    def call(rung, backend):
-        if rung == 'waves':
-            from uacpy.data.waves import fetch_waves
-            w = fetch_waves(point, date=date, source=backend,
-                            max_days=max_days, timeout=timeout,
-                            verbose=verbose, max_distance_km=limit)
-            u = _pm_wind_ms(w.hs)
-            log_message('waves', f"Hs {w.hs:.2f} m "
-                        f"({w.provenance.source.id}) → "
-                        f"PM wind {float(ms_to_knots(u)):.1f} kn", verbose=verbose)
-            return _altimetry(_surface(rmax, u, n_points, rng),
-                              w.provenance)
-        from uacpy.data.wind_live import wind_at
-        return wind_at(point, date=date, source=backend, timeout=timeout,
-                       verbose=verbose, max_distance_km=limit,
-                       who='fetch_sea_surface')
 
-    answer, (rung, backend) = first_answer(attempts, call)
-    if rung == 'waves':
-        return answer
-    answer, wind_prov = answer
-    u10 = float(knots_to_ms(answer))    # wind_at answers in knots
-    u = u10 * _U10_TO_U195
+def _wave_surface(backend, point, *, date, max_days, timeout, verbose,
+                  max_distance_km, rmax, n_points, rng, **_request):
+    """A :data:`_SEA_SURFACE_CHAIN` fetch from a wave source (``backend`` is
+    its :func:`~uacpy.data.fetch_waves` source): the realization of the
+    Pierson-Moskowitz wind of the significant wave height read."""
+    from uacpy.data.waves import fetch_waves
+    w = fetch_waves(point, date=date, source=backend, max_days=max_days,
+                    timeout=timeout, verbose=verbose,
+                    max_distance_km=max_distance_km)
+    u = _pm_wind_ms(w.hs)
+    log_message('waves', f"Hs {w.hs:.2f} m ({w.provenance.source.id}) → "
+                f"PM wind {float(ms_to_knots(u)):.1f} kn", verbose=verbose)
+    return _altimetry(_surface(rmax, u, n_points, rng), w.provenance)
+
+
+def _wind_surface(backend, point, *, date, timeout, verbose, max_distance_km,
+                  rmax, n_points, rng, **_request):
+    """A :data:`_SEA_SURFACE_CHAIN` fetch from the NBS wind (``backend`` is
+    the live ``'nbs'`` or the cached ``'local'`` climatology): the
+    realization of the 10 m wind scaled to the 19.5 m reference height."""
+    from uacpy.data.wind_live import wind_at
+    knots, wind_prov = wind_at(point, date=date, source=backend,
+                               timeout=timeout, verbose=verbose,
+                               max_distance_km=max_distance_km,
+                               who='fetch_sea_surface')
+    u = float(knots_to_ms(knots)) * _U10_TO_U195
     kind = 'climatology' if backend == 'local' else 'live'
-    log_message('wind', f"U10 {answer:.1f} kn (nbs {kind}) → PM wind "
+    log_message('wind', f"U10 {knots:.1f} kn (nbs {kind}) → PM wind "
                 f"{float(ms_to_knots(u)):.1f} kn", verbose=verbose)
-    # The wind record dates the live step read, or the cached climatology by
-    # its month and reference period.
-    record = DataProvenance(source=SOURCES['nbs'],
-                            data_date=wind_prov.data_date,
-                            data_point=wind_prov.data_point,
-                            requested_point=(lat, lon),
-                            requested_date=parse_date(date).isoformat())
-    return _altimetry(_surface(rmax, u, n_points, rng), record)
+    # The wind reading's own record: the 0.25° cell read and the live step
+    # (or the cached climatology's month and reference period), through the
+    # offset rule already.
+    return _altimetry(_surface(rmax, u, n_points, rng), wind_prov)
+
+
+#: The sea-surface sources: the wave heights, then the live 10 m wind, then
+#: the cached NBS monthly climatology (``install.sh --data wind``) — a mean
+#: state, not the day's, so it is the last source of ``'auto'`` rather than
+#: the cache-first twin the other axes try first: for sea state the
+#: date-specific product is the better answer. ``'local'`` (the cached
+#: sources alone) is that climatology.
+_SEA_SURFACE_CHAIN = SourceChain(
+    'sea surface',
+    providers=(SourceProvider('waverys', ('waverys',), _wave_surface),
+               SourceProvider('ww3', ('ww3',), _wave_surface),
+               SourceProvider('nbs', ('nbs',), _wind_surface),
+               SourceProvider('local', ('local',), _wind_surface)),
+    auto=('waverys', 'ww3', 'nbs', 'local'))
 
 
 def _altimetry(pairs, prov):
@@ -216,6 +225,6 @@ def _surface(rmax, wind_ms, n_points, rng):
     # sizing rule answers with its fixed count and no warning — the
     # realization stands in for a flat surface either way. Sizing, cap and
     # the under-resolution warning are generate_sea_surface's.
-    wind_ms = max(wind_ms, SEA_SURFACE_CALM_WIND_MPS)
+    wind_ms = max(wind_ms, SEA_SURFACE_CALM_WIND)
     return generate_sea_surface(rmax, ms_to_knots(wind_ms), n_points=n_points,
                                 rng=rng)

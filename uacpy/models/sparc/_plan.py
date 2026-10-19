@@ -139,16 +139,17 @@ _LOOPED_TIME_SERIES_MODES = {
 
 def check_knobs(*, c_low, c_high, output_mode, pulse_type, march_start,
                 freq_min, freq_max, courant_factor, max_launches, n_mesh,
-                rmax_factor, time_max, window_sound_speed) -> None:
+                rmax_factor, window_sound_speed) -> None:
     """Refuse a constructor knob no run could use: a pinned phase-speed
     bound that is not a positive finite speed or two with
     ``c_low >= c_high``, an unknown ``output_mode`` or
     ``pulse_type``, a positive ``march_start``, a negative ``freq_min``, a
     non-positive ``freq_max`` or a pinned band with ``freq_min >= freq_max``,
     a ``courant_factor`` outside (0, 1], a pinned ``max_launches`` below 1,
-    a pinned ``n_mesh`` that is not a whole number of at least 0, an
-    ``rmax_factor`` below 1, and a non-positive or non-finite ``time_max``
-    or ``window_sound_speed``.
+    a pinned ``n_mesh`` count (one, or one per medium) that is not a whole
+    number of at least 0, an
+    ``rmax_factor`` below 1, and a non-positive or non-finite
+    ``window_sound_speed``.
 
     Run at construction and again by every run (the attributes can be
     reassigned in between).
@@ -166,7 +167,10 @@ def check_knobs(*, c_low, c_high, output_mode, pulse_type, march_start,
             f"it), where the field grows to NaN. Use a value in (0, 1].")
     if max_launches is not None:
         whole_count('SPARC: max_launches', max_launches, 1)
-    if n_mesh is not None:
+    if isinstance(n_mesh, (list, tuple, np.ndarray)):
+        for count in n_mesh:
+            whole_count('SPARC: each n_mesh count', count, 0)
+    elif n_mesh is not None:
         whole_count('SPARC: n_mesh', n_mesh, 0)
     # sparc.f90:152-155 stops the run when the farthest receiver lies past
     # RMax = rmax_factor × that range.
@@ -177,7 +181,6 @@ def check_knobs(*, c_low, c_high, output_mode, pulse_type, march_start,
             f"ranges, which sparc.f90:152-155 refuses ('Largest receiver "
             f"range exceeds RMax'). Use rmax_factor >= 1, or leave it "
             f"unset for an RMax that also clears the range alias.")
-    positive_finite('SPARC: time_max (s)', time_max, optional=True)
     positive_finite('SPARC: window_sound_speed (m/s)', window_sound_speed,
                     optional=True)
     if output_mode not in ('R', 'D', 'S'):
@@ -520,7 +523,7 @@ def range_alias_notice(rmax: float, r_ref: float, c_fast: float,
         f"{time_max:.4g} s output window — it will read as a real late "
         f"arrival. Use SPARC(rmax_factor>"
         f"{margin_needed:.3g}) (runtime scales with it) or shorten the "
-        f"window with time_max.", NumericsWarning,
+        f"window with run(output_duration=).", NumericsWarning,
     )
 
 
@@ -591,7 +594,8 @@ def resolve_n_time_samples(freq_max, time_max, *, n_time_samples):
                 f"{n_needed} (more than eight samples per period at "
                 f"freq_max, Jensen et al. Sect. 8.2.1.3; the count an "
                 f"unset n_time_samples takes), lower freq_max, or shorten "
-                f"the window via time_max / receiver.ranges.max().",
+                f"the window via run(output_duration=) / "
+                f"receiver.ranges.max().",
                 NumericsWarning,
             )
     return n_time_samples, notice
@@ -676,8 +680,8 @@ def refuse_too_few_wavenumbers(nk: int, rmax: float, freq_min: float,
 
 def checked_n_mesh(env, freq_max: float, *,
                    pinned_n_mesh) -> Tuple[int, ...]:
-    """:func:`resolve_n_mesh` as one count per medium (a pinned count on
-    every medium), refused when the deck's mesh would overrun SPARC's
+    """:func:`resolve_n_mesh` as one count per medium (a pinned single
+    count on every medium), refused when the deck's mesh would overrun SPARC's
     static storage (:data:`_MAX_MESH_POINTS`). A pinned 0 asks AT for its
     automatic mesh at the deck frequency (``ReadEnvironmentMod.f90:101-106``),
     so it counts no points here: the binary sizes that mesh and checks it
@@ -707,9 +711,10 @@ def resolve_n_mesh(env, freq_max: float, *, n_mesh) -> Union[int, List[int]]:
     """Mesh count for the deck: the caller's if pinned — 0 included,
     AT's automatic mesh at the deck frequency
     (``ReadEnvironmentMod.f90:101-106``) — else sized at the band top this
-    run actually marches. A pinned ``n_mesh`` comes back as
-    a single ``int`` the writer applies to every medium; the automatic
-    path returns a ``list`` with one count per medium.
+    run actually marches. A pinned single count comes back as the
+    ``int`` the writer applies to every medium, a pinned count per medium
+    as a ``list``; the automatic path returns a ``list`` with one count
+    per medium.
 
     ``misc/ReadEnvironmentMod.f90:103`` sizes an automatic mesh as
     ``deltaz = c / freq0 / 20`` — 20 points per wavelength at the deck's
@@ -731,6 +736,8 @@ def resolve_n_mesh(env, freq_max: float, *, n_mesh) -> Union[int, List[int]]:
     arrival about 1.7 ms early over 300 m. Convergence is monotone in the
     count, so the mesh is sized at ``freq_max``, the band's binding end.
     """
+    if isinstance(n_mesh, (list, tuple, np.ndarray)):
+        return [int(n) for n in n_mesh]
     if n_mesh is not None:
         return int(n_mesh)
     f = float(freq_max)

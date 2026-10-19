@@ -29,7 +29,7 @@ from uacpy.models.kraken._window import phase_speed_window
 #: it gave 0.27 dB median, 3.7 dB max |dTL| and a 1.09 rad mode phase error at
 #: 10 km on a 100 m Pekeris guide (1700 m/s), 0.016 dB median, 0.17 dB max and
 #: 0.24 rad over a 1550 m/s mud seabed, where 100 km gave none.
-KRAKEN_RMAX_NO_RANGE_M = 100_000.0
+KRAKEN_RMAX_NO_RANGE = 100_000.0
 
 
 #: ``KrakenField/field.f90:24`` declares ``MaxNfreq = 1000``, allocates
@@ -124,7 +124,7 @@ def merge_depths(grid, extra, max_depth):
     merged = np.concatenate([grid, extra])
     merged.sort()
     # Two *extras* can also sit inside MergeVectors' tolerance — receiver
-    # depths are only required to differ by DECK_DEPTH_RESOLUTION_M, which is
+    # depths are only required to differ by DECK_DEPTH_RESOLUTION, which is
     # ten times finer. Thin them here so the deck asks for a grid KRAKEN will
     # return unchanged; the endpoints are kept whatever else goes.
     keep = np.ones(merged.size, dtype=bool)
@@ -259,12 +259,11 @@ def dense_mode_depths(env, source, *, pinned_mode_depths,
     ``max(100, total_depth * mode_points_per_meter)`` points linearly spaced
     from 0 to the total media depth (the 100 is uacpy guidance, unmeasured).
 
-    ``env`` is the environment the caller passed. The modes are solved on
-    its r = 0 profile, so the grid spans THAT water column plus THAT
-    column's sediment stack — not the deepest point of a range-dependent
-    bathymetry or the thickest bed along the track, either of which would
-    ask KRAKEN for receivers below the profile it solves (it clamps them and
-    warns about a grid this wrapper built).
+    ``env`` is the one profile the modes are solved on: stage 1 has
+    reduced a range-dependent environment by the collapse policy
+    (:func:`~uacpy.models.kraken._checks.modes_single_profile`; by default
+    the deepest bathymetry and the median seabed), so the grid spans that
+    profile's water column plus its sediment stack.
     """
     if pinned_mode_depths is not None:
         return np.asarray(pinned_mode_depths, dtype=float), None
@@ -283,7 +282,7 @@ def dense_mode_depths(env, source, *, pinned_mode_depths,
 def compute_rmax(receiver) -> float:
     """The mode solver's RMax (m) from the receiver ranges: the farthest
     one — ``doc/kraken.htm`` (8), 678: "the largest range for which a field
-    calculation will be desired" — or :data:`KRAKEN_RMAX_NO_RANGE_M` (100 km)
+    calculation will be desired" — or :data:`KRAKEN_RMAX_NO_RANGE` (100 km)
     when there is no receiver or no positive range.
 
     RMax scales the Richardson mesh-convergence test
@@ -291,7 +290,7 @@ def compute_rmax(receiver) -> float:
     tighter tolerance (finer mesh, longer solve).
     """
     farthest = _farthest_range_m(receiver)
-    return KRAKEN_RMAX_NO_RANGE_M if farthest is None else farthest
+    return KRAKEN_RMAX_NO_RANGE if farthest is None else farthest
 
 
 def _farthest_range_m(receiver) -> Optional[float]:
@@ -376,32 +375,14 @@ def single_profile_n_mesh(env, pinned_n_mesh, freq0
     checks the reader stops on: one count per medium of the deck
     (:func:`at_env_media`), and no count under half of what AT sizes that
     medium at the deck's frequency line ``freq0``
-    (``misc/ReadEnvironmentMod.f90:110-112``, *Mesh is too coarse*)."""
+    (:func:`~uacpy.io.oalib_writer.reject_coarse_at_mesh`,
+    ``misc/ReadEnvironmentMod.f90:110-112``, *Mesh is too coarse*)."""
     if pinned_n_mesh is None:
         return 0
-    if not isinstance(pinned_n_mesh, (list, tuple, np.ndarray)):
-        reject_coarse_at_mesh('Kraken', int(pinned_n_mesh), env, freq0)
-        return int(pinned_n_mesh)
-    counts = tuple(int(n) for n in pinned_n_mesh)
-    media = at_env_media(env)
-    if len(counts) != len(media):
-        raise ConfigurationError(
-            f"Kraken(n_mesh={counts}) gives {len(counts)} count(s) for the "
-            f"deck's {len(media)} media (the water column first, then each "
-            f"sediment layer).",
-            remediation="Pass one count per medium, one count for every "
-                        "medium, or leave n_mesh unset.")
-    for number, (count, medium) in enumerate(zip(counts, media), start=1):
-        floor = at_mesh_floor([medium], freq0)
-        if 0 < count < floor:
-            raise ConfigurationError(
-                f"Kraken(n_mesh={counts}) gives medium {number} {count} "
-                f"points, below the {floor} misc/ReadEnvironmentMod.f90:110-112 "
-                f"requires of it at {freq0:.4g} Hz; the run would stop with "
-                f"'Mesh is too coarse'.",
-                remediation=f"Pass at least {floor} for medium {number}, 0 "
-                            f"to let KRAKEN size it, or leave n_mesh unset.")
-    return counts
+    reject_coarse_at_mesh('Kraken', pinned_n_mesh, env, freq0)
+    if isinstance(pinned_n_mesh, (list, tuple, np.ndarray)):
+        return tuple(int(n) for n in pinned_n_mesh)
+    return int(pinned_n_mesh)
 
 
 def band_mesh_floor_notice(counts, *, deck_frequency, lowest_frequency,

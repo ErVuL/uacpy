@@ -32,7 +32,7 @@ from uacpy.io.bathy_io import (
     write_ati_file,
 )
 from uacpy.core.deck_limits import (
-    DECK_DEPTH_FMT, DECK_DEPTH_RESOLUTION_M, NO_RECEIVER_RANGE_FALLBACK_M,
+    DECK_DEPTH_FMT, DECK_DEPTH_RESOLUTION, NO_RECEIVER_RANGE_FALLBACK,
 )
 from uacpy.io.oalib_writer import (
     SOURCE_TYPE_CODE,
@@ -199,7 +199,7 @@ def _bathymetry_within_mesh(bathymetry, z_max: float) -> np.ndarray:
         bathymetry = bathymetry.to_pairs()
     pairs = np.asarray(bathymetry, dtype=float).copy()
     deepest = float(np.max(pairs[:, 1]))
-    if deepest > z_max + DECK_DEPTH_RESOLUTION_M:
+    if deepest > z_max + DECK_DEPTH_RESOLUTION:
         raise ConfigurationError(
             f"Bellhop: bathymetry reaches {deepest:.6f} m but the SSP mesh "
             f"bottom is {z_max:.6f} m; Bellhop aborts with 'Bathymetry drops "
@@ -298,7 +298,7 @@ def bellhop_ray_box(env, receiver, *, z_box: Optional[float] = None,
     if r_box is None:
         r_box = (BELLHOP_RAY_BOX_FACTOR * receiver.range_max
                  if receiver.range_max > 0
-                 else NO_RECEIVER_RANGE_FALLBACK_M)
+                 else NO_RECEIVER_RANGE_FALLBACK)
     return z_box, r_box
 
 
@@ -672,7 +672,7 @@ def _bellhop_run_type(run_type: str, beam_type: str, *,
     bellhopcxx/bellhopcuda are not indifferent: their 2-D default RunType is
     "CG RR  " with position 6 blank
     (third_party/bellhopcuda/src/module/runtype.hpp:36-41), and a literal
-    '2' means Nx2D — runtype.hpp:92-100 warns "Environment file specifies
+    '2' means Nx2D — bellhopcuda/src/module/runtype.hpp:92-100 warns "Environment file specifies
     dimensionality 2, which usually means Nx2D, but you are running <prog>
     in 2D mode" and rewrites the character to ' '. That warning goes to
     stdout (src/util/errors.cpp:26-36), which uacpy logs only at debug
@@ -766,6 +766,7 @@ def write_bellhop_env_file(
     env: Environment,
     source: Source,
     receiver: Receiver,
+    *,
     run_type: str = "C",
     beam_type: Optional[str] = None,
     source_type: Optional[str] = None,

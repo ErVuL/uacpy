@@ -38,7 +38,7 @@ namespace.
 | `shading_taper(n_elements, window='hann')` | element count, any `scipy.signal.get_window` spec | RMS-normalised amplitude weights |
 | `beamform_field(pressure, positions, angles_deg, frequency, *, sound_speed=1500.0, weights=None, grid_coords=None)` | `(n_elements, *grid)` pressure; `frequency` scalar **or band**; optional per-element shading `weights`; `grid_coords`, one 1-D array per grid axis (e.g. `{'depth': z, 'range': r}`), rides on the result as `.grid_coords` | `BeamformedField(response, angles_deg, element_power, frequencies)`; `.snr_dB(source_level_dB, noise_level_dB)` levels it in dB |
 | `realised_array_gain(response, element_power)` | a beam output `(n_angles, *grid)` and the mean element power `(*grid,)` | best beam over mean element (dB), what `BeamformedField.array_gain()` returns |
-| `plane_wave_array_gain(weights)` | element shading | scalar AG (dB) on a matched plane wave |
+| `plane_wave_array_gain(weights)` | element shading | scalar AG (dB) on a broadside plane wave (the matched one for a real taper) |
 | `matched_replica_gain(pressure)` | `(n_elements, *grid)` pressure | the `10log10(N)` ceiling, per point |
 | `independent_beams(positions, angles_deg, frequency, sound_speed=1500.0, *, weights=None)` | geometry + scanned sector (+ the shading, which widens each cell) | count of orthogonal looks |
 
@@ -388,7 +388,7 @@ when it has to guess.
 ### Three numbers that bound a scan
 
 ```python
-plane_wave_array_gain(w)        # what the weights give on a matched plane wave
+plane_wave_array_gain(w)        # what the weights give on a broadside plane wave
 matched_replica_gain(p)         # the ceiling: 10log10(N), exactly
 scan.array_gain()               # what the scan actually realises
 ```

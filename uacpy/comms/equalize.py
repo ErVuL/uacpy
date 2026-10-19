@@ -4,6 +4,8 @@ equaliser (:class:`DFE`) with its optional carrier PLL."""
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
 from uacpy.comms.channel import _channel_array
@@ -67,11 +69,17 @@ def ls_estimate(received, tx_pilots, n_taps):
 
 
 def omp_estimate(received, tx_pilots, n_taps, sparsity):
-    """Sparse channel estimate via orthogonal matching pursuit.
+    """Sparse channel estimate via orthogonal matching pursuit (Mallat,
+    *A Wavelet Tour of Signal Processing*, §9.4.3).
 
     Recovers at most ``sparsity`` non-zero taps out of ``n_taps`` candidate
-    delays — the right model for the sparse UW multipath channel. Returns the
-    full ``n_taps`` complex vector (zeros off the support).
+    delays — a channel of a few distinct multipath arrivals separated by
+    intervals of negligible reverberation, which Istepanian & Stojanovic
+    (*Underwater Acoustic Digital Signal Processing and Communication
+    Systems*, "Reduced-Complexity Receiver Structures") call naturally
+    sparse; Berger, Zhou, Preisig & Willett (2010) estimate such channels
+    sparsely. Returns the full ``n_taps`` complex vector (zeros off the
+    support).
 
     Parameters
     ----------
@@ -97,17 +105,17 @@ def omp_estimate(received, tx_pilots, n_taps, sparsity):
     coeffs = np.zeros(0, dtype=complex)
     # The selection rule |A^H r| / norms is scale-invariant on its own:
     # scaling the pilots and the record together scales every projection
-    # identically, so the argmax does not move. A bare ``+ 1e-12`` breaks
+    # identically, so the argmax does not move. A bare ``+ 1e-12`` would break
     # that, because the offset is absolute while the norms are dimensional.
     # It bites whenever adjacent columns are near-degenerate, which is the
     # NORMAL condition here — neighbouring delay lags are highly correlated.
     # Measured on a 40-lag grid whose column norms span 49x, with the top
-    # three normalised projections tied to six decimals: the epsilon is
+    # three normalised projections tied to six decimals: such an epsilon is
     # 2.3e-11 of the smallest norm at unit scale (harmless, support [3, 30])
     # and 2.3e-5 at 1e-6 scale, where it reorders the tie and returns
-    # [0, 30]. The same channel in Pa rather than µPa estimated a different
-    # delay. A relative floor keeps the guard against an all-zero column —
-    # the only thing the offset was needed for — without setting a scale.
+    # [0, 30] — the same channel in Pa rather than µPa would estimate a
+    # different delay. A relative floor guards against an all-zero column,
+    # the one case an offset is for, without setting a scale.
     # Same idiom as ``_ZF_REL_FLOOR`` here and ``_PILOT_REL_FLOOR`` in
     # comms.ofdm.
     raw_norms = np.linalg.norm(A, axis=0)
@@ -184,10 +192,10 @@ def mmse_equalizer(received, h, snr_linear):
     signal power over noise power — so it means the same thing here as in
     :func:`uacpy.comms.ofdm.ofdm_demodulate`, and the same number can be
     calibrated once and passed to either. The Wiener regularizer is a
-    noise-to-signal power ratio and so must be expressed in the units of
-    ``|H|^2``: writing it as a bare ``1/snr`` assumed a channel of unit mean
-    power, and equalizing the same link with ``h`` scaled by a propagation
-    gain then changed the damping instead of leaving it alone.
+    noise-to-signal power ratio and so is expressed in the units of
+    ``|H|^2``: a bare ``1/snr`` would assume a channel of unit mean power,
+    and equalizing the same link with ``h`` scaled by a propagation gain
+    would then change the damping instead of leaving it alone.
     ``snr_linear -> inf`` gives the zero-forcing inverse.
 
     The FFT makes the equalization **circular**: ``received`` must carry a cyclic
@@ -215,7 +223,8 @@ def mmse_equalizer(received, h, snr_linear):
         raise ConfigurationError(
             f"mmse_equalizer: snr_linear must be > 0 (linear power ratio, not "
             f"dB); got {snr_linear!r}. A non-positive value makes the Wiener "
-            "regularizer 1/snr zero or negative, which un-damps the inverse.")
+            "regularizer mean(|H|^2)/snr zero or negative, which un-damps "
+            "the inverse.")
     hc = np.asarray(_channel_array(h), dtype=complex).ravel()
     if hc.size > r.size:
         # np.fft.fft(h, r.size) would truncate the channel to the transform
@@ -316,8 +325,10 @@ class DFE(SettingsRepr):
     ----------
     n_ff, n_fb : int
         Feedforward / feedback tap counts. Default 12 / 6 (uacpy guidance).
-    step : float
-        LMS step size (used when ``forget`` is None).
+    step : float, optional
+        LMS step size. Unset, :data:`LMS_DEFAULT_STEP` when ``forget`` is
+        None. RLS reads no step, so a ``step`` given with ``forget`` is
+        refused.
     forget : float, optional
         RLS forgetting factor in (0, 1]; enables RLS adaptation.
     pll_gain : float
@@ -328,11 +339,17 @@ class DFE(SettingsRepr):
     """
 
     def __init__(self, n_ff: int = 12, n_fb: int = 6, *,
-                 step: float = LMS_DEFAULT_STEP,
+                 step: Optional[float] = None,
                  forget=None, pll_gain: float = 0.0):
+        if step is not None and forget is not None:
+            raise ConfigurationError(
+                f"DFE: step={step!r} is the LMS step size and "
+                f"forget={forget!r} switches to RLS adaptation, which reads "
+                f"no step.",
+                remediation="Pass step= for LMS or forget= for RLS, not both.")
         self.n_ff = int(n_ff)
         self.n_fb = int(n_fb)
-        self.step = float(step)
+        self.step = None if step is None else float(step)
         self.forget = forget
         self.pll_gain = float(pll_gain)
 
@@ -350,7 +367,8 @@ class DFE(SettingsRepr):
         :attr:`output_delay` (zero-padded in front); the output lags ``received``
         by the same amount, so ``eq_symbols[output_delay:]`` lines up with
         the transmitted sequence (see :func:`lms_equalizer`)."""
-        return _dfe_core(received, constellation, self.n_ff, self.n_fb, self.step,
+        step = LMS_DEFAULT_STEP if self.step is None else self.step
+        return _dfe_core(received, constellation, self.n_ff, self.n_fb, step,
                          self.forget, self.pll_gain, train)
 
 
@@ -370,7 +388,7 @@ def _dfe_core(received, constellation, n_ff, n_fb, step, forget, pll_gain, train
         )
     # Bring the record to unit mean power before adapting: the LMS step
     # bound, RLS's P(0), the centre-spike init and the unit-energy slicer all
-    # carry an absolute scale, so unnormalised the answer depended on the
+    # carry an absolute scale, so unnormalised the answer would depend on the
     # caller's units (test_comms_equalizers pins the amplitude ladder). Done here
     # rather than tap-by-tap because the register mixes record-scale samples
     # with constellation-scale decisions; a no-op at unit input power.

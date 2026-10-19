@@ -122,8 +122,9 @@ def test_histogram_door_warnings_name_the_callers_file():
     from uacpy.acoustic_signal import probabilistic_welch
     x = np.random.default_rng(0).standard_normal(4000)
     with recorded_warnings() as record:
-        probabilistic_welch(x, 1000.0, segment_duration=0.5, nperseg=8192,
-                            noverlap=8000, level_min_dB=-200, level_max_dB=200)
+        # Every level (~93 dB) outside a 0-1 dB window: one NumericsWarning.
+        probabilistic_welch(x, 1000.0, segment_duration=0.5, level_min_dB=0,
+                            level_max_dB=1)
     warning = _only_warning(record)
     assert Path(warning.filename).resolve() == _THIS_FILE
 
@@ -366,11 +367,11 @@ CONVERTED_SITES = [
     ('acoustic_signal/channel.py', 'impulse_response', 2),
     ('acoustic_signal/cqt.py', '_cq_setup', 2),
     # Reached one frame below each of the three histogram doors.
-    ('acoustic_signal/spectral.py', '_probabilistic_estimate', 2),
+    ('acoustic_signal/spectral.py', '_probabilistic_estimate', 1),
     ('acoustic_signal/frf.py', '_etfe_divide', 1),
     ('comms/channel.py', 'awgn', 1),
     ('comms/janus.py', 'JanusPacket.from_bits', 1),
-    ('comms/ofdm.py', 'ofdm_demodulate', 1),
+    ('comms/ofdm.py', 'ofdm_demodulate', 2),
     ('comms/transceiver.py', 'CommsReceiver.receive', 1),
     ('comms/transceiver.py', 'OFDMReceiver.receive', 1),
     # Not a converted hand count but the same rule, and it belongs under the
@@ -446,7 +447,6 @@ CONVERTED_SITES = [
     # The wavenumber transform and its two range guards moved to
     # core/acoustics/wavenumber.py, out of the .grn reader.
     ('core/acoustics/wavenumber.py', '_warn_zero_ranges', 1),
-    ('io/oalib_reader.py', '_parse_flp', 1),
     ('io/oalib_reader.py', 'read_shd_bin', 2),
     ('io/_parsers.py', '_oast_curve_slots', 1),
     ('io/_parsers.py', '_read_oasp_trf_binary', 1),
@@ -472,8 +472,8 @@ CONVERTED_SITES = [
     # (see test_a_warning_reached_through_a_package_frame_names_the_caller)
     # cannot move the attribution.
     ('acoustic_signal/generate.py', 'synthesize_noise_from_psd', 1),
-    ('acoustic_signal/channel.py', 'impulse_response_from_transfer_function',
-     2),
+    ('acoustic_signal/channel.py', '_impulse_response_from_transfer_function',
+     3),
     ('acoustic_signal/bands.py', '_band_levels', 1),
     ('acoustic_signal/timefreq.py', 'inverse_cwt', 2),
     ('parallel.py', 'ParallelResult.stack', 1),
@@ -498,7 +498,7 @@ def _through_a_package_frame(function, *args, **kwargs):
 
 def _signal_warning_cases():
     from uacpy.acoustic_signal import (
-        band_levels, impulse_response_from_transfer_function,
+        CWTResult, band_levels, impulse_response_from_transfer_function,
         inverse_cwt, synthesize_noise_from_psd)
     ones = np.ones(10)
     return [
@@ -517,11 +517,13 @@ def _signal_warning_cases():
          (np.ones(5),), dict(frequencies=np.linspace(0.0, 1000.0, 5)),
          'too coarse'),
         ('non-uniform CWT scales', inverse_cwt,
-         (np.ones((3, 8), complex), np.array([100.0, 200.0, 250.0]),
-          1000.0), {}, 'not uniform in log2'),
+         (CWTResult(np.array([100.0, 200.0, 250.0]), np.arange(8) / 1000.0,
+                    np.ones((3, 8), complex), sample_rate=1000.0,
+                    wavelet='morlet', w0=6.0),), {}, 'not uniform in log2'),
         ('single CWT scale', inverse_cwt,
-         (np.ones((1, 8), complex), np.array([100.0]), 1000.0), {},
-         'a single scale'),
+         (CWTResult(np.array([100.0]), np.arange(8) / 1000.0,
+                    np.ones((1, 8), complex), sample_rate=1000.0,
+                    wavelet='morlet', w0=6.0),), {}, 'a single scale'),
     ]
 
 

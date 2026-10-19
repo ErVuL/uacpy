@@ -83,7 +83,7 @@ uacpy.plot.compare([modal.at(depth=30.0)]
                    labels=['ideal waveguide (exact)', *modes], ax=axes[1],
                    title='Ideal waveguide, 25 Hz, receiver 30 m')
 uacpy.metrics.tl_difference(modes['Scooter'], modal).plot(
-    ax=axes[2], diff_vmax=1.0, title='Scooter − ideal waveguide (dB)')
+    ax=axes[2], vmax=1.0, title='Scooter − ideal waveguide (dB)')
 fig.tight_layout()
 fig.savefig(OUT / 'example_49_engines_against_closed_forms.png', dpi=150,
             bbox_inches='tight')

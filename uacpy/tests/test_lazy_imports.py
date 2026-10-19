@@ -232,13 +232,10 @@ _LAZY_PACKAGES = ('uacpy.core', 'uacpy.models')
 def test_each_lazy_package_restates_its_table_for_type_checkers(package):
     """The ``if TYPE_CHECKING:`` block of a lazy subpackage imports exactly
     the names its ``_EXPORTS`` table resolves, each from the module the table
-    names, and the submodules its ``__all__`` lists: what a checker reads in
-    place of ``__getattr__``."""
+    names: what a checker reads in place of ``__getattr__``."""
     import importlib
     module = importlib.import_module(package)
     table = {name: (target, name) for name, target in module._EXPORTS.items()}
-    table.update({name: (package, name)
-                  for name in getattr(module, '_LISTED_SUBMODULES', ())})
     mirror = _statically_re_imported_targets(Path(module.__file__))
     assert mirror == table, (
         f"{package}: static mirror and lazy table differ; only in the "
@@ -531,7 +528,8 @@ def test_the_restated_export_lists_stay_in_sync():
               and getattr(viz, n, None) is getattr(plots, n)]
     assert leaked == [], f"plotters reachable as uacpy.visualization.<name>: {leaked}"
     import types
-    # ``uacpy.metrics`` is the root shim MODULE over ``uacpy.core.metrics``:
+    # ``uacpy.metrics`` is the root shim MODULE over
+    # ``uacpy.core.results.metrics``:
     # two module objects with one content, not a drift — compare objects only.
     core_drift = [n for n in core.__all__
                   if n in uacpy.__all__
@@ -706,7 +704,7 @@ _SHORT_RETIRED = ('psd', 'ppsd', 'sel')
 #: names are gone.
 _RETIREMENT_ALLOWED = (
     'synthesize_noise_from_psd', 'plot_psd', 'plot_ppsd',
-    'plot_constant_q_psd', 'plot_constant_q_ppsd', 'as_psd', 'integrate_psd',
+    'as_psd', 'integrate_psd',
     'sound_exposure', 'isel',
     # xarray's own selector, which several readers document by name
     "sel(method='nearest')", '.sel(',

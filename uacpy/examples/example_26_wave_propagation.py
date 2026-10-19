@@ -90,7 +90,8 @@ def run(name, model, waveform=None, run_env=env):
     with warnings.catch_warnings(record=True) as caught:
         if waveform is None:
             field = model.run(run_env, source, receiver,
-                              run_mode=uacpy.RunMode.TIME_SERIES)
+                              run_mode=uacpy.RunMode.TIME_SERIES,
+                              output_duration=T_MAX)
         else:
             field = model.run(run_env, source, receiver,
                               run_mode=uacpy.RunMode.TIME_SERIES,
@@ -117,7 +118,7 @@ def run(name, model, waveform=None, run_env=env):
 # with 8 terms at dr=1 m. Bellhop's fan reaches ±89.9° so the receivers 2 m
 # from the source keep their direct path.
 fields = {
-    'SPARC': run('SPARC', uacpy.SPARC(n_time_samples=400, time_max=T_MAX, freq_min=F_MIN,
+    'SPARC': run('SPARC', uacpy.SPARC(n_time_samples=400, freq_min=F_MIN,
                                       freq_max=F_MAX),
                    run_env=rigid_floor_env),
     'Scooter': run('Scooter', uacpy.Scooter(), waveform),

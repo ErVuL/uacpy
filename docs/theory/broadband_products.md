@@ -190,7 +190,11 @@ length cannot stand in for one against the channel.
 It cannot be detected from `H(f)`: a folded arrival sitting on top
 of the direct one is signature-identical to a clean single arrival.
 The grid has to be sized before the run, from the arrivals, which is
-what `uacpy.Arrivals.synthesis_band` is for.
+what `uacpy.Arrivals.synthesis_band` is for — at `margin=2` or more for
+an energy product, by the rule below: its default 1.2 is what the
+inverse FFT needs (`dtau * df` about 0.83), and on two paths 5-50 ms
+apart it left the band loss up to 2.6 dB off over 900-1100 Hz and
+0.34 dB over 25 Hz-4 kHz.
 
 **The record must beat twice the delay spread, not once.** Keep
 `dtau * df < 0.5` for a path pair `dtau` apart — a record longer
@@ -199,7 +203,10 @@ Validated on two band configurations: inside the rule the error
 stayed within 0.034 dB over 25 Hz-4 kHz and 0.111 dB over
 900-1100 Hz, against 0.81 / 2.86 dB beyond it and -9.29 dB at the
 worst point found. It bounds the error rather than removing it; on a
-narrow band a tenth of a decibel survives.
+narrow band a tenth of a decibel survives. Those runs held many
+samples across the band; the rule does not cover a band only a few
+samples wide: two paths 5 ms apart on 900-1100 Hz at `dtau * df` =
+0.33, 4 samples across the band, read 1.16 dB off.
 
 The size of the error beyond the rule is **not** a function of
 `dtau * df` alone — it also turns on `frac(f0 * dtau)`, the
@@ -211,13 +218,18 @@ the maximum.
 
 ## Broadband propagation loss (`Field.broadband_loss`)
 
-**Why not just run an incoherent model.** Because that is the
-approximation, not the quantity. The KRAKEN manual offers it as one
-— "if one is comparing to measured data which has been taken by
-averaging over frequency one can often simulate the resulting
-smoothed result by an incoherent TL" — and Ainslie's Eq. 11.47 is
-the same step, dropping the relative phase of the ray arrivals. He
-marks where it fails: the step "neglects coherent interference
+**Why not just run an incoherent model.** Because that is an
+approximation, not the quantity, and the two engines that offer one
+drop different phases. Kraken's `INCOHERENT_TL` sums its modes in
+intensity (Jensen et al., *Computational Ocean Acoustics*, Eq. 5.18),
+and the KRAKEN manual offers it as a stand-in — "if one is comparing
+to measured data which has been taken by averaging over frequency one
+can often simulate the resulting smoothed result by an incoherent TL".
+Bellhop's sums its ray arrivals in intensity, which is Ainslie's
+Eq. 11.47: "incoherent" there is meant "in the ray sense of the word
+(which implies that the relative phase of multiple ray arrivals is
+neglected) and not the mode sense". He marks where that step fails:
+it "neglects coherent interference
 effects such as cancellation between direct and surface-reflected
 paths. This coherent effect is not negligible, even for incoherent
 broadband processing, if the distance between the sonar (or target)
@@ -331,7 +343,7 @@ back at the wrong time. A ray model does not have to take that route:
 "the ray/beam process calculates the amplitudes and travel-times of
 all the echoes and can therefore calculate the received timeseries by
 simply summing up the echoes" (Bellhop User Guide sect. 9). That is
-`RunMode.TIME_SERIES` (`to_time_series`),
+`RunMode.TIME_SERIES` (`synthesize_time_series`),
 where an echo past the window is omitted rather than folded — the
 honest truncation, at the cost of giving up the transfer function.
 A waveform need not fit the record either: the channel's impulse
@@ -345,8 +357,10 @@ frequency route and makes the wrap-around harmless instead: displace the
 frequency contour to `w + i*delta`, which damps the synthesised
 trace by `exp(-delta*t)`, so energy that wraps a full record length
 returns `exp(-delta*T)` down and the damping is undone on the trace
-afterwards. Mallick and Frazer put `delta = log(50)/T` — a factor of
-50 — and warn against more, which invents arrivals; the vendored
+afterwards. Mallick and Frazer (*Geophysics* 52, 1355-1364, 1987, as
+Jensen et al. report them, *Computational Ocean Acoustics*, sect. 8.2.2)
+put `delta = log(50)/T` — a factor of 50 — and warn against more, which
+invents arrivals; the vendored
 OASES does exactly that (`third_party/oases/src/unoasp22.f`,
 `OMEGIM`). It is not what this does, because it needs the transfer
 function evaluated at COMPLEX frequency and Bellhop takes a real one.

@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from uacpy.core._validate import DENSITY_UNITS_SUSPECT
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import (
     ConfigurationError, ModelExecutionError, NumericsWarning,
@@ -157,9 +158,17 @@ def stack_traces(inputs, runs, *, band, model_name, provenance):
     )
 
 
+def unit_source_gain(source_density: float) -> float:
+    """The factor :data:`_UNIT_SOURCE_GAIN` / ``rho(z_s)`` (g/cm³) that
+    brings a SPARC field onto the package's unit-source level
+    (:func:`scale_to_unit_source_level`); :func:`rts_to_pressure` applies
+    the same factor to a projected ``.rts``."""
+    return _UNIT_SOURCE_GAIN / float(source_density)
+
+
 def scale_to_unit_source_level(result, env, source) -> None:
     """Bring ``result`` onto the package's unit-source level: multiply
-    by :data:`_UNIT_SOURCE_GAIN` / ``rho(z_s)``.
+    by :func:`unit_source_gain` of ``rho(z_s)``.
 
     Every element mass and stiffness matrix of SPARC's finite-element
     march carries ``1/rho`` (``sparc.f90:434-456``) while the source term
@@ -179,8 +188,8 @@ def scale_to_unit_source_level(result, env, source) -> None:
     multi-depth ``Source``), so one ``rho(z_s)`` covers the whole field.
     """
     depth = float(np.atleast_1d(np.asarray(source.depths, dtype=float))[0])
-    result.data = (_UNIT_SOURCE_GAIN * np.asarray(result.data)
-                   / _source_density(env, depth))
+    result.data = (unit_source_gain(_source_density(env, depth))
+                   * np.asarray(result.data))
 
 
 def warn_on_truncated_window(result, *, pinned_by: Optional[str] = None
@@ -188,7 +197,7 @@ def warn_on_truncated_window(result, *, pinned_by: Optional[str] = None
     """Warn when p(t) is still ringing at the end of the output window.
 
     ``pinned_by`` names where a caller-set window came from
-    (``'SPARC(time_max=…)'``, ``'run(output_duration=…)'``), so the advice
+    (``'run(output_duration=…)'``), so the advice
     is about that window; ``None`` is the automatic one.
 
     ``time_max`` is sized from the direct travel time
@@ -210,7 +219,7 @@ def warn_on_truncated_window(result, *, pinned_by: Optional[str] = None
     if pinned_by is None:
         cause = ("The auto window is 2.5 direct travel times, which does not "
                  "bound the slow modal tail of a waveguide — raise it with "
-                 "SPARC(time_max=...)")
+                 "run(output_duration=...)")
     else:
         cause = (f"The window is the one {pinned_by} set — lengthen it "
                  f"there")
@@ -228,6 +237,8 @@ def rts_to_pressure(
     rts: RtsFile, frequency: float,
     *, pulse_type: Optional[str] = None,
     pulse_frequency: Optional[float] = None,
+    output_mode: Optional[str] = None,
+    source_density: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Project SPARC time-series data onto complex pressure at one frequency.
@@ -266,6 +277,24 @@ def rts_to_pressure(
     the record to hold the whole response: a record still ringing at its
     end breaks the convolution theorem it rests on.
 
+    The ``.rts`` file's own level is not the package's unit-source level
+    that :class:`uacpy.models.SPARC` returns: the binary's field is
+    ``rho(z_s)/2`` times the field of a unit point source
+    (:func:`scale_to_unit_source_level`, ``sparc.f90:434-456``,
+    :529-535), and a horizontal-array (``output_mode='R'``) file is
+    ``sqrt(pi)`` (4.97 dB) hotter than a vertical-array (``'D'``) one —
+    ``'D'`` writes ``1/sqrt(pi*r)`` (``sparc.f90:292``), ``'R'``
+    ``sqrt(k/r)`` with no ``1/sqrt(pi)`` (:622-623). The ``.rts`` records
+    neither the output mode nor the source density, so name them:
+    ``output_mode=`` (the run's ``'R'`` or ``'D'``) divides an ``'R'``
+    file by ``sqrt(pi)``, and ``source_density=`` (g/cm³, the density at
+    the source depth: ``env.water_density`` for a source in the water)
+    multiplies by ``2 / source_density``. With both, the value is at the
+    level ``SPARC.run`` returns, through the same two factors it applies;
+    each left ``None`` leaves its factor out, and with both ``None`` the
+    value is in the file's own convention (measured on a 100 m rigid guide,
+    50 Hz, 'PN+B': 'R' − 'D' = 4.97 dB without ``output_mode``).
+
     A post-processing utility for a ``.rts`` read by
     :func:`uacpy.io.read_rts_file`;
     :class:`uacpy.models.SPARC` returns ``p(t)`` and does not call it. Even
@@ -303,11 +332,14 @@ def rts_to_pressure(
 
     positive_finite('rts_to_pressure: pulse_frequency (Hz)', pulse_frequency,
                     optional=True)
+    level = _package_level_factor(output_mode, source_density)
     if pulse_type is not None:
         # Deconvolve the known source spectrum (convolution theorem): the range
         # time-series r(t) = s(t) ⊛ h(t), so rfft(r)/rfft(s) = h(w0) — the CW
-        # transfer function ≈ absolute TL re 1 m (Jensen COA Eq. 8.1). uacpy
-        # generated the pulse, so s(t) is known. The estimate is physical and
+        # transfer function in the .rts file's level convention (rho(z_s)/2 ×
+        # the unit-source field, sqrt(pi) higher on an 'R' file) times
+        # ``level`` (see the docstring). uacpy generated the pulse, so s(t)
+        # is known. The estimate is physical and
         # window/grid-independent once the output Nyquist clears the pulse band
         # (the SPARC model sizes n_time_samples for this), but SPARC's discretised
         # pulse and band-pass leave a frequency-dependent bias of a few dB vs
@@ -343,8 +375,9 @@ def rts_to_pressure(
                 "rts_to_pressure: source spectrum is zero at "
                 f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
                 "deconvolve (check pulse / frequency).")
-        return (_tone_phasor(p, t, frequency, window='boxcar', axis=0,
-                            who="rts_to_pressure", steady_tone=False)
+        return (level * _tone_phasor(p, t, frequency, window='boxcar',
+                                     axis=0, who="rts_to_pressure",
+                                     steady_tone=False)
                 / S_at_f0), ranges
 
     # The Hann-weighted tone fit AT `frequency` on the file's own output
@@ -357,4 +390,36 @@ def rts_to_pressure(
     p_at_freq = _tone_phasor(p, np.asarray(rts.times, dtype=float),
                              frequency, window='hann', axis=0,
                              who="rts_to_pressure")
-    return p_at_freq, ranges
+    return level * p_at_freq, ranges
+
+
+def _package_level_factor(output_mode: Optional[str],
+                          source_density: Optional[float]) -> float:
+    """The factor :func:`rts_to_pressure` applies for its ``output_mode``
+    and ``source_density``: the looped mode's ``scale`` (``1/sqrt(pi)`` for
+    ``'R'``, :data:`~uacpy.models.sparc._plan._LOOPED_TIME_SERIES_MODES`,
+    the one :func:`stack_traces` applies) times :func:`unit_source_gain`
+    (the one :func:`scale_to_unit_source_level` applies), each only when
+    its argument is set."""
+    factor = 1.0
+    if output_mode is not None:
+        if output_mode not in _LOOPED_TIME_SERIES_MODES:
+            raise ConfigurationError(
+                f"rts_to_pressure: output_mode={output_mode!r} is not a "
+                f"mode that writes a .rts; SPARC writes one with 'R' "
+                f"(horizontal array) or 'D' (vertical array), and a "
+                f"snapshot ('S') writes a .grn instead (sparc.f90:328-337).",
+                remediation="Pass the output_mode of the run that wrote "
+                            "the file, 'R' or 'D'.")
+        factor *= _LOOPED_TIME_SERIES_MODES[output_mode]['scale']
+    if source_density is not None:
+        positive_finite('rts_to_pressure: source_density (g/cm³)',
+                        source_density)
+        if source_density > DENSITY_UNITS_SUSPECT:
+            raise ConfigurationError(
+                f"rts_to_pressure: source_density={source_density:g} reads "
+                f"as kg/m³; the argument is g/cm³.",
+                remediation=f"Pass source_density="
+                            f"{source_density / 1000.0:g}.")
+        factor *= unit_source_gain(source_density)
+    return factor

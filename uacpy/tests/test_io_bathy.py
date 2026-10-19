@@ -78,11 +78,6 @@ class TestBathyIOTypedErrors:
         assert np.allclose(bty.sound_speed, [1600.0, 1700.0, 1700.0])
         assert np.allclose(bty.density, [1.7, 1.9, 1.9])
         assert np.allclose(bty.attenuation, [0.4, 0.6, 0.6])
-        # The parser read_env uses extends to ±infinity, every row constant.
-        from uacpy.io.bathy_io import _parse_bathymetry
-        padded, _ = _parse_bathymetry(path)
-        assert padded[0, 0] == -1e50 and padded[0, -1] == 1e50
-        assert padded[2, 0] == padded[2, 1] and padded[2, -1] == padded[2, -2]
 
 
 class TestAltimetryLongFormat:

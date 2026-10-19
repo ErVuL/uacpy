@@ -369,8 +369,8 @@ def test_the_multi_source_depth_flag_is_read_off_the_native_modes(model_name):
     ``False``: in a field mode ``PropagationModel.run`` loops over the depths
     and stacks the slabs, and in any other mode ``_validate_geometry``
     refuses a multi-depth Source with 'single source depth' (pinned in
-    test_input_validation.py). Bounce also reads ``False``, but its geometry
-    validation is a no-op so nothing enforces it.
+    test_input_validation.py), except REFLECTION, which reads no source
+    geometry (Bounce, OASR).
     """
     try:
         m = build_engine(model_name)

@@ -20,7 +20,7 @@ import numpy as np
 from typing import List, Optional
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
+from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION
 from uacpy.core._grid import nearest_index_on_axis
 from uacpy.core._repr import axis, build
 from uacpy.core._validate import (
@@ -113,7 +113,7 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             require_non_negative(self.ranges, "Surface.ranges", hint="metres")
             if self.ranges.size > 1:
                 require_strictly_increasing(
-                    self.ranges, "Surface.ranges", min_step=DECK_RANGE_RESOLUTION_M)
+                    self.ranges, "Surface.ranges", min_step=DECK_RANGE_RESOLUTION)
         elif len(self.nodes) != 1:
             raise ConfigurationError(
                 "Surface: multiple boundaries require a matching ranges= axis.")
@@ -258,9 +258,10 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
         ``'r0'`` / ``'rmax'`` keep the first / last node. ``'mean'`` /
         ``'median'`` numerically average the boundary properties across nodes,
-        each node weighing the same whatever its range spacing (keeping the r = 0 ``acoustic_type``) — only physical when the nodes
-        share a type (a marginal ice zone, open water beside ice, takes
-        ``'r0'``/``'rmax'``), mirroring :meth:`Bottom.collapse_range`.
+        each node weighing the same whatever its range spacing; they need the
+        nodes to share one ``acoustic_type`` and refuse mixed types (a
+        marginal ice zone, open water beside ice, takes ``'r0'``/``'rmax'``),
+        mirroring :meth:`Bottom.collapse_range`.
         Uniform ``'file'``/``'precalc'`` nodes collapse to their shared
         reflection file with only the roughness reduced, and raise when the
         files differ (tables cannot be blended), again mirroring

@@ -17,7 +17,7 @@ from uacpy.core.boundary import (
     _HALFSPACE_DELEGATED, _LAYER_ACOUSTIC_FIELDS, _boundary_from_values,
     _delegate_write, _reduce_boundaries, _reduce_uniform_nodes,
 )
-from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
+from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION
 from uacpy.core._repr import axis, build, qty
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 from uacpy.core._grid import (
@@ -71,6 +71,14 @@ class SeabedColumn(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     """
     layers: List[SedimentLayer]
     halfspace: BoundaryProperties
+
+    #: Which total sediment thickness shaped a column the CRUST1.0 fetcher
+    #: built (``uacpy.data.crust1_local.fetch_bottom_crust1``): ``'globsed'``,
+    #: ``'globsed-ignored'`` (GlobSed consulted, but the column had no
+    #: sediment layer to rescale) or ``None`` — CRUST1.0's own thickness, an
+    #: explicit one, or a column built any other way. The fetcher stamps it;
+    #: it is not a constructor argument.
+    sediment_thickness_source = None
 
     def __post_init__(self):
         if self.layers is None:
@@ -204,7 +212,7 @@ class SeabedColumn(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
         The layer's ``roughness`` travels with it: both fields describe the
         interface at the top of their material, so the returned boundary
-        carries the same number the layer does. (:meth:`collapse` is the one
+        carries the same number the layer does. (:meth:`collapse_layers` is the one
         place that does not — a reduction over the whole stack has only the
         seabed surface to report, so it takes the half-space's.)
 
@@ -427,6 +435,13 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     columns: List[SeabedColumn]
     ranges: Optional[np.ndarray] = None
 
+    #: ``'globsed'`` when the CRUST1.0 transect fetcher
+    #: (``uacpy.data.crust1_local.fetch_bottom_crust1_transect``) rescaled
+    #: any of its columns to GlobSed, else ``None``, as
+    #: :attr:`SeabedColumn.sediment_thickness_source`. The fetcher stamps
+    #: it; it is not a constructor argument.
+    sediment_thickness_source = None
+
     def __post_init__(self):
         self.columns = list(self.columns)
         if not self.columns:
@@ -449,7 +464,7 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 self.ranges, "Bottom.ranges", hint="metres").ravel()
             require_non_negative(self.ranges, "Bottom.ranges", hint="metres")
             require_strictly_increasing(
-                self.ranges, "Bottom.ranges", min_step=DECK_RANGE_RESOLUTION_M)
+                self.ranges, "Bottom.ranges", min_step=DECK_RANGE_RESOLUTION)
             if len(self.ranges) != len(self.columns):
                 raise ConfigurationError(
                     f"Bottom: ranges length ({len(self.ranges)}) must match "
@@ -535,7 +550,7 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         Always nearest — layer stacks cannot be linearly blended, so a `Bottom`
         has no general ``eval`` (unlike ``SoundSpeedProfile``/``Field``). For
         the one blendable quantity, the half-space of a pure half-space
-        bottom, :meth:`halfspace_at` offers an opt-in ``interp='linear'``.
+        bottom, :meth:`halfspace_at` offers an opt-in ``method='linear'``.
         Positional counterpart: :meth:`isel`.
 
         ``range`` must be a finite scalar — a NaN/inf or array-valued label
@@ -593,15 +608,15 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         return _copy.deepcopy(self.columns[i])
 
     def halfspace_at(self, *, range: float,
-                     interp: Optional[str] = None) -> BoundaryProperties:
+                     method: Optional[str] = None) -> BoundaryProperties:
         """Half-space ``BoundaryProperties`` at ``range`` (m).
 
-        The default (``interp=None`` or ``'nearest'``) reads the NEAREST
+        The default (``method=None`` or ``'nearest'``) reads the NEAREST
         column's half-space intact — the same step rule as :meth:`at` and
         :meth:`column_index_at`, switching midway between consecutive
         ``ranges`` nodes, which is where every engine deck (Bellhop long
         ``.bty``, Kraken segments, RAM profiles) places the switch.
-        ``interp='linear'`` blends the properties between the two bracketing
+        ``method='linear'`` blends the properties between the two bracketing
         columns; it is only defined when every column is a pure
         ``'half-space'``, and it takes the non-blendable fields
         (``acoustic_type``, ``reflection_file``, ``grain_size_phi``) from the
@@ -611,13 +626,13 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         ----------
         range : float
             Range (m), a finite scalar.
-        interp : {None, 'nearest', 'linear'}, optional
+        method : {None, 'nearest', 'linear'}, optional
             Nearest column (default) or a blend of the two bracketing ones.
         """
-        if interp not in (None, 'linear', 'nearest'):
+        if method not in (None, 'linear', 'nearest'):
             raise ConfigurationError(
-                f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
-                f"None; got {interp!r}.")
+                f"Bottom.halfspace_at: method must be 'linear', 'nearest' or "
+                f"None; got {method!r}.")
         # Checked here as well as in ``_nearest_index`` because the blend below
         # never reaches that helper: ``np.interp`` would carry a NaN range into
         # every blended property, and the error then names the stored density
@@ -631,17 +646,17 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         # boundary that exists nowhere on the axis.
         blendable = (not self.is_layered and all(
             c.halfspace.acoustic_type == 'half-space' for c in self.columns))
-        if self.ranges is None or interp in (None, 'nearest'):
+        if self.ranges is None or method in (None, 'nearest'):
             return _copy.deepcopy(
                 self.columns[self._nearest_index(
                     range, "Bottom.halfspace_at")].halfspace)
         if not blendable:
             types = sorted({c.halfspace.acoustic_type for c in self.columns})
             raise ConfigurationError(
-                f"Bottom.halfspace_at(interp='linear') needs every column to "
+                f"Bottom.halfspace_at(method='linear') needs every column to "
                 f"be a pure 'half-space' to blend; got {types}"
                 f"{' with sediment layers' if self.is_layered else ''}. Use "
-                f"interp='nearest' (the default) to read the nearest column "
+                f"method='nearest' (the default) to read the nearest column "
                 f"intact.")
         return _reduce_boundaries(
             [c.halfspace for c in self.columns],

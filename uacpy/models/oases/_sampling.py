@@ -1,100 +1,15 @@
 """The frequency and wavenumber sampling OASES settles on, computed before
-a launch: the OASR/OASP frequency sweep and its resampling, OASP's FFT
-grid and frequency ladder, and the wavenumber count of OASSP's
-roughness branch."""
+a launch: OASP's FFT grid and frequency ladder, and the wavenumber count of
+OASSP's roughness branch. The frequency sweep a deck carries is
+:func:`~uacpy.io.oases_writer.oases_frequency_sweep`."""
 
 from typing import NamedTuple
 
 import numpy as np
 
 from uacpy.models._knobs import whole_count
-from uacpy.core._validate import steps_are_uniform
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.oases_writer import _OASES_MAX_WAVENUMBERS
-
-
-def _oases_frequency_sweep(
-    freqs: np.ndarray, model_name: str, log_spaced: bool = False,
-    argument: str = 'frequencies=',
-) -> tuple[float, float, int]:
-    """The ``(freq_min, freq_max, N)`` triple OASR/OASP write into the
-    input file for a frequency vector.
-
-    OASR's ``.dat`` (``FREQ1 FREQ2 NFREQ``, unoasr21.f:116) and OASP's
-    Block VIII (``NX FR1 FR2 DT``, unoasp22.f:176) carry a sweep as its
-    edges and a count, an equispaced axis (logarithmic under OASR option
-    ``'C'``), so they cannot run any other vector. ``argument`` names where
-    the vector came from in the messages: ``'frequencies='`` (OASP's run
-    keyword) or ``'source.frequencies'`` (OASR).
-
-    Returns
-    -------
-    freq_min, freq_max : float
-    n : int
-        Number of bins.
-
-    Raises
-    ------
-    ConfigurationError
-        For a vector that is not equispaced (not log-spaced when
-        ``log_spaced``), and when ``log_spaced`` is set and the vector's
-        lowest frequency is not strictly positive: the OASR kernel takes
-        ``LOG(FREQ1)``.
-    """
-    freqs = np.atleast_1d(np.asarray(freqs, dtype=float))
-    freq_min = float(freqs.min())
-    freq_max = float(freqs.max())
-    n = int(freqs.size)
-    if n > 1 and log_spaced:
-        # OASR option 'C' makes the kernel sweep LOGARITHMIC
-        # (unoasr21.f:123-125, :243) — it is not a plot option. The
-        # equispacing test below is then exactly inverted: a linear request
-        # is the one being silently regridded, and a log request is correct.
-        # A log sweep has no grid to sit on unless every frequency is
-        # positive: the kernel takes F1LOG = LOG(FREQ1) (unoasr21.f:123) and
-        # the binary aborts a zero bound one line earlier
-        # (:116-118, "FREQUENCIES MUST BE NON-ZERO") while a negative one
-        # reaches LOG unchecked. Refused here so the deck is never written.
-        # NaN-closed: nan fails `> 0` both ways.
-        if not (freq_min > 0):
-            raise ConfigurationError(
-                f"{model_name}: option 'C' makes the frequency sweep "
-                f"logarithmic (unoasr21.f:123-125), which needs every "
-                f"frequency strictly positive; the {argument} vector "
-                f"starts at {freq_min}. Raise the lower bound above 0 Hz, or "
-                f"drop 'C' for a linear sweep."
-            )
-        with np.errstate(divide='ignore', invalid='ignore'):
-            ratios = freqs[1:] / freqs[:-1]
-        target = (freq_max / freq_min) ** (1.0 / (n - 1))
-        if not steps_are_uniform(ratios, target):
-            raise ConfigurationError(
-                f"{model_name}: option 'C' makes the frequency sweep "
-                f"logarithmic (unoasr21.f:123-125 computes the coefficients "
-                f"at exp-spaced frequencies from FREQ1 FREQ2 NFREQ), but the "
-                f"{argument} vector is not log-spaced, so the deck cannot "
-                f"carry it.",
-                remediation=(
-                    f"Pass np.geomspace({freq_min:g}, {freq_max:g}, {n}), "
-                    f"or drop 'C' for a linear sweep."))
-        return freq_min, freq_max, n
-    if n > 1:
-        diffs = np.diff(freqs)
-        # Equispaced if every diff matches the mean diff
-        # (:func:`steps_are_uniform`).
-        target = (freq_max - freq_min) / (n - 1)
-        if not steps_are_uniform(diffs, target):
-            raise ConfigurationError(
-                f"{model_name}: the {argument} vector is not equispaced; "
-                f"the OASES deck carries a frequency sweep as its edges and "
-                f"a count (OASR FREQ1 FREQ2 NFREQ, unoasr21.f:116; OASP "
-                f"NX FR1 FR2 DT, unoasp22.f:176), so it cannot carry these "
-                f"bins.",
-                remediation=(
-                    f"Pass an equispaced vector, e.g. "
-                    f"np.linspace({freq_min:g}, {freq_max:g}, {n}), or run "
-                    f"the bins one at a time."))
-    return freq_min, freq_max, n
 
 
 # OASES' wavenumber-array bound ``_OASES_MAX_WAVENUMBERS`` (imported from the
@@ -119,16 +34,35 @@ def _oases_frequency_sweep(
 _OASSP_MAX_WAVENUMBERS = 4096
 
 
-def _oassp_wavenumber_count(*, layer_speeds, c_low, c_high, source_depth,
-                            receiver_depths, r0_km, rspace_km, nplots,
-                            n_time, freq_max, dt, options, n_wavenumbers):
-    """NWVNO oassp2 integrates on, replicated from its own sampling logic.
+class _OasspWavenumberSampling(NamedTuple):
+    """What oassp2 integrates on (:func:`_oassp_wavenumber_sampling`):
+    ``count`` wavenumbers (NWVNO) up to ``k_max`` (rad/m), ``WKMAX =
+    2*pi*FREQM/CMIN`` (unoassp30.f:351-352). The window is fixed in
+    wavenumber at the band's top frequency ``freq_top`` (Hz, FREQM), so at a
+    frequency ``f`` it reaches down to the phase speed ``2*pi*f/k_max``."""
+    count: int
+    freq_top: float
+    k_max: float
+
+
+def _oassp_wavenumber_count(**sampling) -> int:
+    """NWVNO oassp2 integrates on
+    (:func:`_oassp_wavenumber_sampling`'s ``count``)."""
+    return _oassp_wavenumber_sampling(**sampling).count
+
+
+def _oassp_wavenumber_sampling(
+        *, layer_speeds, c_low, c_high, source_depth, receiver_depths, r0_km,
+        rspace_km, nplots, n_time, freq_max, dt, options,
+        n_wavenumbers) -> _OasspWavenumberSampling:
+    """NWVNO oassp2 integrates on and the window's top wavenumber,
+    replicated from its own sampling logic.
 
     A pinned ``n_wavenumbers >= 1`` is written to the deck as given, and
     oassp2 takes it through its own ``NWVNO=MIN0(NWVNO,NP)`` (unoassp30.f:176)
     into the manual branch (:344-349). Otherwise this is the automatic
     branch, unoassp30.f:281-340 with
-    AUTSAM (:1069-1126), in the deck's own units — ``R0``/``RSPACE`` in km,
+    AUTSAM (:1069-1134), in the deck's own units — ``R0``/``RSPACE`` in km,
     and ``rmi = max(|RSPACE|, 0.1*cref*T)`` mixes that km step with metres
     exactly as :293 does:
 
@@ -146,15 +80,25 @@ def _oassp_wavenumber_count(*, layer_speeds, c_low, c_high, source_depth,
       ``NW = int((wnmax - wnmin)/DK + 1)``;
     * cylindrical geometry (no 'P') forces ``C2 = CMAXIN = 1e12`` and the
       full Hankel transform (``inttyp = 2``, :205-217); plane geometry ('P')
-      keeps the deck's CMAX and doubles NWVNO (:333-340).
+      keeps the deck's CMAX and doubles NWVNO (:333-340);
+    * ``WKMAX = 2*pi*FREQM/CMIN`` (:351-352): AUTSAM's ``CMIN =
+      2*pi*FREQ/WNMAX`` (:1131) makes it ``WNMAX = wnmin + (NW - 1)*DK``
+      (:1126); a pinned count keeps ``CMIN = CMININ`` (:346).
 
     ``layer_speeds`` is ``[(top_depth_m, cp_m_s), ...]`` in deck order;
     ``c_low``/``c_high`` are the deck's CMIN/CMAX.
     """
+    nx = int(n_time)
+    dlfreq = 1.0 / (dt * nx)
+    mx = min(int(freq_max / dlfreq + 2), nx // 2)
+    freq = dlfreq * (mx - 1)
+
     if n_wavenumbers is not None and int(n_wavenumbers) >= 1:
         # The binary's own cap on the count the deck carries
         # (unoassp30.f:176), mirrored to predict what oassp2 integrates on.
-        return min(int(n_wavenumbers), _OASES_MAX_WAVENUMBERS)
+        return _OasspWavenumberSampling(
+            count=min(int(n_wavenumbers), _OASES_MAX_WAVENUMBERS),
+            freq_top=freq, k_max=2.0 * np.pi * freq / float(c_low))
 
     opts = str(options or '')
     cylgeo = 'P' not in opts
@@ -171,11 +115,6 @@ def _oassp_wavenumber_count(*, layer_speeds, c_low, c_high, source_depth,
             inttyp = 2
     if cylgeo:
         inttyp = 2
-
-    nx = int(n_time)
-    dlfreq = 1.0 / (dt * nx)
-    mx = min(int(freq_max / dlfreq + 2), nx // 2)
-    freq = dlfreq * (mx - 1)
 
     speeds = [c for _, c in layer_speeds]
     cref = max([c for c in speeds if c < 2e4] + [0.0])
@@ -202,7 +141,105 @@ def _oassp_wavenumber_count(*, layer_speeds, c_low, c_high, source_depth,
     wnmin = max(wn1 - taperk, dk * 1e-3)
     dk = min(dk, (wnmax - wnmin) / 199.0)
     nw = int((wnmax - wnmin) / dk + 1)
-    return nw if cylgeo else 2 * nw
+    return _OasspWavenumberSampling(
+        count=nw if cylgeo else 2 * nw, freq_top=freq,
+        k_max=wnmin + (nw - 1) * dk)
+
+
+class _OaspWavenumberTop(NamedTuple):
+    """Where OASP's wavenumber window stops (:func:`_oasp_wavenumber_top`):
+    ``k_max`` (rad/m) at the band's top frequency ``freq_top`` (Hz, FREQM),
+    the phase speed ``edge`` = ``2π·freq_top/k_max`` (m/s) the run reaches
+    there, and whether the window is ``fixed`` in wavenumber over the band
+    (then at a frequency ``f`` it reaches ``2πf/k_max``)."""
+    freq_top: float
+    k_max: float
+    edge: float
+    fixed: bool
+
+
+def _oasp_wavenumber_top(*, layer_speeds, c_low, c_high, source_depth,
+                         receiver_depths, receiver_ranges, n_time, dt,
+                         freq_top, options,
+                         n_wavenumbers) -> _OaspWavenumberTop:
+    """Where OASP's wavenumber integral stops, replicated from unoasp22.f.
+
+    A pinned count samples ``WK0 + i·DLWVNO`` with ``DLWVNO`` set at the
+    band top FREQM from ``WKMAX = 2π·FREQM/CMIN`` (:394-396, and the manual
+    branch at :635-639): the window reaches ``2π·FREQM/c_low``, to within
+    ``2π·FREQM/CMAX``, at every frequency. Under automatic sampling AUTSAM
+    runs at each frequency ``f`` (:603-617) on ``CMININ·f/FREQM`` in
+    wavenumber integration, so its ``WN2 = 2πf/C1`` is ``2π·FREQM/c_low``
+    at every ``f`` (slowness integration, option 'B' or 'A', takes
+    ``CMININ`` as given, and its window moves with ``f``), and
+    (:1088-1136):
+
+    * ``RFAC`` 1 under Filon (``'F'``), else 1.5; ``DK = 2π/(RFAC·RANREF)``;
+    * ``rref = rmi + 10·zsep`` (``zsep`` the least source-receiver depth
+      separation), one wavelength of the source's layer at ``f`` when 0;
+      ``taperk = 2π·10/rref``;
+    * ``wnmax = WN2 + taperk`` (:1125), ``wnmin = max(WN1 − taperk,
+      1e-3·DK)``, ``DK = min(DK, (wnmax − wnmin)/199)``, ``NW =
+      int((wnmax − wnmin)/DK + 1)``, ``WNMAX = wnmin + (NW − 1)·DK``,
+      ``CMIN = 2πf/WNMAX`` and ``WKMAX = 2πf/CMIN = WNMAX`` (:617).
+
+    The range axis is Block VIII's ``R0 RSPACE NPLOTS`` (the first receiver
+    range, its step — 1 km for one range — and the count): under ``'J'``
+    ``rmi = |RSPACE|``, ``RANREF = 3·r_max`` (:296-303); otherwise
+    ``RANREF = max(cref·NX·DT, 6·r_max)`` and ``rmi = max(|RSPACE|,
+    0.1·cref·NX·DT)``, ``cref`` the fastest layer speed under 2e4 m/s
+    (:306-321). ``layer_speeds`` is ``[(top_depth_m, cp_m_s), ...]`` in
+    deck order; ``n_time``, ``dt`` and ``freq_top`` are the deck's NX, DT
+    and FREQM as OASP settles them (:func:`_oasp_fft_grid`).
+    """
+    opts = str(options or '')
+    ibody, inttyp = 0, 0
+    for ch in opts:
+        if ch == 'B' and ibody == 0:
+            ibody = 1
+        elif ch == 'A' and ibody == 0:
+            ibody = 2
+        elif ch == 'F':
+            inttyp = 1
+        elif ch == 'f':
+            inttyp = 2
+    freq = float(freq_top)
+    if n_wavenumbers is not None and int(n_wavenumbers) >= 1:
+        k_max = 2.0 * np.pi * freq / float(c_low)
+        return _OaspWavenumberTop(freq_top=freq, k_max=k_max,
+                                  edge=float(c_low), fixed=ibody == 0)
+
+    ranges = np.atleast_1d(np.asarray(receiver_ranges, dtype=float))
+    rspace = float(np.diff(ranges)[0]) if ranges.size > 1 else 1e3
+    rm = float(np.max(np.abs(ranges.min()
+                             + np.arange(ranges.size) * rspace)))
+    if 'J' in opts:
+        rmi = abs(rspace)
+        ranref = 3.0 * rm
+    else:
+        cref = max([c for _, c in layer_speeds if c < 2e4] + [0.0])
+        ranref = cref * int(n_time) * float(dt)
+        rmi = max(abs(rspace), 0.1 * ranref)
+        ranref = max(ranref, 6.0 * rm)
+    zsep = min(abs(float(rd) - float(source_depth))
+               for rd in np.atleast_1d(receiver_depths))
+    rref = rmi + 10.0 * zsep
+    fixed = ibody == 0 and rref != 0.0
+    if rref == 0.0:
+        in_layer = [c for top, c in layer_speeds[1:] if top <= source_depth]
+        rref = (in_layer[-1] if in_layer else layer_speeds[1][1]) / freq
+    taperk = 2.0 * np.pi * 10.0 / rref
+    dk = 2.0 * np.pi / ((1.0 if inttyp == 1 else 1.5) * ranref)
+    wn1 = 2.0 * np.pi * freq / float(c_high)
+    wn2 = (2.0 * np.pi * 1.2 * freq / float(c_low) if ibody == 2
+           else 2.0 * np.pi * freq / float(c_low))
+    wnmax = wn2 + taperk
+    wnmin = max(wn1 - taperk, dk * 1e-3)
+    dk = min(dk, (wnmax - wnmin) / 199.0)
+    nw = int((wnmax - wnmin) / dk + 1)
+    k_max = wnmin + (nw - 1) * dk
+    return _OaspWavenumberTop(freq_top=freq, k_max=k_max,
+                              edge=2.0 * np.pi * freq / k_max, fixed=fixed)
 
 
 def _oassp_fitting_c_low(*, c_low, c_low_max, **sampling):

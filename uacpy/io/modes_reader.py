@@ -5,8 +5,9 @@ Reader for Kraken normal-mode files (binary ``.mod``, ASCII ``.moa``).
 returns the :class:`~uacpy.core.results.Modes` carrier ``Kraken`` itself
 returns. The file-layout parsers behind it (``_read_modes_payload`` for the
 binary direct-access ``.mod`` — the only mode format any Acoustics-Toolbox
-program writes — and ``_read_modes_asc_payload`` for an ASCII ``.moa`` from
-the AT Matlab tools) return the raw OALIB-shaped dicts, and
+program writes — and ``_read_modes_asc_payload`` for an ASCII ``.moa``, a
+format the AT Matlab reader ``read_modes_asc.m`` reads and no shipped program
+writes) return the raw OALIB-shaped dicts, and
 ``_get_component`` pulls one stress-displacement component out of an elastic
 block, which ``read_modes(component=)`` exposes.
 """
@@ -27,10 +28,31 @@ from uacpy.core.acoustics import (
     absorption_francois_garrison, absorption_thorp,
 )
 from uacpy.io.env_reader import _volume_absorption_of
+from uacpy.core._validate import real_scalar_or_none
 from uacpy.io._fortran_helpers import (
     DirectAccessFile, list_directed_int, read_list_directed_values,
     require_model_output, typed_format_error,
 )
+
+
+def _mode_numbers(modes) -> Optional[np.ndarray]:
+    """``read_modes(modes=)`` as the 1-based integer mode numbers both
+    payload readers index with, or ``None`` (keep every mode). A whole
+    number given as a float (``np.arange(1., 4.)``) is that mode; a
+    fraction, a non-finite value, a bool or text names no mode and is
+    refused, before any file is opened."""
+    if modes is None:
+        return None
+    entries = np.atleast_1d(np.asarray(modes, dtype=object)).ravel()
+    numbers = [real_scalar_or_none(m) for m in entries]
+    if any(n is None or not np.isfinite(n) or n != np.floor(n)
+           for n in numbers):
+        raise ConfigurationError(
+            f"read_modes: modes={modes!r} must hold whole mode numbers "
+            f"(1-based, as the file numbers them).",
+            remediation="Pass integers, e.g. modes=[1, 2, 3] or "
+                        "np.arange(1, 4); None keeps every mode.")
+    return np.array([int(n) for n in numbers], dtype=int)
 
 
 def _frequency_index(freq_vec, frequency, filename) -> int:
@@ -256,7 +278,11 @@ def _read_modes_asc_payload(
     (unused in ASCII), the title line, ``freq Nmedia ntot nmat M``, one line
     per medium, the top and bottom halfspace lines, a blank line, the depth
     axis, the wavenumbers, then for each mode a separator line followed by
-    the mode shape.
+    the mode shape. Every record is read as whole lines, so the blank line
+    and the per-mode separator lines must be present: ``read_modes_asc.m``
+    finishes the current line with ``fgetl`` after each ``fscanf``
+    (:26-34, :50-52) and needs neither. Since no program writes the format
+    (below), this layout is uacpy's reading of it, not a producer's.
 
     **Complex values are stored as interleaved ``(Re, Im)`` pairs**, not as
     a real block followed by an imaginary block: the reference reader takes
@@ -289,8 +315,8 @@ def _read_modes_asc_payload(
     if not filename.exists():
         raise MissingFileError(
             f"read_modes: mode file not found: {filename}.",
-            remediation="Check the path; the ASCII .moa is written by the "
-                        "AT Matlab tools, not by the shipped solvers.",
+            remediation="Check the path; no shipped solver writes a .moa "
+                        "(their mode files are the binary .mod).",
         )
 
     with open(filename, "r") as fid:
@@ -926,9 +952,8 @@ def _read_modes_with_halfspace(
             f"dispatcher can attach halfspace terms to.",
             remediation="Read the solver's .mod output, or pass the root "
                         "name and let '.mod' be appended. An ASCII '.moa' "
-                        "written by the AT Matlab tools is read by "
-                        "read_modes through its own parser (it carries no "
-                        "halfspace record).",
+                        "is read by read_modes through its own parser (it "
+                        "carries no halfspace record).",
         )
     Modes = _read_modes_payload(filename, frequency, modes, profile=profile)
     freq_index = _frequency_index(Modes["freqVec"], frequency, filename)
@@ -1016,7 +1041,9 @@ def read_modes(
     modes : int, list or ndarray, optional
         Mode numbers to keep, **1-based** as in the file and in
         ``read_modes_bin.m``; out-of-range numbers are dropped. ``None``
-        keeps all.
+        keeps all. Whole numbers given as floats (``np.arange(1., 4.)``)
+        are those modes; a fraction or a non-number raises
+        :class:`~uacpy.core.exceptions.ConfigurationError`.
     profile : int, optional
         Profile of a multi-profile ``.mod``, 1-based (``Kraken/kraken.f90:42``).
         A ``.moa`` holds one profile and refuses any other.
@@ -1059,6 +1086,7 @@ def read_modes(
     metadata: Dict[str, Any] = {}
     media = None
     tails = None
+    modes = _mode_numbers(modes)
     if ext == '.moa':
         if profile != 1:
             raise ConfigurationError(

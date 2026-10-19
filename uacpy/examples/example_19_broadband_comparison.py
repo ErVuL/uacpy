@@ -127,7 +127,7 @@ for name, field in fields.items():
     print(f"  {name:18s} H{field.data.shape} over "
           f"{field.frequencies[0]:.0f}-{field.frequencies[-1]:.0f} Hz")
 
-# SPARC marches time directly. n_time_samples sets the output rate, n_time_samples / time_max:
+# SPARC marches time directly. n_time_samples sets the output rate over the record output_duration:
 # 4800 over 4 s is 1200 Hz (Nyquist 600 Hz), above the 200 Hz top of the source
 # band. 1001 would give 250 Hz and alias p(t).
 sparc_receiver = uacpy.Receiver(depths=np.array([50.0]),
@@ -135,9 +135,9 @@ sparc_receiver = uacpy.Receiver(depths=np.array([50.0]),
 rigid_floor_env = uacpy.Environment(
     name='Pekeris water, rigid floor (SPARC)', bathymetry=100, ssp=1500,
     bottom=uacpy.BoundaryProperties(acoustic_type='rigid'))
-sparc = uacpy.SPARC(n_time_samples=4800, time_max=4.0, freq_min=50.0, freq_max=200.0).run(
+sparc = uacpy.SPARC(n_time_samples=4800, freq_min=50.0, freq_max=200.0).run(
     rigid_floor_env, source, sparc_receiver,
-    run_mode=uacpy.RunMode.TIME_SERIES)
+    run_mode=uacpy.RunMode.TIME_SERIES, output_duration=4.0)
 print(f"  SPARC              p{sparc.data.shape}, dt={sparc.dt * 1e3:.3f} ms "
       f"(rigid bottom — see the module docstring)")
 
@@ -197,34 +197,23 @@ plt.close(fig)
 # ── Every model as a time trace at the same receiver ────────────────────────
 arrival_s = TARGET_RANGE / 1500.0
 t_start = max(0.0, arrival_s - 0.5)          # half a second of lead-in
-traces = {}
-for name, field in fields.items():
-    trace = field.to_time_trace(depth=TARGET_DEPTH, range=TARGET_RANGE,
-                                sample_rate=fs, window='hann',
-                                t_start=t_start)
-    traces[name] = (trace.times * 1000, trace.data)
-traces['Bellhop (chirp)'] = (
-    chirp_response.times * 1000,
-    chirp_response.at(depth=TARGET_DEPTH, range=TARGET_RANGE).data)
-traces['SPARC'] = (
-    sparc.times * 1000,
-    sparc.at(depth=float(sparc.depths[0]), range=float(sparc.ranges[-1])).data)
+traces = {name: field.to_time_trace(depth=TARGET_DEPTH, range=TARGET_RANGE,
+                                    sample_rate=fs, window='hann',
+                                    t_start=t_start)
+          for name, field in fields.items()}
+traces['Bellhop (chirp)'] = chirp_response.at(depth=TARGET_DEPTH,
+                                              range=TARGET_RANGE)
+traces['SPARC'] = sparc.at(depth=float(sparc.depths[0]),
+                           range=float(sparc.ranges[-1]))
 print(f"  first arrival at {arrival_s * 1e3:.0f} ms; {len(traces)} traces")
 
 fig, axes = plt.subplots(len(traces), 1, figsize=(14, 2.5 * len(traces)),
                          squeeze=False)
-window = (arrival_s * 1000 - 250, arrival_s * 1000 + 250)
-for ax, (name, (times_ms, values)) in zip(axes[:, 0], traces.items()):
-    ax.plot(times_ms, values, color=f'C{list(traces).index(name) % 10}', lw=0.8)
-    ax.set_ylabel(name, fontsize='medium', fontweight='bold')
-    ax.grid(True, alpha=0.3)
+window = (arrival_s - 0.25, arrival_s + 0.25)
+for i, (ax, (name, trace)) in enumerate(zip(axes[:, 0], traces.items())):
+    trace.plot(ax=ax, title=name, color=f'C{i % 10}', lw=0.8)
     if name != 'Bellhop (chirp)':     # the chirp trace has its own short axis
         ax.set_xlim(*window)
-    ax.text(0.98, 0.92, f'max = {np.max(np.abs(values)):.2e}',
-            transform=ax.transAxes, ha='right', va='top', fontsize='small',
-            color='gray',
-            bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.8))
-axes[-1, 0].set_xlabel('Time (ms)')
 fig.suptitle(f'Time series — depth {TARGET_DEPTH:.0f} m, range '
              f'{TARGET_RANGE / 1000:.0f} km, fc '
              f'{source.frequencies[0]:.0f} Hz', fontsize='large')
@@ -235,13 +224,13 @@ plt.close(fig)
 
 # ── The chirp in and the chirp out ──────────────────────────────────────────
 fig, (ax_tx, ax_rx) = plt.subplots(2, 1, figsize=(12, 6))
-uacpy.plot.plot_waveform(chirp, fs, ax_tx, time_units='ms', color='k',
+uacpy.plot.plot_waveform(chirp, fs, ax_tx, time_unit='ms', color='k',
                          linewidth=0.8,
                          title=f'Source: LFM chirp 50-150 Hz, '
                                f'{chirp_duration * 1000:.0f} ms')
 uacpy.plot.plot_waveform(
     chirp_response.at(depth=TARGET_DEPTH, range=TARGET_RANGE).data, fs, ax_rx,
-    t0=float(chirp_response.times[0]), time_units='ms', color='b',
+    t0=float(chirp_response.times[0]), time_unit='ms', color='b',
     linewidth=0.8,
     title=f'Received: Bellhop delay-and-sum at {TARGET_DEPTH:.0f} m, '
           f'{TARGET_RANGE / 1000:.0f} km')

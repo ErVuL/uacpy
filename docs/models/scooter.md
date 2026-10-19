@@ -175,9 +175,9 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `c_low` | `None` | Lower phase-speed bound. Sets `k_max = ω/c_low`. `None` ⇒ the slowest speed of every medium — the water, each sediment layer's `cP`, every shear speed, the half-spaces — × 0.85 when a half-space is elastic, × 0.90 otherwise: the `cMin` `scooter.f90:193-259` computes (it does not apply it), "phase speed must be some 10% below slowest acoustic speed" (:258), "a bit less than Scholte/Stoneley wave speed" (:256). Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1) tie `k_max ≈ 1.1 ω/c_min` to "the lowest wave speed in the problem". Over an elastic seabed it costs wavenumbers (*Layered and elastic seabeds* below). |
+| `c_low` | `None` | Lower phase-speed bound. Sets `k_max = ω/c_low`. `None` ⇒ 0.90 × the slowest wave of the problem: the water, each sediment layer's `cP`, every shear speed, the half-spaces, and every Scholte wave, solved from Brekhovskikh & Lysanov eq. 3.4.29 for each liquid–solid interface — "phase speed must be some 10% below slowest acoustic speed" (`scooter.f90:258`; the `cMin` of `scooter.f90:193-259`, which the binary computes and does not apply, writes 0.85 × the slowest speed over an elastic half-space instead, "a bit less than Scholte/Stoneley wave speed", :256, an estimate of the wave uacpy solves). Stoneley waves, between two solids, are not solved. Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1) tie `k_max ≈ 1.1 ω/c_min` to "the lowest wave speed in the problem". Over an elastic seabed it costs wavenumbers (*Layered and elastic seabeds* below). |
 | `c_high` | `None` | Upper phase-speed bound. Sets `k_min = ω/c_high`. `None` ⇒ the toolbox's unbounded value `1e9` (`doc/bounce.htm`: "CMax to 1.0E9") over every bottom, so the integral runs from `k_min ≈ 0`: Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1 step 1), "it is recommended to initially include these components by choosing k min = 0. If k min is chosen larger, as will often be done by experienced modelers to reduce computation time, one must be careful to avoid numerical artifacts". It costs wavenumbers: `Nk ∝ 1/c_low − 1/c_high`, 4.4× a window capped at `1.05 ×` the fastest speed in the channel of §6 ("The phase-speed window"), and the run time 5-6.6× (measured: 5× on a near-field Lloyd case, 6.6× — 0.24 to 1.58 s — on a 50 Hz Munk run to 50 km), with the Green's-function memory growing as `Nk` too. A set value is written as given; one that drops a direct or surface-reflected path the receivers see warns. |
-| `rmax_factor` | `None` | Spectral `RMax = receiver.ranges.max() × this`. `None` ⇒ `2.0` in every run mode, the ratio of the toolbox's own Scooter decks, narrowband and broadband (`tests/Munk/MunkS.env`, `tests/BroadBand/MunkS.env`: RMax 200 km for receivers to 100 km); `doc/scooter.htm` asks only that RMax reach the farthest receiver — "You can get increased accuracy by making Rmax larger than the largest receiver range; however, run time will increase in direct proportion". |
+| `rmax_factor` | `None` | Spectral `RMax = receiver.ranges.max() × this`, positive and finite. `None` ⇒ `2.0` in every run mode, the ratio of the toolbox's own Scooter decks, narrowband and broadband (`tests/Munk/MunkS.env`, `tests/BroadBand/MunkS.env`: RMax 200 km for receivers to 100 km); `doc/scooter.htm` asks only that RMax reach the farthest receiver — "You can get increased accuracy by making Rmax larger than the largest receiver range; however, run time will increase in direct proportion". |
 | `wavenumber_spectrum` | `'positive'` | Which wavenumber branch the transform integrates: `'positive'`, `'negative'`, `'both'`. `'positive'` is the manual's recommendation (`doc/fields.htm`: "'P' Positive (recommended)"). |
 | `stabilizing_attenuation_off` | `False` | Zero Scooter's contour offset. Leave it alone unless you know why. `False` keeps SCOOTER's own default, `Atten = Deltak` unless TOPOPT(7:7) is `'0'` (`scooter.f90:129-130`; `doc/EnvironmentalFile.htm`). |
 | `taper` | `0.0` | Hanning roll-off of the wavenumber kernel over this fraction of the spectral span at **each** edge, applied before the transform. `0` = off, matching `fieldsco.m`, which disables it and calls it *"user play (at your own risk)"*. A rectangular edge's sidelobes fall at 6 dB/octave, a Hann edge's at 18 (Abraham, *Underwater Acoustic Signal Processing*, Sect. 4.10). A Green's function of fewer than four phase speeds has no room for a roll-off at each edge, and a run that returns one refuses a positive taper (`ConfigurationError`: `taper=0` or more wavenumbers). See the gotcha below before raising it. |
@@ -186,7 +186,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `n_mesh` | `None` | Finite-element points **per medium** (a total count, not a density), written as given. `None` ⇒ `0`, Scooter picks from frequency: the manual's automatic mesh (`doc/EnvironmentalFile.htm`: "If you type 0 for the number of mesh points, the code will calculate NMESH automatically"), which `scooter.f90:106-110` scales with frequency and floors at 100 points. |
+| `n_mesh` | `None` | Finite-element points **per medium** (a total count, not a density): one count for every medium, or one per medium, water first (`n_mesh=[400, 1200]` refines the sediment alone), each a whole number ≥ 0 written as given (a fraction, a negative count, or a list whose length is not the deck's number of media is refused). `None` ⇒ `0`, Scooter picks from frequency: the manual's automatic mesh (`doc/EnvironmentalFile.htm`: "If you type 0 for the number of mesh points, the code will calculate NMESH automatically"), which `scooter.f90:106-110` scales with frequency and floors at 100 points. |
 | `interp_ssp` | `None` | SSP connection scheme; `'isovelocity'` shape forces `'C'` regardless. Unset → `'linear'` (AT `'C'`), the manual's choice when unsure (`doc/EnvironmentalFile.htm`: "If your not sure which option to take, I'd suggest you use 'C'."). |
 
 **Execution**
@@ -197,7 +197,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | `work_dir` | `None` | Pin the scratch dir to keep `.env` / `.grn` / `.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
 | `use_tmpfs` | `False` | Run in RAM. |
-| `timeout` | `600.0` | Subprocess timeout (s). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
+| `timeout` | `600.0` | Subprocess timeout (s), positive and finite, or `None` for no limit (anything else is refused at construction). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
 | `collapse` | `None` | Per-feature collapse overrides. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`; `'info'` logs the resolved `c_low`/`c_high`. |
 
@@ -383,21 +383,39 @@ water for its shear branch to matter mostly at the steep angles. In a thin
 sediment over rock, or with a shear speed close to the water speed, the gap is
 much larger — which is the point of being able to model it exactly.
 
-What the elastic default costs. The derived `c_low` takes the slowest speed of
-every medium, so over this seabed it is 0.85 × the sand's 110 m/s shear speed,
-93.5 m/s (granite, an elastic half-space, sets the 0.85): the seismic interface
-waves an elastic seabed supports travel *below* the shear speed, and the window
-reaches them. A water-only window (`c_low=1341`, 0.90 × the slowest water
-speed) runs 14× faster here (0.11 s against 1.5 s) and moves TL by a median
-0.004 dB (0.1 dB at the 99th percentile), because a source 75 m above the seabed does not excite
-an interface wave; move the source down to 1 m above the seabed and the
-water-only window is off by up to **2.4 dB** at a receiver near the interface.
-Pin `c_low` above the shear speed when the geometry stays far from the bed and
-run time matters. Over elastic layers on a *fluid* half-space the factor is
-0.90, which can sit above the interface wave; a run then says so (a
-`NumericsWarning`) when the source or a receiver lies within one interface
-wavelength, `0.85·c_s/f`, of the seafloor. For a seabed whose shear physics is
-the whole question, [OASES](oases.md) goes further; [Bounce](bounce.md) gives
+What the elastic default costs. The derived `c_low` sits 10 % under the
+slowest wave of the problem (`scooter.f90:258`, "some 10% below"), and over an
+elastic seabed that is a seabed Scholte wave, the root of
+Brekhovskikh & Lysanov's eq. 3.4.29 (§3.4.2: a wave slower than both the
+shear wave and the water, whose amplitude decays away from the interface on
+both sides) solved for each liquid–solid interface
+(`uacpy.acoustics.scholte_wave_speed` computes it on your own media): over this seabed the
+water–sand wave travels at 98.6 m/s, 0.90 of the sand's 110 m/s shear speed,
+so `c_low` is 88.7 m/s. A water-only window (`c_low=1341`, 0.90 × the slowest water
+speed) integrates 15× fewer wavenumbers here (5 965 against 90 179; 0.2 s
+against 3.1 s) and moves TL by a median 0.004 dB (0.1 dB at the 99th
+percentile), because a source 75 m above the seabed does not excite a
+Scholte wave; move the source down to 1 m above the seabed and the
+water-only window is off by up to **2.4 dB** at a receiver near the
+interface. Pin `c_low` above the shear speed when the geometry stays far from
+the bed and run time matters.
+
+Solving the wave matters most when the shear speed is close to the water's.
+On the `limestone` preset (cp 3000, cs 1500 m/s) under 30 m of 1500 m/s water
+the wave travels at 1240.4 m/s, 0.83 × the shear speed, below the 0.85 ×
+1500 = 1275 m/s that `scooter.f90:255-256`'s factor gives. At 30 Hz with
+source and receiver at 15 m, `Scooter(c_low=1275)` reads 99.7 / 93.4 dB at
+1 / 2 km, 33 / 21 dB above OAST's 66.6 / 72.8 dB; the derived `c_low`,
+0.90 × 1240.4 = 1116.4 m/s, reads 66.5 / 71.5 dB. Over a seabed whose shear
+speed is above the water's (granite, basalt) the wave sits just under the
+water speed (1489 m/s on `basalt`), so the derived `c_low` is 0.90 × that
+wave, about 1340 m/s. A pinned `c_low` above a wave
+says so (a `NumericsWarning`) when the source or a receiver lies within one
+Scholte wavelength, `v/f`, of that interface: "interface waves can only be
+excited … by sources close in terms of wavelength to the interface" (Jensen
+et al., §9.2.6.2); the one-wavelength reach is uacpy guidance.
+
+For a seabed whose shear physics is the whole question, [OASES](oases.md) goes further; [Bounce](bounce.md) gives
 you the reflection coefficient alone.
 
 ### Benchmarking another model against it
@@ -518,7 +536,8 @@ the mesh reaches it.
 **`n_mesh` is a count per medium, not a density.** It is the Acoustics Toolbox
 `NG` column, a total number of finite-element points in each medium. Leaving it
 at `0` lets Scooter size the mesh from the frequency, which is usually what you
-want; raise it if the result changes when you do.
+want; raise it if the result changes when you do. A list gives each medium its
+own count, water first, so a convergence study can refine one medium at a time.
 
 **`n_mesh` below 100 does nothing.** Scooter floors the count at 100
 points per medium (`scooter.f90:110`), and the `.prt` still echoes back the
@@ -582,8 +601,10 @@ but it is bounded, so the cast costs relative precision only.
 
 **`taper` smooths an edge; it cannot recover spectrum.** COA's criterion is
 that the roll-off span "several periods" of `exp(ikr)`, i.e.
-`taper × (kMax−kMin) × r_max ≫ 2π` — parts in ten thousand of the band over a
-kilometre, not percent. Values far above that attenuate real spectrum. That is
+`taper × (kMax−kMin) × r_max ≫ 2π`. One period is `2π / ((kMax−kMin)·r_max)` of
+the band, and with the default window (`kMax−kMin ≈ ω/c_low`) that is
+`c_low / (f·r_max)`: 0.67 % at 200 Hz and 1 km over a `c_low` of 1341 m/s, scaling
+as `1/(f·r_max)`. Values far above that attenuate real spectrum. That is
 occasionally what you want, since the far evanescent tail is the worst-
 conditioned part of the solve, but it is never free and should be measured
 against something independent. Leave `c_high` unset (unbounded) first.

@@ -318,6 +318,14 @@ class TestErrorMessages:
         msg = str(error)
         assert "150" in msg and "100" in msg
 
+    def test_a_depth_just_past_the_bound_reads_past_it(self):
+        """4 cm under a 100 m seafloor prints as 100.04 m against 100 m, not
+        "100.0 m exceeds 100.0 m" with a remedy it already meets."""
+        msg = str(InvalidDepthError(depth=100.04, depth_max=100.0,
+                                    context="Source"))
+        assert "Source depth (100.04 m) exceeds resolvable depth (100 m)" in msg
+        assert "Set source depth to ≤ 100 m" in msg
+
     def test_unsupported_feature_lists_alternatives(self):
         error = UnsupportedFeatureError(
             'Kraken', 'ray-path computation', alternatives=['Bellhop'],
@@ -1012,7 +1020,7 @@ class TestTypedErrorsReplaceBareOnes:
 
     def test_zero_energy_waveform_raises_instead_of_a_nan_surface(self):
         with pytest.raises(ConfigurationError, match="energy"):
-            ambiguity_function(np.zeros(8), 1000.0, n_doppler=3)
+            ambiguity_function(np.zeros(8), 1000.0, n_doppler_shifts=3)
 
     @pytest.mark.parametrize("depth", [0, -2])
     def test_interleaver_depth_below_one_is_typed(self, depth):

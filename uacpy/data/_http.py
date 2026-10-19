@@ -336,8 +336,9 @@ def http_get(
                             "fetcher takes an address override (url=, or "
                             "base_url= where it builds many requests: "
                             "emodnet, seaice), as do the live Argo, WOA23, "
-                            "GEBCO (OpenTopoData), EMODnet and MARS fetchers "
-                            "(base_url=).",
+                            "bathymetry (OpenTopoData, GMRT, EMODnet DTM), "
+                            "EMODnet, MARS, NBS wind and WaveWatch III "
+                            "fetchers (base_url=).",
             ) from exc
         except _TRANSIENT_EXC as exc:
             # Connection reset / timeout / truncated body / remote disconnect —
@@ -367,8 +368,10 @@ def http_get(
                 continue
             raise DataFetchError(
                 f"Could not reach {url}: {reason} (after {retries} retries).",
-                remediation="Check network connectivity, or pass base_url= for "
-                            "a reachable service instance.",
+                remediation="Check network connectivity, or point the fetcher "
+                            "at a reachable service instance (base_url=, or "
+                            "the host's module constant for GMRT, the EMODnet "
+                            "DTM, NBS wind and WaveWatch III).",
             ) from exc
         except (OSError, http.client.HTTPException) as exc:
             # Raised by getresponse()/read() after the request went out, which

@@ -8,7 +8,7 @@ frequency, the way hearing does (Brown 1991).
 Uses: acoustic_signal.lfm_chirp / hfm_chirp / ricker_wavelet / gaussian_pulse ·
 m_sequence · welch · plot_waveform · plot_psd · constant_q_transform · constant_q_spectrogram ·
 constant_q · plot_constant_q_transform ·
-plot_constant_q_spectrogram · plot_constant_q_psd
+plot_constant_q_spectrogram
 """
 
 import os
@@ -75,8 +75,8 @@ cq_psd = constant_q(lfm, fs, scaling='spectrum', freq_min=80, freq_max=2000,
                              bins_per_octave=24)
 # The same 60 dB window as the spectrogram: the in-band bins peak near 104 dB.
 # Passed whole, so the axis reads the estimate's own scaling (band power).
-uacpy.plot.plot_constant_q_psd(cq_psd, ax=axes[2, 1], ymin=60, ymax=120,
-                               title='LFM constant-Q band power')
+uacpy.plot.plot_psd(cq_psd, ax=axes[2, 1], ymin=60, ymax=120,
+                    title='LFM constant-Q band power')
 
 # The raw transform the two panels above are built from: one frame, centred on
 # the record, complex coefficients on the same geometric bin grid. The frame

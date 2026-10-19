@@ -29,7 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
 from uacpy.core._export import ExportRecord
-from uacpy.core.exceptions import FileFormatError, MissingFileError
+from uacpy.core.exceptions import FileFormatError
+from uacpy.io._fortran_helpers import require_model_output
 
 
 @dataclass(frozen=True, eq=False)
@@ -113,17 +114,18 @@ def read_psif(filepath: Union[str, Path]) -> PsifFile:
 
     Raises
     ------
+    MissingFileError
+        No ``psif.dat`` at the path (the run may have failed before writing
+        it).
     FileFormatError
-        No ``psif.dat`` at the path, a malformed or truncated file, or a
-        stock mpiramS direct-access file (a ``recl.dat`` beside it), which
-        is a different layout from the sequential one uacpy's patched build
-        writes.
+        A malformed or truncated file, or a stock mpiramS direct-access file
+        (a ``recl.dat`` beside it), which is a different layout from the
+        sequential one uacpy's patched build writes.
     """
     filepath = Path(filepath)
     psif_file = filepath / 'psif.dat' if filepath.is_dir() else filepath
 
-    if not psif_file.exists():
-        raise MissingFileError(f"mpiramS output not found: {psif_file}.")
+    require_model_output(psif_file, 'read_psif')
 
     # ``psif.dat`` is written by mpiramS on this host during the same run, so
     # its byte order is the host's; ``FortranFile`` reads native endianness,

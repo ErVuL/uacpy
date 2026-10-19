@@ -26,8 +26,8 @@ from typing import Optional, Union
 import numpy as np
 
 from uacpy.core.constants import (
-    DEFAULT_SOUND_SPEED, NEPER_TO_DB, REFERENCE_DEPTH_M, REFERENCE_PH,
-    REFERENCE_SALINITY_PSU, REFERENCE_TEMPERATURE_C,
+    DEFAULT_SOUND_SPEED, NEPER_TO_DB, REFERENCE_DEPTH, REFERENCE_PH,
+    REFERENCE_SALINITY, REFERENCE_TEMPERATURE,
 )
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._validate import water_property
@@ -177,8 +177,8 @@ def ph_to_nbs(pH, scale, *, temperature, salinity):
 
 def absorption_francois_garrison(
     frequency: _ArrayLike,
-    temperature: _ArrayLike = REFERENCE_TEMPERATURE_C,
-    salinity: _ArrayLike = REFERENCE_SALINITY_PSU,
+    temperature: _ArrayLike = REFERENCE_TEMPERATURE,
+    salinity: _ArrayLike = REFERENCE_SALINITY,
     pH: _ArrayLike = REFERENCE_PH,
     depth: Optional[_ArrayLike] = None,
 ) -> np.ndarray:
@@ -224,6 +224,16 @@ def absorption_francois_garrison(
     states units and no validity range, and checks neither.
     :class:`FrancoisGarrison` refuses them at construction instead.
 
+    **Where the equation holds.** Francois & Garrison (1982, Part II) compile
+    it "to predict absorption in natural seawater in the frequency range of
+    200 Hz to 1 MHz and to depths of 5000 m" (§IV) and tabulate it
+    (Table IV) for −1.8 to 30 °C; its salinity terms rest on data at 30-41 ‰
+    and the seawater pH range is 7.7-8.3 (the sources the law
+    :class:`FrancoisGarrison` cites for each). This array formula checks
+    none of them and returns the extrapolated number; the law warns outside
+    that envelope (``ValidityWarning``), so ``FrancoisGarrison(...).table(...)``
+    is the checked route.
+
     References
     ----------
     Francois & Garrison (1982). JASA 72(6), 1879–1890.
@@ -236,7 +246,7 @@ def absorption_francois_garrison(
                    dtype=float)
     pH = np.asarray(water_property(pH, depth, name='pH', who=who),
                     dtype=float)
-    z = np.asarray(REFERENCE_DEPTH_M if depth is None else depth,
+    z = np.asarray(REFERENCE_DEPTH if depth is None else depth,
                    dtype=float)
 
     c = 1412.0 + 3.21 * T + 1.19 * S + 0.0167 * z

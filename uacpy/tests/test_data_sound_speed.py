@@ -19,6 +19,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.data import _cache
 from uacpy.data import sound_speed as ss
+from uacpy.tests.conftest import recorded_warnings
 
 
 #: The real dry-point check, for the tests that are about it.
@@ -121,11 +122,14 @@ def test_fetch_ssp_builds_profile(annual_http):
 
 
 def test_mackenzie_reads_the_woa23_depths_directly(annual_http):
-    # Mackenzie is stated in depth: no pressure round trip at any latitude.
+    # Mackenzie is stated in depth: no pressure round trip at any latitude,
+    # and no notice about a latitude the caller never passed.
     from uacpy.core.acoustics import sound_speed_mackenzie
     temp, sal = _ANNUAL[('t', 0)][1], _ANNUAL[('s', 0)][1]
     for point in ((0.5, -40.5), (60.5, -40.5)):
-        c = ss.fetch_ssp(point, formula='mackenzie').sound_speed[:, 0]
+        with recorded_warnings() as rec:
+            c = ss.fetch_ssp(point, formula='mackenzie').sound_speed[:, 0]
+        assert not [w for w in rec if 'latitude' in str(w.message)]
         np.testing.assert_allclose(
             c, sound_speed_mackenzie(temperature=np.array(temp),
                                      salinity=np.array(sal),
@@ -257,10 +261,13 @@ def test_a_point_gebco_puts_on_land_is_refused_before_any_source(
     monkeypatch.setattr(ss, '_woa_cache_first',
                         lambda source, call: reached.append(source) or 'ssp')
     monkeypatch.setattr(ss, '_ssp_chain_fetch',
-                        lambda *a, **kw: reached.append('chain') or 'ssp')
+                        lambda *a, **kw: reached.append('chain')
+                        or ('ssp', 'argo'))
     from uacpy.data import environment as env_mod
+    sand = uacpy.BoundaryProperties.from_preset('sand')
     monkeypatch.setattr(env_mod, '_fetch_bottom',
-                        lambda *a, **kw: reached.append('bottom') or ('b', 'x'))
+                        lambda *a, **kw: reached.append('bottom')
+                        or (sand, 'x'))
     call = lambda: getattr(data, fetch)((48.85, 2.35), source='local')
     if refused:
         with pytest.raises(DataFetchError,
@@ -283,7 +290,7 @@ def test_fetch_ssp_matches_source_ids_and_presets_in_any_case(
     monkeypatch.setattr(ss, '_woa_cache_first',
                         lambda source, call: reached.append(('woa', source)))
     monkeypatch.setattr(ss, '_ssp_chain_fetch', lambda source, *a, **kw:
-                        reached.append(('chain', source)))
+                        reached.append(('chain', source)) or ('ssp', 'argo'))
     uacpy.data.fetch_ssp((45.6, -6.2), month=7, source=spelling)
     assert reached == [reaches]
 
@@ -311,10 +318,60 @@ def test_a_whole_valued_max_days_reaches_every_ssp_source_as_whole_days(
         monkeypatch, fetch, where):
     seen = []
     monkeypatch.setattr(ss, '_ssp_chain_fetch', lambda source, where, call,
-                        request, **kw: seen.append(request['max_days']))
+                        request, **kw: seen.append(request['max_days'])
+                        or ('ssp', 'argo'))
     getattr(uacpy.data, fetch)(*where, date='2024-07-01', source='argo',
                                max_days=15.0)
     assert seen == [15] and type(seen[0]) is int
+
+
+@pytest.mark.parametrize('max_days, notices', [(5, 1), (None, 0)])
+def test_a_max_days_woa23_does_not_read_is_announced(annual_http, max_days,
+                                                     notices):
+    """WOA23 is a climatology keyed on month: a max_days= it answers changed
+    nothing and says so; left unset, nothing is announced."""
+    with recorded_warnings() as caught:
+        ss.fetch_ssp((30.5, -40.5), max_days=max_days)
+    unused = [str(w.message) for w in caught if 'was not used' in str(w.message)]
+    assert len(unused) == notices
+    if notices:
+        assert unused[0].startswith('fetch_ssp: max_days=5 was not used: '
+                                    'WOA23 answered')
+
+
+@pytest.mark.parametrize('fetch, where', [
+    ('fetch_ssp', ((45.6, -6.2),)),
+    ('fetch_ssp_transect', ((45.6, -6.2), (45.8, -6.0)))])
+def test_the_woa23_settings_another_source_does_not_read_are_announced(
+        monkeypatch, fetch, where):
+    """month, resolution, decade and base_url reach WOA23 only: each one
+    given when Copernicus answers gives its own notice; one left unset none."""
+    monkeypatch.setattr(ss, '_ssp_chain_fetch',
+                        lambda *a, **kw: ('ssp', 'copernicus'))
+    with recorded_warnings() as caught:
+        getattr(uacpy.data, fetch)(*where, month=7, resolution='0.25',
+                                   decade='A5B4', source='copernicus')
+    unused = sorted(str(w.message).split(' was not used')[0]
+                    for w in caught if 'was not used' in str(w.message))
+    assert unused == [f"{fetch}: decade='A5B4'", f"{fetch}: month=7",
+                      f"{fetch}: resolution='0.25'"]
+    assert all('Copernicus answered' in str(w.message) for w in caught
+               if 'was not used' in str(w.message))
+
+
+@pytest.mark.parametrize('fetch', ['fetch_ssp', 'fetch_ssp_transect'])
+def test_an_unknown_resolution_is_refused_whichever_source_answers(
+        monkeypatch, fetch):
+    reached = []
+    monkeypatch.setattr(ss, '_ssp_chain_fetch',
+                        lambda *a, **kw: reached.append(1) or ('ssp', 'argo'))
+    where = ((45.6, -6.2),) if fetch == 'fetch_ssp' else ((45.6, -6.2),
+                                                          (45.8, -6.0))
+    with pytest.raises(ConfigurationError,
+                       match=rf"{fetch}: unknown resolution='0.5'"):
+        getattr(uacpy.data, fetch)(*where, date='2024-07-01', source='argo',
+                                   resolution='0.5')
+    assert reached == []
 
 
 @pytest.mark.parametrize('max_days', [1.5, -1, True])
@@ -479,10 +536,10 @@ def test_the_default_extension_latitude_is_the_core_reference():
     """One source of truth: the default is core's constant itself, not a
     literal that agrees with it today."""
     import inspect
-    from uacpy.core.acoustics.seawater import REFERENCE_LATITUDE_DEG
+    from uacpy.core.acoustics.seawater import REFERENCE_LATITUDE
     for fn in (ss.extend_ssp_below_data, ss.extend_column_to_seafloor):
         default = inspect.signature(fn).parameters['latitude'].default
-        assert default is REFERENCE_LATITUDE_DEG
+        assert default is REFERENCE_LATITUDE
 
 
 def _provenance_columns():
@@ -910,7 +967,7 @@ class TestDeepenWithClimatology:
                                                   source='local')
         z = np.asarray(deep.depths)
         c = np.asarray(deep.sound_speed)[:, 0]
-        top = 600.0 - ss.CAST_BLEND_M
+        top = 600.0 - ss.CAST_BLEND
         assert np.all(c[z < top] == 1530.0)
         assert z[-1] == 1000.0
         assert c[-1] == np.asarray(column.sound_speed)[-1, 0]
@@ -938,7 +995,7 @@ class TestDeepenWithClimatology:
         out = ss._blend_cast_onto_column(cast, column)
         z = np.asarray(out.depths)
         c = np.asarray(out.sound_speed)[:, 0]
-        top = 600.0 - ss.CAST_BLEND_M
+        top = 600.0 - ss.CAST_BLEND
         if end == 'top':
             i = int(np.flatnonzero(z == top)[0])
             slope, wanted = (c[i + 1] - c[i]) / (z[i + 1] - z[i]), -0.01
@@ -988,6 +1045,19 @@ class TestDeepenWithClimatology:
         assert point == (45.6, -6.2)
         assert (kw['date'], kw['month'], kw['resolution'], kw['source'],
                 kw['timeout']) == ('2026-07-15', None, '0.25', 'woa23', 5.0)
+
+    @pytest.mark.parametrize('spelling', ['WOA23', 'Local'])
+    def test_a_climatology_source_matches_in_any_case(self, monkeypatch,
+                                                       spelling):
+        calls = []
+
+        def record(point, **kw):
+            calls.append(kw['source'])
+            return _cast([0.0, 3000.0], speed=1500.0)
+        monkeypatch.setattr(ss, 'fetch_ssp', record)
+        uacpy.data.deepen_with_climatology(
+            _cast([0.0, 100.0]), (45.6, -6.2), month=7, source=spelling)
+        assert calls == [spelling.lower()]
 
     def test_a_missing_climatology_is_raised_not_skipped(self, woa_cache):
         """Asked to deepen, a point with no installed column refuses rather

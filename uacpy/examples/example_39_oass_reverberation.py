@@ -42,16 +42,12 @@ receiver = uacpy.Receiver(depths=[10.0, 50.0, 90.0],
 
 work_dir = OUT / 'example_39_work'
 
-# interface=3 is the water/sediment boundary: deck layer 1 is the vacuum upper
-# half-space, 2 the water column, 3 the sediment. uacpy refuses an interface
-# that is not a bottom layer, because attaching the spectrum to the wrong
-# record leaves a POSITIVE RG there — an infinite correlation length, i.e. no
-# back-scatter at all, from a run that still exits 0.
-# A 0.5 m rms roughness at 250 Hz leaves perturbation theory above about
-# 73° grazing; OASS says where, and that notice is printed.
+# OASS puts the roughness spectrum on the seafloor (deck layer 3, below the
+# vacuum and the water) with the seabed's own 0.5 m rms roughness. At 250 Hz
+# that roughness leaves perturbation theory above about 73° grazing; OASS says
+# where, and that notice is printed.
 with warnings.catch_warnings(record=True) as caught:
-    reverb = uacpy.OASS(interface=3, correlation_length=10.0,
-                        rms_roughness=0.5,
+    reverb = uacpy.OASS(correlation_length=10.0,
                         work_dir=work_dir, cleanup=False).run(
         env, source, receiver, run_mode=uacpy.RunMode.REVERBERATION)
 for warning in caught:

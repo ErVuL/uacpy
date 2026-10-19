@@ -259,6 +259,24 @@ class TestTheBandAverageIsTheLossABandwidthSees:
         with pytest.raises(ConfigurationError, match="complex"):
             two_path_field().to_dB().broadband_loss()
 
+    def test_the_spectrum_of_a_received_trace_is_refused(self):
+        # A pressure trace transforms to S·H (Pa·s), whose band mean
+        # carries the source spectrum; an impulse response transforms to H.
+        fs = 8000.0
+        t = np.arange(800) / fs
+        x = np.zeros((1, 1, t.size))
+        x[0, 0, 40], x[0, 0, 120] = 1.0, 0.5
+        coords = {'depth': [10.0], 'range': [100.0], 'time': t}
+        trace = Field(data=x, coords=coords, kind='pressure', unit='Pa')
+        with pytest.raises(ConfigurationError,
+                           match=r"^Field.broadband_loss: this field is the "
+                                 r"spectrum S·H of a received pressure "
+                                 r"trace \(unit 'Pa·s'\)"):
+            trace.to_transfer_function().broadband_loss()
+        response = Field(data=x * fs, coords=coords, kind='impulse_response')
+        assert np.isfinite(
+            response.to_transfer_function().broadband_loss().data).all()
+
     def test_a_spectrum_off_the_frequency_axis_is_refused(self):
         field = two_path_field()
         with pytest.raises(ConfigurationError, match="frequency axis has"):
@@ -875,6 +893,40 @@ class TestAWeightedMapIsTheWeightedReceivedPressure:
                                                       abs=1e-3)
         assert sel.weighting == label
 
+    @pytest.mark.parametrize('weighting, label', [
+        ('LF', 'LF'),
+        (([100.0, 1000.0, 3000.0], [-30.0, 0.0, -10.0]), 'custom')])
+    def test_the_band_route_takes_the_weighting_and_records_it(
+            self, weighting, label):
+        """broadband_loss(weighting=) weights the band by |S|²·10^(W/10):
+        the loss the hand-folded recipe gives, and the map (and the level
+        set from it) records the weighting the waveform route records."""
+        from uacpy.acoustics import frequency_weighting
+        # Two paths 1 ms apart: |H| changes over the band, so the weighting
+        # moves the loss (a flat |H| would hide it).
+        field = two_path_field(delay=1e-3,
+                               frequencies=np.arange(50.0, 3000.0, 10.0))
+        f = np.asarray(field.coords['frequency'])
+        density = np.minimum(1.0, (500.0 / f) ** 2)
+        folded = density * 10 ** (frequency_weighting(f, weighting) / 10)
+        by_hand = field.broadband_loss(source_spectrum=np.sqrt(folded))
+        loss = self.quiet(lambda: field.broadband_loss(
+            source_spectrum=np.sqrt(density), weighting=weighting))
+        np.testing.assert_allclose(loss.data, by_hand.data, rtol=0,
+                                   atol=1e-9)
+        assert loss.weighting == label and by_hand.weighting is None
+        assert loss.at_source_level(150.0).weighting == label
+        unweighted = field.broadband_loss(source_spectrum=np.sqrt(density))
+        assert np.max(np.abs(np.asarray(loss.data)
+                             - np.asarray(unweighted.data))) > 0.01
+
+    def test_a_weighting_with_no_weight_on_the_band_is_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match="^Field.broadband_loss: the weighting "
+                                 "carries no weight on this band"):
+            free_field().broadband_loss(
+                weighting=([1e6, 2e6], [0.0, 0.0]))
+
     def test_a_flat_weighting_leaves_the_map_unchanged(self):
         field = free_field()
         x = self.burst()
@@ -989,6 +1041,38 @@ class TestATrackMapSumsTheSingleEventMap:
         middle = sel.track_exposure(x, closest_approach=[100.0, 500.0])
         np.testing.assert_allclose(plan.data[:, 1, :], middle.data,
                                    atol=1e-12)
+
+    def test_per_event_gives_the_summands_of_the_total(self):
+        """per_event=True is each event's SEL at the receiver, on a
+        ``position`` axis after ``range``: their energy sum is the track
+        total, and one receiver's slice is its exposure along the
+        passage, loudest at closest approach."""
+        from uacpy.core.acoustics import sum_levels_dB, track_exposure
+        sel = self.single_event_map()
+        x = np.arange(-2e3, 2e3 + 1, 50.0)
+        total = sel.track_exposure(x, closest_approach=[100.0, 1000.0])
+        each = sel.track_exposure(x, closest_approach=[100.0, 1000.0],
+                                  per_event=True)
+        assert each.axes == ['depth', 'range', 'position']
+        np.testing.assert_allclose(each.coords['position'], x)
+        assert each.track_events is None and each.kind == 'sound_exposure'
+        np.testing.assert_allclose(sum_levels_dB(each.data, axis=-1),
+                                   total.data, atol=1e-9)
+        np.testing.assert_allclose(each.data, track_exposure(
+            sel.data, sel.ranges, x, closest_approach=[100.0, 1000.0],
+            axis=1, per_event=True), atol=1e-12)
+        passage = each.at(range=100.0).data[0]
+        assert int(np.argmax(passage)) == int(np.argmin(np.abs(x)))
+        plan = sel.track_exposure(x, closest_approach=[100.0],
+                                  along=[-500.0, 0.0], per_event=True)
+        assert plan.axes == ['depth', 'along', 'range', 'position']
+
+    def test_the_event_position_axis_exports_in_metres(self):
+        pytest.importorskip('xarray')
+        each = self.single_event_map().track_exposure(
+            np.arange(-1e3, 1e3 + 1, 100.0), closest_approach=[100.0],
+            per_event=True)
+        assert each.to_xarray().coords['position'].attrs['units'] == 'm'
 
     def test_the_along_axis_exports_in_metres(self):
         # The plan view's along-track axis is a distance, and its export

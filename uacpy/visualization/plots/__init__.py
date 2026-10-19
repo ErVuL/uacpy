@@ -20,7 +20,7 @@ from uacpy.visualization.plots.fields import (
     compare, compare_models, plot_field_difference,
     plot_field_statistics, shared_colorbar,
     plot_transfer_function, plot_impulse_response, plot_track_exposure,
-    plot_source_depth_panels,
+    plot_source_depth_panels, draw_contours,
 )
 from uacpy.visualization.plots.animation import (
     animate_field, save_animation, plot_time_snapshots,
@@ -37,12 +37,16 @@ from uacpy.visualization.plots.rays_modes import (
     plot_rays, plot_arrivals, plot_mode_shapes,
     plot_reflection_coefficient, plot_covariance, plot_replicas,
 )
-# The labelled twins of plot_field and plot_source_depth_panels a Field
-# names in ``_plotter_name()``: their refusals name the call the user made
-# (``Field.plot``, ``plot_result``), looked up here by name
+# The labelled twins a result names in ``_plotter_name()`` in place of its
+# public plotter: their refusals name the call the user made (``Field.plot``,
+# ``Rays.plot``, ``plot_result``), looked up here by name
 # (:func:`_draw_result`).
 from uacpy.visualization.plots.fields import (  # noqa: F401
     _plot_field_as, _plot_source_depth_panels,
+)
+from uacpy.visualization.plots.rays_modes import (  # noqa: F401
+    _plot_rays, _plot_arrivals, _plot_mode_shapes,
+    _plot_reflection_coefficient, _plot_covariance, _plot_replicas,
 )
 from uacpy.visualization.plots.environment import (
     plot_environment, plot_ssp, plot_range_profile,
@@ -57,7 +61,6 @@ from uacpy.visualization.plots.signal import (
     plot_psd, plot_ppsd,
     plot_spectrogram, plot_cwt, plot_wigner_ville, plot_cepstrum,
     plot_constant_q_transform, plot_constant_q_spectrogram,
-    plot_constant_q_psd, plot_constant_q_ppsd,
     plot_band_levels, plot_ambiguity,
     plot_matched_field,
     plot_frf, plot_coherence, plot_lsfir_diagnostics,
@@ -65,8 +68,8 @@ from uacpy.visualization.plots.signal import (
 from uacpy.visualization.plots.comms import (
     plot_channel, plot_channel_response, plot_doppler_ambiguity,
     plot_convergence, plot_sync_metric,
-    plot_subcarriers, plot_scatter, plot_constellation, plot_eye_diagram,
-    plot_ber_curve,
+    plot_subcarriers, plot_received_symbols, plot_constellation,
+    plot_eye_diagram, plot_ber_curve,
 )
 from uacpy.visualization.plots.noise import (
     plot_wenz, plot_weighting, plot_source_level, plot_roc,
@@ -105,9 +108,9 @@ def _draw_result(who: str, result, /, env: Optional[Environment] = None,
     reaches the plotter.
 
     The result names its view (``result._plotter_name()``, a plotter in this
-    module) and whether that view draws an environment
-    (``result._draws_env``): such a view is handed ``env``, and ``who`` too
-    when it takes one (a view whose refusals name the call); any other view
+    module), handed ``who`` when it takes one (a labelled twin, whose
+    refusals name the call), and whether that view draws an environment
+    (``result._draws_env``): such a view is handed ``env``; any other view
     refuses ``env=`` rather than drop it, since accepting it silently would
     look like it had an effect. A ``ResultStack`` is refused before the
     lookup: its slabs are drawn one at a time."""
@@ -127,13 +130,12 @@ def _draw_result(who: str, result, /, env: Optional[Environment] = None,
             f"{who}: no plotter registered for {type(result).__name__}."
         )
     draw = globals()[name]
+    named = {'who': who} if 'who' in inspect.signature(draw).parameters else {}
     if not result._draws_env:
         if env is not None:
             raise ConfigurationError(result._env_refusal(who))
-        return draw(result, **kwargs)
-    if 'who' in inspect.signature(draw).parameters:
-        return draw(result, env=env, who=who, **kwargs)
-    return draw(result, env=env, **kwargs)
+        return draw(result, **named, **kwargs)
+    return draw(result, env=env, **named, **kwargs)
 
 
 def plot_carrier(carrier, **kwargs):
@@ -189,6 +191,7 @@ __all__ = [
     'plot_replicas',
     'plot_signal_excess',
     'plot_detection_probability',
+    'draw_contours',
     'plot_track_exposure',
     'compare',
     'compare_models',
@@ -221,8 +224,6 @@ __all__ = [
     'plot_spectrogram',
     'plot_constant_q_transform',
     'plot_constant_q_spectrogram',
-    'plot_constant_q_psd',
-    'plot_constant_q_ppsd',
     'plot_cwt',
     'plot_wigner_ville',
     'plot_cepstrum',
@@ -238,7 +239,7 @@ __all__ = [
     'plot_convergence',
     'plot_sync_metric',
     'plot_subcarriers',
-    'plot_scatter',
+    'plot_received_symbols',
     'plot_constellation',
     'plot_eye_diagram',
     'plot_ber_curve',

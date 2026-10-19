@@ -118,7 +118,7 @@ def grid_is_paired(grid_type) -> bool:
     over their Cartesian product — the pairing the ``'I'`` deck also
     enforces by requiring equal lengths
     (:func:`~uacpy.models.bellhop._checks.reject_unequal_paired_grid`).
-    BELLHOP sorts each array on read (``SourceReceiverPositions.f90:224``),
+    BELLHOP sorts each array on read (``SourceReceiverPositions.f90:224``, ``:268``),
     so the pairs are always a monotone diagonal.
     """
     return str(grid_type).upper() == 'I'

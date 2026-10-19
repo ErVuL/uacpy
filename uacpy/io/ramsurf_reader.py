@@ -32,18 +32,15 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import numpy as np
 
 from uacpy.core._export import ExportRecord
 
-from uacpy.io._fortran_helpers import (
-    detect_endian, read_fortran_record, require_model_output,
-    typed_format_error,
-)
-from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.exceptions import ConfigurationError, FileFormatError, IOWarning
+from uacpy.io._fortran_helpers import require_model_output, typed_format_error
+from uacpy.io._parsers import parse_pcomplex_grid, parse_tl_grid
+from uacpy.core.exceptions import ConfigurationError, FileFormatError
 
 
 #: The quantities a Collins output file holds, and their units.
@@ -184,106 +181,6 @@ def read_tl_line(filepath: Union[str, Path]) -> PeGrid:
                   data=data[:, 1].astype(float))
 
 
-#: Double-precision kind → the single-precision kind a stock build writes.
-_SINGLE_PRECISION = {'f8': 'f4', 'c16': 'c8'}
-
-
-def _read_lz_records(
-    filepath: Union[str, Path], *, dtype: str
-) -> Tuple[int, np.ndarray]:
-    """
-    Read a Fortran-unformatted file whose record 1 is ``int32 lz`` and
-    records 2..N each hold ``lz`` samples of ``dtype``. Returns ``(lz,
-    matrix[lz, n_records])``.
-
-    ``dtype`` is an endian-agnostic kind string (``'f8'``, ``'c16'`` — the
-    Collins binaries are built with ``-fdefault-real-8``); this
-    helper owns byte order entirely. Byte order is auto-detected from the
-    first record marker and applied to ``dtype`` here, so callers must not
-    pass a ``<``/``>`` prefix (any prefix is stripped defensively). A
-    one-shot warning fires the first time a big-endian file is decoded.
-
-    ``dtype`` names the double-precision kind; a first data record of half
-    that length (``lz`` single-precision samples, a stock build) switches
-    the file to ``'f4'``/``'c8'``, returned upcast to ``dtype``. Bytes left
-    after the last whole record (a run cut short mid-write) warn with the
-    count of records kept.
-    """
-    path = Path(filepath)
-    with path.open('rb') as f:
-        f.seek(0, 2)
-        file_size = f.tell()
-        f.seek(0)
-        # 12 bytes is the smallest possible file: the header record is a
-        # 4-byte marker, one int32 ``lz``, and a 4-byte trailing marker.
-        if file_size < 12:
-            raise FileFormatError(f"{path}: too short to contain the header record.")
-
-        probe = f.read(4)
-        f.seek(0)
-        endian = detect_endian(probe, source=f'ramsurf_reader:{path.name}')
-        # Re-anchor the caller-supplied dtype on the detected byte order so
-        # the file decodes correctly regardless of host endianness.
-        base_dtype = dtype.lstrip('<>=|')
-        item_dtype = np.dtype(endian + base_dtype)
-
-        (lz,) = read_fortran_record(f, 'i', endian=endian)
-        single = _SINGLE_PRECISION.get(base_dtype)
-        if single is not None and lz > 0 and file_size - f.tell() >= 4:
-            (first_len,) = np.frombuffer(f.read(4), dtype=endian + 'i4')
-            f.seek(-4, 1)
-            if first_len == lz * np.dtype(single).itemsize:
-                item_dtype = np.dtype(endian + single)
-        expected = lz * item_dtype.itemsize
-
-        columns = []
-        # Stop before a partial trailing record: each data record is its
-        # ``lz``-sample payload framed by a leading and trailing 4-byte marker.
-        while file_size - f.tell() >= 8 + expected:
-            payload = read_fortran_record(f, raw=True, endian=endian)
-            if len(payload) != expected:
-                raise FileFormatError(
-                    f"{path}: expected {expected}-byte data record, "
-                    f"got {len(payload)}."
-                )
-            col = np.frombuffer(payload, dtype=item_dtype).astype(
-                base_dtype, copy=True
-            )
-            columns.append(col)
-        leftover = file_size - f.tell()
-
-    if not columns:
-        raise FileFormatError(f"{path}: no data records found.")
-    if leftover:
-        warnings.warn(
-            f"{path.name}: {leftover} byte(s) after the last whole "
-            f"{expected}-byte record are not a complete range step and were "
-            f"dropped; {len(columns)} range step(s) read. The run was cut "
-            f"short while writing.",
-            IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
-
-    return lz, np.stack(columns, axis=1)
-
-
-def _grid_axes(lz, n_ranges, dr, ndr, dz, ndz, depth_index_offset):
-    """Range and depth axes (m) shared by ``tl.grid`` and ``pcomplex.bin``,
-    which are written on the same (z, r) grid."""
-    ranges = np.arange(1, n_ranges + 1, dtype=float) * dr * ndr
-    depths = (depth_index_offset
-              + np.arange(1, lz + 1, dtype=float) * ndz - 1) * dz
-    return ranges, depths
-
-
-def _read_grid(filepath, reader, dtype, dr, ndr, dz, ndz, depth_index_offset):
-    """``(ranges, depths, field)`` of a ``tl.grid``-shaped file; the field is
-    native-endian ``dtype`` straight from :func:`_read_lz_records`."""
-    require_model_output(filepath, reader)
-    lz, field = _read_lz_records(filepath, dtype=dtype)
-    ranges, depths = _grid_axes(lz, field.shape[1], dr, ndr, dz, ndz,
-                                depth_index_offset)
-    return ranges, depths, field
-
-
 @typed_format_error
 def read_tl_grid(
     filepath: Union[str, Path],
@@ -325,8 +222,10 @@ def read_tl_grid(
         the depth axis (m), and ``data`` of shape
         ``(n_depths, n_ranges)``.
     """
-    ranges, depths, tl = _read_grid(filepath, 'read_tl_grid', 'f8', dr, range_decimation,
-                                    dz, depth_decimation, depth_index_offset)
+    ranges, depths, tl = parse_tl_grid(
+        filepath, dr=dr, range_decimation=range_decimation, dz=dz,
+        depth_decimation=depth_decimation,
+        depth_index_offset=depth_index_offset)
     return PeGrid(quantity='transmission_loss', unit='dB', ranges=ranges,
                   depths=depths, data=tl)
 
@@ -378,7 +277,9 @@ def read_pcomplex_grid(
         carrier and the Hankel phase the RAM wrapper applies, so not a
         pressure.
     """
-    ranges, depths, p = _read_grid(filepath, 'read_pcomplex_grid', 'c16', dr,
-                                   range_decimation, dz, depth_decimation, depth_index_offset)
+    ranges, depths, p = parse_pcomplex_grid(
+        filepath, dr=dr, range_decimation=range_decimation, dz=dz,
+        depth_decimation=depth_decimation,
+        depth_index_offset=depth_index_offset)
     return PeGrid(quantity='pe_envelope', unit='', ranges=ranges,
                   depths=depths, data=p)

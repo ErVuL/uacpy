@@ -506,8 +506,34 @@ def test_a_water_sound_speed_crust1_does_not_use_is_announced(cache, speed,
         fetch_bottom((30.0, -40.0), source='crust1', depth=3000.0,
                      water_sound_speed=speed)
     unused = [w for w in caught if issubclass(w.category, FallbackWarning)
-              and 'water_sound_speed= was not used' in str(w.message)]
+              and f'water_sound_speed={speed} was not used'
+              in str(w.message)]
     assert len(unused) == notices
+
+
+@pytest.mark.parametrize('kw, expected', [
+    ({'model': 'apl-uw', 'depth': 3000.0},
+     ["fetch_bottom: depth=3000.0", "fetch_bottom: model='apl-uw'"]),
+    ({'hamilton_fit': 'abyssal-plain'},
+     ["fetch_bottom: hamilton_fit='abyssal-plain'"]),
+    ({}, []),
+])
+def test_the_settings_crust1_does_not_read_are_announced(cache, monkeypatch,
+                                                         kw, expected):
+    """CRUST1.0 converts no grain size and is not depth-driven: a model,
+    hamilton_fit or depth given when it answers changed nothing (the depth
+    only stood in for the dry-point lookup), one notice each."""
+    from uacpy.core.exceptions import FallbackWarning
+    from uacpy.data import fetch_bottom
+    monkeypatch.setattr(environment, '_refuse_a_dry_point',
+                        lambda point, **kw: None)
+    with recorded_warnings() as caught:
+        fetch_bottom((30.0, -40.0), source='crust1',
+                     **{'depth': None, **kw})
+    unused = sorted(str(w.message).split(' was not used')[0] for w in caught
+                    if issubclass(w.category, FallbackWarning)
+                    and 'was not used' in str(w.message))
+    assert unused == expected
 
 
 def test_a_crust1_environment_lists_the_licence_once(cache):
@@ -534,8 +560,13 @@ def test_a_crust1_environment_lists_the_licence_once(cache):
         (30.0, -40.0), (31.0, -40.0), n_points=3, source='crust1'),
 ], ids=['fetch_crust1_profile', 'fetch_bottom_crust1',
         'fetch_bottom_crust1_transect', 'fetch_bottom', 'fetch_bottom_transect'])
-def test_every_public_crust1_reader_warns_that_it_is_non_commercial(cache, read):
+def test_every_public_crust1_reader_warns_that_it_is_non_commercial(
+        cache, monkeypatch, read):
     from uacpy.core.exceptions import ProvenanceWarning
+    # fetch_bottom first asks whether the point is wet; this cache holds no
+    # GEBCO grid, so that lookup would go to OpenTopoData.
+    monkeypatch.setattr(environment, '_refuse_a_dry_point',
+                        lambda point, **kw: None)
     with recorded_warnings() as caught:
         read()
     assert [w for w in caught if issubclass(w.category, ProvenanceWarning)

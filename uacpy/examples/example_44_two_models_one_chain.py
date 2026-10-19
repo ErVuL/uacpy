@@ -10,7 +10,7 @@ docs/guide/sonar.md §3 reads the two detection maps, docs/guide/arrays.md
 Uses: Kraken(mode_coupling='coupled') · Bellhop · Field.p over source_depth ·
 beamform_field (narrowband and broadband) · BeamformedField.to_time_trace ·
 Field.to_time_trace(source_waveform=) · RunMode.BROADBAND · compare_models ·
-passive_signal_excess_field(array_gain_dB=<grid>) · plot_waveform
+passive_signal_excess_field(array_gain_dB=<grid>) · Field.plot(value='envelope')
 """
 
 import os
@@ -23,7 +23,7 @@ import uacpy
 from uacpy.acoustic_signal import (beamform_field, independent_beams,
                                    shading_taper, tone_burst)
 from uacpy.models import RunMode
-from uacpy.plot import compare_models, plot_waveform
+from uacpy.plot import compare_models
 from uacpy.sonar import (detection_ranges_field, detection_threshold_energy,
                          passive_signal_excess_field, per_look_false_alarm,
                          transition_probability_field)
@@ -139,14 +139,12 @@ for label, angle in ((f'beam at {look:+.1f}°', look),
                                         t_start=t_start)
 peak_one = np.max(np.abs(np.asarray(traces['one element'].data)))
 for label, trace in traces.items():
-    y = np.asarray(trace.data).ravel()
-    t = np.asarray(trace.coords['time'])
-    print(f"{label:>15}: peak {20.0 * np.log10(np.max(np.abs(y)) / peak_one):+5.1f} "
+    peak = np.max(np.abs(np.asarray(trace.data)))
+    print(f"{label:>15}: peak {20.0 * np.log10(peak / peak_one):+5.1f} "
           f"dB re one element")
-    plot_waveform(y, 1.0 / float(np.diff(t)[0]), ax, t0=float(t[0]),
-                  value='envelope', label=label,
-                  title=f'A {FREQ:.0f} Hz tone burst from {TARGET_DEPTH:.0f} m '
-                        f'at {R_SHOT / 1e3:.0f} km')
+    trace.plot(ax=ax, value='envelope', label=label,
+               title=f'A {FREQ:.0f} Hz tone burst from {TARGET_DEPTH:.0f} m '
+                     f'at {R_SHOT / 1e3:.0f} km')
 ax.legend(fontsize=8)
 fig.tight_layout()
 fig.savefig(OUT / 'example_44_reception.png', dpi=140, bbox_inches='tight')

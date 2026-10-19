@@ -1,6 +1,6 @@
 # External data — building an Environment from the real ocean
 
-> `uacpy.data` · 78 public names · GPS coordinates (and a date) in, a
+> `uacpy.data` · 79 public names · GPS coordinates (and a date) in, a
 > ready-to-run [`Environment`](environment.md) out
 
 [Environment](environment.md) tells you how to *describe* the ocean. This page
@@ -82,7 +82,7 @@ tl.plot(env=env, source=source)
 | `surface` | ❌ | free (pressure-release) surface |
 | `altimetry` | ❌ | flat sea surface |
 | `absorption` | ❌ (`with_absorption=True`) | none: lossless water (pass `absorption=Thorp()` for a frequency-only law) |
-| `water_density` | with `with_absorption=True` (the T/S row at mid-depth, IES-80; a grain-size seabed takes its density ratio against it) | 1.027 g/cm³ |
+| `water_density` | with `with_absorption=True` (the T/S row at mid-depth of the column read at the point — the start on a transect — IES-80; a grain-size seabed takes its density ratio against it) | 1.027 g/cm³ |
 
 **Bathymetry and sound speed are mandatory axes**, so with neither a literal
 nor a `*_sources` list they are fetched from the default chains. The seabed,
@@ -120,29 +120,40 @@ environment with no `bottom_sources=` has a *made-up* seabed, and
 | `n_points` | `None` | bathymetry samples along the transect: an int is used as given, `None` is 50 (uacpy guidance); `'auto'` targets GEBCO native resolution |
 | `max_points` | `None` | the sampling budget per axis: the points an `'auto'` count probes, and the ceiling of an unset count; `None` = 1000 for `'auto'` (uacpy guidance). An explicit count above an explicit `max_points` is refused, naming both |
 | `range_dependent_ssp` / `_bottom` / `_surface` | `None` | `None` = range-dependent on a transect, range-independent at a point |
-| `ssp_n_points` | `'auto'` | one column per distinct grid cell crossed (WOA23 1°, Copernicus 1/12°) |
+| `ssp_n_points` | `None` | `'auto'`: one column per distinct grid cell crossed (WOA23 1°, Copernicus 1/12°) |
 | `bottom_n_points` | `None` | seabed samples, `None` = 6 (uacpy guidance); `'auto'` probes every waypoint |
-| `surface_n_points` | `'auto'` | ice/open-water zones collapsed to one boundary each |
+| `surface_n_points` | `None` | `'auto'`: ice/open-water zones collapsed to one boundary each |
 | `altimetry_n_points`, `altimetry_rng` | `None`, `None` | fetched sea-surface realisation; `n_points=None` sizes the grid from the sea state (8 samples per Pierson-Moskowitz peak wavelength, floored at 500), so a long transect resolves its waves instead of aliasing them flat |
 
 **Tolerances and numerics**
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `bottom_model` | `'hamilton'` | grain-size → geoacoustics relations behind every seabed that arrives as a ϕ (all sources but `crust1`, and a ϕ literal): `'apl-uw'` for 10–100 kHz work, see [§5](#the-grain-size-conversion) |
+| `bottom_model` | `None` | `'hamilton'`: grain-size → geoacoustics relations behind every seabed that arrives as a ϕ (all sources but `crust1`, and a ϕ literal): `'apl-uw'` for 10–100 kHz work, see [§5](#the-grain-size-conversion) |
 | `bottom_hamilton_fit` | `None` | which Hamilton & Bachman fit `'hamilton'` evaluates (the per-layer fetchers' `hamilton_fit=`): `'continental-terrace'` when `None`, `'abyssal-hill'` or `'abyssal-plain'`; a deep-ocean site wants an abyssal fit, which nothing infers; refused beside `bottom_model='apl-uw'` |
 | `surface_threshold` | `None` | lowest sea-ice concentration (fraction 0–1) a fetched surface takes as ice cover; `None` = 0.15, NSIDC's ice edge, uacpy guidance as the acoustic switch (see [ice](#ice--a-different-top-boundary)) |
 | `with_absorption` | `False` | build a `FrancoisGarrison` profile from the site's T/S column (and GLODAP pH) |
 | `max_distance_km` | `None` | refuse data whose point (cast, sample, or cell centre) stands farther than this from the site, on every fetched axis; see [the offset rule](#the-offset-rule) |
-| `max_days` | `None` | staleness guard for the **time-specific** SSP sources (`argo`, `copernicus`); ignored by climatologies |
+| `max_days` | `None` | staleness guard for every **time-specific** read: the SSP sources (`argo`, `copernicus`), the absorption's T/S and Copernicus BGC pH on those branches, the WAVERYS sea state; ignored by climatologies, WaveWatch III and live NBS wind |
 | `formula` | `'teos10'` | sound-speed equation; `'unesco'` (Chen–Millero 1977, ≈ 0.6 m/s high in deep water), `'delgrosso'` (open-ocean salinity only) and `'mackenzie'` (Mackenzie 1981's nine-term equation, also `formula='mackenzie'` on `SoundSpeedProfile.from_temperature_salinity`) also available, see [utilities](utilities.md) |
-| `resolution` | `'1.00'` | WOA23 grid spacing in degrees (`'0.25'` for the fine grid) |
+| `resolution` | `None` | `'1.00'`: WOA23 grid spacing in degrees (`'0.25'` for the fine grid, read live: `--data woa23` installs the 1° grids only) |
 | `timeout`, `verbose` | `120.0`, `False` | forwarded to the fetchers |
 
 The named choices `bottom_model`, `bottom_hamilton_fit`, `formula` and every
 `*_sources` id match in any case (`'Hamilton'`, `'TEOS10'`, `'WOA23'`), as do
 the ids and presets the per-layer fetchers take as `source=`; unit
 strings stay exact, since there case carries meaning (`dB`).
+
+A setting you give that the run does not use is never dropped in silence: a
+`FallbackWarning` names it and why ("`n_points=30` was not used: no transect_to
+is given …"; `bottom_model` with no grain size converted, `resolution` with no
+WOA23 grid read, `max_days` with no time-specific source read). The per-layer
+fetchers do the same: `fetch_ssp` for `max_days` when WOA23 answers and for
+`month`, `resolution`, `decade` and `base_url` when Argo or Copernicus answers;
+`fetch_bottom` for `model`, `hamilton_fit` and `water_sound_speed` when CRUST1.0
+answers and for `depth` when a source other than `'pelagic'` answers (a given
+depth still stands in for the wet-point check). A setting left at `None` says
+nothing.
 
 ---
 
@@ -226,7 +237,7 @@ grid = uacpy.data.fetch_bathy_grid(
     REGION_LAT, REGION_LON, n_lat=420, n_lon=420, source='local')
 
 uacpy.plot.plot_bathymetry_map(
-    grid.lats, grid.lons, grid.depths, transect=(A, B), source=A,
+    grid.lats, grid.lons, grid.depths, transect=(A, B), source_point=A,
     contours=[200.0, 1000.0, 2000.0, 3000.0, 4000.0],
     show_data_credit=[uacpy.data.SOURCES['gebco']],
     title='GEBCO 2025 — Celtic shelf break to the Biscay abyssal plain')
@@ -269,7 +280,7 @@ only.
 
 | Source | Coverage | Resolution | Time | Licence | Offline |
 |---|---|---|---|---|---|
-| `woa23` | global | 1° (or 0.25°), 102 standard levels to 5500 m | monthly **climatology** | public domain (NOAA) | ✅ `--data woa23` |
+| `woa23` | global | 1° (or 0.25°), 102 standard levels to 5500 m | monthly **climatology** | public domain (NOAA) | ✅ `--data woa23` (1°; 0.25° live only) |
 | `copernicus` | global | operational model grid | date-specific (reanalysis / forecast) | Copernicus Marine Licence (commercial OK) | ❌ live, free login |
 | `argo` | ice-free ocean, float-dependent | one real cast | the nearest profile in space and time | free and unrestricted | ❌ live |
 | `glodap` | global | 1°, 33 levels | climatology | CC-BY 4.0 | ✅ `--data glodap` |
@@ -345,15 +356,26 @@ with the temperature and salinity there
 (`FrancoisGarrison.from_temperature_salinity`; its `collapse_to_depth=` keeps
 the one row nearest that depth instead, whose water then stands for the whole
 column). pH is the cached GLODAP column when installed, as `(depth, pH)`
-pairs on its own levels, one value at the column's mid-depth from Copernicus
+pairs on its own levels (at a coastal point whose own GLODAP cell holds no
+column, the column of the cell the T/S came from, so the two share one
+location, the offset announced), one value at the column's mid-depth from Copernicus
 BGC on that branch, and 8.0 (the package's reference sea water, announced in
 the call's notice with the reason) otherwise (a fetched pH is declared `ph_scale='total'` and converted to the
 NBS scale the formula was fitted on; see [environment](environment.md)). The
 mid-depth T/S row sets `env.water_density` (IES-80 at that T and S), the one
 density every deck's water column carries — see
-[Conventions](environment.md#8-conventions-and-gotchas). The absorption is
-drawn from the same WOA23 cell and grid resolution as the SSP, so the two are
-consistent. See
+[Conventions](environment.md#8-conventions-and-gotchas). At a point the
+absorption is drawn from the same WOA23 cell and grid resolution as the SSP,
+so the two are consistent. On a transect the column is read at the start
+point, and when the track's deepest seafloor sample lies below that column's
+deepest level, the column read at that sample (one more request) continues it
+below — T/S rows, and GLODAP pH levels when the start's pH is a GLODAP column —
+so the deep water is not given the start's deepest row (the law holds a
+column's end rows past its depths). The added column is cited in
+`env.data_sources`; the water density stays the start column's; a column that
+cannot be read is named in the call's notice. The T/S and pH records are the
+law's own, `env.absorption.data_sources`, so `env.absorption.table(f)` carries
+them and its plot credits them. See
 [environment §6](environment.md#6-absorption--volume-attenuation) for what the
 absorption models do once attached.
 
@@ -423,9 +445,14 @@ the shapes, not just the values:
   section can mean uniform seabed or no coverage, and only the source's
   documented footprint tells you which.
 - **`graw`** is the one continuous field, so it is the only curve that varies
-  smoothly. It is a machine-learning prediction of bulk *density*, with speed and
-  attenuation back-derived by inverting the same Hamilton table the other sources
-  use forwards.
+  smoothly. It is a machine-learning prediction of bulk *density* trained on
+  drill-core measurements, with speed and attenuation back-derived from the grain
+  size that density gives — APL-UW TR 9407 §IV.A.5's route for a bulk value:
+  the inverted Hamilton-Bachman regression (its Eq. 12), then every other
+  input from the grain size. Under `bottom_model='apl-uw'` that includes the
+  density, APL-UW's surficial value at that grain size; under `'hamilton'` the
+  measured density travels as it is. Below 1.448 g/cm³ the grain size is held
+  at 9 ϕ, so the speed there does not follow the measured density.
 - **`pelagic`** is a first-principles rule (carbonate compensation depth and
   latitude), so it steps exactly once, where the track crosses the CCD. It never
   fails, which is why it is the last rung of every chain.
@@ -523,7 +550,7 @@ the lookup the NCEI sample fetcher uses), converted once per distinct sample:
 ```python
 bottom = uacpy.data.bottom_from_samples(
     survey.lat, survey.lon, survey.phi, A, B, max_distance_km=25.0,
-    water_sound_speed=1490.0)
+    water_sound_speed=1490.0, water_density=1.025)
 env = uacpy.data.fetch_environment(A, transect_to=B, bottom=bottom,
                                    ssp_sources='local')
 ```
@@ -534,8 +561,10 @@ change of seabed lands within one probe step of where the nearest sample
 changes. A waypoint with no sample within `max_distance_km` is a gap, filled
 from the nearest covered waypoint with a warning; without a limit every
 waypoint takes its nearest sample and one warning counts those farther than
-10 km. `model=`, `hamilton_fit=` and `water_sound_speed=` (a speed, or a
-`(lat, lon)` callable read at each waypoint) reach the conversion.
+10 km. `model=`, `hamilton_fit=`, `water_sound_speed=` and `water_density=`
+(each water value a number, or a `(lat, lon)` callable read at each waypoint)
+reach the conversion — pass the deck's `env.water_density` to carry the density
+ratio against the site's water, as a fetched seabed is.
 
 **Choosing the conversion for a fetched seabed.** Every seabed source that
 reports a ϕ goes through this conversion, so the choice is one keyword away:
@@ -622,12 +651,18 @@ fram = ((81.0, -2.0), (76.5, 2.0))          # Fram Strait, marginal ice zone
 
 for month, label in ((3, 'March — winter maximum'),
                      (9, 'September — summer minimum')):
-    uacpy.plot.plot_sea_ice_map(
-        uacpy.data.sea_ice_grid(month, hemi='N'), hemi='N',
-        transect=fram, title=label)
+    ice = uacpy.data.sea_ice_grid(month, hemi='N')   # SeaIceGrid
+    ice.plot(transect=fram, title=label)
 ```
 
 ![NSIDC sea-ice climatology](figures/data_sea_ice.png)
+
+`sea_ice_grid` returns a `SeaIceGrid`: the hemisphere's concentration
+(`ice.concentration`, also `np.asarray(ice)`; `NaN` is land), its `hemi` and
+`month`, the cell centres as projected `ice.x` / `ice.y` (m, `ice.crs`) and as
+`ice.lats` / `ice.lons`, and the climatology's `provenance`; `ice.to_xarray()`
+carries all of it. The record is read-only: `np.array(ice)` is a copy to mask
+or edit.
 
 `surface_sources='seaice'` reads the NSIDC concentration at the point for
 `date`'s month and, at or above `surface_threshold` (default 15 %), replaces the free surface with a
@@ -708,7 +743,7 @@ is what each axis does with it.
 | Axis | Sampling | Why |
 |---|---|---|
 | bathymetry | `n_points=None` (50), or `'auto'` at GEBCO native spacing | continuous field, nothing to collapse |
-| SSP | `ssp_n_points='auto'` — one column per **distinct grid cell** crossed (WOA23 1°, Copernicus 1/12°) | the cell is the sample identity (WOA23's found analytically, Copernicus's from the dataset's own axes), so no duplicate column is ever fetched; each Copernicus column is one remote read, so a long transect makes many |
+| SSP | `ssp_n_points='auto'` — one column per **distinct grid cell** crossed (WOA23 1°, Copernicus 1/12°) | the cell is the sample identity (WOA23's found analytically, Copernicus's from the dataset's own axes), so no crossed cell is fetched twice — but a dry coastal WOA23 cell takes its nearest wet cell's column, which a neighbouring crossed cell may take too (each record names the cell read and its distance); each Copernicus column is one remote read, so a long transect makes many |
 | bottom | `bottom_n_points=None` (6) | the seabed sources expose no cheap identity, so `'auto'` must *fetch* at every probe point |
 | surface | `surface_n_points='auto'` — consecutive ice/open zones collapsed | the marginal ice zone at native scale, no staircase |
 
@@ -803,7 +838,7 @@ This is the part that gets people into trouble, so uacpy makes it hard to lose.
   one DataFrame.
 - A `TSProfile` (`fetch_ts_profile`, `fetch_ts_profile_operational`) or a
   `PHProfile` (`fetch_ph_profile`) holds one on `.provenance`.
-- A `BathyGrid` (`fetch_bathy_grid`) holds one on `.provenance`.
+- A `BathyGrid` (`fetch_bathy_grid`) and a `SeaIceGrid` (`sea_ice_grid`) hold one on `.provenance`.
 - An `AlongTrack` (the scalar transects: `fetch_sediment_thickness_transect`,
   `fetch_seabed_density_transect`, `fetch_sea_ice_concentration_transect`,
   `fetch_wind_transect`) holds a tuple of records on `.provenance`, one per
@@ -909,6 +944,12 @@ waypoint, and each sample past a threshold has its own notice. One call of
 sentence of each: `fetch_bottom_transect: 3 note(s) on where the seabed's data
 come from: (1) …; (2) …; (3) …`. A licence notice and a waypoint filled from
 its neighbour are listed the same way; any other warning passes on as it came.
+So inside such a call a substitution (a waypoint filled from its neighbour, a
+profile extended to the seafloor) reaches you in the `ProvenanceWarning`, not
+as a `FallbackWarning`: `filterwarnings('ignore', category=FallbackWarning)`
+leaves it shown, and ignoring `ProvenanceWarning` hides it with the rest of the
+summary. The same note from a fetcher called on its own, outside such a call,
+is a `FallbackWarning`.
 The point fetchers whose answer can carry more than one note — `fetch_ssp`,
 `fetch_bottom`, `fetch_sea_surface`, `fetch_waves`, `fetch_argo_profile`,
 `fetch_ssp_argo` and the `*_operational` Copernicus fetchers (a cast both far
@@ -943,8 +984,13 @@ p.range == r]` is what was read at range `r`. Each record also says what its
 `data_point` is: `point_kind` (`'cell'`, `'cast'`, `'sample'`, or `None` for a
 value read at the point itself), `cell_size_deg` for a regular grid, and
 `from_neighbour_cell` when the fetcher knows whether the point's own cell was
-read. `citations()` gives a source read at several points one block whose
-`Fetched:` line summarises them:
+read. The bathymetry is the exception: a fetched transect's
+`env.bathymetry.data_sources` holds one record, for the start point — the
+centre of the local GEBCO cell read there, the node the EMODnet DTM's reply
+names, or the point itself for GMRT and OpenTopoData, which name none — and
+the other waypoints' depths are not recorded one by one (a point fetch's
+record is built the same way). `citations()` gives a source read at several
+points one block whose `Fetched:` line summarises them:
 
 ```
   Fetched:     date annual mean (climatology); 4 points along the transect, 0.0–78.3 km away (largest at range 0 km: nearest wet 1° cell, centred 42.50 N, 4.50 E)
@@ -987,23 +1033,29 @@ time offset `offset_days`, and one row for the engine that produced
 
 ### Credit on every figure
 
-The plotters that own an environment draw its attribution as a grey footnote,
+The plotters that draw an environment add its attribution to a grey footnote,
 automatically. You have already seen it twice on this page — under the
 bathymetry map and under the environment cross-section:
 
 | Call | Footnote |
 |---|---|
 | `env.plot()` | `Data:` from `env.data_sources` |
+| `env.ssp.plot()` / `plot_ssp(env)` | `Data:` from `env.ssp.data_sources` |
+| `env.bathymetry.plot()` / `plot_range_profile(profile)` | `Data:` from the profile's `data_sources` |
+| `env.absorption.table(f).plot()` / `plot_absorption(table)` | `Data:` from the table's `data_sources`: the T/S and pH records of a `with_absorption=True` law |
 | `tl.plot(env=env)` | `Model:` from the result, above `Data:` from the env |
 | `plot_bottom_properties(env)` | `Data:` from `env.data_sources` |
 | `plot_bathymetry_map(grid)` | `Data:` from the `BathyGrid`'s `.provenance`; bare arrays: whatever `show_data_credit=` hands it |
+| `plot_sea_ice_map(grid)` / `grid.plot()` | `Data:` from the `SeaIceGrid`'s `.provenance` (the NSIDC climatology and its reference period) |
 | `plot_overview(env, ...)` | both, centred under the map panel |
 
 The map is the exception that shows the rule: a bare `(lats, lons, depth)` grid
 carries no provenance of its own, which is why the figure in §3, drawn from the
 grid's arrays, passes `show_data_credit=[SOURCES['gebco']]` explicitly; the
-`BathyGrid` `fetch_bathy_grid` returns, passed whole, credits itself. Only footnotes on standalone
-figures are drawn — a plotter given `ax=` leaves the composition to its caller.
+`BathyGrid` `fetch_bathy_grid` returns, passed whole, credits itself. The credit
+follows the plot into any figure: a plotter given `ax=` adds its sources to the
+footnote of the figure that axes belongs to, each source once
+([plotting guide §5](plotting.md#5-composition-with-ax)).
 
 Pass `show_data_credit=False` to suppress it, an `Environment` / `Result` / list of
 `DataSource` / list of strings to override it. The default is `True`, which
@@ -1087,14 +1139,19 @@ before failing, and verifies all four grids against their md5 before writing
 any, so what decides whether a download is CRUST1.0 is the data rather than the
 host it came from.
 
-The live services that take no address keyword read their host from an
-exported module constant, so a mirror is one assignment: GMRT
-(`uacpy.data.gmrt_live.POINT_URL`, `GRID_URL`), the EMODnet DTM
-(`uacpy.data.emodnet_bathy_live.ERDDAP_URL`), NBS wind
-(`uacpy.data.wind_live.ERDDAP_URL`) and WaveWatch III
-(`uacpy.data.ww3_live.ERDDAP_URL`). `fetch_bathy(base_url=)` is the
-OpenTopoData root that `'gebco'` falls back to online, and is refused with a
-source that never reads it.
+The live fetchers take the same keyword: `base_url=` is the address of the
+service the call reads, and left at its default it reads that service's
+exported module constant. On the bathymetry fetchers it is the root of
+whichever live service `source=` names — the OpenTopoData root `'gebco'`
+falls back to online, the GMRT services root (`PointServer` and `GridServer`
+hang under it; `uacpy.data.gmrt_live.POINT_URL`, `GRID_URL`) or the EMODnet
+DTM griddap root (`uacpy.data.emodnet_bathy_live.ERDDAP_URL`) — and is
+refused with a source that reads no live service (`'local'`) or several
+(`'auto'`). `fetch_wind` / `fetch_wind_transect` take the NBS griddap root
+(`uacpy.data.wind_live.ERDDAP_URL`; refused with `source='local'`), and
+`fetch_waves` the WaveWatch III one (`uacpy.data.ww3_live.ERDDAP_URL`;
+refused when `source=` holds no `'ww3'`, and noted as unused when WAVERYS
+answers).
 
 Only `http`/`https` are accepted, on both transports — a `file://` or `ftp://`
 address is refused rather than turned into a local-file read. And a dataset
@@ -1168,8 +1225,11 @@ is covered. Check the source's coverage before reading structure into a flat
 line.
 
 **`max_days` does not apply to everything; `max_distance_km` does.**
-`max_days` guards the time-specific sources (`argo`, `copernicus`);
-climatologies ignore it. `max_distance_km` reaches every fetched axis, grids
+`max_days` guards the time-specific reads (`argo`, `copernicus` — its SSP and,
+with `with_absorption`, its T/S and BGC pH — and the WAVERYS sea state);
+climatologies, WaveWatch III and the live NBS wind ignore it. A monthly
+Copernicus product stamps its step once per month, so a `max_days` shorter than
+the date's distance to that stamp refuses the date's own month. `max_distance_km` reaches every fetched axis, grids
 included, and a grid cell's centre stands up to half its diagonal from any
 point inside it — about 79 km on the 1° WOA23 grid at the equator — so a
 limit below that refuses ordinary cells, not only far samples.

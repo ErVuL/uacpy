@@ -185,10 +185,20 @@ class TestTheRegistriesHaveOneDoor:
         assert 'x' not in N.WIND_MODELS
 
     def test_the_view_reads_like_a_dict(self):
-        assert sorted(N.WIND_MODELS) == ['coates', 'knudsen', 'merklinger']
-        assert repr(N.WIND_MODELS) == (
-            "WIND_MODELS(['coates', 'knudsen', 'merklinger'])")
+        assert sorted(N.WIND_MODELS) == ['coates', 'merklinger']
+        assert repr(N.WIND_MODELS) == "WIND_MODELS(['coates', 'merklinger'])"
         assert N.WIND_MODELS.get('nope') is None
+
+
+def test_no_wind_model_rests_on_an_unsourced_wind_law():
+    """The wind models are published closed forms in wind speed
+    (Merklinger, Coates); a straight-line fit through Knudsen's per-force
+    curves, whose wind term no source states, is not offered."""
+    with pytest.raises(ConfigurationError,
+                       match=r"wind_model='knudsen' is not a known model; "
+                             r"choose from \['coates', 'merklinger'\]"):
+        N.WenzNoise(np.array([1000.0]), wind_speed_kn=10.0,
+                    wind_model='knudsen')
 
 
 def test_coates_alternatives_registered():
@@ -483,108 +493,6 @@ def test_the_drdc_report_is_cited_by_its_own_year():
     assert src.count('2022') >= 4
 
 
-class TestKnudsenMatchesThePublishedCurves:
-    """``44 + 20·log10(U_kn) - 17·log10(f_kHz)`` against the 1948 figure.
-
-    The expected side is Knudsen, Alford & Emling (1948) Fig. 4 Part C read
-    off the page — the overall 0.1-10 kc level of each of the seven curves —
-    together with the two statements the paper makes in its own text: a
-    -5 dB/octave spectrum slope, and levels referred to 0.0002 dyne/cm²
-    (= 20 µPa, so +26.0 dB to reach dB re 1 µPa²/Hz). Nothing here calls
-    into the model to build its own expectation.
-
-    The model is a straight-line closed form and the curves are not quite
-    straight in log10(U), so the test is that they agree inside the scatter
-    the paper reports for its own observations ("of the order of 4 to 5 db")
-    — not that they agree exactly. Demanding exactness would be demanding
-    something the data does not support.
-
-    Hildebrand et al. (2021) Table IV gives a third party's reading of the
-    same figure, which bounds the risk that it was misread once here.
-    """
-
-    #: Fig. 4 Part C legend: overall 0.1-10 kc level per curve, keyed by
-    #: wind force, in the paper's own dB re 0.0002 dyne/cm². Seven curves;
-    #: the set skips force 6 (it plots sea states 0, ½, 1, 2, 3, 4 and 6).
-    FIG4_OVERALL_DB = {0: 57.0, 1: 63.0, 2: 68.0, 3: 74.0, 4: 77.0,
-                       5: 79.0, 7: 83.0}
-    SLOPE_DB_PER_OCTAVE = 5.0
-    BAND_HZ = (100.0, 10000.0)
-    REF_SHIFT_DB = 20.0 * np.log10(20.0)       # 0.0002 dyne/cm² = 20 µPa
-
-    #: Hildebrand et al. (2021) Table IV, "Knudsen (1948)" row: 1 kHz
-    #: spectrum level, dB re 1 µPa²/Hz, by Beaufort force. The paper states
-    #: these carry 0.5 dB precision, "due to the difficulty of estimation
-    #: from published graphics".
-    HILDEBRAND_TABLE_IV = {1: 51.0, 2: 55.5, 3: 61.5, 4: 64.5, 5: 66.5,
-                           7: 71.0}
-
-    @classmethod
-    def _published_1k_levels(cls):
-        """Fig. 4's curves as 1 kHz spectrum levels, dB re 1 µPa²/Hz."""
-        a = (cls.SLOPE_DB_PER_OCTAVE / np.log10(2.0)) / 10.0
-        f1, f2 = cls.BAND_HZ
-        band = 10.0 * np.log10(1000.0 ** a / (a - 1.0)
-                               * (f1 ** (1.0 - a) - f2 ** (1.0 - a)))
-        return {force: lvl - band + cls.REF_SHIFT_DB
-                for force, lvl in cls.FIG4_OVERALL_DB.items()}
-
-    def test_the_two_readings_of_the_figure_agree(self):
-        """This file's reading against Hildebrand's, before either is used
-        to judge the model. Without this, a misread figure would be checked
-        against itself."""
-        mine = self._published_1k_levels()
-        for force, want in self.HILDEBRAND_TABLE_IV.items():
-            assert abs(mine[force] - want) <= 0.6, (
-                f'force {force}: this file {mine[force]:.1f}, '
-                f'Hildebrand Table IV {want:.1f}')
-
-    def test_the_slope_is_the_paper_s_five_db_per_octave(self):
-        """-17 dB/decade is -5 dB/octave rounded; the gap is what rounding
-        costs, 0.12 dB per octave."""
-        f = np.array([500.0, 1000.0, 2000.0, 4000.0])
-        steps = np.diff(N.WIND_MODELS['knudsen'](f, wind_speed_kn=15.0))
-        assert np.allclose(steps, -5.0, atol=0.15), steps
-
-    def test_it_sits_inside_the_scatter_of_the_curves_it_fits(self):
-        from uacpy.core.units import beaufort_to_wind_speed
-        published = self._published_1k_levels()
-        diffs = []
-        for force in sorted(self.HILDEBRAND_TABLE_IV):
-            u = beaufort_to_wind_speed(force)
-            got = float(N.WIND_MODELS['knudsen'](np.array([1000.0]),
-                                                 wind_speed_kn=u)[0])
-            diffs.append(got - published[force])
-        rms = float(np.sqrt(np.mean(np.square(diffs))))
-        assert rms < N.KNUDSEN_UNCERTAINTY_DB, (rms, diffs)
-
-    def test_the_constant_is_the_calm_curve(self):
-        """At 1 knot and 1 kHz the formula is its constant, 44 dB, and
-        Fig. 4's force-0 curve lands within a decibel of it."""
-        got = float(N.WIND_MODELS['knudsen'](np.array([1000.0]),
-                                             wind_speed_kn=1.0)[0])
-        assert got == pytest.approx(44.0)
-        assert abs(self._published_1k_levels()[0] - 44.0) < 1.0
-
-    def test_it_is_the_stated_formula(self):
-        f = np.array([250.0, 1000.0, 8000.0])
-        got = N.WIND_MODELS['knudsen'](f, wind_speed_kn=12.0)
-        want = 44.0 + 20.0 * np.log10(12.0) - 17.0 * np.log10(f / 1000.0)
-        assert np.allclose(got, want)
-
-    def test_zero_wind_switches_the_source_off(self):
-        lvl = N.WIND_MODELS['knudsen'](np.array([1e3]), wind_speed_kn=0.0)
-        assert np.all(np.isneginf(lvl))
-
-    def test_the_curves_are_parallel_as_knudsen_drew_them(self):
-        """His curves shift with wind by the same amount at every
-        frequency, which is the property the straight-line form keeps."""
-        f = np.array([200.0, 1000.0, 5000.0])
-        a = N.WIND_MODELS['knudsen'](f, wind_speed_kn=5.0)
-        b = N.WIND_MODELS['knudsen'](f, wind_speed_kn=25.0)
-        assert np.allclose(b - a, (b - a)[0])
-
-
 class TestAnEnvironmentKnobNoSubmodelReadsIsReported:
     """A setting that is accepted, validated, and then has no effect.
 
@@ -704,6 +612,31 @@ class TestTheWindScaleConversions:
         with pytest.raises(ConfigurationError, match="units must be"):
             beaufort_to_wind_speed(5, units='mph')
 
+    def test_a_record_converts_entry_by_entry(self):
+        """An array (a fetched wind record, a column of forces) gives an
+        array of the same shape, each entry as its scalar call gives it; a
+        scalar stays a scalar."""
+        from uacpy.core.units import (beaufort_to_wind_speed,
+                                      sea_state_to_wind_speed,
+                                      wind_speed_to_beaufort)
+        speeds = np.array([[5.0, 12.0], [0.2, 45.0]])
+        forces = wind_speed_to_beaufort(speeds)
+        assert forces.shape == (2, 2) and forces.dtype.kind == 'i'
+        assert forces.tolist() == [[2, 4], [0, 8]]
+        assert isinstance(wind_speed_to_beaufort(5.0), int)
+        np.testing.assert_array_equal(
+            beaufort_to_wind_speed(forces),
+            [[beaufort_to_wind_speed(int(f)) for f in row] for row in forces])
+        assert isinstance(beaufort_to_wind_speed(3), float)
+        states = np.array([0.5, 4.0, 6.0])
+        np.testing.assert_array_equal(
+            sea_state_to_wind_speed(states, units='m/s'),
+            [sea_state_to_wind_speed(s, units='m/s') for s in states])
+        with pytest.raises(ConfigurationError, match='force must be one of'):
+            beaufort_to_wind_speed(np.array([3, 9]))
+        with pytest.raises(ConfigurationError, match='must be >= 0'):
+            wind_speed_to_beaufort(np.array([3.0, -1.0]))
+
 
 class TestEverySubmodelUacpyShipsIsRecognisedAsItsOwn:
     """`_is_builtin_submodel` decides whose signature may be trusted.
@@ -729,7 +662,7 @@ class TestEverySubmodelUacpyShipsIsRecognisedAsItsOwn:
                        registries)
                    for key, fn in registry.items()}
         # Silence must mean "all recognised", never "none were found".
-        assert len(shipped) >= 8, sorted(shipped)
+        assert len(shipped) >= 7, sorted(shipped)
         unrecognised = [name for name, fn in shipped.items()
                         if not N._is_builtin_submodel(fn)]
         assert not unrecognised, (
@@ -862,21 +795,3 @@ class TestTheForeignCarrierRefusalSaysWhatToDoInstead:
         assert 'Snapshots' in message and 'plot_spectrogram' in message
         # ...and offers a remedy that exists for a carrier without .plot().
         assert 'arrays' in message
-
-
-class TestKnudsenSaysWhereItHasNoData:
-    """EXPERT-4: the straight Knudsen line was applied at every frequency,
-    rising 17 dB/decade below the curves' 0.1-10 kc band with no warning."""
-
-    def test_frequencies_outside_the_band_warn(self):
-        from uacpy.noise.ambient import _wind_knudsen
-        with pytest.warns(UserWarning, match="outside 100-25000 Hz"):
-            _wind_knudsen(np.array([10.0, 1000.0]), wind_speed_kn=10.0)
-
-    def test_the_band_itself_is_silent(self):
-        import warnings
-        from uacpy.noise.ambient import _wind_knudsen
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            _wind_knudsen(np.array([100.0, 1000.0, 25000.0]),
-                          wind_speed_kn=10.0)

@@ -22,12 +22,8 @@ from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, NumericsWarning, ValidityWarning,
 )
+from uacpy.core._fourier import _BLOCK_ELEMENTS
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-
-
-#: Elements of the largest scratch block a batched transform builds at
-#: once: 4e6 complex128 ~ 64 MB.
-_SCRATCH_BLOCK_ELEMS = 4_000_000
 
 
 # A record of n samples per cell can demand a multi-GB buffer from a too-high
@@ -169,7 +165,7 @@ def band_sum(G, freqs, *, sample_rate: float, t_start, n_samples: int
         bins = first + np.arange(freqs.size)
         keep = (bins >= 0) & (bins < lattice)
         ramp_hz = freqs[0] - first * step
-        chunk = max(1, _SCRATCH_BLOCK_ELEMS // lattice)
+        chunk = max(1, _BLOCK_ELEMENTS // lattice)
         # One chunk holding the whole record keeps the transform as the
         # result, so a row holds one complex record at a time.
         out = (None if chunk >= n_rows and n_samples == lattice
@@ -189,7 +185,7 @@ def band_sum(G, freqs, *, sample_rate: float, t_start, n_samples: int
     else:
         out = np.empty((n_rows, n_samples), dtype=complex)
         span = _sp_fft.next_fast_len(freqs.size + n_samples - 1)
-        chunk = max(1, _SCRATCH_BLOCK_ELEMS // span)
+        chunk = max(1, _BLOCK_ELEMENTS // span)
         for a in range(0, n_rows, chunk):
             rows = slice(a, min(a + chunk, n_rows))
             out[rows] = _chirp_z(G[rows], df / fs, n_samples)
@@ -436,11 +432,20 @@ def _hann_weight_at_peak(mag, freqs, who) -> str:
             f"({float(np.asarray(freqs)[int(np.argmax(mag))]):g} Hz)")
 
 
+def _energy_words(weighting) -> str:
+    """``'energy'``, or the weighted energy ``weighting`` names."""
+    if weighting is None:
+        return "energy"
+    if isinstance(weighting, str):
+        return f"{weighting}-weighted energy"
+    return "weighted energy"
+
+
 def warn_band_edge_cuts_spectrum(source_spectrum, window: str,
                                   who: str, *, freqs, waveform=None,
                                   sample_rate=None,
-                                  energy_share: Optional[float] = None
-                                  ) -> None:
+                                  energy_share: Optional[float] = None,
+                                  weighting=None) -> None:
     """Warn when an untapered synthesis's band ``freqs`` (Hz) cuts the
     source spectrum, judged by what the cut changes.
 
@@ -456,6 +461,9 @@ def warn_band_edge_cuts_spectrum(source_spectrum, window: str,
     loses more than ``_EXPOSURE_SHARE_LOSS_DB`` and states the share
     instead of advising a taper, which would cost the exposure more (a Hann
     window read a burst 17 dB light, :meth:`Field.sound_exposure_level`).
+    A weighted exposure's share is of the weighted energy
+    (:func:`band_energy_share` with its ``weighting``), and the warning
+    says so.
 
     For a peak or a trace with its ``waveform`` the warning is given when
     the band moves the peak of the pulse it limits by more than
@@ -481,10 +489,12 @@ def warn_band_edge_cuts_spectrum(source_spectrum, window: str,
             warnings.warn(
                 f"{who}: the band's edge cuts the source spectrum at "
                 f"{edge_dB:.1f} dB re its peak, and the band holds "
-                f"{100 * energy_share:.3g} % of the source waveform's energy "
-                f"({kept_dB:.2f} dB): the exposure counts that share. Widen "
-                f"the frequency band to the waveform's support to count the "
-                f"rest; a window would remove more of it.",
+                f"{100 * energy_share:.3g} % of the source waveform's "
+                f"{_energy_words(weighting)} ({kept_dB:.2f} dB): the "
+                f"exposure counts that share. Widen the frequency band to "
+                f"the waveform's support"
+                + ("" if weighting is None else " under that weighting")
+                + " to count the rest; a window would remove more of it.",
                 NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
     elif waveform is not None and sample_rate is not None:
         change, (low, high) = band_limited_pulse(waveform, sample_rate, freqs)
@@ -706,24 +716,46 @@ def refuse_record_shorter_than_waveform(df: float, wf: np.ndarray,
                          f"Hz."))
 
 
-def band_energy_share(source_spectrum, freqs, wf, sample_rate) -> float:
+def band_energy_share(source_spectrum, freqs, wf, sample_rate,
+                      weighting=None) -> float:
     """The share of the waveform ``wf``'s energy inside the band ``freqs``:
     ``2 Σ |S(f_k)|² Δf`` over the band (a 0 Hz bin counted once) against
     ``Σ wf² / sample_rate``, Parseval's two sides for a real signal, at most
     1. ``source_spectrum`` is the continuous spectrum on ``freqs``
-    (:func:`~uacpy.acoustic_signal.spectrum_at.waveform_spectrum_at`)."""
+    (:func:`~uacpy.acoustic_signal.spectrum_at.waveform_spectrum_at`).
+
+    With ``weighting`` (any form :func:`~uacpy.acoustics.frequency_weighting`
+    takes) it is the share of the WEIGHTED energy, the quantity a weighted
+    exposure integrates (Southall et al. 2019: the weighted spectrum
+    integrated across frequency): both sides weighted by ``10**(W/10)``,
+    the whole waveform's on an FFT four times its length, at least."""
     freqs = np.asarray(freqs, dtype=float)
-    total = float(np.sum(np.asarray(wf, dtype=float) ** 2)) / sample_rate
+    wf = np.asarray(wf, dtype=float).ravel()
+    total = float(np.sum(wf ** 2)) / sample_rate
     if freqs.size < 2 or not total > 0.0:
         return 1.0
     power = np.abs(np.asarray(source_spectrum)) ** 2
+    if weighting is not None:
+        # Deferred: core.acoustics loads its own dependencies on first use.
+        from uacpy.core.acoustics.weighting import frequency_weighting
+        power = power * 10.0 ** (frequency_weighting(freqs, weighting) / 10.0)
+        nfft = 1 << int(np.ceil(np.log2(max(4 * wf.size, 16))))
+        grid = np.fft.rfftfreq(nfft, 1.0 / float(sample_rate))
+        # One-sided Parseval: DC and Nyquist once, every other bin twice.
+        once = (grid == 0.0) | (grid == grid[-1])
+        density = (np.abs(np.fft.rfft(wf, nfft)) ** 2
+                   * 10.0 ** (frequency_weighting(grid, weighting) / 10.0))
+        total = float(np.sum(np.where(once, 1.0, 2.0) * density)) / (
+            nfft * float(sample_rate))
+        if not total > 0.0:
+            return 1.0
     twice = np.where(freqs > 0.0, 2.0, 1.0)
     band = float(np.sum(twice * power)) * float(freqs[1] - freqs[0])
     return min(band / total, 1.0)
 
 
 def waveform_synthesis_setup(freqs, wf, sample_rate, *, window, who,
-                              exposure=False):
+                              exposure=False, weighting=None):
     """``(source_spectrum, plan)`` for synthesising a waveform through
     ``H(f)`` on ``freqs``: the checks, the exact source spectrum on the axis
     and the shared grid at ``sample_rate`` (:func:`synthesis_grid`). The
@@ -737,7 +769,8 @@ def waveform_synthesis_setup(freqs, wf, sample_rate, *, window, who,
     mid-record — so that check lives where the arrivals are
     (``Arrivals.synthesis_band``; Bellhop's BROADBAND run on its default
     grid). ``exposure`` words the band-edge warning for an exposure, which
-    integrates every record (:func:`warn_band_edge_cuts_spectrum`)."""
+    integrates every record (:func:`warn_band_edge_cuts_spectrum`), its
+    share of the energy judged under the exposure's ``weighting``."""
     n_src = wf.size
     if n_src < 2:
         raise ConfigurationError(
@@ -768,7 +801,9 @@ def waveform_synthesis_setup(freqs, wf, sample_rate, *, window, who,
         source_spectrum, window, who, freqs=freqs, waveform=wf,
         sample_rate=sample_rate,
         energy_share=(band_energy_share(source_spectrum, freqs, wf,
-                                        sample_rate) if exposure else None))
+                                        sample_rate, weighting)
+                      if exposure else None),
+        weighting=weighting)
     return source_spectrum, plan
 
 
@@ -788,7 +823,7 @@ def synthesize_cells(spectra, source_spectrum, plan, t_start, *, who):
     out = np.empty((n_cells, n_samples), dtype=np.float64)
     head_dB = np.full(n_cells, -np.inf)
     tail_dB = np.full(n_cells, -np.inf)
-    chunk = max(1, _SCRATCH_BLOCK_ELEMS // max(n_samples, 1))
+    chunk = max(1, _BLOCK_ELEMENTS // max(n_samples, 1))
     for a in range(0, n_cells, chunk):
         idx = np.arange(a, min(a + chunk, n_cells))
         out[idx], (head_dB[idx], tail_dB[idx]) = synthesize_traces(

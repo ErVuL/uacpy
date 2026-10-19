@@ -116,7 +116,7 @@ def test_the_knob_checks_read_numbers_by_the_one_rule(value, whole, real):
 
 @pytest.mark.parametrize('cls_name, knob', [
     ('Kraken', 'c_high'), ('Kraken', 'n_modes'), ('Scooter', 'rmax_factor'),
-    ('SPARC', 'time_max'), ('Bounce', 'n_angles'), ('RAM', 'dr'),
+    ('SPARC', 'window_sound_speed'), ('Bounce', 'n_angles'), ('RAM', 'dr'),
     ('RAM', 'accuracy'), ('Bellhop', 'r_box'), ('OAST', 'range_max'),
     ('OASN', 'white_noise_level_dB'), ('OASP', 'freq_max'),
     ('OASSP', 'rms_roughness'), ('OASS', 'correlation_length'),
@@ -531,7 +531,7 @@ def test_the_run_settings_record_keeps_its_saved_form(key):
     carries — is reported here, and recorded on purpose by rewriting the
     saved record (``python -m uacpy.tests._save_run_settings KEY``,
     docs/DEV.md section 3, step 5). Values are not compared: the record
-    holds the executable's path and the backend the machine offers."""
+    holds the backend the machine offers."""
     saved_by_engine = json.loads(_SAVED_SETTINGS.read_text(encoding='utf-8'))
     if key not in saved_by_engine:
         pytest.fail(f"no saved run-settings record for {key!r}: run "
@@ -681,10 +681,14 @@ def test_a_time_series_and_every_snapshot_of_it_answer_coherence_alike(
 
 
 def _staged(key):
-    """The registered engine class, which runs on the stage hooks."""
+    """The registered engine class, which runs on stage hooks of its own:
+    each defined on it or on a base below :class:`PropagationModel` (OASS
+    and OASSP take three from the scattering chain's base,
+    ``_ScatteringPostProcessor``)."""
     cls = ENGINES[key].load()
     assert not inspect.isabstract(cls), cls
-    assert all(hook in vars(cls) for hook in _STAGE_HOOKS), cls
+    assert all(getattr(cls, hook) is not getattr(PropagationModel, hook)
+               for hook in _STAGE_HOOKS), cls
     return cls
 
 
@@ -1219,6 +1223,50 @@ def test_the_record_states_every_knob_as_given(key):
             assert name not in engine.knobs, name
         else:
             assert engine.knobs[name] == _plain(getattr(model, name)), name
+
+
+@pytest.mark.parametrize('key', _KEYS)
+@pytest.mark.parametrize('timeout', [0, -1.0, float('nan'), float('inf')])
+def test_every_constructor_refuses_a_timeout_no_launch_can_use(key, timeout):
+    """The host option ``timeout`` is validated once, by
+    ``models/_host.py``'s ``set_host_options``, on every engine: the launch
+    hands it to ``communicate(timeout=…)``, which kills every launch at 0,
+    and raises its own error on inf (OverflowError) and nan (ValueError).
+    ``None`` is its "no limit" and is kept. A bool is refused earlier, by
+    the numeric-knob rule."""
+    from uacpy.core.exceptions import ConfigurationError
+    entry = ENGINES[key]
+    cls = entry.load()
+    with pytest.raises(ConfigurationError,
+                       match=rf'^{cls.__name__}: timeout \(s\) must be '
+                             rf'positive and finite, or None for no limit; '
+                             rf'got'):
+        cls(**{**dict(entry.example_kwargs), 'timeout': timeout})
+    assert cls(**{**dict(entry.example_kwargs),
+                  'timeout': 0.5}).timeout == 0.5
+
+
+@pytest.mark.parametrize('key', _KEYS)
+def test_a_timeout_of_none_launches_with_no_limit(key, launch_spy):
+    """``timeout=None`` reaches every launch as ``communicate``'s own "no
+    limit": the engine's launch route hands ``None`` to the subprocess."""
+    model = _engine(key, timeout=None)
+    assert model.timeout is None
+    launch = type(model)._run_subprocess
+    seen = []
+
+    def run_true(cmd, cwd, **kwargs):
+        seen.append(kwargs.get('timeout'))
+        result = launch(model, [shutil.which('true')], cwd=cwd,
+                        timeout=kwargs.get('timeout'))
+        seen.append(result.returncode)
+        raise LaunchReached
+
+    launch_spy(model, then=run_true)
+    env, src, rcv = _carriers(key)
+    with pytest.raises(LaunchReached):
+        model.run(env, src, rcv)
+    assert seen == [None, 0]
 
 
 @pytest.mark.parametrize('key', _KEYS)

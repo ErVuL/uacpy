@@ -283,7 +283,7 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
         fig, pair = plt.subplots(2, 1, sharex=True)
         given = self.PAIR_SPELLINGS[spelling](pair)
         _, drawn = field.plot_transfer_function(ax=given)
-        assert drawn == (pair[0], pair[1])
+        assert tuple(drawn) == (pair[0], pair[1])
         assert pair[0].lines and pair[1].lines, 'lent axes were not drawn into'
         plt.close(fig)
 
@@ -322,7 +322,7 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
 
         fig, pair = plt.subplots(2, 1, sharex=True)
         _, drawn = field.plot_transfer_function(ax=pair)
-        assert drawn == (pair[0], pair[1])
+        assert tuple(drawn) == (pair[0], pair[1])
         plt.close(fig)
 
     def test_the_pair_has_one_keyword(self):

@@ -64,7 +64,7 @@ for ax, field, title in ((axes[0], pinned, 'c₀=1500 (pinned)\nasymmetric ξ-ra
                            f"dr={grid.dr:.2f} m, dz={grid.dz:.3f} m")
 # The signed residual, on a ±5 dB diverging window.
 uacpy.metrics.tl_difference(pinned, optimized).plot(
-    ax=axes[2], env=env, diff_vmax=5,
+    ax=axes[2], env=env, vmax=5,
     title=f'pinned − optimized, RMS {rms:.2f} dB')
 fig.suptitle('RAM Padé-error grid optimizer (Lytaev) — Pekeris 100 Hz, '
              'src 25 m, 10 km', y=1.02)

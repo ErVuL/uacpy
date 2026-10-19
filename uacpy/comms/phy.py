@@ -98,7 +98,9 @@ def rc_pulse(t_symbols, rolloff):
     ``|t| = 1/(2 beta)`` takes its limit ``(pi/4) sinc(1/(2 beta))``. It is
     the transmit root-raised-cosine convolved with its matched filter, so
     it is what a receiver sees at its decision instants: zero at every
-    non-zero integer ``t`` (Nyquist) and, between integers, the
+    non-zero integer ``t`` (Nyquist; band-limited pulses with zero crossings
+    at every non-zero multiple of the symbol period are Oppenheim, Willsky
+    & Nawab, *Signals and Systems*, §8.6.2) and, between integers, the
     inter-symbol interference a path delayed by a fraction of a symbol
     leaves. :meth:`uacpy.core.results.Arrivals.channel_taps` samples it at
     ``k T - tau_i`` for its symbol-spaced (``sps=1``) taps.
@@ -167,9 +169,9 @@ def pulse_shape(symbols, sps, rolloff=0.25, span=8):
     sps : int
         Samples per symbol, >= 1.
     rolloff : float, optional
-        Excess bandwidth, in ``[0, 1]``. Default 0.25.
+        Excess bandwidth, in ``[0, 1]``. Default 0.25 (uacpy guidance).
     span : int, optional
-        Filter length in symbols. Default 8.
+        Filter length in symbols. Default 8 (uacpy guidance).
     """
     sps = _require_integer_sps("pulse_shape", sps)
     if sps < 1:
@@ -187,9 +189,9 @@ def rrc_matched_filter(samples, sps, rolloff=0.25, span=8):
     Named for the filter, not for the operation: "matched filter" alone means
     replica correlation everywhere else in the package
     (:func:`uacpy.acoustic_signal.matched_filter`, which takes a replica
-    where this takes a samples-per-symbol count), and reading this module a
-    bare ``matched_filter`` looked like that one. ``uacpy.comms`` exports it
-    under this same name.
+    where this takes a samples-per-symbol count), and a bare
+    ``matched_filter`` here would read as that one. ``uacpy.comms`` exports
+    it under this same name.
 
     Parameters
     ----------
@@ -198,9 +200,10 @@ def rrc_matched_filter(samples, sps, rolloff=0.25, span=8):
     sps : int
         Samples per symbol, >= 1.
     rolloff : float, optional
-        The transmit filter's roll-off. Default 0.25.
+        The transmit filter's roll-off. Default 0.25 (uacpy guidance, as on
+        :func:`pulse_shape`).
     span : int, optional
-        The transmit filter's length in symbols. Default 8.
+        The transmit filter's length in symbols. Default 8 (uacpy guidance).
     """
     return np.convolve(np.asarray(samples, dtype=complex),
                        rrc_filter(sps, rolloff, span))

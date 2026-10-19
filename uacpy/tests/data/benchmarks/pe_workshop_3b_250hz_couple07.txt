@@ -2,7 +2,8 @@
 # 
 # Problem: Davis, J. A., White, D. and Cavanagh, R. C., "NORDA Parabolic Equation Workshop",
 # NORDA Technical Note 143 (1982), Test Case 3b; Jensen, Kuperman, Porter & Schmidt,
-# Computational Ocean Acoustics, 2nd ed., Sect. 6.4.2.4 uses a variant of it.
+# Computational Ocean Acoustics, 2nd ed., Sect. 6.2.4, Fig. 6.2 shows it (Sect. 6.4.2.4
+# uses a variant of it).
 # Range-independent: isovelocity water 1500 m/s, density 1.0, 100 m deep, over a
 # homogeneous fluid bottom 1590 m/s, density 1.2, 0.5 dB/wavelength; source and receiver
 # both 99.5 m deep, 0.5 m above the seafloor. The COUPLE documentation describes the case

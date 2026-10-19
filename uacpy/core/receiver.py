@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Union, List, Optional
 from uacpy.core._repr import axis, build
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core.deck_limits import (
-    DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
+    DECK_DEPTH_RESOLUTION, DECK_RANGE_RESOLUTION,
 )
 from uacpy.core._validate import (
     require_non_negative, require_real_array, require_strictly_increasing,
@@ -54,11 +54,11 @@ class Receiver(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     depths : float or array-like
         Receiver depth(s) in meters. Positive down from surface. More than
         one must be strictly increasing, with a minimum step of
-        ``DECK_DEPTH_RESOLUTION_M`` (the resolution the decks write).
+        ``DECK_DEPTH_RESOLUTION`` (the resolution the decks write).
     ranges : float or array-like, optional
         Receiver range(s) in meters. Default is single point at 0m. More
         than one must be strictly increasing, with a minimum step of
-        ``DECK_RANGE_RESOLUTION_M``.
+        ``DECK_RANGE_RESOLUTION``.
 
     Attributes
     ----------
@@ -178,9 +178,9 @@ class Receiver(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             self.ranges, "receiver ranges", hint="metres, outward from source")
 
         require_strictly_increasing(self.depths, "Receiver.depths",
-                                    min_step=DECK_DEPTH_RESOLUTION_M)
+                                    min_step=DECK_DEPTH_RESOLUTION)
         require_strictly_increasing(self.ranges, "Receiver.ranges",
-                                    min_step=DECK_RANGE_RESOLUTION_M)
+                                    min_step=DECK_RANGE_RESOLUTION)
 
     @property
     def n_depths(self) -> int:

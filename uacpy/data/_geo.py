@@ -17,7 +17,8 @@ from uacpy.core.provenance import _point_in_words
 from uacpy.core.exceptions import (
     ConfigurationError, DataFetchError,
 )
-from uacpy.core.geo import geodesic_waypoints, great_circle_km
+from uacpy.core.geo import (EARTH_RADIUS, as_coordinate, central_angle,
+                            geodesic_waypoints, great_circle_km)
 from uacpy.data._provenance_notice import provenance_notice
 
 __all__ = [
@@ -26,7 +27,7 @@ __all__ = [
     'DEFAULT_MAX_TRANSECT_POINTS', 'checked_max_points',
     'checked_n_points', 'auto_budget', 'default_n_points',
     'checked_explicit_n_points', 'DEFAULT_ALONG_TRACK_POINTS',
-    'along_track_waypoints',
+    'along_track_waypoints', 'point_along_track',
     'require_source', 'require_month',
     'checked_max_days', 'cut_at_first_invalid', 'mid_depth',
     'value_at_depth',
@@ -265,6 +266,25 @@ def along_track_waypoints(start, end, n_points, max_points, *, who, cell_of):
     keep = np.asarray(run_representative_indices(
         [cell_of(la, lo) for la, lo in zip(lats, lons)]), dtype=int)
     return lats[keep], lons[keep], ranges[keep]
+
+
+def point_along_track(start, end, range_m: float) -> Tuple[float, float]:
+    """The ``(lat, lon)`` ``range_m`` metres from ``start`` on the great
+    circle to ``end``: the spherical interpolation
+    :func:`~uacpy.core.geo.geodesic_waypoints` samples, at one range (so a
+    range a transect reports maps back to its waypoint)."""
+    lat1, lon1 = np.radians(as_coordinate(start))
+    lat2, lon2 = np.radians(as_coordinate(end))
+    ang = central_angle(start, end)
+    if ang == 0.0:
+        return as_coordinate(start)
+    a = np.sin(ang - range_m / EARTH_RADIUS) / np.sin(ang)
+    b = np.sin(range_m / EARTH_RADIUS) / np.sin(ang)
+    x = a * np.cos(lat1) * np.cos(lon1) + b * np.cos(lat2) * np.cos(lon2)
+    y = a * np.cos(lat1) * np.sin(lon1) + b * np.cos(lat2) * np.sin(lon2)
+    z = a * np.sin(lat1) + b * np.sin(lat2)
+    return (float(np.degrees(np.arctan2(z, np.hypot(x, y)))),
+            float(np.degrees(np.arctan2(y, x))))
 
 
 def lon_linspace(lon0: float, lon1: float, n: int) -> np.ndarray:

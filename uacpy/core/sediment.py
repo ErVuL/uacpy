@@ -75,7 +75,7 @@ Sediment sound speed and density are computed as **ratios to the overlying
 seawater**, scaled by the in-situ water properties the caller passes (so fine
 muds correctly come out slower than seawater). ``uacpy.data.fetch_environment``
 passes the in-situ seafloor sound speed but not a density, so on that path the
-density ratio is carried against ``DEFAULT_WATER_DENSITY_G_CM3``. Attenuation is returned in dB/wavelength, which is
+density ratio is carried against ``DEFAULT_WATER_DENSITY``. Attenuation is returned in dB/wavelength, which is
 frequency-independent (``α[dB/λ] = (α/f)·c/1000``).
 """
 
@@ -86,7 +86,7 @@ from typing import Dict, Optional, Union
 import numpy as np
 
 from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
-                                  DEFAULT_WATER_DENSITY_G_CM3)
+                                  DEFAULT_WATER_DENSITY)
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import canonical_choice
@@ -140,11 +140,10 @@ _HB_TABLE = (
     (8.80, 1.480, 0.990),   # silty clay  (ratio < 1: slower than seawater)
 )
 
-# Hamilton & Bachman (1982) Appendix, p. 1902 — read from
-# ``external:hamilton1982.pdf`` page 12 at 500 dpi, the equation blocks being
-# undecoded in the parsed copy. The Appendix gives a separate fit for each of
-# three environments, in its own words: "Separate equations are listed, where
-# appropriate, for each of the three general environments as follows:
+# Hamilton & Bachman (1982) Appendix, p. 1902. The Appendix gives a separate
+# fit for each of three environments, in its own words: "Separate equations
+# are listed, where appropriate, for each of the three general environments as
+# follows:
 # continental terrace (shelf and slope) (T); abyssal hill (pelagic) (H);
 # abyssal plain (turbidite) (P)."
 #
@@ -252,7 +251,7 @@ GRAIN_SIZE_MODELS = ('hamilton', 'apl-uw')
 DEFAULT_GRAIN_SIZE_MODEL = 'hamilton'
 # Seawater each model's ratios are carried back to when the caller gives no
 # in-situ values: the package's one water — the nominal DEFAULT_SOUND_SPEED
-# and DEFAULT_WATER_DENSITY_G_CM3 — for both models, so a grain-size seabed
+# and DEFAULT_WATER_DENSITY — for both models, so a grain-size seabed
 # in a default Environment presents exactly the published ratio to the deck
 # (every deck divides the seabed density by the same water density). These
 # are uacpy's in-situ defaults, not the conditions the relations were
@@ -269,8 +268,8 @@ DEFAULT_GRAIN_SIZE_MODEL = 'hamilton'
 # `HS%rho = rhoR`, the ratio used directly as g/cm³ against water of density
 # 1): a uacpy 'apl-uw' seabed in default water presents the same ratio.
 _MODEL_WATER_REFERENCE = {
-    'hamilton': (DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3),
-    'apl-uw': (DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3)}
+    'hamilton': (DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY),
+    'apl-uw': (DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY)}
 _HAMILTON_KP_PHI_RANGE = (0.0, 9.5)
 
 
@@ -331,7 +330,7 @@ def hamilton_attenuation(phi: float) -> float:
 
     ``α(dB/m) = k_p · f(kHz)``. The four regressions are the Fig. 3 caption of
     Hamilton, "Compressional-wave attenuation in marine sediments", Geophysics
-    37 (1972), p. 636 (``external:hamilton1972.pdf`` pages 16-17), which names
+    37 (1972), p. 636, which names
     the sediments each was fitted to: coarse, medium and fine sand in part
     (0 to 2.6 ϕ); fine sand in part, very fine sand and mixed sizes (2.6 to
     4.5); mixed sizes (4.5 to 6.0); silt-clays (6.0 to 9.5). They are "strictly
@@ -461,7 +460,7 @@ def grain_size_from_density(
 
     A density the chosen fit cannot represent is **announced and held at the
     nearer end**, like every other substitution here. That is not a rare edge:
-    the continental-terrace quadratic is evaluated over 1 to 9 ϕ, and its
+    the continental-terrace quadratic is evaluated over -1 to 9 ϕ, and its
     density there falls no lower than its 9 ϕ end, 1.448 g/cm³ against the
     default water (the parabola's own vertex, 1.418, lies past that range at
     ϕ = 10.94) — and **59.9 % of the Graw grid's ocean cells are below that
@@ -474,24 +473,29 @@ def grain_size_from_density(
     terrace fit reaches 40.1 %.
     So the warning names the hamilton_fit whose range would cover the value.
 
-    **What this inverse is, and what its own sources say about it.** Hamilton &
-    Bachman's Appendix is directional by construction -- its equations
-    "constitute the best indices (x) to obtain the desired properties (y)"
-    (p. 1902), it
-    lists no equation with mean grain size as the y, and it asks that each be
-    "used only between the limiting values of the index property", which for
-    (T) is 1 to 9 phi. Bachman's own later advice is stronger, as Ainslie
-    relays it (*Principles of Sonar Performance Modelling* p. 177): the fit
-    "is intended for computing c or rho, given the grain size M_z. Bachman
-    (1985) advises against its use for any other purpose, including the reverse
-    conversion from c or rho to M_z. Instead Bachman provides separate
-    correlation equations for this" (Bachman, *JASA* 78, 616-621, 1985).
-    This function inverts the forward fit instead, which is a different
-    estimator: a fit of rho on phi minimises residuals in rho, so reading it
-    backwards compresses the spread in phi and biases a phi estimated from a
-    noisy density toward the middle of the range. Treat what comes back as an
-    index, not as a measurement; Bachman's (1985) separate equations are
-    what would replace it.
+    **Where this inverse comes from.** The continental-terrace inverse is the
+    published one: for a measured bulk density ratio, APL-UW TR 9407
+    (*APL-UW High-Frequency Ocean Environmental Acoustic Models Handbook*,
+    1994), sect. IV.A.5, gives "the following inverted forms of the
+    Hamilton-Bachman regression relations", Eq. (12)
+    ``M_z = 10.937 - sqrt(128.25 rho - 177.12)``, ``1.22 < rho < 2.05``.
+    Over -1 to 9 ϕ this function and Eq. (12) agree to 0.001 ϕ; Eq. (12)
+    runs on to 10.94 ϕ (a ratio of 1.381, below which its square root has no
+    real value), past Hamilton & Bachman's own 9 ϕ limit, where this
+    function holds 9 ϕ and warns. The abyssal-hill and abyssal-plain
+    inverses are uacpy guidance: the same algebraic inversion of Hamilton &
+    Bachman's (H) and (P) relations, which TR 9407 does not print.
+
+    Hamilton & Bachman's Appendix is directional by construction -- its
+    equations "constitute the best indices (x) to obtain the desired
+    properties (y)" (p. 1902), to be "used only between the limiting values
+    of the index property", for (T) 1 to 9 ϕ -- and a fit of rho on phi
+    minimises residuals in rho, so reading it backwards compresses the
+    spread in phi toward the middle of the range: treat what comes back as
+    an index, not as a measurement. (The advice against reverse use that
+    Ainslie, *Principles of Sonar Performance Modelling*, p. 177, relays from
+    Bachman (1985) concerns Bachman's own medium-frequency correlations,
+    Ainslie's Eq. 4.95, not Hamilton & Bachman's relations.)
 
     Parameters
     ----------
@@ -500,7 +504,7 @@ def grain_size_from_density(
     water_density : float, optional
         In-situ seawater density (g/cm³) the density ratio is formed
         against. ``None`` (default) uses the reference the forward call
-        uses, ``DEFAULT_WATER_DENSITY_G_CM3``.
+        uses, ``DEFAULT_WATER_DENSITY``.
     hamilton_fit : str, optional
         Which Hamilton & Bachman fit to invert: ``'continental-terrace'``
         (default), ``'abyssal-hill'`` or ``'abyssal-plain'``, as
@@ -520,7 +524,7 @@ def grain_size_from_density(
             remediation=f"Use one of {tuple(GRAIN_SIZE_ENVIRONMENTS)}.",
         )
     fit = GRAIN_SIZE_ENVIRONMENTS[hamilton_fit]
-    rho_w = (DEFAULT_WATER_DENSITY_G_CM3 if water_density is None
+    rho_w = (DEFAULT_WATER_DENSITY if water_density is None
              else float(water_density))
     lab = float(density) / rho_w * _HB_T_REF_RHOW
     lo, hi = fit['evaluated_range']
@@ -636,9 +640,8 @@ def _hamilton_geoacoustics(phi, water_sound_speed, water_density,
 # Using Grain Size", which opens on p. IV-7, states on p. IV-8 that relations
 # (2)-(5) "are defined only for -1 <= Mz <= 9", which is the interval the clamp
 # holds the fits to. The polynomial coefficients themselves are verified
-# against the AT transcription above; the report's equation blocks are not
-# decoded in the parsed copy, and the fifth digit of the velocity ratio's third
-# branch is indistinct in the scan even at 1200 dpi. -0.0024324 is the value
+# against the AT transcription above; the printed fifth digit of the velocity
+# ratio's third branch is ambiguous. -0.0024324 is the value
 # that reproduces Table 2's printed nu column at all seven Mz >= 5.3 rows to
 # four decimals (-0.0024224 reproduces two of the seven), and it is what
 # ``ReadEnvironmentBell.f90:504`` uses.
@@ -817,7 +820,7 @@ def grain_size_to_geoacoustics(
         In-situ seawater sound speed (m/s) and density (g/cm³) the ratios are
         scaled by. ``None`` (default) uses the package's one water — the
         nominal 1500 m/s and 1.027 g/cm³ (``DEFAULT_SOUND_SPEED``,
-        ``DEFAULT_WATER_DENSITY_G_CM3``) — for either model, so the seabed
+        ``DEFAULT_WATER_DENSITY``) — for either model, so the seabed
         presents the published ratio to a deck in default water. These are
         uacpy's in-situ defaults, not the conditions the relations were
         measured at: Hamilton & Bachman's values are laboratory measurements

@@ -1,6 +1,6 @@
 """BROADBAND and TIME_SERIES from the arrivals of one ray trace at the
-carrier: the reception of a source pulse (:meth:`Arrivals.to_time_series
-<uacpy.core.results.Arrivals.to_time_series>`, TIME_SERIES)
+carrier: the reception of a source pulse (:meth:`Arrivals.synthesize_time_series
+<uacpy.core.results.Arrivals.synthesize_time_series>`, TIME_SERIES)
 and the transfer function the arrivals sum to (BROADBAND), with the notices
 of what one trace at ``fc`` cannot carry across the band."""
 

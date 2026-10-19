@@ -16,7 +16,7 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 
-from figure_scripts._common import WIDE, shallow_water
+from figure_scripts._common import shallow_water
 
 import uacpy
 from uacpy.acoustic_signal import (
@@ -48,7 +48,8 @@ from uacpy.acoustic_signal import (
     wigner_ville,
 )
 from uacpy.models import Bellhop, Kraken, RunMode
-from uacpy.plot import draw_sound_cone, plot_band_levels, plot_psd
+from uacpy.plot import (plot_band_levels, plot_psd, plot_spectrogram,
+                        plot_wigner_ville)
 from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
@@ -130,19 +131,15 @@ def chirp_sweep_laws():
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.2), sharey=True)
     for ax, sig, tt, name in [(axes[0], lfm, t_lfm, 'lfm_chirp — linear sweep'),
                               (axes[1], hfm, t_hfm, 'hfm_chirp — hyperbolic sweep')]:
-        f, t_spec, Sxx = spectrogram(sig, fs, nperseg=256, noverlap=240)
-        ax.set_facecolor('k')
-        ax.pcolormesh(t_spec * 1e3, f, _power_dB(Sxx, floor=-35.0),
-                      shading='auto', cmap='magma', vmin=-35.0, vmax=0.0)
+        spectrogram(sig, fs, nperseg=256, noverlap=240).plot(
+            ax=ax, reference='peak', dynamic_range_dB=35.0, cmap='magma',
+            freq_min=None, freq_max=2200.0, show_colorbar=False, title=name)
         f_inst = instantaneous_frequency(sig, fs)
         keep = slice(int(0.015 * fs), -int(0.015 * fs))
-        ax.plot(tt[keep] * 1e3, f_inst[keep], color='#7fffd4', lw=1.4,
+        ax.plot(tt[keep], f_inst[keep], color='#7fffd4', lw=1.4,
                 label='instantaneous_frequency')
-        ax.set_ylim(0.0, 2200.0)
-        ax.set_xlabel('Time (ms)')
-        ax.set_title(name, fontweight='bold', fontsize=11)
         ax.legend(loc='upper left', fontsize=8)
-    axes[0].set_ylabel('Frequency (Hz)')
+        ax.title.set(fontweight='bold', fontsize=11)
     fig.suptitle('Two chirps over the same 200–1600 Hz band',
                  fontweight='bold', fontsize=13)
     fig.tight_layout()
@@ -171,7 +168,7 @@ def pulse_compression_gain():
     arr = _bellhop_arrivals()
     # Each arrival's copy of the chirp, filtered by its volume absorption
     # across the band, on the record's own clock.
-    received = arr.to_time_series(source_waveform=tx, sample_rate=fs)
+    received = arr.synthesize_time_series(source_waveform=tx, sample_rate=fs)
     t_rx = received.times
     rx = received.data[0, 0]
     # The 0 dB-source record placed at SL = 180 dB re 1 µPa at 1 m, in Pa,
@@ -239,16 +236,14 @@ def ambiguity_surfaces():
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.4), sharey=True)
     for ax, sig, name in [(axes[0], lfm, 'lfm_chirp'), (axes[1], hfm, 'hfm_chirp')]:
-        delays, dop, chi = ambiguity_function(
-            analytic_signal(sig), fs, doppler_shifts=doppler)
-        im = ax.imshow(_dB(chi, floor=-30.0), aspect='auto', origin='lower',
-                       extent=_cell_edge_extent(delays * 1e3, dop),
-                       vmin=-30.0, vmax=0.0, cmap='viridis')
+        ambiguity_function(analytic_signal(sig), fs,
+                           doppler_shifts=doppler).plot(
+            ax=ax, value='dB', dynamic_range_dB=30.0, show_colorbar=False,
+            title=f'{name} — |χ(τ, ν)|')
         ax.set_xlim(-6.0, 6.0)
-        ax.set_xlabel('Delay τ (ms)')
-        ax.set_title(f'{name} — |χ(τ, ν)|', fontweight='bold', fontsize=11)
-    axes[0].set_ylabel('Doppler ν (Hz)')
-    fig.colorbar(im, ax=axes, label='dB re peak')
+        ax.title.set(fontweight='bold', fontsize=11)
+    axes[1].set_ylabel('')
+    fig.colorbar(axes[0].images[0], ax=axes, label='|χ| (dB re peak)')
     fig.suptitle('Ambiguity surfaces of the same 4 kHz band, 50 ms pulse',
                  fontweight='bold', fontsize=13)
     return fig
@@ -282,24 +277,18 @@ def resolution_tradeoff():
 
     fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2), sharey=True)
     for ax, nperseg in [(axes[0], 64), (axes[1], 512)]:
-        f, t_spec, Sxx = spectrogram(sig, fs, nperseg=nperseg,
-                                     noverlap=nperseg - 8)
-        ax.pcolormesh(t_spec, f, _power_dB(Sxx, floor=-40.0), shading='auto',
-                      cmap='magma', vmin=-40.0, vmax=0.0)
-        ax.set_title(f'spectrogram(nperseg={nperseg}) — '
-                     f'Δf ≈ {fs / nperseg:.0f} Hz, Δt = {nperseg / fs * 1e3:.0f} ms',
-                     fontweight='bold', fontsize=10)
-        ax.set_xlabel('Time (s)')
-    freqs, _, W = cwt(sig, fs, frequencies=np.logspace(np.log10(20.0),
-                                                       np.log10(900.0), 160))
-    axes[2].pcolormesh(t, freqs, _dB(W, floor=-40.0), shading='auto',
-                       cmap='magma', vmin=-40.0, vmax=0.0)
-    axes[2].set_title('cwt(wavelet="morlet") — Δf/f constant',
-                      fontweight='bold', fontsize=10)
-    axes[2].set_xlabel('Time (s)')
-    axes[0].set_ylabel('Frequency (Hz)')
+        spectrogram(sig, fs, nperseg=nperseg, noverlap=nperseg - 8).plot(
+            ax=ax, reference='peak', dynamic_range_dB=40.0, cmap='magma',
+            show_colorbar=False,
+            title=f'spectrogram(nperseg={nperseg}) — '
+                  f'Δf ≈ {fs / nperseg:.0f} Hz, Δt = {nperseg / fs * 1e3:.0f} ms')
+    cwt(sig, fs, frequencies=np.logspace(np.log10(20.0), np.log10(900.0),
+                                         160)).plot(
+        ax=axes[2], reference='peak', dynamic_range_dB=40.0, cmap='magma',
+        show_colorbar=False, title='cwt(wavelet="morlet") — Δf/f constant')
     axes[0].set_ylim(0.0, 900.0)
     for ax in axes:
+        ax.title.set(fontweight='bold', fontsize=10)
         ax.set_facecolor('k')
         ax.set_xlim(0.0, t[-1])
         ax.axhline(100.0, color='#7fffd4', lw=0.6, ls=':')
@@ -322,22 +311,25 @@ def wigner_ville_cross_terms():
     sig = (np.sin(2 * np.pi * 150.0 * t) * np.exp(-0.5 * ((t - 0.07) / 0.018) ** 2)
            + np.sin(2 * np.pi * 500.0 * t) * np.exp(-0.5 * ((t - 0.18) / 0.018) ** 2))
 
-    f_s, t_s, Sxx = spectrogram(sig, fs, nperseg=64, noverlap=60)
     f_w, t_w, W = wigner_ville(sig, fs)
     f_p, t_p, P = wigner_ville(sig, fs, lag_smoothing=63, time_smoothing=25)
 
     fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2), sharey=True)
-    axes[0].pcolormesh(t_s, f_s, _power_dB(Sxx, floor=-35.0), shading='auto',
-                       cmap='magma', vmin=-35.0, vmax=0.0)
-    axes[0].set_title('spectrogram — no cross-terms, blurred',
-                      fontweight='bold', fontsize=10)
+    spectrogram(sig, fs, nperseg=64, noverlap=60).plot(
+        ax=axes[0], reference='peak', dynamic_range_dB=35.0, cmap='magma',
+        show_colorbar=False, title='spectrogram — no cross-terms, blurred')
+    axes[0].title.set(fontweight='bold', fontsize=10)
+    # plot_wigner_ville draws the distribution it is handed; it has no
+    # dB-re-peak view, so it is handed the positive part in dB re peak.
     for ax, ff, tt, D, name in [
             (axes[1], f_w, t_w, W, 'wigner_ville() — sharp, with a cross-term'),
             (axes[2], f_p, t_p, P,
              'wigner_ville(lag_smoothing=63, time_smoothing=25)')]:
-        ax.pcolormesh(tt, ff, _power_dB(np.maximum(D, 0.0), floor=-35.0),
-                      shading='auto', cmap='magma', vmin=-35.0, vmax=0.0)
-        ax.set_title(name, fontweight='bold', fontsize=10)
+        plot_wigner_ville(ff, tt, _power_dB(np.maximum(D, 0.0), floor=-35.0),
+                          ax=ax, cmap='magma', vmin=-35.0, vmax=0.0,
+                          show_colorbar=False, title=name)
+        ax.title.set(fontweight='bold', fontsize=10)
+        ax.set_ylabel('')
     for ax in axes:
         ax.set_xlabel('Time (s)')
         ax.set_ylim(0.0, 700.0)
@@ -385,7 +377,8 @@ def fk_round_trip():
     gather, times, depths, fs = _vertical_array_gather()
     dz = float(depths[1] - depths[0])
 
-    frequencies, wavenumbers, power, spectrum = fk_transform(gather, fs, dz)
+    fk = fk_transform(gather, fs, dz)
+    frequencies, wavenumbers, power, spectrum = fk
     kk, ff = np.meshgrid(wavenumbers, frequencies)
     # A linear event t = t0 + p*z maps to k = +2*pi*f*p, so the down-going half
     # (p > 0, later at greater depth) is k > 0 for f > 0; muting the complement
@@ -393,7 +386,7 @@ def fk_round_trip():
     mask = np.ones_like(power)
     mask[(ff > 0) & (kk < 0)] = 0.0
     mask[(ff < 0) & (kk > 0)] = 0.0
-    down = inverse_fk(spectrum * mask)
+    down = inverse_fk(fk._replace(spectrum=spectrum * mask))
 
     def draw(ax, data, title):
         v = 0.3 * np.abs(gather).max()
@@ -406,19 +399,16 @@ def fk_round_trip():
 
     fig, axes = plt.subplots(2, 2, figsize=(11.0, 8.0))
     draw(axes[0, 0], gather, 'Bellhop gather — 64-element vertical array, 1 km')
-    ax = axes[0, 1]
-    ax.imshow(_power_dB(power, floor=-40.0), aspect='auto', origin='lower',
-              extent=_cell_edge_extent(wavenumbers, frequencies),
-              vmin=-40.0, vmax=0.0, cmap='magma')
-    draw_sound_cone(ax, frequencies[-1], wavenumbers[-1], 1500.0, color='#7fffd4')
+    _, ax = fk.plot(ax=axes[0, 1], reference='peak', dynamic_range_dB=40.0,
+                    cmap='magma', sound_speed=1500.0, show_colorbar=False,
+                    title='f-k power (f > 0 half) — hatched quadrant is muted')
+    ax.title.set(fontweight='bold', fontsize=10)
     ax.axvspan(0.0, wavenumbers[-1], facecolor='w', alpha=0.22, hatch='//',
                edgecolor='w')
     ax.set_ylim(0.0, 600.0)
     ax.set_xlabel('Vertical wavenumber k (rad/m)')
-    ax.set_ylabel('Frequency (Hz)')
-    ax.set_title('f-k power (f > 0 half) — hatched quadrant is muted',
-                 fontweight='bold', fontsize=10)
-    draw(axes[1, 0], down, 'inverse_fk(spectrum · mask) — down-going only')
+    draw(axes[1, 0], down,
+         'inverse_fk(fk._replace(spectrum=spectrum · mask)) — down-going only')
     draw(axes[1, 1], gather - down, 'Residual — the up-going wavefield')
     fig.suptitle('Filtering between the forward transform and its inverse',
                  fontweight='bold', fontsize=13)
@@ -482,24 +472,21 @@ def modal_warping():
     axes[0].legend(fontsize=8, loc='lower right')
     axes[0].grid(alpha=0.3)
 
+    # The arrival starts at r/c, so its frame times are offset by it.
     f_a, t_a, S_a = spectrogram(arrival, fs, nperseg=128, noverlap=124)
-    axes[1].pcolormesh(t_a + trial_range / c, f_a, _power_dB(S_a, floor=-30.0),
-                       shading='auto', cmap='magma', vmin=-30.0, vmax=0.0)
-    axes[1].set_xlabel('Time (s)')
-    axes[1].set_ylabel('Frequency (Hz)')
-    axes[1].set_ylim(0.0, 70.0)
-    axes[1].set_title('Received transient — modes disperse',
-                      fontweight='bold', fontsize=10)
+    plot_spectrogram(f_a, t_a + trial_range / c, S_a, ax=axes[1],
+                     reference='peak', dynamic_range_dB=30.0, cmap='magma',
+                     freq_min=None, freq_max=70.0, show_colorbar=False,
+                     title='Received transient — modes disperse')
 
-    f_w, t_w, S_w = spectrogram(warped, fs_warp, nperseg=256, noverlap=252)
-    axes[2].pcolormesh(t_w, f_w, _power_dB(S_w, floor=-30.0), shading='auto',
-                       cmap='magma', vmin=-30.0, vmax=0.0)
+    spectrogram(warped, fs_warp, nperseg=256, noverlap=252).plot(
+        ax=axes[2], reference='peak', dynamic_range_dB=30.0, cmap='magma',
+        freq_min=None, freq_max=50.0, show_colorbar=False,
+        title='warp_signal(...) — modes become tones')
     axes[2].set_xlabel('Warped time (s)')
     axes[2].set_ylabel('Warped frequency (Hz)')
-    axes[2].set_ylim(0.0, 50.0)
-    axes[2].set_title('warp_signal(...) — modes become tones',
-                      fontweight='bold', fontsize=10)
     for ax in (axes[1], axes[2]):
+        ax.title.set(fontweight='bold', fontsize=10)
         for f_c in cutoffs:
             ax.axhline(f_c, color='#7fffd4', lw=0.6, ls=':', alpha=0.8)
     fig.suptitle('Modal dispersion in an ideal 100 m waveguide at 5 km; '
@@ -522,7 +509,7 @@ def spectra_and_bands():
 
     fs = 25_000.0
     _, x = synthesize_noise_from_psd(
-        target, f_target, duration=30.0, sample_rate=fs, interp='log',
+        target, f_target, duration=30.0, sample_rate=fs, method='log',
         rng=rng)
     frequencies, power = welch(x, fs, nperseg=32768)
     band = (frequencies >= 20.0) & (frequencies <= 11_000.0)

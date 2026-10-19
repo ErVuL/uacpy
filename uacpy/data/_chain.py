@@ -8,15 +8,18 @@ dataset, and only an absent or unreadable cache
 When no attempt answers, the most substantive error is raised.
 """
 
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
 
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
+                                   FallbackWarning)
 from uacpy.data import _cache
 
 __all__ = ['CACHE_BACKEND', 'MissingPrerequisiteError', 'SourceProvider',
            'SourceChain', 'first_answer', 'lower_source_spec',
-           'raise_substantive', 'source_tuple']
+           'raise_substantive', 'source_tuple', 'unused_setting_notices']
 
 #: The backend token of a source's cached twin.
 CACHE_BACKEND = 'local'
@@ -85,6 +88,20 @@ def first_answer(attempts, call, *, cached=lambda backend:
     raise_substantive(errors)
 
 
+def unused_setting_notices(who, unused):
+    """One ``FallbackWarning`` per setting the caller gave that the run did
+    not use, so it is never dropped in silence. ``unused``
+    holds ``(name, value, why)`` triples; a ``None`` value is a setting left
+    unset and gives none. ``why`` is the clause after "was not used:"."""
+    for name, value, why in unused:
+        if value is None:
+            continue
+        shown = (f"{name}={value!r}"
+                 if isinstance(value, (str, int, float)) else f"{name}=")
+        warnings.warn(f"{who}: {shown} was not used: {why}.",
+                      FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
 def source_tuple(value):
     """A ``str``/sequence source spec as a tuple of lower-case source names:
     every axis matches names case-insensitively, so ``'GEBCO'`` and
@@ -135,12 +152,15 @@ class SourceProvider:
 
 @dataclass(frozen=True)
 class SourceChain:
-    """The sources of one ``fetch_environment`` axis and its ``'auto'``
-    order. ``'local'`` is the ``'auto'`` chain restricted to cached twins."""
+    """The sources of one fetched axis and its ``'auto'`` order.
+    ``'local'`` is the ``'auto'`` chain restricted to cached twins, a preset
+    where ``presets`` holds it (an axis with no cached source names only
+    ``'auto'``)."""
 
     axis: str
     providers: Tuple[SourceProvider, ...]
     auto: Tuple[str, ...]
+    presets: Tuple[str, ...] = ('auto', 'local')
 
     def provider(self, source):
         """The provider whose id is ``source``."""
@@ -152,7 +172,7 @@ class SourceChain:
         cached backends only (no network); else the explicit list. Names
         and presets match in any case."""
         spec = lower_source_spec(spec)
-        if spec == 'local':
+        if spec == 'local' and 'local' in self.presets:
             return self.auto, True
         if spec == 'auto':
             return self.auto, False
@@ -174,8 +194,39 @@ class SourceChain:
                         f"{src!r} is a preset for the whole {keyword} value "
                         f"and is not valid inside a sequence; pass it alone, "
                         f"or list sources from {known}."
-                        if src in ('auto', 'local')
-                        else f"Use 'auto', 'local' or one of {known}."),
+                        if src in self.presets
+                        else f"Use {self._preset_words()} or one of "
+                             f"{known}."),
                 )
             attempts.extend(self.provider(src).attempts(cache_only=cache_only))
         return attempts
+
+    def _preset_words(self):
+        """The presets as a refusal names them: ``'auto', 'local'``."""
+        return ', '.join(repr(p) for p in self.presets)
+
+    def answer(self, spec, call, *, who, keyword):
+        """``(call(source, backend), (source, backend))`` for the first
+        attempt of the ``spec`` chain that answers, by :func:`first_answer`;
+        an unknown name is refused before any attempt."""
+        sources, cache_only = self.resolve(spec)
+        return first_answer(self.attempts(sources, cache_only=cache_only,
+                                          who=who, keyword=keyword), call)
+
+    def fetch(self, source, backend, where, request, *, who, keyword):
+        """One attempt: ``source``'s point fetch at ``where = (point,)``, or
+        its transect fetch when ``where`` holds both ends; a source with no
+        transect fetch is refused (``ConfigurationError``, so a chain moves
+        on), naming ``who`` and the ``keyword`` it was asked for by."""
+        provider = self.provider(source)
+        if len(where) == 1:
+            return provider.point(backend, *where, **request)
+        if provider.transect is None:
+            usable = ' or '.join(repr(p.id) for p in self.providers
+                                 if p.transect is not None)
+            raise ConfigurationError(
+                f"{who}: {keyword}{source!r} has no transect fetch, so it "
+                f"gives no range-dependent {self.axis}.",
+                remediation=f"Use {usable}.",
+            )
+        return provider.transect(backend, *where, **request)

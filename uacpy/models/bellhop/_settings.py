@@ -30,8 +30,11 @@ class BellhopSettings(EngineSettings):
         An auto-selected bellhopcuda that finds no CUDA device moves to the
         next installed binary at launch; ``result.backend`` names the one
         that ran.
-    executable : str
-        Path of that binary.
+    executable : str or None
+        The file name of a pinned binary whose name matches no build
+        (``backend`` ``'custom'``); ``None`` for a named build, which
+        ``backend`` names. The path is not recorded: it is the machine's,
+        as every other engine's binary path is (``_HOST_KNOBS``).
     run_type : str
         The deck's ``RunType(1:1)``: ``'C'``, ``'I'``, ``'S'`` (TL),
         ``'R'`` (rays), ``'E'`` (eigenrays) or ``'A'`` (arrivals, which the
@@ -51,7 +54,8 @@ class BellhopSettings(EngineSettings):
     ray_step : float
         The ray step (m) the deck carries.
     ray_step_origin : str
-        Where ``ray_step`` came from: the constructor, or ``env.depth / 50``.
+        Where ``ray_step`` came from: the constructor, ``env.depth / 50``,
+        or ``2 × r_box / MaxN`` for the selected build.
     z_box, r_box : float
         The ray box (m) the deck carries: a ray is dropped once its depth
         exceeds ``z_box`` or its range exceeds ``r_box``.
@@ -96,7 +100,7 @@ class BellhopSettings(EngineSettings):
     """
 
     backend: str
-    executable: str
+    executable: Optional[str]
     run_type: str
     fc: float
     beam_type: str

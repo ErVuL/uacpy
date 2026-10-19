@@ -10,7 +10,6 @@ import uacpy
 from uacpy.core import _validate
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io import oases_writer
-from uacpy.models.oases import _sampling
 
 JITTER = 1e-4      # between UNIFORM_STEP_RTOL (1e-6) and the loosened 1e-3
 
@@ -23,7 +22,7 @@ def _jittered(start, step, n):
 
 def _freq_sweep():
     src = uacpy.Source(depths=[50.0], frequencies=_jittered(100.0, 10.0, 6))
-    oases_writer._resolve_freq_sweep('w', src, 100.0)
+    oases_writer.oases_frequency_sweep(src.frequencies, 'w')
 
 
 def _range_axis():
@@ -32,13 +31,14 @@ def _range_axis():
 
 
 def _linear_sweep():
-    _sampling._oases_frequency_sweep(_jittered(100.0, 10.0, 6), 'OASR')
+    oases_writer.oases_frequency_sweep(_jittered(100.0, 10.0, 6), 'OASR',
+                                       argument='frequencies=')
 
 
 def _log_sweep():
     freqs = np.geomspace(100.0, 1000.0, 6)
     freqs[2] *= 1.0 + JITTER
-    _sampling._oases_frequency_sweep(freqs, 'OASR', log_spaced=True)
+    oases_writer.oases_frequency_sweep(freqs, 'OASR', log_spaced=True)
 
 
 def _angles(tmp_path):
@@ -53,7 +53,7 @@ SITES = {'frequency sweep': _freq_sweep, 'range axis': _range_axis,
          'linear sweep': _linear_sweep,
          'log sweep': _log_sweep, 'OASR angles': _angles}
 #: What each site's refusal or notice says about the axis.
-REFUSAL = {'frequency sweep': 'frequencies is not uniformly spaced',
+REFUSAL = {'frequency sweep': 'source.frequencies vector is not equispaced',
            'range axis': 'ranges is not uniformly spaced',
            'linear sweep': 'vector is not equispaced',
            'log sweep': 'not log-spaced',

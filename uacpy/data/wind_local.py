@@ -1,9 +1,10 @@
 """Offline NBS 10 m wind-speed monthly climatology.
 
-``install.sh --data wind`` builds a **monthly climatology** of NBS 10 m wind
-speed: for each calendar month it averages the NBS monthly-mean global fields
-over a period of years into a 0.25° ``speed(12, lat, lon)`` grid, cached as an
-``.npz``. This module then returns the climatological wind speed at a point and
+``install.sh --data wind`` caches NOAA/NCEI's published NBS **monthly
+climatology** of 10 m wind speed — already averaged over 1991-2020 by NOAA
+(:data:`NBS_CLIMATOLOGY_URL`), uacpy averages nothing — as a 0.25°
+``speed(12, lat, lon)`` grid in an ``.npz``. This module then returns the
+climatological wind speed at a point and
 month — the offline, reproducible analogue of the live NBS fetch (also the
 mean-state fallback, so it understates day-to-day sea state; the live
 :func:`uacpy.data.wind_live.fetch_wind` is preferred for a specific date).

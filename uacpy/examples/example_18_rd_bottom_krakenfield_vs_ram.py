@@ -139,7 +139,7 @@ vmax = 5 * round(min(140, np.nanpercentile(every_tl, 95)) / 5)
 residuals = [np.asarray(per_model['RAM'].dB) - np.asarray(per_model[name].dB)
              for per_model in fields.values()
              for name in ('Kraken adiabatic', 'Kraken coupled')]
-diff_vmax = max(5.0, 5.0 * np.ceil(max(
+residual_window = max(5.0, 5.0 * np.ceil(max(
     float(np.nanpercentile(np.abs(r), 95)) for r in residuals) / 5.0))
 
 fig, axes = plt.subplots(3, 4, figsize=(22, 14))
@@ -158,7 +158,7 @@ for col, (case, name) in enumerate([(c, n) for c in fields
                                               'Kraken coupled')]):
     uacpy.metrics.tl_difference(fields[case]['RAM'], fields[case][name]).plot(
         ax=axes[2, col], env=cases[case],
-        show_colorbar=False, diff_vmax=diff_vmax,
+        show_colorbar=False, vmax=residual_window,
         title=f'{case} — RAM − {name.split()[1]}')
 
 fig.suptitle('Range-dependent bottom — adiabatic vs coupled modes vs RAM\n'

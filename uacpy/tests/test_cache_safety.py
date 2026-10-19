@@ -173,11 +173,13 @@ def test_the_npz_index_round_trips_geometry_codes_and_lookup(cache):
 def test_the_seaice_npz_round_trips_nan_and_dtype(cache):
     """Land is NaN and the grids are float32; a container change must not
     quietly promote the dtype or fill the holes."""
-    grid = np.full((12, 4, 4), 0.6, np.float32)
+    grid = np.full((12, 448, 304), 0.6, np.float32)       # the North grid
     grid[:, 0, 0] = np.nan
+    south = np.full((12, 332, 316), 0.6, np.float32)
     np.savez_compressed(cache / 'seaice' / seaice_local.INDEX_FILE,
-                        N=grid, S=grid, years=np.array([2019, 2023], np.int32))
-    back = seaice_local.sea_ice_grid(3, hemi='N')
+                        N=grid, S=south,
+                        years=np.array([2019, 2023], np.int32))
+    back = seaice_local.sea_ice_grid(3, hemi='N').concentration
     assert back.dtype == np.float32
     assert np.array_equal(back, grid[2], equal_nan=True)
     assert np.isnan(back[0, 0])

@@ -13,13 +13,12 @@ model defaults in ``uacpy.models._defaults``, Acoustics-Toolbox letters in
 import math
 
 __all__ = [
-    'REFERENCE_TEMPERATURE_C', 'REFERENCE_SALINITY_PSU', 'REFERENCE_DEPTH_M',
+    'REFERENCE_TEMPERATURE', 'REFERENCE_SALINITY', 'REFERENCE_DEPTH',
     'REFERENCE_PH', 'PH_MIN', 'PH_MAX', 'DEFAULT_SOUND_SPEED',
-    'DEFAULT_WATER_DENSITY_G_CM3', 'WATER_DENSITY_MIN_G_CM3',
-    'WATER_DENSITY_MAX_G_CM3',
+    'DEFAULT_WATER_DENSITY',
     'PRESSURE_FLOOR', 'NO_ENERGY_DB',
     'REFERENCE_PRESSURE_WATER', 'REFERENCE_PRESSURE_AIR', 'NEPER_TO_DB',
-    'STANDARD_GRAVITY_M_S2', 'STANDARD_ATMOSPHERE_PA',
+    'STANDARD_GRAVITY', 'STANDARD_ATMOSPHERE',
 ]
 
 
@@ -27,9 +26,9 @@ __all__ = [
 # 35 psu, at the surface (0 m, one atmosphere), pH 8.0. One state for every
 # function, so a default density, sound speed, absorption and bubble
 # resonance all describe the same water.
-REFERENCE_TEMPERATURE_C = 10.0
-REFERENCE_SALINITY_PSU = 35.0
-REFERENCE_DEPTH_M = 0.0
+REFERENCE_TEMPERATURE = 10.0
+REFERENCE_SALINITY = 35.0
+REFERENCE_DEPTH = 0.0
 REFERENCE_PH = 8.0
 
 # The pH scale: a value outside it is no water's.
@@ -50,12 +49,7 @@ DEFAULT_SOUND_SPEED = 1500.0
 # seabed density RATIO (Jensen et al. Table 1.3, Hamilton, APL-UW) is
 # multiplied by to become an absolute density — so a default run sees
 # exactly the published ratio.
-DEFAULT_WATER_DENSITY_G_CM3 = 1.027
-
-# g/cm³ — the band a water density must lie in. Sea water is about
-# 1.027; a value in kg/m³ lands a factor 1000 outside it.
-WATER_DENSITY_MIN_G_CM3 = 0.9
-WATER_DENSITY_MAX_G_CM3 = 1.1
+DEFAULT_WATER_DENSITY = 1.027
 
 # Floor applied whenever we take 20*log10(|p|), and the single no-energy level
 # uacpy reports: 1e-30 lands at 600 dB of loss, far past anything a real
@@ -80,7 +74,7 @@ REFERENCE_PRESSURE_AIR = 2e-5    # Pa (20 µPa)
 NEPER_TO_DB = 20.0 / math.log(10.0)
 
 # m/s² — standard gravity (CGPM 1901, exact).
-STANDARD_GRAVITY_M_S2 = 9.80665
+STANDARD_GRAVITY = 9.80665
 
 # Pa — the standard atmosphere (exact).
-STANDARD_ATMOSPHERE_PA = 101325.0
+STANDARD_ATMOSPHERE = 101325.0

@@ -42,7 +42,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy import data
-from uacpy import UACPYError
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -128,7 +127,7 @@ try:
     via = 'offline polygons' if data.is_installed('emodnet') else 'live WFS'
     print(f"  EMODnet seabed @ {point}: {seabed.acoustic_type}, "
           f"c_p={seabed.sound_speed:.0f} m/s, ϕ={seabed.grain_size_phi} ({via})")
-except UACPYError as exc:
+except uacpy.DataFetchError as exc:
     print(f"  EMODnet seabed: [skipped] {exc.message.splitlines()[0]}")
 
 # ── The composite: map · TL · section, from one call ────────────────────────
@@ -287,7 +286,7 @@ if data.is_installed('seaice'):
                    for name, spot in [
                        ("Central Arctic (88 N, perennial)", (88.0, 0.0)),
                        ("Fram Strait (79 N, seasonal)", (79.0, -3.0))]}
-    except UACPYError as exc:             # a sea-ice fetch failed: say why
+    except uacpy.DataFetchError as exc:   # a sea-ice fetch failed: say why
         print(f"  sea-ice overview: [skipped] {exc.message.splitlines()[0]}")
     else:
         for name, (march, september) in seasons.items():
@@ -299,10 +298,9 @@ if data.is_installed('seaice'):
         # NSIDC sea-ice map.
         fig, _ = uacpy.plot.plot_overview(
             ice_env, ice_grid, map_fn=uacpy.plot.plot_sea_ice_map,
-            map_kwargs=dict(hemi='N'), transect=(ice_a, ice_b), tl=ice_tl,
+            transect=(ice_a, ice_b), tl=ice_tl,
             source=ice_source, receiver=ice_receiver,
             sea_ice=ice_track,
-            show_data_credit=list(ice_env.data_sources) + [data.SOURCES['seaice']],
             map_title="Arctic sea ice (NSIDC climatology)",
             tl_title=f"Transmission loss (Bellhop, {FREQ_HZ:g} Hz)",
             env_title=f"Under-ice environment A→B "

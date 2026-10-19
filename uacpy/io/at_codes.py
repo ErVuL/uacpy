@@ -185,7 +185,7 @@ class AttenuationUnits(Enum):
     """Attenuation units understood by the Acoustics Toolbox.
 
     ``TOPOPT(3:3)``. The names follow the Fortran's own comments in
-    ``misc/AttenMod.f90:66-80``; ``doc/EnvironmentalFile.htm`` writes ``'F'``
+    ``misc/AttenMod.f90:58-80``; ``doc/EnvironmentalFile.htm`` writes ``'F'``
     as "dB/(kmHz)" where the Fortran writes "dB/(m kHz)" — the SAME unit, not
     two conventions, since ``alpha*f_Hz*r_km`` and ``alpha*f_kHz*r_m`` differ
     by 1000 in both numerator and denominator. The member name follows the

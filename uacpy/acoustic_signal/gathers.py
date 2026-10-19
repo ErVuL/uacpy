@@ -10,11 +10,14 @@ from __future__ import annotations
 import warnings
 from collections import namedtuple
 import numpy as np
-from uacpy.core.exceptions import ConfigurationError, NumericsWarning
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, NumericsWarning,
+)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.acoustic_signal._results import PlottedResult
 from uacpy.core._validate import (
-    require_finite_signal, require_positive_finite_scalar, require_real_signal,
+    _MAX_CHANNELS_GUESSED, require_finite_signal,
+    require_positive_finite_scalar, require_real_signal,
 )
 from uacpy.acoustic_signal.windows import (_default_noverlap, _fk_tapers,
                                            _spectral_window)
@@ -38,25 +41,31 @@ _RadonFields = namedtuple("RadonResult", "moveout taus panel")
 
 class RadonResult(PlottedResult, _RadonFields):
     """Radon panel over ``moveout`` and intercept ``taus``, carrying the
-    moveout family it was scanned in as ``kind``.
+    moveout family it was scanned in as ``kind`` and the forward call's
+    geometry.
 
     The tuple is the measurement, so ``moveout, taus, panel = ...``
     keeps working; :meth:`plot` is the one obvious way to draw it. ``kind``
     is ``'parabolic'`` (curvature, s/m²) or ``'hyperbolic'`` (velocity,
     m/s): it says what ``moveout`` measures, so it is an attribute rather
-    than a fourth tuple element, as ``FKResult.scaling`` is.
+    than a fourth tuple element, as ``FKResult.scaling`` is. ``sample_rate``
+    (Hz), ``dx`` (m), ``nx`` (traces) and ``x0`` (m) are the gather's, which
+    :func:`inverse_radon` reads back, so the result goes back whole; a
+    filtered panel keeps them through ``result._replace(panel=filtered)``.
     """
 
-    _attrs = ("kind",)
+    _attrs = ("kind", "sample_rate", "dx", "nx", "x0")
     _plotter = "plot_radon"
 
-    def __new__(cls, moveout, taus, panel, *, kind):
-        if kind not in _RADON_KINDS:
-            raise ConfigurationError(
-                f"RadonResult: kind must be one of {_RADON_KINDS}; got "
-                f"{kind!r}.")
+    def __new__(cls, moveout, taus, panel, *, kind, sample_rate, dx, nx,
+                x0=0.0):
+        _require_radon_kind(kind, "RadonResult")
         self = super().__new__(cls, moveout, taus, panel)
         self.kind = kind
+        self.sample_rate = float(sample_rate)
+        self.dx = float(dx)
+        self.nx = int(nx)
+        self.x0 = float(x0)
         return self
 
     def _field_units(self):
@@ -66,16 +75,29 @@ class RadonResult(PlottedResult, _RadonFields):
 
 class TauPResult(PlottedResult,
                  namedtuple("TauPResult", "slownesses taus panel")):
-    """Tau-p panel over ``slownesses`` and intercept ``taus``.
+    """Tau-p panel over ``slownesses`` and intercept ``taus``, carrying the
+    forward call's geometry.
 
     The tuple is the measurement, so ``slownesses, taus, panel = ...``
     keeps working; :meth:`plot` is the one obvious way to draw it.
+    ``sample_rate`` (Hz), ``dx`` (m), ``nx`` (traces) and ``x0`` (m) are the
+    gather's, which :func:`inverse_taup` reads back, so the result goes back
+    whole; a filtered panel keeps them through
+    ``result._replace(panel=filtered)``.
     """
 
-    __slots__ = ()
-
+    _attrs = ("sample_rate", "dx", "nx", "x0")
     _plotter = "plot_taup"
     _plot_fields = ("slownesses", "taus", "panel")
+
+    def __new__(cls, slownesses, taus, panel, *, sample_rate, dx, nx,
+                x0=0.0):
+        self = super().__new__(cls, slownesses, taus, panel)
+        self.sample_rate = float(sample_rate)
+        self.dx = float(dx)
+        self.nx = int(nx)
+        self.x0 = float(x0)
+        return self
 
     def _field_units(self):
         return {"slownesses": "s/m", "taus": "s", "panel": None}
@@ -96,8 +118,10 @@ class FKResult(PlottedResult, _FKFields):
     """The ``(frequencies, wavenumbers, power, spectrum)`` 4-tuple of
     :func:`fk_transform`, carrying the panel's ``scaling`` as an attribute.
 
-    Unpacking stays four-wide (``f, k, power, spectrum = fk_transform(...)``)
-    and :func:`inverse_fk` keeps taking the fourth element. ``scaling`` is one
+    Unpacking stays four-wide (``f, k, power, spectrum = fk_transform(...)``),
+    and :func:`inverse_fk` takes the result whole and inverts its
+    ``spectrum`` (a masked one through ``result._replace(spectrum=masked)``).
+    ``scaling`` is one
     of :data:`FK_SCALINGS` and tells :func:`~uacpy.plot.plot_fk`
     which unit the panel is in, so it is not a fifth tuple element: a fifth
     element would change every unpack site for one flag the plotter reads.
@@ -210,37 +234,30 @@ def _fk_nfft(nfft, nt, nx):
     return NT, NX
 
 
-def _require_scalar_geometry(who, sample_rate, dx, signature):
-    """Reject an array where a scalar ``sample_rate``/``dx`` belongs.
-
-    ``inverse_taup`` and ``inverse_radon`` take a panel, the scalar geometry
-    and then a parameter axis; a call that puts the axis array in a scalar
-    slot is caught here and told the expected signature instead of failing
-    later inside numpy.
-    """
-    for name, value in (("sample_rate", sample_rate), ("dx", dx)):
-        if np.ndim(value) != 0:
-            raise ConfigurationError(
-                f"{who}: {name} must be a scalar, got an array of shape "
-                f"{np.shape(value)} — check the argument order, which is "
-                f"{signature}.")
-
-
-def _require_axis_array(who, name, value, signature):
-    """Reject a parameter axis that is not a 1-D array.
-
-    The axis is the one inverse argument a scalar cannot stand in for: with a
-    one-row panel, a scalar in the axis slot lines up in size, so a call
-    written in another argument order (a scalar geometry value landing on the
-    axis) would run on the wrong numbers. A single-row axis is passed as a
-    length-1 array.
-    """
-    if np.ndim(value) != 1:
+def _require_forward_result(who, result, cls, transform, field):
+    """The forward result an inverse takes whole, or a refusal saying how to
+    hand it a filtered panel: the result carries the geometry the inverse
+    needs, which a bare array does not."""
+    if not isinstance(result, cls):
         raise ConfigurationError(
-            f"{who}: {name} must be a 1-D array (one value per panel "
-            f"row; a single row takes a length-1 array); got "
-            f"{'a scalar' if np.ndim(value) == 0 else f'shape {np.shape(value)}'}"
-            f" — check the argument order, which is {signature}.")
+            f"{who}: takes the {cls.__name__} {transform} returned, which "
+            f"carries the geometry the inverse needs; got "
+            f"{type(result).__name__}.",
+            remediation=f"Pass the {transform} result whole; for a filtered "
+                        f"{field}, result._replace({field}=filtered).")
+
+
+def _require_panel_rows(who, panel, axis, axis_name):
+    """The panel as a float 2-D array with one row per value of its
+    parameter axis (a ``_replace`` that changed one and not the other is
+    refused)."""
+    panel = np.asarray(panel, dtype=float)
+    axis = np.atleast_1d(np.asarray(axis, dtype=float))
+    if panel.ndim != 2 or panel.shape[0] != axis.size:
+        raise ConfigurationError(
+            f"{who}: the panel (shape {panel.shape}) must be 2-D with one "
+            f"row per {axis_name} value ({axis.size}).")
+    return panel, axis
 
 
 def _flip_wavenumber_axis(F):
@@ -278,12 +295,6 @@ def _require_radon_kind(kind, who):
             f"{who}: kind must be one of {_RADON_KINDS}; got {kind!r}.")
 
 
-#: Fewest time samples a gather may have with more traces than samples before
-#: it reads as ``(nx, nt)``: the channel-count bound ``welch`` applies to a
-#: ``(n_samples, n_channels)`` record.
-_MAX_TRANSPOSED_NT = 64
-
-
 def _gather_time_first(d, axis, who):
     """The 2-D gather ``d`` as ``(nt, nx)``. ``axis`` is its time axis:
     ``None`` reads axis 0 and warns when the shape looks like ``(nx, nt)``
@@ -303,8 +314,11 @@ def _gather_time_first(d, axis, who):
 def _warn_if_gather_reads_transposed(nt, nx, who):
     """Warn when an ``(nt, nx)`` gather looks like ``(nx, nt)``: a few dozen
     time samples against more traces is a (space, time) array, and every
-    transform here would read its traces as time and its samples as space."""
-    if nt < nx and nt <= _MAX_TRANSPOSED_NT:
+    transform here would read its traces as time and its samples as space.
+    "A few dozen" is the channel-count bound the estimators' layout guards
+    apply to a ``(n_samples, n_channels)`` record,
+    :data:`~uacpy.core._validate._MAX_CHANNELS_GUESSED`."""
+    if nt < nx and nt <= _MAX_CHANNELS_GUESSED:
         warnings.warn(
             f"{who}: data is shaped ({nt}, {nx}), read as {nt} time samples "
             f"of {nx} traces, which looks like a (traces, time) array. Pass "
@@ -377,10 +391,11 @@ def radon_transform(data, sample_rate, dx, moveout, kind, x0=0.0, *,
         for ix in range(nx):
             tt = _moveout_times(kind, taus, x[ix], m)
             R[i] += np.interp(tt, taus, d[:, ix], left=0.0, right=0.0)
-    return RadonResult(moveout, taus, R, kind=kind)
+    return RadonResult(moveout, taus, R, kind=kind, sample_rate=sample_rate,
+                       dx=dx, nx=nx, x0=x0)
 
 
-def inverse_radon(R, sample_rate, dx, moveout, nx, kind, x0=0.0):
+def inverse_radon(R):
     """Adjoint (back-projection) Radon transform: ``(n_moveout, nt) -> (nt, nx)``.
 
     Spreads each Radon sample back along its moveout curve. This is the matched
@@ -390,45 +405,21 @@ def inverse_radon(R, sample_rate, dx, moveout, nx, kind, x0=0.0):
     machine precision — which is what an iterative least-squares (sparse Radon)
     solver needs.
 
-    ``sample_rate``/``dx`` are the geometry and ``moveout`` the scanned
-    parameter axis — the order :func:`inverse_taup` shares.
-
     Parameters
     ----------
-    R : ndarray
-        The ``(n_moveout, nt)`` Radon panel.
-    sample_rate : float
-        Temporal sample rate (Hz).
-    dx : float
-        Sensor spacing (m).
-    moveout : array_like
-        The scanned parameter axis.
-    nx : int
-        Traces in the output gather.
-    kind : {'parabolic', 'hyperbolic'}
-        The moveout family.
-    x0 : float, optional
-        Reference offset (m) of the forward transform. Default 0.
+    R : RadonResult
+        What :func:`radon_transform` returned, whole: its ``panel`` is spread
+        back over the ``nx`` traces of its ``kind``, ``sample_rate``, ``dx``
+        and ``x0``. A filtered panel goes back as
+        ``R._replace(panel=filtered)``.
     """
-    _require_radon_kind(kind, "inverse_radon")
-    R = np.asarray(R, dtype=float)
-    if R.ndim != 2:
-        raise ConfigurationError(
-            "inverse_radon: R must be 2-D (n_moveout, nt)"
-            f"; got shape {R.shape}.")
-    nm, nt = R.shape
-    _require_scalar_geometry(
-        "inverse_radon", sample_rate, dx,
-        "inverse_radon(R, sample_rate, dx, moveout, nx)")
-    _require_axis_array("inverse_radon", "moveout", moveout,
-                        "inverse_radon(R, sample_rate, dx, moveout, nx)")
-    moveout = np.asarray(moveout, dtype=float)
-    if moveout.size != nm:
-        raise ConfigurationError(
-            f"inverse_radon: moveout length ({moveout.size}) must match R rows "
-            f"({nm}); the signature is inverse_radon(R, sample_rate, dx, "
-            "moveout, nx) — the moveout axis comes fourth, as the slowness "
-            "axis does in inverse_taup.")
+    _require_forward_result("inverse_radon", R, RadonResult,
+                            "radon_transform", "panel")
+    kind, nx, x0 = R.kind, R.nx, R.x0
+    sample_rate, dx = R.sample_rate, R.dx
+    R, moveout = _require_panel_rows("inverse_radon", R.panel, R.moveout,
+                                     "moveout")
+    nt = R.shape[1]
     if kind == "hyperbolic" and np.any(moveout <= 0):
         raise ConfigurationError(
             "inverse_radon: hyperbolic moveout is a velocity (m/s) and the "
@@ -460,13 +451,23 @@ def inverse_radon(R, sample_rate, dx, moveout, nx, kind, x0=0.0):
     return out
 
 
-def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
+#: Slownesses on the axis :func:`taup_transform` builds when ``n_slownesses``
+#: is unset (uacpy guidance).
+_TAUP_N_SLOWNESS = 201
+
+#: Largest slowness (s/m) of that axis when ``p_max`` is unset: everything
+#: with an apparent velocity above 1000 m/s, which spans the water column and
+#: most sediments (uacpy guidance).
+_TAUP_P_MAX = 1.0 / 1000.0
+
+
+def taup_transform(data, sample_rate, dx, slownesses=None, n_slownesses=None,
                    p_max=None, *, x0=0.0, window="boxcar", nfft=None,
                    axis=None):
     """Forward linear tau-p (slant stack), frequency-domain.
 
     Returns a :class:`TauPResult` namedtuple ``(slownesses, taus, panel)``:
-    slowness axis (s/m), intercept-time axis (s), and the panel ``(n_slowness,
+    slowness axis (s/m), intercept-time axis (s), and the panel ``(n_slownesses,
     NT)``.
 
     ``x0`` is the reference offset (m) subtracted from the sensor positions,
@@ -501,12 +502,14 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
     dx : float
         Sensor spacing (m).
     slownesses : array_like, optional
-        The slowness axis (s/m); ``None`` builds one from ``n_slowness`` and
-        ``p_max``.
-    n_slowness : int, optional
-        Slownesses of the built axis. Default 201.
+        The slowness axis (s/m); ``None`` builds one from ``n_slownesses`` and
+        ``p_max``. Given, the axis is not built, so a given ``n_slownesses``
+        or ``p_max`` gets a ``FallbackWarning``.
+    n_slownesses : int, optional
+        Slownesses of the built axis. Unset, 201 (uacpy guidance).
     p_max : float, optional
-        Largest slowness (s/m) of the built axis.
+        Largest slowness (s/m) of the built axis. Unset, 1e-3 s/m, every
+        apparent velocity above 1000 m/s (uacpy guidance).
     x0 : float, optional
         Reference offset (m). Default 0.
     window : str or tuple, optional
@@ -520,7 +523,7 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
     The spatial axis has no such knob, and deliberately so
     -----------------------------------------------------
     The slowness axis is yours to set outright — ``slownesses`` takes any
-    array, uniform or not, and ``n_slowness``/``p_max`` build one for you — so
+    array, uniform or not, and ``n_slownesses``/``p_max`` build one for you — so
     resolution in ``p`` is never limited by a transform length the way
     :func:`fk_transform`'s wavenumber axis is. There is correspondingly no
     spatial ``nfft``: this transform SUMS over sensors rather than
@@ -559,11 +562,19 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
                              nt)[:, None]
     x = np.arange(nx) * dx - float(x0)
     if slownesses is None:
-        if p_max is None:
-            # +/- 1e-3 s/m: everything with an apparent velocity above
-            # 1000 m/s, which spans the water column and most sediments.
-            p_max = 1.0 / 1000.0
-        slownesses = np.linspace(-p_max, p_max, int(n_slowness))
+        p_max = _TAUP_P_MAX if p_max is None else p_max
+        slownesses = np.linspace(
+            -p_max, p_max,
+            _TAUP_N_SLOWNESS if n_slownesses is None else int(n_slownesses))
+    else:
+        unused = [f"{name}={value!r}" for name, value in (
+            ("n_slownesses", n_slownesses), ("p_max", p_max)) if value is not None]
+        if unused:
+            warnings.warn(
+                f"taup_transform: slownesses= is the axis itself, so "
+                f"{' and '.join(unused)}, which build an axis, "
+                f"{'is' if len(unused) == 1 else 'are'} not used.",
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     slownesses = np.atleast_1d(np.asarray(slownesses, dtype=float))
     D = np.fft.rfft(d, n=NT, axis=0)
     freqs = np.fft.rfftfreq(NT, 1.0 / fs)                # Hz
@@ -576,55 +587,27 @@ def taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201,
         # then u(tau, p) = sum_x d(tau + p*x, x), the linear moveout curve.
         phase = np.exp(1j * omega[:, None] * (p * x)[None, :])
         taup[i] = np.fft.irfft(np.sum(D * phase, axis=1), n=NT)
-    return TauPResult(slownesses, np.arange(NT) / fs, taup)
+    return TauPResult(slownesses, np.arange(NT) / fs, taup, sample_rate=fs,
+                      dx=dx, nx=nx, x0=x0)
 
 
-def inverse_taup(taup, sample_rate, dx, slownesses, nx, *, x0=0.0):
-    """Adjoint slant stack ``(n_slowness, nt) -> (nt, nx)``.
-
-    Standalone inverse — pass a tau-p panel you already have (e.g. a filtered
-    one) plus its slowness axis and geometry; no prior :func:`taup_transform`
-    call needed. ``x0`` is the reference offset (m) the forward transform used;
-    pass the same value back.
-
-    The argument order is :func:`inverse_radon`'s and the forward
-    transforms': panel, ``sample_rate``, ``dx``, then the parameter axis
-    (``slownesses``) and ``nx``. The scalar geometry arguments are
-    type-checked, so a call that puts the slowness array in a scalar slot is
-    refused by name.
+def inverse_taup(taup):
+    """Adjoint slant stack ``(n_slownesses, nt) -> (nt, nx)``.
 
     Parameters
     ----------
-    taup : ndarray
-        The ``(n_slowness, nt)`` tau-p panel.
-    sample_rate : float
-        Temporal sample rate (Hz).
-    dx : float
-        Sensor spacing (m).
-    slownesses : array_like
-        The panel's slowness axis (s/m).
-    nx : int
-        Traces in the output gather.
-    x0 : float, optional
-        Reference offset (m) of the forward transform. Default 0.
+    taup : TauPResult
+        What :func:`taup_transform` returned, whole: its ``panel`` is spread
+        back along each of its ``slownesses`` over the ``nx`` traces of its
+        ``sample_rate``, ``dx`` and ``x0``. A filtered panel goes back as
+        ``taup._replace(panel=filtered)``.
     """
-    u = np.asarray(taup, dtype=float)
-    if u.ndim != 2:
-        raise ConfigurationError(
-            "inverse_taup: taup must be 2-D (n_slowness, nt)"
-            f"; got shape {u.shape}.")
-    n_p, nt = u.shape
-    _require_scalar_geometry("inverse_taup", sample_rate, dx,
-                             "inverse_taup(taup, sample_rate, dx, slownesses, nx)")
-    _require_axis_array("inverse_taup", "slownesses", slownesses,
-                        "inverse_taup(taup, sample_rate, dx, slownesses, nx)")
-    slownesses = np.asarray(slownesses, dtype=float)
-    if slownesses.size != n_p:
-        raise ConfigurationError(
-            f"inverse_taup: slownesses length ({slownesses.size}) must match "
-            f"taup rows ({n_p}); the signature is inverse_taup(taup, "
-            "sample_rate, dx, slownesses, nx) — the slowness axis comes "
-            "fourth, as the moveout axis does in inverse_radon.")
+    _require_forward_result("inverse_taup", taup, TauPResult,
+                            "taup_transform", "panel")
+    sample_rate, dx, nx, x0 = taup.sample_rate, taup.dx, taup.nx, taup.x0
+    u, slownesses = _require_panel_rows("inverse_taup", taup.panel,
+                                        taup.slownesses, "slowness")
+    nt = u.shape[1]
     x = np.arange(int(nx)) * float(dx) - float(x0)
     U = np.fft.rfft(u, axis=1)
     omega = 2.0 * np.pi * np.fft.rfftfreq(nt, 1.0 / float(sample_rate))
@@ -637,11 +620,12 @@ def inverse_taup(taup, sample_rate, dx, slownesses, nx, *, x0=0.0):
 
 
 def inverse_fk(FK):
-    """Inverse f-k transform: complex (fftshifted) spectrum -> real gather.
+    """Inverse f-k transform: the complex (fftshifted) spectrum of an
+    :class:`FKResult` -> real gather.
 
-    Pass the (possibly filtered/muted) complex spectrum — i.e. the ``spectrum``
-    returned by :func:`fk_transform` (single-segment), after any f-k mask. It
-    must be in the ``fftshift``ed layout that :func:`fk_transform` produces.
+    Pass what :func:`fk_transform` returned (single-segment), whole; a
+    filtered or muted spectrum goes back as ``FK._replace(spectrum=masked)``,
+    in the ``fftshift``ed layout :func:`fk_transform` produces.
 
     The output has the **spectrum's** shape ``(NT, NX)`` — the zero-padded
     ``nfft`` shape when the forward transform was padded, with the original
@@ -654,19 +638,17 @@ def inverse_fk(FK):
 
     Parameters
     ----------
-    FK : ndarray
-        The complex, fftshifted spectrum of :func:`fk_transform`.
+    FK : FKResult
+        What :func:`fk_transform` returned; its ``spectrum`` is inverted.
     """
-    if FK is None:
+    _require_forward_result("inverse_fk", FK, FKResult, "fk_transform",
+                            "spectrum")
+    if FK.spectrum is None:
         raise ConfigurationError(
             "inverse_fk: spectrum is None — an f-k panel averaged over more "
             "than one segment has no phase and cannot be inverted. Re-run "
             "fk_transform with nperseg=None for an invertible spectrum.")
-    if isinstance(FK, tuple):
-        raise ConfigurationError(
-            "inverse_fk: pass the complex spectrum (the .spectrum field / 4th "
-            "element of fk_transform's result), not the whole FKResult tuple.")
-    fk = np.asarray(FK)
+    fk = np.asarray(FK.spectrum)
     if fk.ndim != 2:
         raise ConfigurationError(
             "inverse_fk: FK must be 2-D (nt, nx)"

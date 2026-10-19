@@ -11,7 +11,7 @@ Uses: comms.ber_sweep (BerCurve.plot) · multipath_channel · Arrivals.channel_t
 simulate_link · DFE ·
 detect_preamble · estimate_doppler_scale (a DopplerEstimate) / compensate_doppler ·
 ofdm_modulate / ofdm_demodulate · conv_encode / viterbi_decode · m_sequence ·
-JanusPacket · ber_theory_curve · plot_scatter · plot_convergence ·
+JanusPacket · ber_theory_curve · plot_received_symbols · plot_convergence ·
 plot_sync_metric · plot_doppler_ambiguity · plot_subcarriers
 """
 
@@ -130,10 +130,10 @@ comms.ber_theory_curve("qpsk", fine).plot(ax=axes[0, 0])
 qam.plot(ax=axes[0, 0], label="16QAM meas")
 comms.ber_theory_curve("16qam", fine).plot(ax=axes[0, 0], linestyle=":",
                                            title="AWGN link")
-uacpy.plot.plot_scatter(equalized.rx_symbols[2000:], ax=axes[0, 1],
-                        ideal=modulator.constellation,
-                        title=f"QPSK after DFE (BER {equalized.ber:.1e})",
-                        color="C0")
+uacpy.plot.plot_received_symbols(equalized.rx_symbols[2000:], ax=axes[0, 1],
+                                 ideal=modulator.constellation,
+                                 title=f"QPSK after DFE (BER {equalized.ber:.1e})",
+                                 color="C0")
 uacpy.plot.plot_convergence(equalized.mse, ax=axes[1, 0], title="(DFE, RLS)")
 uacpy.plot.plot_sync_metric(sync_metric, threshold=0.5, ax=axes[1, 1])
 uacpy.plot.plot_doppler_ambiguity(doppler, ax=axes[2, 0])

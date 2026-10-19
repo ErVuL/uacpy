@@ -17,7 +17,8 @@ from uacpy.core._export import ExportRecord
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.geo import as_coordinate
-from uacpy.data._chain import first_answer, lower_source_spec
+from uacpy.data._chain import (SourceChain, SourceProvider,
+                               unused_setting_notices)
 from uacpy.data._geo import checked_max_days, checked_max_distance
 from uacpy.data.sources import DataProvenance
 from uacpy.data._provenance_notice import one_provenance_notice
@@ -55,24 +56,39 @@ class SeaStateRecord(ExportRecord):
 WAVE_SOURCES = ('waverys', 'ww3')
 
 
-def _resolve_order(source):
-    source = lower_source_spec(source)
-    if source == 'auto':
-        return WAVE_SOURCES
-    order = (source,) if isinstance(source, str) else tuple(source)
-    for name in order:
-        if name not in WAVE_SOURCES:
-            raise ConfigurationError(
-                f"fetch_waves: unknown wave source {name!r}.",
-                remediation=f"Use 'auto' or one of {sorted(WAVE_SOURCES)}.",
-            )
-    return order
+def _waverys_point(_backend, point, *, date, verbose, max_distance_km,
+                   max_days, **_request):
+    """A :data:`_WAVE_CHAIN` point fetch: the Copernicus WAVERYS record."""
+    from uacpy.data.copernicus import fetch_waves_operational
+    extra = {} if max_days is None else {'max_days': max_days}
+    return fetch_waves_operational(point, date=date, verbose=verbose,
+                                   max_distance_km=max_distance_km, **extra)
+
+
+def _ww3_point(_backend, point, *, date, timeout, verbose, max_distance_km,
+               base_url=None, **_request):
+    """A :data:`_WAVE_CHAIN` point fetch: the WaveWatch III record."""
+    from uacpy.data.ww3_live import hs_at
+    hs, prov = hs_at(point, date=date, timeout=timeout, verbose=verbose,
+                     max_distance_km=max_distance_km, who='fetch_waves',
+                     base_url=base_url)
+    return SeaStateRecord(hs=hs, tp=None, provenance=prov)
+
+
+#: The wave sources, both live (sea state has no cached twin, so ``'auto'``
+#: is the one preset).
+_WAVE_CHAIN = SourceChain(
+    'wave',
+    providers=(SourceProvider('waverys', ('live',), _waverys_point),
+               SourceProvider('ww3', ('live',), _ww3_point)),
+    auto=WAVE_SOURCES, presets=('auto',))
 
 
 @one_provenance_notice(subject="the sea state's data",
                        record="the result's .provenance")
 def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
-                verbose=False, max_distance_km=None) -> SeaStateRecord:
+                verbose=False, max_distance_km=None,
+                base_url=None) -> SeaStateRecord:
     """Significant wave height (m) at a ``(lat, lon)`` point and date.
 
     ``source`` is ``'waverys'`` (the Copernicus WAVERYS reanalysis), ``'ww3'``
@@ -107,30 +123,41 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
         Refuse a grid node standing farther than this (km) from ``point`` (the
         offset rule), whichever source answers; ``None`` (default) sets no
         limit beyond its warning.
+    base_url : str, optional
+        The ERDDAP griddap root WaveWatch III is read from (a mirror serving
+        ``ww3_global``); ``None`` (default) reads the module constant
+        ``uacpy.data.ww3_live.ERDDAP_URL``. WAVERYS reads its own Copernicus
+        session, so ``base_url`` with a source list that holds no ``'ww3'``
+        is refused, and a ``FallbackWarning`` says it was not used when
+        WAVERYS answered.
     """
     as_coordinate(point)                       # validate before any request
     limit = checked_max_distance(max_distance_km, 'fetch_waves')
     if max_days is not None:
         max_days = checked_max_days(max_days, 'fetch_waves')
-    order = _resolve_order(source)
-
-    def call(name, _backend):
-        if name == 'waverys':
-            from uacpy.data.copernicus import fetch_waves_operational
-            extra = {} if max_days is None else {'max_days': max_days}
-            return fetch_waves_operational(point, date=date, verbose=verbose,
-                                           max_distance_km=limit, **extra)
-        from uacpy.data.ww3_live import hs_at
-        hs, prov = hs_at(point, date=date, timeout=timeout, verbose=verbose,
-                         max_distance_km=limit, who='fetch_waves')
-        return SeaStateRecord(hs=hs, tp=None, provenance=prov)
-
-    out, (name, _backend) = first_answer(((name, None) for name in order),
-                                         call)
+    if base_url is not None and 'ww3' not in _WAVE_CHAIN.resolve(source)[0]:
+        raise ConfigurationError(
+            f"fetch_waves: base_url= is the WaveWatch III ERDDAP griddap "
+            f"root, which only source 'ww3' reads; source={source!r} does "
+            f"not read it.",
+            remediation="Drop base_url=, or include 'ww3' in source=.")
+    request = dict(date=date, timeout=timeout, verbose=verbose,
+                   max_distance_km=limit, max_days=max_days,
+                   base_url=base_url)
+    out, (name, _backend) = _WAVE_CHAIN.answer(
+        source,
+        lambda src, backend: _WAVE_CHAIN.fetch(
+            src, backend, (point,), request, who='fetch_waves',
+            keyword='source='),
+        who='fetch_waves', keyword='source=')
     if max_days is not None and name == 'ww3':
         warnings.warn(
             f"fetch_waves: max_days={max_days} was not used: WaveWatch III "
             f"answered, and it reads the field at 00:00 UTC of date= itself, "
             f"with no time tolerance (only WAVERYS reads max_days).",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    if name != 'ww3':
+        unused_setting_notices('fetch_waves', [(
+            'base_url', base_url,
+            "WAVERYS answered, and only WaveWatch III reads base_url")])
     return out

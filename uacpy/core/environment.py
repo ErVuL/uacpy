@@ -19,11 +19,12 @@ from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, ValidityWarning)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._plotting import plotter
-from uacpy.core._validate import real_scalar_or_none, sanitize_title
+from uacpy.core._validate import (
+    DENSITY_UNITS_SUSPECT, real_scalar_or_none, sanitize_title)
 from uacpy.core._provenance import (
     coerce_data_sources, dedupe_provenance, dedupe_records)
 from uacpy.core._carrier import (
-    DeepCopyMixin, _under_construction, carrier)
+    DeepCopyMixin, _under_construction, carrier, refuse_unknown_attribute)
 from uacpy.core._export import CarrierExport
 from uacpy.core._repr import build, extent, qty
 from uacpy.core.boundary import SedimentLayer, BoundaryProperties
@@ -36,9 +37,8 @@ from uacpy.core.absorption import (
     Absorption, AbsorptionCoefficient, FrancoisGarrison, _absorption_law,
 )
 from uacpy.core.constants import (
-    DEFAULT_WATER_DENSITY_G_CM3, REFERENCE_SALINITY_PSU,
-    REFERENCE_TEMPERATURE_C, WATER_DENSITY_MAX_G_CM3,
-    WATER_DENSITY_MIN_G_CM3,
+    DEFAULT_WATER_DENSITY, REFERENCE_SALINITY,
+    REFERENCE_TEMPERATURE,
 )
 from uacpy.core.geo import as_coordinate, great_circle_midpoint, parse_date
 
@@ -105,21 +105,21 @@ def _warn_if_reference_water_replaces(old, new) -> None:
     if not (isinstance(new, FrancoisGarrison) and not new.is_profile
             and isinstance(old, FrancoisGarrison)):
         return
-    if not (new.temperature == REFERENCE_TEMPERATURE_C
-            and new.salinity == REFERENCE_SALINITY_PSU):
+    if not (new.temperature == REFERENCE_TEMPERATURE
+            and new.salinity == REFERENCE_SALINITY):
         return
     t_gap = float(np.max(np.abs(np.asarray(old._values('temperature'),
                                            dtype=float)
-                                - REFERENCE_TEMPERATURE_C)))
+                                - REFERENCE_TEMPERATURE)))
     s_gap = float(np.max(np.abs(np.asarray(old._values('salinity'),
                                            dtype=float)
-                                - REFERENCE_SALINITY_PSU)))
+                                - REFERENCE_SALINITY)))
     if t_gap <= _REFERENCE_WATER_GAP_C and s_gap <= _REFERENCE_WATER_GAP_PSU:
         return
     own = ', '.join(old._repr_bits())
     warnings.warn(
         f"Environment: absorption {new!r} is the reference water "
-        f"({REFERENCE_TEMPERATURE_C:g} °C, {REFERENCE_SALINITY_PSU:g} psu), "
+        f"({REFERENCE_TEMPERATURE:g} °C, {REFERENCE_SALINITY:g} psu), "
         f"and it replaces this environment's own water ({own}), up to "
         f"{t_gap:.3g} °C and {s_gap:.3g} psu away. Francois-Garrison follows "
         f"the temperature and salinity, so the run absorbs as in water this "
@@ -131,20 +131,25 @@ def _warn_if_reference_water_replaces(old, new) -> None:
 
 def _coerce_water_density(value) -> float:
     """The water density as a float in g/cm³ (``None`` is the package
-    default); refused outside 0.9-1.1, where a kg/m³ slip lands."""
+    default): any positive, finite value; one above
+    ``DENSITY_UNITS_SUSPECT`` reads as kg/m³ and is refused, as every
+    other density input of the package refuses it."""
     if value is None:
-        value = DEFAULT_WATER_DENSITY_G_CM3
+        value = DEFAULT_WATER_DENSITY
     rho_w = real_scalar_or_none(value)
     if rho_w is None:
         raise ConfigurationError(
             f"Environment: water_density must be a number in g/cm³; "
             f"got {value!r}.")
-    if not (WATER_DENSITY_MIN_G_CM3 <= rho_w <= WATER_DENSITY_MAX_G_CM3):
+    if not (np.isfinite(rho_w) and rho_w > 0.0):
         raise ConfigurationError(
-            f"Environment: water_density={rho_w:g} lies outside "
-            f"{WATER_DENSITY_MIN_G_CM3:g}-{WATER_DENSITY_MAX_G_CM3:g} "
-            f"g/cm³. The unit is g/cm³ (sea water is about 1.027); a "
-            f"kg/m³ value has to be divided by 1000.")
+            f"Environment: water_density must be positive and finite, in "
+            f"g/cm³ (sea water is about 1.027); got {rho_w!r}.")
+    if rho_w > DENSITY_UNITS_SUSPECT:
+        raise ConfigurationError(
+            f"Environment: water_density is in g/cm³ (sea water is about "
+            f"1.027); {rho_w:g} reads as kg/m³.",
+            remediation=f"Pass water_density={rho_w / 1000.0:g}.")
     return rho_w
 
 
@@ -285,7 +290,8 @@ class Environment(DeepCopyMixin, CarrierExport):
     as the constructor checks and completes the same argument, copying only
     the assigned value: the profile is extended to span a deeper seafloor, a
     derived ``location`` follows a reassigned ``transect``, and a refused
-    value leaves the environment as it was.
+    value leaves the environment as it was. An assignment to a name that is
+    not one of its settings is refused: nothing would read it.
 
     Parameters
     ----------
@@ -350,7 +356,7 @@ class Environment(DeepCopyMixin, CarrierExport):
         the engines that fix the water at 1 and read seabed densities as
         ratios — the RAM codes and BOUNCE — receive each seabed density
         divided by it. Default ``None`` is
-        :data:`~uacpy.core.constants.DEFAULT_WATER_DENSITY_G_CM3` (1.027);
+        :data:`~uacpy.core.constants.DEFAULT_WATER_DENSITY` (1.027);
         ``uacpy.acoustics.density(T, S)`` (g/cm³) gives the value for a
         measured column. Seabed densities stay absolute g/cm³ (Hamilton's
         tables), so the impedance contrast the engines see is ρ_b/ρ_w
@@ -376,10 +382,10 @@ class Environment(DeepCopyMixin, CarrierExport):
         (:func:`uacpy.core.geo.parse_date`): no data source reads a finer
         time. Default ``None``.
     extra_data_sources : tuple of DataProvenance, keyword-only
-        Provenance records that belong to no carrier:
-        ``uacpy.data.fetch_environment`` puts the absorption's
-        temperature/salinity row and its pH here. Default ``()``.
-        :attr:`data_sources` merges them with the carriers' own records.
+        Provenance records that belong to no carrier (a fetched absorption's
+        temperature, salinity and pH are the law's own
+        ``absorption.data_sources``). Default ``()``. :attr:`data_sources`
+        merges them with the carriers' own records.
 
     Examples
     --------
@@ -587,12 +593,14 @@ class Environment(DeepCopyMixin, CarrierExport):
         # constructor checks and completes that argument, with the fields it
         # moves with, all computed before any is stored, so a refused value
         # leaves the environment as it was. Only the assigned value is
-        # copied; the other carriers are the environment's own already.
-        if (name in self.__dataclass_fields__
-                and id(self) not in _under_construction()):
-            for field, new in self._assignment(name, value).items():
-                object.__setattr__(self, field, new)
-            return
+        # copied; the other carriers are the environment's own already. A
+        # name that is not a setting is refused: nothing would read it.
+        if id(self) not in _under_construction():
+            if name in self.__dataclass_fields__:
+                for field, new in self._assignment(name, value).items():
+                    object.__setattr__(self, field, new)
+                return
+            refuse_unknown_attribute(self, name)
         object.__setattr__(self, name, value)
 
     def _assignment(self, name, value) -> dict:
@@ -632,14 +640,14 @@ class Environment(DeepCopyMixin, CarrierExport):
     @property
     def data_sources(self) -> tuple:
         """Provenance of this environment (read-only): each carrier's own
-        ``data_sources`` in the order bathymetry → ssp → bottom → surface,
-        then :attr:`extra_data_sources`, then the altimetry's, exact repeats
-        removed: a transect keeps one record per column read, each with its
-        ``range``. It is read from the carriers each time, so a reassigned
-        carrier brings its own records."""
+        ``data_sources`` in the order bathymetry → ssp → bottom → surface →
+        absorption, then :attr:`extra_data_sources`, then the altimetry's,
+        exact repeats removed: a transect keeps one record per column read,
+        each with its ``range``. It is read from the carriers each time, so a
+        reassigned carrier brings its own records."""
         return dedupe_records(
             dedupe_provenance((self.bathymetry, self.ssp, self.bottom,
-                               self.surface))
+                               self.surface, self.absorption))
             + self.extra_data_sources
             + dedupe_provenance((self.altimetry,)))
 

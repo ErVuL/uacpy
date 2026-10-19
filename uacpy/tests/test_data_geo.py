@@ -170,7 +170,7 @@ def test_as_coordinate_allows_unwrapped_longitude():
 
 def test_transect_length_pins_the_documented_geodesic():
     # Guide endpoints (48.2, -8.0) → (45.6, -6.2): the spherical haversine on
-    # the shared EARTH_RADIUS_M (6 371 008.8 m) gives 319 797.92 m. The WGS84
+    # the shared EARTH_RADIUS (6 371 008.8 m) gives 319 797.92 m. The WGS84
     # ellipsoidal length is 319 906.6 m, 0.034 % longer — within the
     # documented few-parts-in-10³ spherical approximation.
     from uacpy.data.bathymetry import transect_length

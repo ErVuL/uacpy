@@ -10,6 +10,7 @@ the vendored source, cited at the assertion.
 
 import io
 import dataclasses
+import warnings
 
 import numpy as np
 import pytest
@@ -23,7 +24,7 @@ from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.bottom import Bottom
 from uacpy.core.bottom import SeabedColumn
 from uacpy.core.boundary import SedimentLayer
-from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_WATER_DENSITY
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.exceptions import FileFormatError
@@ -332,7 +333,11 @@ class TestFieldFlpWriter:
                if 'Rro(' in ln][0]
         assert rro.split('!')[0].replace('/', ' ').split() == [
             '-2.5', '0.0', '0.1', '7.25']
-        deck = read_flp(tmp_path / 'tilt.flp')
+        # The tilt is the documented geometry (Kraken(range_offsets=)): read
+        # without a warning.
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            deck = read_flp(tmp_path / 'tilt.flp')
         np.testing.assert_array_equal(deck.receiver_range_offsets, offsets)
         write_fieldflp(tmp_path / 'again.flp', **dataclasses.asdict(deck))
         assert ((tmp_path / 'again.flp').read_text()
@@ -598,9 +603,9 @@ class TestSSPLinePinsWaterProperties:
                 f"SSP row {row} has {len(row)} columns; a short form lets the "
                 f"top half-space's cs/rho/alphaI/betaI leak into the water")
             assert float(row[2]) == 0.0, f"water shear speed must be 0: {row}"
-            assert float(row[3]) == pytest.approx(DEFAULT_WATER_DENSITY_G_CM3), (
+            assert float(row[3]) == pytest.approx(DEFAULT_WATER_DENSITY), (
                 f"water density must be the Environment's (default "
-                f"{DEFAULT_WATER_DENSITY_G_CM3} g/cm³): {row}")
+                f"{DEFAULT_WATER_DENSITY} g/cm³): {row}")
             assert float(row[5]) == 0.0, f"water shear atten must be 0: {row}"
 
 
@@ -1819,10 +1824,10 @@ class TestDeckDepthQuantisation:
         the depth the caller built, and made ``Scooter`` insensitive to a 6 cm
         change entirely.
         """
-        from uacpy.core.deck_limits import DECK_DEPTH_RESOLUTION_M
+        from uacpy.core.deck_limits import DECK_DEPTH_RESOLUTION
         from uacpy.io.oalib_writer import deck_depth
         got = deck_depth(depth)
-        assert abs(got - depth) <= DECK_DEPTH_RESOLUTION_M
+        assert abs(got - depth) <= DECK_DEPTH_RESOLUTION
 
     @pytest.mark.parametrize('depth', [
         100.0, 150.0, 2000.0, 200.3, 100.04, 42.2999960])
@@ -1838,8 +1843,8 @@ class TestDeckDepthQuantisation:
         ``100 * EPSILON( 1.0e0 )`` = 1.19e-05 m, so the written resolution has to
         sit below that for the mesh line and the SSP rows to count as equal."""
         import numpy as np
-        from uacpy.core.deck_limits import DECK_DEPTH_RESOLUTION_M
-        assert DECK_DEPTH_RESOLUTION_M < 100.0 * np.finfo(np.float32).eps
+        from uacpy.core.deck_limits import DECK_DEPTH_RESOLUTION
+        assert DECK_DEPTH_RESOLUTION < 100.0 * np.finfo(np.float32).eps
 
     @staticmethod
     def _mesh_line_depth(path):
@@ -2294,14 +2299,14 @@ class TestFieldFlpProfileRangeCollapse:
 
     def test_the_quantum_is_the_boundary(self, tmp_path):
         """1 mm apart is exactly representable; anything closer is not."""
-        from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
-        self._write(tmp_path, [0.0, 4000.0, 4000.0 + 2 * DECK_RANGE_RESOLUTION_M,
+        from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION
+        self._write(tmp_path, [0.0, 4000.0, 4000.0 + 2 * DECK_RANGE_RESOLUTION,
                                10000.0])
         with pytest.raises(
                 ConfigurationError,
                 match="both write as .* at the deck's 1 mm resolution"):
             self._write(tmp_path, [0.0, 4000.0,
-                                   4000.0 + DECK_RANGE_RESOLUTION_M / 10.0, 10000.0])
+                                   4000.0 + DECK_RANGE_RESOLUTION / 10.0, 10000.0])
 
 
 class TestOneEnvironmentOneWaterDepth:
@@ -2470,74 +2475,21 @@ def test_read_flp_accepts_list_directed_records_and_sorts(tmp_path):
     the reader must too — and the Fortran Sorts every source/receiver axis
     after SubTab (misc/SourceReceiverPositions.f90:224,268), so axes come
     back ascending whatever order the deck listed."""
-    from uacpy.io.oalib_reader import _parse_flp
+    from uacpy.io.oalib_reader import read_flp
     import pathlib
     sduct = pathlib.Path('uacpy/third_party/Acoustics-Toolbox/tests/'
                          'sduct/sductK.flp')
     if sduct.exists():
-        d = _parse_flp(str(sduct))   # used to raise: invalid literal '9999,'
-        assert np.all(np.diff(d['pos']['r']['z']) >= 0)
+        d = read_flp(str(sduct))   # used to raise: invalid literal '9999,'
+        assert np.all(np.diff(d.receiver_depths) >= 0)
     deck = tmp_path / 'unsorted.flp'
     deck.write_text(
         "'title'\n'R'\n9999,\t! M\n1\n0.0 /\n3\n20 1 5 km sorted after read\n"
         "2\n100 25 /\n3\n4000 0 2000 /\n1\n0.0 /\n")
-    d = _parse_flp(str(deck))
-    assert np.all(np.diff(d['pos']['r']['r']) >= 0)
-    assert np.all(np.diff(d['pos']['s']['z']) >= 0)
-    assert np.all(np.diff(d['pos']['r']['z']) >= 0)
-
-
-class TestReadFlpBuildsItsDebugPreviewOnlyWhenItCanPrint:
-    """``read_flp``'s two axis previews exist solely for a debug message.
-
-    ``verbose`` is public and defaults off, and Python evaluates a call's
-    arguments before ``log_message`` can decline them — so an unguarded
-    preview is formatted on every read, for a line no one asked for. The
-    previews stay (``verbose`` is a documented switch, not dead code);
-    only the moment they are built moved.
-    """
-
-    DECK = ("'title'\n'R'\n9999,\t! M\n1\n0.0 /\n3\n20 1 5\n"
-            "2\n100 25 /\n3\n4000 0 2000 /\n1\n0.0 /\n")
-
-    def _deck(self, tmp_path):
-        path = tmp_path / 'preview.flp'
-        path.write_text(self.DECK)
-        return path
-
-    def _calls(self, tmp_path, **kwargs):
-        from unittest.mock import patch
-        from uacpy.io.oalib_reader import _parse_flp
-        with patch('uacpy.io.oalib_reader.log_message') as logger:
-            _parse_flp(str(self._deck(tmp_path)), **kwargs)
-        return [call.args[1] for call in logger.call_args_list]
-
-    def test_a_default_read_never_formats_a_preview(self, tmp_path):
-        messages = self._calls(tmp_path)
-        assert not [m for m in messages if 'rProf (km)' in m]
-        assert not [m for m in messages if 'Rro (m)' in m]
-
-    def test_a_verbose_read_gets_both_previews(self, tmp_path):
-        """The switch keeps working — this is a lazier preview, not a
-        removed one."""
-        messages = self._calls(tmp_path, verbose='debug')
-        assert [m for m in messages if 'rProf (km)' in m]
-        assert [m for m in messages if 'Rro (m)' in m]
-
-    def test_the_preview_lists_a_short_axis_value_by_value(self, tmp_path):
-        messages = self._calls(tmp_path, verbose='debug')
-        prof = next(m for m in messages if 'rProf (km)' in m)
-        assert prof.endswith('[0] (1 pts)')
-
-    def test_the_read_returns_the_same_deck_either_way(self, tmp_path):
-        from uacpy.io.oalib_reader import _parse_flp
-        path = str(self._deck(tmp_path))
-        quiet = _parse_flp(path)
-        loud = _parse_flp(path, verbose='debug')
-        assert quiet['title'] == loud['title']
-        assert np.array_equal(quiet['r_prof'], loud['r_prof'])
-        assert np.array_equal(quiet['pos']['r']['ro'],
-                              loud['pos']['r']['ro'])
+    d = read_flp(str(deck))
+    assert np.all(np.diff(d.receiver_ranges) >= 0)
+    assert np.all(np.diff(d.source_depths) >= 0)
+    assert np.all(np.diff(d.receiver_depths) >= 0)
 
 
 class TestPhaseSpeedBoundsStayContractedToRangeZero:
@@ -3219,42 +3171,6 @@ def test_read_arr_file_accepts_fortran_exponent_tokens(tmp_path):
     cell = result.by_receiver[0][0][0]
     assert cell['delays'][0] == 0.5
     assert cell['delays_imag'][0] == 1.0e-101
-
-
-class TestReadFlpPreviewSwitchesPastElevenEntries:
-    """``read_flp``'s debug preview is the io package's one axis preview
-    (``_fortran_helpers.summarize_axis``): every value up to eleven entries,
-    the first ten and the last beyond, with the count."""
-
-    @staticmethod
-    def _deck(tmp_path, n_prof):
-        path = tmp_path / f'preview{n_prof}.flp'
-        path.write_text(f"'title'\n'R'\n9999,\t! M\n{n_prof}\n0.0 {n_prof - 1}.0 /"
-                        "\n3\n20 1 5\n2\n100 25 /\n3\n4000 0 2000 /\n"
-                        f"{n_prof}\n0.0 0.0 /\n")
-        return path
-
-    def _previews(self, tmp_path, n_prof):
-        from unittest.mock import patch
-        from uacpy.io.oalib_reader import _parse_flp
-        with patch('uacpy.io.oalib_reader.log_message') as logger:
-            _parse_flp(str(self._deck(tmp_path, n_prof)), verbose='debug')
-        messages = [call.args[1] for call in logger.call_args_list]
-        return (next(m for m in messages if 'rProf (km)' in m),
-                next(m for m in messages if 'Rro (m)' in m))
-
-    def test_eleven_entries_are_listed_one_by_one(self, tmp_path):
-        prof, offsets = self._previews(tmp_path, 11)
-        assert prof.endswith(
-            '[' + ', '.join(str(k) for k in range(11)) + '] (11 pts)')
-        assert offsets.endswith('[' + ', '.join(['0'] * 11) + '] (11 pts)')
-
-    def test_twelve_entries_show_the_first_ten_and_the_last(self, tmp_path):
-        prof, offsets = self._previews(tmp_path, 12)
-        assert prof.endswith(
-            '[' + ', '.join(str(k) for k in range(10)) + ', …, 11] (12 pts)')
-        assert offsets.endswith(
-            '[' + ', '.join(['0'] * 10) + ', …, 0] (12 pts)')
 
 
 class TestScooterExtraTopOptCharacter:

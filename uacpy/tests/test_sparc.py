@@ -510,8 +510,9 @@ class TestThePulseBandComesFromTheBaseBandResolver:
         bands = []
         for f in (50.0, 100.0, 200.0):
             env, source, receiver, kw = self._call(f)
-            bands.append(self._band(SPARC(verbose=False, time_max=0.3)
+            bands.append(self._band(SPARC(verbose=False)
                                     .run_settings(env, source, receiver,
+                                                  output_duration=0.3,
                                                   **kw)))
         assert len(set(bands)) == 1, bands
 
@@ -611,9 +612,9 @@ class TestThePulseBandComesFromTheBaseBandResolver:
         env, source, receiver, _kw = self._call(80.0)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            settings = SPARC(verbose=False, time_max=0.6).run_settings(
+            settings = SPARC(verbose=False).run_settings(
                 env, source, receiver, source_waveform=wave,
-                sample_rate=fs)
+                sample_rate=fs, output_duration=0.6)
         freq_min, freq_max = self._band(settings)
         assert freq_min < 20.0 and 200.0 < freq_max < 260.0
 
@@ -625,11 +626,12 @@ class TestThePulseBandComesFromTheBaseBandResolver:
         notice states the energy left out and the cost of the full band."""
         wave, fs = self._burst(4.2)
         env, source, receiver, _kw = self._call(80.0)
-        model = SPARC(verbose=False, time_max=0.6)
+        model = SPARC(verbose=False)
         with recorded_warnings() as caught:
             settings = model.run_settings(env, source, receiver,
                                           source_waveform=wave,
-                                          sample_rate=fs)
+                                          sample_rate=fs,
+                                          output_duration=0.6)
         freq_min, freq_max = self._band(settings)
         assert 240.0 < freq_max < 270.0
         assert settings.engine.freq_max_origin.startswith('the -20 dB band')
@@ -660,10 +662,10 @@ class TestOutputTimeGridContract:
         env = Environment(
             name='window', bathymetry=100.0, ssp=1500.0,
             bottom=BoundaryProperties(acoustic_type='rigid'))
-        result = SPARC(time_max=1.0, march_start=-0.4, verbose=False).run(
+        result = SPARC(march_start=-0.4, verbose=False).run(
             env, Source(depths=50.0, frequencies=50.0),
             Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])),
-            run_mode=RunMode.TIME_SERIES)
+            run_mode=RunMode.TIME_SERIES, output_duration=1.0)
         times = np.asarray(result.coords['time'], dtype=float)
         # floor(8 × 150 Hz × 1.0 s) + 2: the canned band's top is 3 × 50 Hz.
         assert times.size == 1202
@@ -737,11 +739,11 @@ def test_ricker_arrival_peaks_at_travel_time_plus_5_over_2pi_f():
     freq = 25.0
     # rmax_factor=10 refines Δk (Nk ≈ 140) so the direct arrival is
     # clean; the r = RMax replica then sits at 4 km / 2.7 s, out of window.
-    result = SPARC(pulse_type='RN+N', time_max=0.5, rmax_factor=10.0,
+    result = SPARC(pulse_type='RN+N', rmax_factor=10.0,
                    verbose=False).run(
         env, Source(depths=500.0, frequencies=freq),
         Receiver(depths=np.array([500.0]), ranges=np.array([400.0])),
-        run_mode=RunMode.TIME_SERIES)
+        run_mode=RunMode.TIME_SERIES, output_duration=0.5)
     times = np.asarray(result.coords['time'], dtype=float)
     trace = np.abs(np.asarray(result.data, dtype=float)[0, 0])
     peak_t = float(times[np.argmax(trace)])
@@ -983,6 +985,47 @@ class TestSPARCHankelNormalisation:
                                    atol=0.0)
 
 
+    @pytest.mark.requires_binary
+    @pytest.mark.slow
+    def test_rts_to_pressure_brings_both_files_to_the_run_level(
+            self, tmp_path):
+        """``rts_to_pressure(output_mode=, source_density=)`` applies the two
+        factors ``SPARC.run`` applies, so an 'R' and a 'D' file of one
+        receiver project to one value, and each equals the projection of
+        the trace the run returned (on the file's own times; the run's
+        uniform time grid moves it by 4e-4 through the six-digit labels).
+        Without them the files keep their own convention: 'R' is
+        ``sqrt(pi)`` hotter."""
+        from uacpy.io import RtsFile
+        from uacpy.io.oalib_reader import read_rts_file
+        from uacpy.models.sparc import rts_to_pressure
+        env, source, _ = self._rig()
+        receiver = Receiver(depths=np.array([60.0]),
+                            ranges=np.array([500.0]))
+        kwargs = dict(pulse_type='PN+B', pulse_frequency=50.0)
+        level, raw = {}, {}
+        for mode in ('R', 'D'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                result = SPARC(output_mode=mode, verbose=False,
+                               cleanup=False, work_dir=tmp_path / mode).run(
+                    env, source, receiver)
+            rts = read_rts_file(sorted((tmp_path / mode).rglob('*.rts'))[0])
+            got, _ = rts_to_pressure(rts, 50.0, output_mode=mode,
+                                     source_density=env.water_density, **kwargs)
+            level[mode] = complex(np.ravel(got)[0])
+            raw[mode] = complex(np.ravel(
+                rts_to_pressure(rts, 50.0, **kwargs)[0])[0])
+            trace = np.asarray(result.data)[0, 0][:, None]
+            run, _ = rts_to_pressure(
+                RtsFile(title='', positions=receiver.ranges,
+                        times=np.asarray(rts.times), pressure=trace),
+                50.0, **kwargs)
+            assert abs(level[mode] / complex(np.ravel(run)[0]) - 1) < 1e-9
+        assert abs(level['R'] / level['D'] - 1) < 1e-3
+        assert abs(raw['R'] / raw['D']) == pytest.approx(np.sqrt(np.pi),
+                                                         rel=1e-3)
+
 class TestDefaultOutputWindowTracksTravelTime:
     """``time_max`` defaults to ``2.5 × r_max / c``. ``rmax_factor`` is a
     wavenumber-sampling knob (``Δk ≈ 2π/RMax``); folding it into the output
@@ -999,13 +1042,14 @@ class TestDefaultOutputWindowTracksTravelTime:
         return (env, Source(depths=25.0, frequencies=50.0),
                 Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
 
-    def _deck_time_max(self, tmp_path, ssp=1500.0, **kw):
+    def _deck_time_max(self, tmp_path, ssp=1500.0, output_duration=None,
+                       **kw):
         import re
         env, source, receiver = self._rig(ssp)
         deck = tmp_path / 'model.env'
         with recorded_warnings() as caught:
             _write_deck(SPARC(verbose=False, **kw), deck, env, source,
-                        receiver)
+                        receiver, output_duration=output_duration)
         times = [re.match(r'^0\.0 (\S+) /$', ln)
                  for ln in deck.read_text().splitlines()]
         time_max = float([m for m in times if m][-1].group(1))
@@ -1020,8 +1064,8 @@ class TestDefaultOutputWindowTracksTravelTime:
         time_max, _ = self._deck_time_max(tmp_path, rmax_factor=10.0)
         assert time_max == pytest.approx(2.5 * 1000.0 / 1500.0, rel=1e-4)
 
-    def test_explicit_time_max_wins(self, tmp_path):
-        time_max, _ = self._deck_time_max(tmp_path, time_max=7.0)
+    def test_output_duration_sets_the_window(self, tmp_path):
+        time_max, _ = self._deck_time_max(tmp_path, output_duration=7.0)
         assert time_max == pytest.approx(7.0, rel=1e-9)
 
     def test_march_start_does_not_shift_the_output_window(self, tmp_path):
@@ -1062,6 +1106,29 @@ class TestDefaultOutputWindowTracksTravelTime:
 def _rigid_env(depth=100.0, speed=1500.0):
     return Environment(name='rigid', bathymetry=depth, ssp=speed,
                        bottom=BoundaryProperties(acoustic_type='rigid'))
+
+
+@pytest.mark.parametrize('knobs, call, said', [
+    (dict(window_sound_speed=1480.0), dict(output_duration=2.0),
+     "SPARC: window_sound_speed=1480.0 is not used: it sizes the automatic "
+     "time_max, and time_max is run(output_duration=…)."),
+    (dict(window_sound_speed=1480.0), {}, None),
+    (dict(output_mode='S', max_launches=4), {},
+     "SPARC: max_launches=4 is not used: output_mode='S' runs one snapshot "
+     "launch, and the cap applies to the looped axis of 'R' and 'D'."),
+    (dict(output_mode='R', max_launches=4), {}, None),
+])
+def test_a_knob_the_run_does_not_read_is_noticed(knobs, call, said):
+    """``window_sound_speed`` sizes only the automatic ``time_max`` and
+    ``max_launches`` caps only the looped 'R' / 'D' axes: set where the run
+    does not read them, each gets one notice; read, nothing is said."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        notices = SPARC(verbose=False, **knobs).run_settings(
+            _rigid_env(), *_point(), **call).engine.notices
+    unused = [n.message for n in notices if 'is not used' in n.message]
+    assert unused == ([] if said is None else [said])
 
 
 def _write_deck(model, path, env, source, receiver, **run_kwargs):
@@ -1161,20 +1228,16 @@ class TestSparcRangeAlias:
         assert resolve_rmax(1000.0, 1500.0, 9.0, rmax_factor=3.0) == (
             3000.0, 3.0, 'SPARC(rmax_factor=…)')
 
-    @pytest.mark.parametrize('window', [dict(time_max=4.0),
-                                        dict(output_duration=4.0)])
-    def test_a_long_pinned_window_keeps_the_default_silent(self, window):
+    def test_a_long_pinned_window_keeps_the_default_silent(self):
         """The default RMax follows the window it is written with, so a
         record pinned past the auto one (3.3 s at 2 km) still has no
         replica in it; a fixed 4 r would put it at 4 s."""
         env = _rigid_env()
-        knob = {k: v for k, v in window.items() if k == 'time_max'}
-        call = {k: v for k, v in window.items() if k == 'output_duration'}
         with recorded_warnings() as caught:
-            settings = SPARC(verbose=False, **knob).run_settings(
+            settings = SPARC(verbose=False).run_settings(
                 env, Source(depths=50.0, frequencies=20.0),
                 Receiver(depths=[50.0], ranges=[2000.0]),
-                run_mode=RunMode.TIME_SERIES, **call)
+                run_mode=RunMode.TIME_SERIES, output_duration=4.0)
         assert settings.engine.rmax == pytest.approx(2000.0 + 1.2 * 1500.0 * 4.0)
         assert not [w for w in caught if 'range alias' in str(w.message)]
         assert not [n for n in settings.engine.notices
@@ -1308,7 +1371,8 @@ class TestSparcWindowTruncation:
 
     @pytest.mark.parametrize('pinned_by, says, never', [
         (None, 'The auto window is 2.5 direct travel times', 'set —'),
-        ('SPARC(time_max=…)', 'the one SPARC(time_max=…) set', 'auto window'),
+        ('run(output_duration=…)', 'the one run(output_duration=…) set',
+         'auto window'),
     ])
     def test_the_advice_is_about_the_window_that_was_used(self, pinned_by,
                                                           says, never):
@@ -1606,6 +1670,48 @@ class TestSparcSizesItsMeshPerMediumAtTheBandTop:
         with pytest.raises(ConfigurationError, match='SPARC: n_mesh'):
             SPARC(n_mesh=bad, verbose=False)
 
+    @staticmethod
+    def _over_a_layer():
+        """100 m of water over 50 m of 1700 m/s sediment on a rigid floor:
+        at the 30 Hz deck frequency AT's floor is 20 points in the water,
+        8 in the layer (ReadEnvironmentMod.f90:101-112)."""
+        from uacpy.core import BoundaryProperties, Environment
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=50.0, sound_speed=1700.0,
+                                      density=2.0, attenuation=0.2)],
+                halfspace=BoundaryProperties(acoustic_type='rigid')))
+
+    def test_a_count_per_medium_is_recorded_as_given(self):
+        """One count per medium, water first, as Kraken, Scooter and Bounce
+        take it; the deck writes each on its medium line."""
+        settings = SPARC(n_mesh=[300, 120], verbose=False).run_settings(
+            self._over_a_layer(), *_point())
+        assert settings.engine.n_mesh == (300, 120)
+        assert resolve_n_mesh(self._over_a_layer(), 60.0,
+                              n_mesh=(300, 120)) == [300, 120]
+
+    def test_a_list_of_the_wrong_length_is_refused(self):
+        with pytest.raises(ConfigurationError, match='2 media'):
+            SPARC(n_mesh=[300], verbose=False).run_settings(
+                self._over_a_layer(), *_point())
+
+    def test_a_medium_under_ats_floor_is_refused_in_its_name(self):
+        with pytest.raises(ConfigurationError, match='medium 2 7 points'):
+            SPARC(n_mesh=[300, 7], verbose=False).run_settings(
+                self._over_a_layer(), *_point())
+        assert SPARC(n_mesh=[300, 8], verbose=False).run_settings(
+            self._over_a_layer(), *_point()).engine.n_mesh == (300, 8)
+
+    @pytest.mark.parametrize('bad', [[300, 2.5], [300, -1]])
+    def test_a_count_per_medium_that_is_not_a_whole_number_is_refused(
+            self, bad):
+        with pytest.raises(ConfigurationError,
+                           match='SPARC: each n_mesh count'):
+            SPARC(n_mesh=bad, verbose=False)
+
 
 class TestSourceTimeSeriesFromFile:
     """A ``pulse_type`` opening with ``'F'`` (or ``'B'``, played backwards)
@@ -1809,7 +1915,7 @@ class TestSparcMarchesTheWaveformItIsHanded:
     """MODELS_B-20 / Theo's decision: the waveform and record length a
     TIME_SERIES run is handed mean on SPARC what they mean on every other
     engine. An unpinned pulse_type marches the waveform (STSFIL, 'FN+B') and
-    an unpinned time_max takes output_duration."""
+    output_duration is the record end."""
 
     def test_a_waveform_selects_the_sts_route(self):
         """The settings carry 'FN+B' and the requested record length; the
@@ -1823,7 +1929,8 @@ class TestSparcMarchesTheWaveformItIsHanded:
         assert settings.engine.pulse_type == 'FN+B'
         assert settings.engine.time_max == 0.8
         assert settings.engine.time_max_origin == 'run(output_duration=…)'
-        assert (model.pulse_type, model.time_max) == (None, None)
+        assert model.pulse_type is None
+        assert not hasattr(model, 'time_max')
 
     @pytest.mark.requires_binary
     def test_each_source_depth_marches_its_waveform_in_its_own_subdirectory(
@@ -1847,25 +1954,13 @@ class TestSparcMarchesTheWaveformItIsHanded:
         for depth in ('30', '60'):
             assert (tmp_path / f'source_depth_{depth}m' / 'STSFIL').exists()
 
-    def test_output_duration_beside_a_pinned_time_max_is_refused(self):
-        with pytest.raises(ConfigurationError,
-                           match='contradict each other') as exc:
-            SPARC(time_max=0.5, verbose=False).run_settings(
-                _rigid_env(), Source(depths=10.0, frequencies=200.0),
-                Receiver(depths=[20.0], ranges=[500.0]),
-                source_waveform=np.hanning(64), sample_rate=8000.0,
-                output_duration=0.8)
-        assert 'SPARC(time_max=0.5)' in str(exc.value)
-        assert 'run(output_duration=)' in str(exc.value)
-
-    def test_a_pinned_time_max_alone_sets_the_record(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            settings = SPARC(time_max=0.5, verbose=False).run_settings(
-                _rigid_env(), Source(depths=10.0, frequencies=200.0),
-                Receiver(depths=[20.0], ranges=[500.0]),
-                source_waveform=np.hanning(64), sample_rate=8000.0)
-        assert settings.engine.time_max == 0.5
+    def test_the_record_end_is_not_a_constructor_knob(self):
+        """``run(output_duration=)`` is the one spelling of the record end,
+        on SPARC as on every TIME_SERIES engine."""
+        import inspect
+        assert 'time_max' not in inspect.signature(SPARC).parameters
+        with pytest.raises(TypeError, match='time_max'):
+            SPARC(time_max=0.5)
 
     def test_a_pinned_pulse_is_kept(self):
         assert SPARC(pulse_type='PN+B', verbose=False).pulse_type == 'PN+B'
@@ -2121,6 +2216,51 @@ class TestRtsToPressureDividesByThePulseTheRunMarched:
             rts_to_pressure(rts, 40.0, pulse_type='P', pulse_frequency=0.0)
 
 
+class TestRtsToPressureNamesTheRunsLevel:
+    """``output_mode=`` divides an 'R' file by ``sqrt(pi)`` and
+    ``source_density=`` multiplies by ``2 / source_density``, each only when set
+    (the factors ``SPARC.run`` applies); a value no ``.rts`` can come from
+    is refused."""
+
+    @staticmethod
+    def _record():
+        from uacpy.io import RtsFile
+        t = np.arange(512) / 1000.0
+        p = np.sin(2 * np.pi * 50.0 * t) * np.exp(-((t - 0.2) / 0.05) ** 2)
+        return RtsFile(title='', positions=np.array([1e3]), times=t,
+                       pressure=p[:, None])
+
+    @pytest.mark.parametrize('pulse_type', [None, 'P'])
+    def test_each_argument_applies_its_own_factor(self, pulse_type):
+        from uacpy.models.sparc import rts_to_pressure
+        rts = self._record()
+        kwargs = dict(pulse_type=pulse_type)
+
+        def value(**more):
+            return complex(np.ravel(
+                rts_to_pressure(rts, 50.0, **kwargs, **more)[0])[0])
+
+        raw = value()
+        assert value(output_mode='D') == raw
+        assert value(output_mode='R') == pytest.approx(raw / np.sqrt(np.pi),
+                                                       rel=1e-14)
+        assert value(source_density=1.027) == pytest.approx(raw * 2.0 / 1.027,
+                                                        rel=1e-14)
+        assert value(output_mode='R', source_density=1.027) == pytest.approx(
+            raw * 2.0 / 1.027 / np.sqrt(np.pi), rel=1e-14)
+
+    @pytest.mark.parametrize('kwargs, match', [
+        (dict(output_mode='S'), r"output_mode='S' is not a mode that "
+                                r"writes a \.rts"),
+        (dict(output_mode='r'), r"output_mode='r' is not a mode"),
+        (dict(source_density=0.0), r"source_density \(g/cm³\) must be positive"),
+        (dict(source_density=1027.0), r"source_density=1027 reads as kg/m³"),
+    ])
+    def test_a_value_no_rts_comes_from_is_refused(self, kwargs, match):
+        from uacpy.models.sparc import rts_to_pressure
+        with pytest.raises(ConfigurationError, match=match):
+            rts_to_pressure(self._record(), 50.0, **kwargs)
+
 class TestTheSourceGeometriesFollowTheOutputMode:
     """Only the snapshot ('S') runs a Hankel transform, so only it honours a
     line source; the geometries are read off ``output_mode`` at the run, so
@@ -2163,7 +2303,6 @@ class TestSparcRefusesAKnobNoMarchCanUse:
         (dict(courant_factor=0.0), 'courant_factor must be positive'),
         (dict(max_launches=0), 'max_launches must be an integer >= 1'),
         (dict(rmax_factor=0.5), 'inside the receiver ranges'),
-        (dict(time_max=-1.0), 'time_max'),
         (dict(window_sound_speed=0.0), 'window_sound_speed'),
     ])
     def test_the_constructor_refuses_it(self, kw, match):
@@ -2172,7 +2311,7 @@ class TestSparcRefusesAKnobNoMarchCanUse:
 
     @pytest.mark.parametrize('kw', [
         dict(courant_factor=1.0), dict(rmax_factor=1.0),
-        dict(max_launches=np.int64(3)), dict(time_max=0.5)])
+        dict(max_launches=np.int64(3))])
     def test_the_values_at_the_bounds_are_taken(self, kw):
         SPARC(**kw)
 
@@ -2199,12 +2338,12 @@ class TestSparcUnboundedCHighIsTheToolboxDecksValue:
         t = np.arange(int(16.0 * cls._FS)) / cls._FS
         wave = np.exp(-((t - 0.005) * 900.0) ** 2)
         return SPARC(verbose=False, c_low=cls._C_LOW, freq_min=0.0,
-                     freq_max=cls._F_MAX, time_max=0.15,
+                     freq_max=cls._F_MAX,
                      **knobs).run_settings(
             env, Source(depths=10.0, frequencies=300.0),
             Receiver(depths=[10.0], ranges=[50.0]),
             run_mode=RunMode.TIME_SERIES, source_waveform=wave,
-            sample_rate=cls._FS)
+            sample_rate=cls._FS, output_duration=0.15)
 
     @classmethod
     def _limit(cls):
@@ -2237,12 +2376,12 @@ class TestSparcUnboundedCHighIsTheToolboxDecksValue:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 result = SPARC(verbose=False, c_low=self._C_LOW, freq_min=0.0,
-                               freq_max=self._F_MAX, time_max=0.15,
+                               freq_max=self._F_MAX,
                                n_time_samples=1202, **knobs).run(
                     env, Source(depths=10.0, frequencies=300.0),
                     Receiver(depths=[10.0], ranges=[50.0]),
                     run_mode=RunMode.TIME_SERIES, source_waveform=wave,
-                    sample_rate=self._FS)
+                    sample_rate=self._FS, output_duration=0.15)
             traces.append(np.asarray(result.data, dtype=float)[0, 0])
         assert np.abs(traces[0]).max() > 0.0
         np.testing.assert_array_equal(traces[1], traces[0])

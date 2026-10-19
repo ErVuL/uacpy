@@ -30,7 +30,7 @@ from uacpy.io.oalib_writer import (
 from uacpy.models._spec import EngineTraits, ModelSpec
 from uacpy.models._stacking import _slabs_of
 from uacpy.models.base import (
-    DEFAULT_RUN_TIMEOUT_S, PropagationModel, StageInputs, _host_options,
+    DEFAULT_RUN_TIMEOUT, PropagationModel, StageInputs, _host_options,
 )
 from uacpy.models.provenance import model_provenance
 from uacpy.models._launch import run_prt_binary
@@ -62,9 +62,8 @@ from uacpy.models.bellhop._plan import (
     carrier_source, deck_receiver, gaussian_beam_band_notice,
     geometry_notices, launch_source,
     line_source_sgb_notice, pad_receiver_ranges, pulse_samples,
-    unused_band_knobs_notice,
     resolve_cerveny_knobs, resolve_interp_ssp, resolve_ray_box,
-    resolve_ray_step, ray_step_origin,
+    resolve_ray_step, ray_step_origin, ray_storage_remedy,
 )
 from uacpy.models.bellhop._settings import BellhopSettings
 from uacpy.models.bellhop._synthesis import arrivals_run_settings, synthesise
@@ -114,8 +113,11 @@ class Bellhop(PropagationModel):
     - ``ray_step=None`` → ``env.depth / 50``. Bellhop's own choice for a zero
       step is ``depth/10`` (``bellhop.f90:170-171``), which under-resolves a
       near-horizontal refracted ray: measured 26.56 dB max against a
-      converged step on Munk 5000 m at 100 Hz. A pinned ``ray_step=0`` asks
-      for that choice and gets it.
+      converged step on Munk 5000 m at 100 Hz. On a long shallow run the
+      step is coarser, ``2 × r_box / MaxN``, so a ray crosses the box within
+      half the build's per-ray limit (100 000 steps on bellhopcuda / cxx,
+      1 000 000 on the Fortran build). A pinned ``ray_step=0`` asks for that
+      choice and gets it.
     - ``z_box=None`` → ``1.2 × env.depth``.
     - ``r_box=None`` → ``1.2 × receiver.range_max`` (or 10 km if 0), uacpy
       guidance measured on an up-slope wedge
@@ -150,7 +152,8 @@ class Bellhop(PropagationModel):
     **Broadband amplitude approximation (BROADBAND / TIME_SERIES).** The
     arrival set is computed by a *single* ray trace at the band centre
     ``fc`` and reused across the synthesised band
-    ``[fc(1-bw/2), fc(1+bw/2)]`` (``bw = bandwidth_factor``). On the
+    (``run(frequencies=)``, or the default band ``fc·(1 ± 0.25)`` around a
+    one-frequency Source, :func:`~uacpy.models._band.broadband_band`). On the
     **BROADBAND** route the travel time ``Re(τ)`` is applied exactly per
     frequency (``exp(-i2πf·τ)``,
     :func:`~uacpy.acoustic_signal.arrival_grid_transfer_function`), so the *timing*
@@ -170,7 +173,7 @@ class Bellhop(PropagationModel):
     the law says so
     (:func:`~uacpy.models.bellhop._synthesis.warn_if_attenuation_extrapolates`).
     **TIME_SERIES** synthesises in the time domain instead
-    (:meth:`Arrivals.to_time_series <uacpy.core.results.Arrivals.to_time_series>`),
+    (:meth:`Arrivals.synthesize_time_series <uacpy.core.results.Arrivals.synthesize_time_series>`),
     which delays each arrival exactly and filters it by the same rescaled
     absorption. What is held frequency-flat on *both* routes is the beam
     **amplitude**, and
@@ -178,7 +181,8 @@ class Bellhop(PropagationModel):
     (``'G'``) carry no frequency in their width, and their bins equal a
     trace at each frequency (0.04-0.06 dB median at ±95 % of ``fc`` on a
     30 m sand guide, 0.01 dB on a Munk profile at ±90 %); a Gaussian beam
-    (``'B'``) is floored at ``π·c/fc`` (``influence.f90:561-563``), so its
+    (``'B'``) is floored at ``min(0.2·fc·τ, π·c/fc)`` (``influence.f90:563``),
+    so its
     bins are first-order away from ``fc`` (mean energy +1.41 / -0.88 dB at
     ±50 % on the same sand guide), and a ``'B'`` band reaching more than
     50 % of ``fc`` from it warns
@@ -373,16 +377,13 @@ class Bellhop(PropagationModel):
         ib_win: Optional[int] = None,
         component: str = CERVENY_DEFAULTS['component'],
         beam_shift: bool = BELLHOP_BEAM_SHIFT,
-        # Broadband synthesis knobs (BROADBAND / TIME_SERIES paths)
-        n_frequencies: Optional[int] = None,
-        bandwidth_factor: Optional[float] = None,
         auto_bounce: bool = True,
         # Standard plumbing
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         """
@@ -437,7 +438,8 @@ class Bellhop(PropagationModel):
             approach". Neither is right everywhere — measured against Kraken, ``G`` wins on a
             boundary-dominated Pekeris guide (1.4 vs 2.3 dB rms) and ``B`` on the
             Munk profile's shadow zones and caustics (2.7 vs 3.2 dB). ``G`` is
-            the default because ``B``'s width floor of ``πλ`` biases TL in a
+            the default because ``B``'s width floor (``πλ`` once the travel
+            time exceeds ``5πλ/f``, ``influence.f90:563``) biases TL in a
             duct only a few ``πλ`` deep: on a 100 m channel at 200 Hz ``B``
             reads +2.55 dB above a wavenumber-integration reference where
             ``G`` reads +0.32 dB (+3.35 / −0.12 dB on Pekeris at 100 Hz). Pass
@@ -497,7 +499,15 @@ class Bellhop(PropagationModel):
             make an automatic selection of about a tenth of the water
             depth"). ``None`` (default) is ``env.depth / 50``, uacpy
             guidance measured on the Munk case
-            (:data:`~uacpy.models.bellhop._plan._STEP_PER_DEPTH`).
+            (:data:`~uacpy.models.bellhop._plan._STEP_PER_DEPTH`), or
+            ``2 × r_box / MaxN`` when that is coarser (the factor 2 is uacpy
+            guidance): the selected build
+            stores at most ``MaxN`` steps per ray (100 000 on bellhopcuda /
+            cxx, ``bhc/structs.hpp:66``; 1 000 000 on Fortran BELLHOP,
+            ``bellhopMod.f90:4``) and cuts a longer ray short, and the
+            manual ties the step to the "range of receivers"
+            (:data:`~uacpy.models.bellhop._plan._RAY_STEP_HEADROOM`).
+            A pinned step is written as given.
             ``doc/bellhop.htm`` asks for a convergence check: "If you use
             STEP=0.0 BELLHOP will use a default step-size and tell you what
             it picked. You should then halve the step size until the results
@@ -520,7 +530,7 @@ class Bellhop(PropagationModel):
             ``'R'`` rectilinear (default, BELLHOP's own: ``doc/bellhop.htm``
             OPTION(5:5)) | ``'I'`` irregular: the i-th depth
             pairs with the i-th range after BELLHOP sorts both lists
-            (``SourceReceiverPositions.f90:224``), so the pairs always run
+            (``SourceReceiverPositions.f90:224``, ``:268``), so the pairs always run
             shallow-near to deep-far. Arbitrary (depth, range) points: run
             ``'R'`` and sample with ``Field.at``.
         interp_ssp : str, optional
@@ -581,21 +591,6 @@ class Bellhop(PropagationModel):
             When True, sets RunType position 7 to 'S' enabling beam-shift
             on boundary reflections. Default: False, BELLHOP's own
             (``ReadEnvironmentBell.f90:159-165``).
-        n_frequencies : int, optional
-            Number of frequency bins of the BROADBAND band expanded from a
-            single centre frequency. ``None`` (default) is
-            :data:`~uacpy.models._defaults.DEFAULT_BROADBAND_N_FREQUENCIES`
-            (uacpy guidance, as is the bandwidth below; the manuals name
-            neither).
-        bandwidth_factor : float, optional
-            Fractional bandwidth of that band ``[fc·(1-bw/2),
-            fc·(1+bw/2)]``, in (0, 2) so the lower edge stays above 0 Hz.
-            ``None`` (default) is
-            :data:`~uacpy.models._defaults.DEFAULT_BROADBAND_BANDWIDTH_FACTOR`.
-
-            Both are used only by a BROADBAND run of a one-frequency Source
-            without ``frequencies=``; set on any other run, the run says it
-            does not use them.
         auto_bounce : bool, optional
             Default ``True``. When ``env`` carries a *layered* ``Bottom``
             (sediment layers Bellhop's ray tracer cannot mesh), ``run(...)``
@@ -653,12 +648,7 @@ class Bellhop(PropagationModel):
         self.ib_win = ib_win
         self.component = component
         self.beam_shift = bool(beam_shift)
-        self.n_frequencies = n_frequencies
-        self.bandwidth_factor = (float(bandwidth_factor)
-                                 if bandwidth_factor is not None else None)
         self._check_knobs()
-        if self.n_frequencies is not None:
-            self.n_frequencies = int(self.n_frequencies)
         check_component(component=self.component, beam_type=self.beam_type)
         warn_on_ignored_cerveny_knobs(
             beam_type=self.beam_type, beam_width_type=self.beam_width_type,
@@ -703,7 +693,7 @@ class Bellhop(PropagationModel):
 
         self._log(f"Using Bellhop {self._resolved_backend}: {self._exe}")
 
-    def _validate_geometry(self, env, source, receiver, run_mode=None):
+    def _validate_geometry(self, env, source, receiver, run_mode):
         """The shared geometry checks, then the refusal only Bellhop needs:
         :func:`~uacpy.models.bellhop._checks.reject_source_outside_the_medium`
         of a source on or outside a boundary at its own range."""
@@ -773,8 +763,6 @@ class Bellhop(PropagationModel):
             n_beams=self.n_beams, grid_type=self.grid_type,
             launch_angles_deg=self.launch_angles_deg,
             ray_step=self.ray_step, z_box=self.z_box, r_box=self.r_box,
-            n_frequencies=self.n_frequencies,
-            bandwidth_factor=self.bandwidth_factor,
             single_beam=self.single_beam)
 
     def _validate_engine(self, env, source, receiver, run_mode, *,
@@ -812,14 +800,14 @@ class Bellhop(PropagationModel):
         ``request``)."""
         mode = settings.mode
         kw = request.kwargs if request is not None else {}
-        band = band_origin(mode, source, kw, n_frequencies=self.n_frequencies,
-                           bandwidth_factor=self.bandwidth_factor)
+        band = band_origin(mode, source, kw)
         n_pulse = pulse_samples(mode, kw)
         run_type = _RUN_MODE_TO_INFLUENCE_LETTER[mode]
         fc = carrier_frequency(source, mode)
-        step = resolve_ray_step(env, ray_step=self.ray_step)
         z_box, z_box_origin, r_box, r_box_origin = resolve_ray_box(
             env, receiver, z_box=self.z_box, r_box=self.r_box)
+        step = resolve_ray_step(env, ray_step=self.ray_step, r_box=r_box,
+                                backend=self._resolved_backend)
         notices = geometry_notices(
             env, source, receiver, mode, launch_angles_deg=self.launch_angles_deg,
             grid_type=self.grid_type, beam_type=self.beam_type,
@@ -829,11 +817,6 @@ class Bellhop(PropagationModel):
         for notice in (message_notice(ray_box_notice(env, receiver, mode,
                                                      z_box, r_box),
                                       ValidityWarning),
-                       message_notice(unused_band_knobs_notice(
-                                       mode, band,
-                                       n_frequencies=self.n_frequencies,
-                                       bandwidth_factor=self.bandwidth_factor),
-                                   FallbackWarning),
                        message_notice(beam_type_run_mode_notice(mode,
                                                              beam_type=self.beam_type),
                                    ValidityWarning),
@@ -875,14 +858,17 @@ class Bellhop(PropagationModel):
             notices.append(message_notice(pad_notice, NumericsWarning))
         return BellhopSettings(
             backend=str(self._resolved_backend),
-            executable=str(self._exe),
+            executable=(Path(self._exe).name
+                        if self._resolved_backend == 'custom' else None),
             run_type=run_type,
             fc=fc,
             beam_type=self.beam_type,
             n_beams=self.n_beams,
             launch_angles_deg=tuple(self.launch_angles_deg),
             ray_step=float(step),
-            ray_step_origin=ray_step_origin(step, ray_step=self.ray_step),
+            ray_step_origin=ray_step_origin(
+                step, ray_step=self.ray_step, r_box=r_box,
+                backend=self._resolved_backend),
             z_box=float(z_box),
             z_box_origin=z_box_origin,
             r_box=float(r_box),
@@ -1028,9 +1014,12 @@ class Bellhop(PropagationModel):
                 stale_outputs=_BELLHOP_OUTPUT_SUFFIXES,
             )
         if self._resolved_backend in ('cuda', 'cxx'):
-            warn_on_engine_stdout_warnings(result.stdout or '',
-                                           model_name=self.model_name,
-                                           backend=self._resolved_backend)
+            warn_on_engine_stdout_warnings(
+                result.stdout or '', model_name=self.model_name,
+                backend=self._resolved_backend,
+                ray_storage_remedy=ray_storage_remedy(
+                    backend=self._resolved_backend, ray_step=engine.ray_step,
+                    r_box=engine.r_box))
 
     def _leave_cuda_without_a_device(self, exc) -> bool:
         """Move an auto-selected bellhopcuda that found no CUDA device onto
@@ -1119,11 +1108,6 @@ class Bellhop(PropagationModel):
                                  f"beams (angleMod.f90:38-51), as its .prt "
                                  f"reports")
         return result
-
-    def _broadband_band_knobs(self):
-        """The band a single BROADBAND carrier expands with: this model's
-        ``n_frequencies`` / ``bandwidth_factor`` knobs."""
-        return self.n_frequencies, self.bandwidth_factor
 
     def run_with_bounce(
         self,

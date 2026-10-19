@@ -15,7 +15,7 @@ frequency:
 3. pure-water viscous absorption, above ~500 kHz — proportional to f².
 
 Uses: Thorp.table · FrancoisGarrison.table ·
-convert_attenuation_units · core.acoustics.sound_speed_mackenzie ·
+convert_attenuation_units · acoustics.sound_speed_mackenzie ·
 AbsorptionCoefficient.plot (curve and overlay) · the α(z, f) values of
 a depth-resolved AbsorptionCoefficient
 """
@@ -188,9 +188,9 @@ plt.close(fig)
 # at four depths.
 fg_frequencies = np.logspace(np.log10(200.0), 6, 300)    # F-G's fitted band
 fg_depths = np.linspace(0.0, 4000.0, 81)
-over_depth = uacpy.FrancoisGarrison(
-    temperature=TEMPERATURE, salinity=SALINITY,
-    pH=PH).table(fg_frequencies, depths=fg_depths)
+deep_francois = uacpy.FrancoisGarrison(temperature=TEMPERATURE,
+                                       salinity=SALINITY, pH=PH)
+over_depth = deep_francois.table(fg_frequencies, depths=fg_depths)
 alpha_zf = np.asarray(over_depth.data)                 # (n_depths, n_freq)
 ratio = alpha_zf / alpha_zf[0]
 for probe in (1e3, 1e4, 1e5, 1e6):
@@ -206,16 +206,10 @@ left.set_xlabel('Frequency (kHz)')
 left.set_ylabel('Depth (km)')
 left.set_title('α(z) / α(z = 0) — Francois-Garrison', fontweight='bold')
 fig.colorbar(mesh, ax=left, label='α(z) / α(0)')
-khz_band = fg_frequencies >= 1e3                         # 1 kHz - 1 MHz
-for depth_km, colour in ((0, 'C0'), (1, 'C1'), (2, 'C2'), (4, 'C3')):
-    row = int(np.argmin(np.abs(fg_depths - 1000.0 * depth_km)))
-    right.loglog(fg_frequencies[khz_band] / 1e3, alpha_zf[row, khz_band],
-                 color=colour, label=f'z = {depth_km} km')
-right.set_xlabel('Frequency (kHz)')
-right.set_ylabel('α (dB/km)')
-right.set_title('α(f) at four depths', fontweight='bold')
-right.grid(True, which='both', alpha=0.3)
-right.legend()
+khz_band = fg_frequencies[fg_frequencies >= 1e3]         # 1 kHz - 1 MHz
+for depth_km in (0, 1, 2, 4):
+    deep_francois.table(khz_band, depths=1000.0 * depth_km).plot(
+        ax=right, label=f'z = {depth_km} km', title='α(f) at four depths')
 fig.suptitle(f'Volume absorption over depth — {TEMPERATURE:.0f} °C, '
              f'S = {SALINITY:.0f}, pH {PH:g}, held constant with depth',
              fontweight='bold')

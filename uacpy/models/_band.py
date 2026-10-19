@@ -7,8 +7,12 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 
-from uacpy.acoustic_signal._synthesis import source_waveform_problem
-from uacpy.core._validate import reject_complex, require_positive
+from uacpy.acoustic_signal._synthesis import (
+    refuse_record_shorter_than_waveform, source_waveform_problem,
+)
+from uacpy.core._validate import (
+    reject_complex, require_positive, steps_are_uniform,
+)
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.run_settings import RunMode, TimeSettings
 from uacpy.models._budget import memory_budget
@@ -276,6 +280,29 @@ class BandResolution(NamedTuple):
     notice: Optional[str] = None
 
 
+def refuse_a_record_shorter_than_the_pulse(settings, *,
+                                           model_name: str) -> None:
+    """Stage 3 of a TIME_SERIES run whose trace is synthesised from the
+    transfer function on ``settings.frequencies``: the refusal that
+    synthesis gives a record ``1/Δf`` shorter than the pulse
+    (:func:`~uacpy.acoustic_signal._synthesis.refuse_record_shorter_than_waveform`,
+    the same function, so one rule), raised before the engine runs. A grid
+    that is not uniform is left to the synthesis, which refuses it."""
+    time, freqs = settings.time, settings.frequencies
+    if (settings.mode != RunMode.TIME_SERIES or time is None
+            or time.source_waveform is None or freqs is None):
+        return
+    f = np.atleast_1d(np.asarray(freqs, dtype=float))
+    if f.ndim != 1 or f.size < 2:
+        return
+    df = float(f[1] - f[0])
+    if df <= 0 or not steps_are_uniform(np.diff(f), df):
+        return
+    refuse_record_shorter_than_waveform(
+        df, np.asarray(time.source_waveform), float(time.sample_rate),
+        f"{model_name}.run")
+
+
 def time_settings(kwargs, *, pads_pulse: bool) -> TimeSettings:
     """The TIME_SERIES request of a checked call's keywords ``kwargs``. The
     pulse is stored as the synthesis uses it (real, float64, zero-padded to
@@ -330,65 +357,21 @@ def pad_waveform_to_duration(source_waveform, sample_rate, output_duration):
     return np.concatenate([wf, pad])
 
 
-def broadband_band(source, n_frequencies=None, bandwidth_factor=None, *,
-                   model_name: str) -> BandResolution:
+def broadband_band(source) -> BandResolution:
     """The BROADBAND grid of ``source``: a multi-element
     ``source.frequencies`` *is* the band; a single centre frequency ``fc``
-    expands to ``n_frequencies`` bins spanning ``fc·(1 ± bandwidth_factor/2)``
-    (``None`` takes the package defaults
-    :data:`~uacpy.models._defaults.DEFAULT_BROADBAND_N_FREQUENCIES` and
-    :data:`~uacpy.models._defaults.DEFAULT_BROADBAND_BANDWIDTH_FACTOR`).
-
-    Raises :class:`ConfigurationError` for a band that cannot be built:
-    fewer than two bins, or a ``bandwidth_factor`` outside ``(0, 2)`` — a
-    non-positive one inverts or collapses the band, and from 2 up its lower
-    edge reaches 0 Hz, which is no model frequency. An axis the package
-    DERIVES must be ascending and distinct (a caller's Source may list its
-    own frequencies in any order, never twice)."""
+    expands to :data:`~uacpy.models._defaults.DEFAULT_BROADBAND_N_FREQUENCIES`
+    bins spanning ``fc·(1 ± b/2)``, ``b`` =
+    :data:`~uacpy.models._defaults.DEFAULT_BROADBAND_BANDWIDTH_FACTOR`, built
+    as given (a sub-1 Hz centre included). Any other band is the run's
+    ``frequencies=``."""
     src_f = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
     if src_f.size > 1:
         return BandResolution(src_f)
-    fc = float(src_f[0])
-    if n_frequencies is None:
-        n_frequencies = DEFAULT_BROADBAND_N_FREQUENCIES
-    n_frequencies = int(n_frequencies)
-    # ``np.linspace`` degenerates below two points: 1 returns the lower
-    # band edge alone — a grid silently mislabelled as the band — and 0
-    # an empty grid, so neither can span fc·(1 ± bandwidth_factor/2).
-    if n_frequencies < 2:
-        raise ConfigurationError(
-            f"{model_name} broadband: n_frequencies = {n_frequencies} cannot "
-            f"span a frequency band — the expanded grid needs at least "
-            f"its two edges.",
-            remediation=(
-                "Use n_frequencies >= 2, or pass frequencies=[fc] to run a "
-                "single bin."
-            ),
-        )
-    if bandwidth_factor is None:
-        bandwidth_factor = DEFAULT_BROADBAND_BANDWIDTH_FACTOR
-    half_bw = 0.5 * float(bandwidth_factor)
-    lo = fc * (1.0 - half_bw)
-    hi = fc * (1.0 + half_bw)
-    if float(bandwidth_factor) <= 0:
-        raise ConfigurationError(
-            f"{model_name} broadband: bandwidth_factor = "
-            f"{bandwidth_factor:g} gives the band [{lo:g}, {hi:g}] Hz "
-            f"around fc = {fc:g} Hz. The band is "
-            f"fc*(1 +/- bandwidth_factor/2), so bandwidth_factor "
-            f"must be positive.",
-            remediation=("Use 0 < bandwidth_factor < 2, or pass "
-                         "frequencies= with the band you want."))
-    if not lo > 0.0:
-        raise ConfigurationError(
-            f"{model_name} broadband: bandwidth_factor = "
-            f"{bandwidth_factor:g} puts the lower edge of the band "
-            f"fc*(1 +/- bandwidth_factor/2) at {lo:g} Hz (fc = {fc:g} Hz); "
-            f"a band of model frequencies lies above 0 Hz, so "
-            f"bandwidth_factor must be below 2.",
-            remediation=("Use 0 < bandwidth_factor < 2, or pass "
-                         "frequencies= with the band you want."))
-    return BandResolution(np.linspace(lo, hi, n_frequencies))
+    half_bw = 0.5 * DEFAULT_BROADBAND_BANDWIDTH_FACTOR
+    return BandResolution(np.linspace(float(src_f[0]) * (1.0 - half_bw),
+                                      float(src_f[0]) * (1.0 + half_bw),
+                                      DEFAULT_BROADBAND_N_FREQUENCIES))
 
 
 def time_series_band(source_waveform, sample_rate, *,
@@ -518,12 +501,10 @@ def time_series_band(source_waveform, sample_rate, *,
 
 
 def resolve_band(mode, source, frequencies, time, *, model_name: str,
-                 n_frequencies=None, bandwidth_factor=None,
                  solves_each_bin: bool = True) -> BandResolution:
     """The frequency grid (Hz) a call asks for, by the base rules, once,
     with its notice: ``frequencies=`` when given; else, for ``BROADBAND``,
-    :func:`broadband_band` of the source (with the model's ``n_frequencies`` /
-    ``bandwidth_factor``); for ``TIME_SERIES``, a multi-element
+    :func:`broadband_band` of the source; for ``TIME_SERIES``, a multi-element
     ``source.frequencies`` (it names the band as explicitly as
     ``frequencies=`` does), else :func:`time_series_band` of the pulse of
     the time settings ``time`` (``None`` without a usable pulse; its notice
@@ -533,8 +514,7 @@ def resolve_band(mode, source, frequencies, time, *, model_name: str,
         return BandResolution(
             np.atleast_1d(np.asarray(frequencies, dtype=float)))
     if mode == RunMode.BROADBAND:
-        return broadband_band(source, n_frequencies, bandwidth_factor,
-                              model_name=model_name)
+        return broadband_band(source)
     if mode == RunMode.TIME_SERIES:
         src_f = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
         if src_f.size > 1:

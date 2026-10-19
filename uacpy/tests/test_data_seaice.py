@@ -462,12 +462,12 @@ def test_sea_ice_direct_hit_is_silent(monkeypatch):
 def test_sea_ice_canopy_roughness_is_opt_in():
     """The published 0.4/1.0 dB/λ parameters describe a smooth plate, so the
     default stays 0; a caller who wants the scattering passes a roughness."""
-    from uacpy.data.seaice_local import (SEA_ICE_TYPICAL_ROUGHNESS_M,
+    from uacpy.data.seaice_local import (SEA_ICE_TYPICAL_ROUGHNESS,
                                          sea_ice_surface)
     smooth = sea_ice_surface(0.9)
-    rough = sea_ice_surface(0.9, roughness=SEA_ICE_TYPICAL_ROUGHNESS_M)
+    rough = sea_ice_surface(0.9, roughness=SEA_ICE_TYPICAL_ROUGHNESS)
     assert not smooth.roughness
-    assert rough.roughness == pytest.approx(SEA_ICE_TYPICAL_ROUGHNESS_M)
+    assert rough.roughness == pytest.approx(SEA_ICE_TYPICAL_ROUGHNESS)
     for field in ('sound_speed', 'shear_speed', 'density', 'attenuation',
                   'shear_attenuation'):
         assert getattr(smooth, field) == getattr(rough, field)
@@ -564,6 +564,103 @@ def test_a_fetched_sea_ice_canopy_is_dated_by_the_cache_period(
     (prov,) = surface.data_sources
     assert prov.source.id == 'seaice'
     assert prov.data_date == '2019-2023 (climatology)'
+
+
+def _full_north(synthetic_model):
+    """The synthetic climatology on the full 448 x 304 North grid (0.7 at
+    the March pixel the fake projection maps to), which a SeaIceGrid
+    requires."""
+    north = np.zeros((12, 448, 304), dtype=np.float32)
+    north[2, 2, 3] = 0.7
+    synthetic_model['N'] = north
+    return north
+
+
+def test_editing_a_sea_ice_grid_leaves_the_climatology_untouched(
+        synthetic_model):
+    """The grid is a map for the user to mask or threshold; the record is
+    read-only and ``np.array(grid)`` a copy, so the process-wide climatology
+    the fetchers read does not change with it."""
+    _full_north(synthetic_model)
+    grid = seaice_local.sea_ice_grid(3, hemi='N')
+    with pytest.raises(ValueError, match='read-only'):
+        grid.concentration[2, 3] = 0.1
+    edited = np.array(grid)
+    edited[2, 3] = 0.1
+    assert seaice_local.fetch_sea_ice_concentration((85.0, 0.0), month=3) == \
+        pytest.approx(0.7)
+    assert seaice_local.sea_ice_grid(3, hemi='N').concentration[2, 3] == \
+        pytest.approx(0.7)
+
+
+def test_sea_ice_grid_is_a_record_with_its_hemisphere_and_provenance(
+        synthetic_model):
+    """The map carries what its plot and an export need: the hemisphere,
+    the month, the climatology's provenance; numpy reads its
+    concentration."""
+    north = _full_north(synthetic_model)
+    grid = seaice_local.sea_ice_grid(3, hemi='N')
+    assert isinstance(grid, seaice_local.SeaIceGrid)
+    assert (grid.hemi, grid.month, grid.crs) == ('N', 3, 'EPSG:3411')
+    assert grid.provenance.source.id == 'seaice'
+    assert grid.provenance.data_date == '2019-2023 (climatology)'
+    assert np.array_equal(np.asarray(grid), north[2])
+    assert grid.concentration.dtype == np.float32
+
+
+def test_the_grid_coordinates_are_the_cells_the_point_lookup_reads():
+    """``x`` / ``y`` are the projected cell centres and ``lats`` / ``lons``
+    their unprojection, the arithmetic of the point lookup's
+    ``_cell_center``: the cell south-east of the pole (row 234, column 154
+    north) and its southern twin."""
+    for hemi, (row, col) in (('N', (234, 154)), ('S', (174, 158))):
+        g = seaice_local._GRID[hemi]
+        grid = seaice_local.SeaIceGrid(
+            concentration=np.zeros(g['shape'], dtype=np.float32), hemi=hemi,
+            month=1)
+        assert grid.x.shape == (g['shape'][1],)
+        assert grid.y.shape == (g['shape'][0],)
+        assert grid.lats.shape == grid.lons.shape == g['shape']
+        assert (grid.x[col], grid.y[row]) == (12500.0, -12500.0)
+        model = {'tf': {hemi: seaice_local._pyproj_transformer(g['epsg'])}}
+        lat, lon = seaice_local._cell_center(model, hemi, row, col)
+        assert grid.lats[row, col] == pytest.approx(lat, abs=1e-9)
+        assert grid.lons[row, col] == pytest.approx(lon, abs=1e-9)
+
+
+@pytest.mark.parametrize('kwargs, match', [
+    (dict(hemi='n'), r"hemi='n' is not a hemisphere of the NSIDC grid"),
+    (dict(hemi='S'), r"\(448, 304\), the hemi='N' grid"),
+    (dict(month=13), r'month=13'),
+])
+def test_a_sea_ice_grid_off_its_hemisphere_is_refused(kwargs, match):
+    """The coordinates and the map's overlays are placed on the hemisphere's
+    NSIDC cells, so a record whose array is another grid is refused."""
+    fields = dict(concentration=np.zeros((448, 304)), hemi='N', month=3)
+    fields.update(kwargs)
+    with pytest.raises(ConfigurationError, match=match):
+        seaice_local.SeaIceGrid(**fields)
+
+
+def test_a_sea_ice_grid_round_trips_through_its_exports():
+    """``to_dict`` / ``from_dict`` and ``to_xarray`` / ``from_xarray``
+    rebuild the record; the xarray form carries the cell coordinates."""
+    from uacpy.data import SOURCES, DataProvenance
+    grid = seaice_local.SeaIceGrid(
+        concentration=np.full((332, 316), 0.25), hemi='S', month=9,
+        provenance=DataProvenance(source=SOURCES['seaice'],
+                                  data_date='2019-2023 (climatology)'))
+    back = seaice_local.SeaIceGrid.from_dict(grid.to_dict())
+    assert (back.hemi, back.month) == ('S', 9)
+    assert np.array_equal(back.concentration, grid.concentration)
+    assert back.provenance.data_date == '2019-2023 (climatology)'
+    pytest.importorskip('xarray')
+    dataset = grid.to_xarray()
+    assert dataset['concentration'].dims == ('y', 'x')
+    assert np.array_equal(dataset['lat'].values, grid.lats)
+    again = seaice_local.SeaIceGrid.from_xarray(dataset)
+    assert (again.hemi, again.month) == ('S', 9)
+    assert np.array_equal(again.concentration, grid.concentration)
 
 
 def test_sea_ice_grid_names_the_bad_month_before_the_bad_hemisphere(monkeypatch):

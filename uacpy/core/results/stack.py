@@ -14,7 +14,8 @@ from uacpy.core._plotting import plotter
 from uacpy.core._grid import nearest_index_on_axis
 from uacpy.core.results._base import Result, _integer_index, coordinate_axis
 from uacpy.core.results.field import Field, _AXIS_IDENTITY_ATTR
-from uacpy.core.results._superposition import _same_value, _stacked_record
+from uacpy.core.results._superposition import (_check_labels, _same_value,
+                                               _stacked_record)
 
 
 class ResultStack(Result):
@@ -47,6 +48,10 @@ class ResultStack(Result):
     Construction
     ------------
     ``ResultStack(slabs, coordinate, coordinate_name='source_depth')``
+
+    The labels follow :func:`~uacpy.core.results.stack_fields`' rule:
+    finite, each used once, and on a ``source_depth`` or ``frequency`` axis
+    the slab's own value where it holds one — otherwise refused.
 
     Access
     ------
@@ -95,6 +100,11 @@ class ResultStack(Result):
                 f"ResultStack: every slab must have the same concrete "
                 f"type; got {sorted(t.__name__ for t in types)}."
             )
+        # The labels follow stack_fields' rule: a NaN or repeated label
+        # makes the nearest-label lookup pick one slab for all, and a slab
+        # of one source depth labelled another is found under the wrong one.
+        _check_labels(slabs, coord, str(coordinate_name), 'ResultStack',
+                      noun='slab')
 
         # The identity the stack states as its own, which every slab must
         # share (the one rule stack_fields applies to a Field); the run
@@ -471,14 +481,6 @@ class ResultStack(Result):
         saved_slabs = [dict(saved) for saved in list(d['slabs'])]
         klasses = [_resolve_class(saved.pop('__class__'), Result)
                    for saved in saved_slabs]
-        if any(issubclass(klass, Field) for klass in klasses):
-            raise ConfigurationError(
-                "ResultStack.from_dict: the saved stack holds Field slabs, "
-                "and a ResultStack holds no Field; uacpy reads only files "
-                "written by this version.",
-                remediation="Re-run the computation: a multi-depth run "
-                            "returns one Field over source_depth, saved and "
-                            "read with Field.to_dict / Field.from_dict.")
         slabs = [klass.from_dict(saved)
                  for klass, saved in zip(klasses, saved_slabs)]
         coordinate = np.asarray(d['coordinate'], dtype=float)

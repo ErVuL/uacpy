@@ -49,6 +49,7 @@ Potter, Alves, Green, Zappa, Nissen & McCoy (2014), *The JANUS Underwater
 from __future__ import annotations
 
 from collections import namedtuple
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -61,7 +62,9 @@ from numpy.lib.stride_tricks import sliding_window_view
 from uacpy.core._export import CarrierExport
 from uacpy.core._repr import FieldsRepr
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
-from uacpy.core.exceptions import ConfigurationError, IOWarning
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, IOWarning, NumericsWarning,
+)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import (require_below_nyquist,
                                   require_positive_finite_scalar)
@@ -266,7 +269,6 @@ class JanusPacket(FieldsRepr, CarrierExport):
             # failed decode the version field is as garbled as the rest, and
             # a version-mismatch claim would point away from the real failure
             # (crc_ok=False already reports it).
-            import warnings
             warnings.warn(
                 f"JanusPacket.from_bits: packet version {version} != 3 "
                 f"(the only version this codec implements); field layout "
@@ -347,6 +349,28 @@ def _band_params(fc, bandwidth):
     fsw = bandwidth / (2 * _N_SLOTS)            # 26 slots
     freq_min = fc - bandwidth / 2
     return freq_min, fsw
+
+
+def _require_janus_band(fc, bandwidth, chip_duration, who):
+    """``(fc, bandwidth, chip_duration)`` as floats, refused unless the band
+    and the chip can carry a packet: ``fc`` and ``bandwidth`` finite and
+    > 0, the lowest tone ``fc - bandwidth/2`` above 0 Hz, and a given
+    ``chip_duration`` finite and > 0 (``None`` stays ``None``, one over the
+    tone spacing). A zero or negative chip builds an empty waveform, and a
+    band reaching 0 Hz has tones at no or negative frequency."""
+    fc = require_positive_finite_scalar(fc, who, "fc", " Hz")
+    bandwidth = require_positive_finite_scalar(bandwidth, who, "bandwidth",
+                                               " Hz")
+    if fc - bandwidth / 2 <= 0.0:
+        raise ConfigurationError(
+            f"{who}: a {bandwidth:g} Hz band centred on {fc:g} Hz starts at "
+            f"{fc - bandwidth / 2:g} Hz, at or below 0 Hz, where no tone "
+            f"can sit.",
+            remediation=f"Narrow bandwidth below {2 * fc:g} Hz, or raise fc.")
+    if chip_duration is not None:
+        chip_duration = require_positive_finite_scalar(
+            chip_duration, who, "chip_duration", " s")
+    return fc, bandwidth, chip_duration
 
 
 def _chip_bounds(n_chips, chip_duration, sample_rate):
@@ -471,6 +495,8 @@ def janus_modulate(bits64, *, sample_rate, fc=FC_INITIAL, bandwidth=BW_INITIAL,
             f"tapered-cosine chips); got {window!r}.")
     sample_rate = require_positive_finite_scalar(
         sample_rate, "janus_modulate", "sample_rate", " Hz")
+    fc, bandwidth, chip_duration = _require_janus_band(
+        fc, bandwidth, chip_duration, "janus_modulate")
     if wakeup:
         # The top wake-up tone sits ON the band edge, so the band-edge rule
         # below admits it at exactly Nyquist, where it is sampled twice a
@@ -483,7 +509,7 @@ def janus_modulate(bits64, *, sample_rate, fc=FC_INITIAL, bandwidth=BW_INITIAL,
                           "the tones alias")
     sym = janus_encode(bits64)
     freq_min, fsw = _band_params(fc, bandwidth)
-    chip_duration = 1.0 / fsw if chip_duration is None else float(chip_duration)
+    chip_duration = 1.0 / fsw if chip_duration is None else chip_duration
     fh = (FH_SEQUENCE if hop_sequence is None else
           _require_hop_sequence(hop_sequence, "janus_modulate"))
     fs = float(sample_rate)
@@ -787,10 +813,12 @@ def janus_detect(waveform, sample_rate, fc=FC_INITIAL, bandwidth=BW_INITIAL,
     """
     sample_rate = require_positive_finite_scalar(
         sample_rate, "janus_detect", "sample_rate", " Hz")
+    fc, bandwidth, chip_duration = _require_janus_band(
+        fc, bandwidth, chip_duration, "janus_detect")
     _require_band_sampled(sample_rate, fc, bandwidth, "janus_detect",
                           "the recording holds those tones aliased")
     freq_min, fsw = _band_params(fc, bandwidth)
-    chip_duration = 1.0 / fsw if chip_duration is None else float(chip_duration)
+    chip_duration = 1.0 / fsw if chip_duration is None else chip_duration
     fh = (FH_SEQUENCE if hop_sequence is None else
           _require_hop_sequence(hop_sequence, "janus_detect"))
     fs = float(sample_rate)
@@ -932,10 +960,32 @@ class JanusReception(ResultTuple,
         return {"bits": "", "crc_ok": ""}
 
 
+def _notice_unused_doppler_settings(start, doppler_max_speed, sound_speed):
+    """A ``FallbackWarning`` naming each Doppler setting
+    :func:`janus_demodulate` will not read: both when ``start`` is given (it
+    skips the detector and the Doppler stage), ``sound_speed`` when
+    ``doppler_max_speed=0`` disables the Doppler stage."""
+    if start is not None:
+        unused = [f"{name}={value!r}" for name, value in (
+            ("doppler_max_speed", doppler_max_speed),
+            ("sound_speed", sound_speed)) if value is not None]
+        reason = ("start= skips the detector and the Doppler compensation"
+                  if unused else None)
+    elif doppler_max_speed == 0 and sound_speed is not None:
+        unused = [f"sound_speed={sound_speed!r}"]
+        reason = "doppler_max_speed=0 disables the Doppler compensation"
+    else:
+        return
+    if unused:
+        warnings.warn(
+            f"janus_demodulate: {reason}, so {' and '.join(unused)} "
+            f"{'is' if len(unused) == 1 else 'are'} not used.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
 def janus_demodulate(waveform, sample_rate, fc=FC_INITIAL, bandwidth=BW_INITIAL,
                      chip_duration=None, hop_sequence=None, start=None,
-                     doppler_max_speed=DEFAULT_DOPPLER_MAX_SPEED,
-                     sound_speed=DEFAULT_SOUND_SPEED):
+                     doppler_max_speed=None, sound_speed=None):
     """Demodulate a JANUS waveform -> :class:`JanusReception`, which unpacks
     as ``(bits64, crc_ok)``.
 
@@ -988,21 +1038,33 @@ def janus_demodulate(waveform, sample_rate, fc=FC_INITIAL, bandwidth=BW_INITIAL,
         Frequency-hop indices, each in 0..12; ``None`` is the JANUS sequence.
     start : int, optional
         Sample index of the preamble; given, it skips the detector and the
-        Doppler compensation.
+        Doppler compensation, so a given ``doppler_max_speed`` or
+        ``sound_speed`` then gets a ``FallbackWarning``.
     doppler_max_speed : float, optional
         Half-range (m/s) of the radial speeds searched. It shortens the
         detector's Goertzel window as well as bounding the Doppler estimate;
-        0 disables the Doppler compensation. Default 5.
+        0 disables the Doppler compensation. Unset, 5
+        (:data:`DEFAULT_DOPPLER_MAX_SPEED`). An estimate at the edge of the
+        search gets a ``NumericsWarning``: the true speed may lie beyond it.
     sound_speed : float, optional
         Sound speed (m/s) converting the speed range to a Doppler scale.
-        Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
+        Unset, :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`; not used
+        (a given one gets a ``FallbackWarning``) when
+        ``doppler_max_speed=0`` or ``start`` is given.
     """
     sample_rate = require_positive_finite_scalar(
         sample_rate, "janus_demodulate", "sample_rate", " Hz")
+    fc, bandwidth, chip_duration = _require_janus_band(
+        fc, bandwidth, chip_duration, "janus_demodulate")
     _require_band_sampled(sample_rate, fc, bandwidth, "janus_demodulate",
                           "the recording holds those tones aliased")
+    _notice_unused_doppler_settings(start, doppler_max_speed, sound_speed)
+    if doppler_max_speed is None:
+        doppler_max_speed = DEFAULT_DOPPLER_MAX_SPEED
+    if sound_speed is None:
+        sound_speed = DEFAULT_SOUND_SPEED
     freq_min, fsw = _band_params(fc, bandwidth)
-    chip_duration = 1.0 / fsw if chip_duration is None else float(chip_duration)
+    chip_duration = 1.0 / fsw if chip_duration is None else chip_duration
     fh = (FH_SEQUENCE if hop_sequence is None else
           _require_hop_sequence(hop_sequence, "janus_demodulate"))
     fs = float(sample_rate)
@@ -1032,6 +1094,16 @@ def janus_demodulate(waveform, sample_rate, fc=FC_INITIAL, bandwidth=BW_INITIAL,
         if doppler_max_speed > 0:
             a = _estimate_doppler(x, start, freq_min, fsw, fh, chip_duration, fs,
                                   doppler_max_speed, sound_speed)
+            if abs(a) >= doppler_max_speed / sound_speed:
+                warnings.warn(
+                    f"janus_demodulate: the Doppler estimate a = v/c = "
+                    f"{a:+.6f} sits at the edge of the search, |a| <= "
+                    f"doppler_max_speed/sound_speed = "
+                    f"{doppler_max_speed / sound_speed:.6f} "
+                    f"(doppler_max_speed={doppler_max_speed} m/s), so the "
+                    f"true radial speed may lie beyond it. Raise "
+                    f"doppler_max_speed to search wider.",
+                    NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
             # The preamble moved with the record; re-detect where it went.
             # Only the stretch the re-detection and the frame read is
             # resampled: the detector's window around the moved start

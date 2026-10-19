@@ -61,7 +61,8 @@ def depth_index_base(kind: str) -> int:
 #: gets (the Collins binaries' ``mz`` is checked separately). Sized for kHz
 #: work: a 100 m sand channel to 2 km needs 23 117 points at 5 kHz (3.2 s)
 #: and 62 108 at 10 kHz (12.9 s) to meet the band's score, where 10 000
-#: points left the field 3.5 / 7.4 dB rms from Kraken.
+#: points left the field 3.5 / 7.4 dB rms from Kraken. uacpy guidance (no
+#: manual sets a cap).
 MAX_DEPTH_POINTS = 100000
 
 
@@ -79,7 +80,8 @@ MAX_DEPTH_POINTS = 100000
 #: horizontal component, which carries the level. The budget is scored on the
 #: largest ``|rate|`` over the band, the steeper trapped components' gain
 #: included (+0.45 dB/km on the limestone at 1.5 m), so it holds for every
-#: component; there it puts ``dr`` at 0.50 m over 10 km.
+#: component; there it puts ``dr`` at 0.50 m over 10 km. The 0.5 dB budget
+#: is uacpy guidance.
 RAMS_CN_DRIFT_BUDGET_DB = 0.5
 
 
@@ -91,7 +93,7 @@ RAMS_CN_DRIFT_BUDGET_DB = 0.5
 #: floor's own error) and costs 0.15–0.28 dB rms on a 200→100 m sand wedge,
 #: where the stride's alignment with the bathymetry staircase moves the field
 #: either way; the measured ladder (3.7 % at a third of the beat) is in
-#: ``docs/models/ram.md`` §6.
+#: ``docs/models/ram.md`` §6. uacpy guidance (measured).
 COLLINS_SAMPLES_PER_BEAT = 6.0
 
 
@@ -130,7 +132,8 @@ _SEABED_WAVELENGTHS_BEFORE_ABSORBER = 2.0
 #: field: a component 20 dB under another changes their sum by at most
 #: 20·log10(1.1) = 0.83 dB. :func:`leaky_field_depth` follows each component
 #: until its leakage (or the seabed's own loss along its path) has taken it
-#: this far down.
+#: this far down. The 0.83 dB bound is arithmetic; taking it as negligible
+#: is uacpy guidance.
 _LEAKY_COMPONENT_FLOOR_DB = 20.0
 
 #: Loss (dB) at which a component has leaked ``10^(-floor/10)`` (1 %) of its
@@ -146,16 +149,17 @@ _LEAKED_ENERGY_FLOOR_DB = float(
 #: Sub-bottom margin, in wavelengths, below which the absorbing layer has no
 #: room to work. ``ram.pdf`` p.7 asks for the grid bottom "well below the ocean
 #: bottom interface" with the attenuation raised "over the lower few
-#: wavelengths of the grid"; three is that "few", calibrated against the
-#: measured error curve rather than assumed — and the width of Collins' own
-#: sample absorber (100 m at 50 Hz with c0 = 1600 m/s, ram.pdf p.8, p.12).
+#: wavelengths of the grid"; three is uacpy's reading of that "few" (uacpy
+#: guidance), calibrated against the measured error curve rather than
+#: assumed — and the width of Collins' own sample absorber (100 m at 50 Hz
+#: with c0 = 1600 m/s, ram.pdf p.8, p.12).
 _MIN_SUBBOTTOM_WAVELENGTHS = 3.0
 
 
 #: Attenuation (dB/wavelength) an unpinned absorbing layer ramps to at the
 #: domain floor: the floor of Collins' sample ramp ``900.0 0.5`` /
 #: ``1000.0 10.0`` (ram.pdf p.12, Fig. 2); upstream mpiramS used 5
-#: (third_party/MODIFICATIONS.md:2431-2432).
+#: (``mpiramS/src/peramx_mpi.f90:391-395``).
 DEFAULT_ABSORBER_ATTENUATION = 10.0
 
 
@@ -201,37 +205,23 @@ def warn_if_pinned_absorber_is_below_the_seabed(env: Environment, *,
         NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
-def seabed_sound_speed(env: Environment, c0: float) -> float:
+def seabed_sound_speed(env: Environment) -> float:
     """Sound speed just below the seafloor, for sizing the real-seabed pad.
 
     The evanescent tail this pad has to contain decays in the BOTTOM, so
-    the bottom's own speed sets its scale. A boundary that carries no
-    speed (vacuum / rigid, or a shape this wrapper cannot read) falls back
-    to the PE reference speed, which keeps the pad finite and positive.
+    the bottom's own speed sets its scale. Every column carries a
+    geoacoustic half-space here: RAM refuses a vacuum, rigid or tabulated
+    one in stage 2 (``RAM._validate_engine``), before stage 3 sizes the
+    domain.
     """
-    bottom = env.bottom
     # ``Bottom`` has no plain ``sound_speed``, so reading one silently
     # returns the water value and under-sizes the pad.
     # ``all_sound_speeds()`` is exactly the set wanted: every layer speed
-    # plus the half-spaces that carry geoacoustics, with 'vacuum' /
-    # 'rigid' / 'file' / 'precalc' skipped because their ``sound_speed``
-    # is a placeholder rather than a seabed speed. Take the LARGEST: the
+    # plus the half-spaces that carry geoacoustics. Take the LARGEST: the
     # pad is a wavelength count, and the longest bottom wavelength is the
     # conservative one to size it by.
-    speeds = [v for v in bottom.all_sound_speeds()
-              if np.isfinite(v) and v > 0.0]
-    if not speeds:
-        # A rigid / vacuum boundary leaves ``all_sound_speeds`` empty but
-        # still reports a nominal ``halfspace_sound_speed`` (1600 m/s), and
-        # that is what sizes the pad there — harmlessly, since such a
-        # boundary carries no transmitted field for the pad to hold. Only a
-        # boundary that reports no usable speed at all falls back to the
-        # reference speed.
-        speeds = [v for v in
-                  np.atleast_1d(np.asarray(bottom.halfspace_sound_speed,
-                                           dtype=float)).ravel().tolist()
-                  if np.isfinite(v) and v > 0.0]
-    return max(speeds) if speeds else float(c0)
+    return max(v for v in env.bottom.all_sound_speeds()
+               if np.isfinite(v) and v > 0.0)
 
 
 def resolve_c0(env: Environment, *, knobs) -> float:
@@ -368,19 +358,13 @@ def compute_zmax(env: Environment, freq: float,
 
 def _seabed_top_media(env: Environment) -> List[tuple]:
     """``(sound_speed, density, attenuation)`` of the medium just below the
-    seafloor in every column that carries geoacoustics: the top sediment
-    layer, else the half-space."""
+    seafloor in every column: the top sediment layer, else the half-space
+    (geoacoustic in every column, :func:`seabed_sound_speed`)."""
     bottom = env.bottom
     media = []
     for i in range(bottom.n_ranges):
         column = bottom.isel(range=i)
-        if column.layers:
-            top = column.layers[0]
-        else:
-            top = column.halfspace
-            if (BoundaryType.from_string(top.acoustic_type).is_parameter_free
-                    or top.acoustic_type in ('file', 'precalc')):
-                continue
+        top = column.layers[0] if column.layers else column.halfspace
         media.append((float(top.sound_speed), float(top.density),
                       float(top.attenuation)))
     return media
@@ -536,7 +520,7 @@ def adequate_zmax(env: Environment, freq: float,
         # bathymetry-following layer set stays inside the grid at the
         # range where it reaches deepest.
         stack = float(env.bottom.total_thickness_max())
-    c_bottom = seabed_sound_speed(env, c0)
+    c_bottom = seabed_sound_speed(env)
     seabed_pad = max(
         _SEABED_WAVELENGTHS_BEFORE_ABSORBER * c_bottom / max(freq, 1.0),
         leaky_field_depth(env, freq, max_range, knobs=knobs))
@@ -670,10 +654,13 @@ def mask_absorbing_layer(model_name: str, data, depths,
     n_inside = int(np.count_nonzero(inside))
     if n_inside:
         out[inside] = np.nan
+        where = (f"from {float(np.min(top)):.1f} m down" if np.ptp(top) == 0
+                 else f"its top follows the seafloor, shallowest "
+                      f"{float(np.min(top)):.1f} m")
         warnings.warn(
             f"{model_name}: {n_inside} of {out.size} samples lie inside the "
-            f"artificial absorbing layer (from {float(np.min(top)):.1f} m "
-            f"down) and are returned as NaN: its attenuation is a "
+            f"artificial absorbing layer ({where}) and are returned as NaN: "
+            f"its attenuation is a "
             f"computational device to stop reflections from the grid floor "
             f"(Collins & Siegmann, Parabolic Wave Equations with "
             f"Applications, §1.2.5), not the seabed. Pin a deeper zmax= to "

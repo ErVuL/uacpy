@@ -412,3 +412,46 @@ def test_tables_on_their_own_grids_stack_onto_one_given_axis():
     np.testing.assert_allclose(stacked.phase[:, 1], [0.0, 0.15, 0.9])
     with pytest.raises(ConfigurationError, match='beyond table 0'):
         ReflectionCoefficient.stack([a, b], angles_deg=[0.0, 95.0])
+
+
+def _table(**kw):
+    return ReflectionCoefficient(angles_deg=[10.0, 20.0, 30.0],
+                                 magnitude=[0.9, 1.1, 0.8],
+                                 phase=[0.0, 0.1, 0.2], **kw)
+
+
+class TestReflectionType:
+    """``ReflectionCoefficient.reflection_type`` travels as an attribute:
+    carried by a slice, round-tripped through to_dict and the xarray
+    export, refused as metadata."""
+
+    def test_the_constructor_keyword_is_the_attribute(self):
+        assert _table(reflection_type='transmission').reflection_type == \
+            'transmission'
+        assert _table().reflection_type is None
+
+    def test_a_slice_carries_it(self):
+        sliced = _table(reflection_type='transmission').at(angle=20.0)
+        assert sliced.reflection_type == 'transmission'
+
+    def test_to_dict_round_trips_it(self):
+        back = ReflectionCoefficient.from_dict(
+            _table(reflection_type='transmission').to_dict())
+        assert back.reflection_type == 'transmission'
+
+    def test_the_xarray_export_round_trips_it(self):
+        pytest.importorskip('xarray')
+        back = ReflectionCoefficient.from_xarray(
+            _table(reflection_type='transmission').to_xarray())
+        assert back.reflection_type == 'transmission'
+        assert 'reflection_type' not in back.metadata
+
+    def test_a_saved_dict_keeping_it_in_metadata_is_refused(self):
+        d = _table().to_dict()
+        d['metadata'] = {'reflection_type': 'transmission'}
+        with pytest.raises(ConfigurationError, match='reflection_type'):
+            ReflectionCoefficient.from_dict(d)
+
+    def test_a_metadata_entry_naming_it_is_refused(self):
+        with pytest.raises(ConfigurationError, match='reflection_type'):
+            _table(metadata={'reflection_type': 'transmission'})

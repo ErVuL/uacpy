@@ -9,9 +9,13 @@ whose engine default is ``None`` (resolved from the inputs at run time) is
 not listed: both sides call one resolver instead.
 """
 
+import math
+from typing import NamedTuple
+
 __all__ = [
     'C_LOW_FACTOR',
-    'C_LOW_FACTOR_ELASTIC',
+    'ScholteWave',
+    'scholte_waves',
     'default_c_low',
     'BELLHOP_BEAM_TYPE',
     'BELLHOP_N_BEAMS',
@@ -43,76 +47,144 @@ __all__ = [
 
 #: The slow phase-speed edge every wavenumber-integration engine derives when
 #: ``c_low`` is unpinned (Scooter, SPARC, OAST, OASP, OASS, OASSP, OASN and
-#: their deck writers) is a factor on the slowest speed of the whole problem
-#: (:func:`default_c_low`): this factor, or :data:`C_LOW_FACTOR_ELASTIC` when
-#: a half-space is elastic. ``scooter.f90:193-259`` takes cMin over every
-#: acoustic medium's cP (:209-210), every elastic medium's cS (:216-217) and
-#: the acoustic half-spaces (cS when elastic, :236-253), then ``cMin = 0.90 *
-#: cMin   ! phase speed must be some 10% below slowest acoustic speed``
-#: (:258), or 0.85 "a bit less than Scholte/Stoneley wave speed" when a
-#: half-space is elastic (:255-256) — and does not apply it (:261-263,
-#: ``!!!cLow = MAX( cLow, cMin )``). Jensen et al. (*Computational Ocean
-#: Acoustics*, ch. 4 App. 1): "the highest significant spatial frequency in
-#: the horizontal corresponds to the lowest wave speed in the problem. It is,
-#: therefore, in general, conservative to choose k_max ≃ 1.1 ω/c_min"
-#: (0.91·c_min). OASES states no factor; its worked decks pin CMIN by hand
-#: (oast.tex:568, oasn.tex:479).
+#: their deck writers) is this factor on the slowest wave speed of the whole
+#: problem (:func:`default_c_low`): ``scooter.f90:258``, ``cMin = 0.90 * cMin
+#: ! phase speed must be some 10% below slowest acoustic speed``. Jensen et
+#: al. (*Computational Ocean Acoustics*, ch. 4 App. 1): "the highest
+#: significant spatial frequency in the horizontal corresponds to the lowest
+#: wave speed in the problem. It is, therefore, in general, conservative to
+#: choose k_max ≃ 1.1 ω/c_min" (0.91·c_min). ``scooter.f90:193-259`` takes
+#: cMin over every acoustic medium's cP (:209-210), every elastic medium's
+#: cS (:216-217) and the acoustic half-spaces (cS when elastic, :236-253),
+#: and over an elastic half-space writes 0.85 instead, "phase speed a bit
+#: less than Scholte/Stoneley wave speed" (:255-256) — an estimate of the
+#: Scholte wave, which falls short when the shear speed is close to the
+#: water's (1240 m/s = 0.83 × 1500 m/s on the limestone preset). uacpy
+#: solves that wave (:func:`scholte_waves`) and counts it among the
+#: speeds, so the one factor applies to fluid and elastic problems alike.
+#: scooter.f90 computes cMin and does not apply it (:261-263,
+#: ``!!!cLow = MAX( cLow, cMin )``). OASES states no factor; its worked decks
+#: pin CMIN by hand (oast.tex:568, oasn.tex:479).
 C_LOW_FACTOR = 0.90
 
-#: The factor on the slowest speed when a half-space is elastic:
-#: ``scooter.f90:255-256``, "phase speed a bit less than Scholte/Stoneley
-#: wave speed" — the interface wave travels at "about 0.85 times the minimum
-#: shear-wave speed" (Jensen et al., *Computational Ocean Acoustics*,
-#: §5.10.5).
-C_LOW_FACTOR_ELASTIC = 0.85
+
+class ScholteWave(NamedTuple):
+    """A Scholte wave of an environment: its phase speed
+    (m/s), the depth (m) of the interface it travels along, and which two
+    media meet there."""
+    speed: float
+    depth: float
+    where: str
+
+    def __repr__(self) -> str:
+        from uacpy.core._repr import fields_repr
+        return fields_repr(self, units={'speed': 'm/s'})
+
+
+def scholte_waves(env):
+    """The Scholte waves of ``env``, one
+    :class:`ScholteWave` per liquid medium touching an elastic one: the
+    water on an elastic seabed or under an elastic top half-space, a fluid
+    sediment layer on an elastic layer or half-space, an elastic layer on a
+    fluid one. Each speed is
+    :func:`~uacpy.core.acoustics.boundaries.scholte_wave_speed` for the
+    two media taken as half-spaces (Brekhovskikh & Lysanov §3.4.2,
+    eq. 3.4.29), with the water's slowest speed at its deepest sample
+    against the seabed and at its shallowest against the top. Two elastic
+    media in contact are not
+    a liquid-solid pair and give none. The seafloor is ``env.depth``; a
+    sediment interface lies the thicknesses of the layers above it deeper.
+    Every seabed column counts."""
+    import numpy as np
+    from uacpy.core.acoustics.boundaries import scholte_wave_speed
+    from uacpy.core.boundary import BoundaryType
+
+    ssp = np.atleast_2d(np.asarray(env.ssp.sound_speed, dtype=float))
+    rho_w = float(env.water_density)
+    waves = []
+
+    def meet(upper, lower, depth, where):
+        liquid, solid = (upper, lower) if lower[1] > 0.0 else (lower, upper)
+        if liquid[1] > 0.0 or solid[1] <= 0.0:
+            return
+        speed = scholte_wave_speed(solid[0], solid[1], solid[2],
+                                   water_sound_speed=liquid[0],
+                                   water_density=liquid[2])
+        if not math.isnan(speed):
+            waves.append(ScholteWave(speed, depth, where))
+
+    def medium(props):
+        return (float(props.sound_speed), float(props.shear_speed or 0.0),
+                float(props.density))
+
+    for column in env.bottom.columns:
+        upper = (float(np.nanmin(ssp[-1])), 0.0, rho_w)
+        upper_name, depth = 'the water', float(env.depth)
+        stack = [(layer, 'a sediment layer', float(layer.thickness))
+                 for layer in column.layers]
+        if BoundaryType.from_string(
+                column.halfspace.acoustic_type).is_geoacoustic:
+            stack.append((column.halfspace, 'the bottom half-space', 0.0))
+        for props, name, thickness in stack:
+            meet(upper, medium(props), depth,
+                 f"between {upper_name} and {name}")
+            upper, upper_name = medium(props), name
+            depth += thickness
+    for top in env.surface.nodes:
+        if BoundaryType.from_string(top.acoustic_type).is_geoacoustic:
+            meet(medium(top), (float(np.nanmin(ssp[0])), 0.0, rho_w), 0.0,
+                 'between the top half-space and the water')
+    return waves
 
 
 def default_c_low(env):
     """``(c_low, origin)``: the slow phase-speed edge (m/s) an unpinned
     ``c_low`` takes on ``env``, and the sentence stating where it came from.
 
-    The rule of ``scooter.f90:193-259`` (see :data:`C_LOW_FACTOR`): the
-    slowest speed of every medium — the water, each sediment layer, each
-    'half-space' boundary at the bottom and the top, a shear speed counted
-    wherever it is non-zero — times :data:`C_LOW_FACTOR_ELASTIC` when a
-    half-space is elastic, :data:`C_LOW_FACTOR` otherwise. An elastic
-    medium contributes ``min(cP, cS)``, which is scooter.f90's ``cS``
-    whenever the shear speed is below the compressional one. Vacuum, rigid
-    and reflection-table boundaries carry no medium (scooter.f90 reads only
-    ``BC == 'A'``). Every seabed column counts, so on a range-dependent
-    ``env`` it is the slowest speed along the track."""
+    :data:`C_LOW_FACTOR` × the slowest wave speed of the problem: the
+    water's slowest sound speed; the compressional speed of each sediment
+    layer and of each 'half-space' boundary at the bottom and the top, and
+    its shear speed wherever that is non-zero; and every Scholte wave a liquid
+    medium carries against a solid one
+    (:func:`scholte_waves`, Brekhovskikh & Lysanov §3.4.2, eq. 3.4.29).
+    Vacuum, rigid and reflection-table boundaries carry no medium
+    (scooter.f90 reads only ``BC == 'A'``). Every seabed column counts, so
+    on a range-dependent ``env`` it is the slowest wave along the track.
+    A Stoneley wave (between two solids) is not solved and does
+    not count."""
     import numpy as np
     from uacpy.core.boundary import BoundaryType
 
     speeds = [(float(np.nanmin(np.asarray(env.ssp.sound_speed, dtype=float))),
                'the water')]
-    elastic_halfspace = False
 
     def medium(props, name):
-        cs = float(props.shear_speed or 0.0)
-        if cs > 0.0:
-            speeds.append((min(float(props.sound_speed), cs),
-                           f"{name}'s shear speed"))
-        else:
-            speeds.append((float(props.sound_speed), name))
-        return cs > 0.0
+        speeds.append((float(props.sound_speed), name))
+        if float(props.shear_speed or 0.0) > 0.0:
+            speeds.append((float(props.shear_speed), f"{name}'s shear speed"))
 
     for column in env.bottom.columns:
         for layer in column.layers:
             medium(layer, "a sediment layer")
         if BoundaryType.from_string(
                 column.halfspace.acoustic_type).is_geoacoustic:
-            elastic_halfspace |= medium(column.halfspace,
-                                        "the bottom half-space")
+            medium(column.halfspace, "the bottom half-space")
     for top in env.surface.nodes:
         if BoundaryType.from_string(top.acoustic_type).is_geoacoustic:
-            elastic_halfspace |= medium(top, "the top half-space")
+            medium(top, "the top half-space")
     c_min, where = min(speeds, key=lambda s: s[0])
-    factor = C_LOW_FACTOR_ELASTIC if elastic_halfspace else C_LOW_FACTOR
-    return factor * c_min, (
-        f"{factor:g} × {c_min:g} m/s, {where} — the slowest speed of every "
-        f"medium{', over an elastic half-space' if elastic_halfspace else ''}"
-        f" (scooter.f90:193-259)")
+    rule = (f"{C_LOW_FACTOR:g} × {c_min:g} m/s, {where} — the slowest speed "
+            f"of every medium (scooter.f90:193-259)")
+    waves = scholte_waves(env)
+    if waves:
+        wave = min(waves, key=lambda w: w.speed)
+        if wave.speed < c_min:
+            return C_LOW_FACTOR * wave.speed, (
+                f"{C_LOW_FACTOR:g} × {wave.speed:.1f} m/s, the Scholte "
+                f"wave {wave.where} (Brekhovskikh & Lysanov "
+                f"§3.4.2, eq. 3.4.29; scooter.f90:258), slower than every "
+                f"medium (the slowest: {where}, {c_min:g} m/s)")
+    return C_LOW_FACTOR * c_min, rule
 
 #: Bellhop's beam type: geometric hat, Cartesian (BELLHOP's own default:
 #: doc/bellhop.htm OPTION(2:2) "'G' Geometric hat beams in Cartesian

@@ -21,7 +21,10 @@ title, frequency, NMedia, TopOpt and its follow-up rows, one mesh line plus
 SSP rows per medium, BotOpt and the bottom half-space row, then the
 program's own tail — ``cLow cHigh``, ``RMax``, source and receiver depths
 (and the broadband frequency vector) for KRAKEN/Scooter; source depths,
-receiver depths and ranges, RunType and the beam block for Bellhop.
+receiver depths and ranges (and the broadband frequency vector), RunType and
+the beam block for Bellhop. Source and receiver positions are sorted, as
+AT's ``ReadVector`` sorts them (``misc/SourceReceiverPositions.f90:224``,
+``:268``); a frequency vector is kept as given (``ReadfreqVec``, ``:66``).
 """
 
 import warnings
@@ -37,7 +40,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.core.units import km_to_m
 from uacpy.io.bellhop_writer import BELLHOP_SSP_GUARD_RANGE_FACTOR
-from uacpy.core.deck_limits import AT_DB_PER_NEPER, AT_LAST_SSP_POINT_EPS_M
+from uacpy.core.deck_limits import AT_DB_PER_NEPER, AT_LAST_SSP_POINT_EPS
 from uacpy.io.at_codes import (
     BELLHOP_RUN_TYPES, BOUNDARY_TYPES_BY_CODE, SSP_INTERP_BY_CODE,
     AttenuationUnits,
@@ -369,7 +372,7 @@ def _medium(rows: _Rows, index: int):
         # The medium ends on the row AT its base depth, by AT's own absolute
         # test ABS(z - Depth) < 100*EPSILON(1.0) (misc/sspMod.f90:353); a
         # row merely near the base, or past it, is read on as AT reads on.
-        if abs(z - base) < AT_LAST_SSP_POINT_EPS_M:
+        if abs(z - base) < AT_LAST_SSP_POINT_EPS:
             return n_mesh, sigma, base, np.asarray(medium, dtype=float)
 
 
@@ -437,7 +440,7 @@ def _range_dependent_halfspace(rows: np.ndarray, unit: str, roughness: float,
     where :func:`_nodes_for_switches` puts them.
     """
     from uacpy.core.bottom import Bottom
-    from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
+    from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION
     props = np.array([
         (cp, cs, rho, _db_per_wavelength(unit, ap, cp),
          _db_per_wavelength(unit, as_, cs))
@@ -449,7 +452,7 @@ def _range_dependent_halfspace(rows: np.ndarray, unit: str, roughness: float,
         cp, cs, rho, ap, as_ = values[0]
         return _halfspace((0.0, cp, cs, rho, ap, as_), roughness)
     ranges = _nodes_for_switches(rows[0, steps[1:]], float(rows[0, 0]),
-                                 1.5 * DECK_RANGE_RESOLUTION_M)
+                                 1.5 * DECK_RANGE_RESOLUTION)
     if ranges is None:
         raise UnsupportedFeatureError(
             'read_env', f"{path.with_suffix('.bty')}: long-format half-space "
@@ -513,21 +516,22 @@ def _sibling_flp(flp: Path):
     for ``fields.exe``
     (:func:`~uacpy.io.oalib_reader._is_fields_exe_flp`).
 
-    Returns ``(option, depths, ranges)``, ``depths`` None for the Scooter
-    layout; ``option[0] == 'X'`` is a line source in both, and a ``'*'`` in
-    column 3 (``field.exe``) or 4 (``fields.exe``) the source beam pattern.
+    Returns ``(option, beam_pattern, depths, ranges)``: ``option`` the
+    option's first letter (``'X'`` a line source in both layouts),
+    ``beam_pattern`` whether column 3 (``field.exe``) or 4 (``fields.exe``)
+    is ``'*'`` (the source beam pattern), ``depths`` None for the Scooter
+    layout.
     """
     with open(flp, 'r', encoding='utf-8', errors='replace') as fid:
         first = _record(fid, 'first', flp)
         second = _record(fid, 'second', flp)
-        from uacpy.io.oalib_reader import _is_fields_exe_flp, _parse_flp
+        from uacpy.io.oalib_reader import _is_fields_exe_flp, read_flp
         if not _is_fields_exe_flp(second):
-            data = _parse_flp(flp)
-            opt = data['opt'].ljust(4)
-            pos = data['pos']['r']
+            deck = read_flp(flp)
+            opt = deck.option.ljust(4)
             return (opt[0], opt[2] == '*',
-                    np.asarray(pos['z'], dtype=float),
-                    np.asarray(pos['r'], dtype=float))
+                    np.asarray(deck.receiver_depths, dtype=float),
+                    np.asarray(deck.receiver_ranges, dtype=float))
         fid.seek(0)
         _record(fid, 'option', flp)
         ranges_km = _vector(fid, 'receiver ranges', flp)
@@ -615,11 +619,14 @@ def _kraken_tail(fid, path, topopt: str) -> Dict[str, Any]:
             alternatives=["uacpy.io.read_reflection_coefficient on the "
                           ".brc BOUNCE writes"],
             alternatives_label='readers')
+    # ReadVector sorts every position vector it reads
+    # (misc/SourceReceiverPositions.f90:224, :268); the frequency vector is
+    # read as given (ReadfreqVec, :66).
     tail: Dict[str, Any] = {
         'options': {'c_low': c_low, 'c_high': c_high,
                     'rmax': float(km_to_m(rmax_km))},
-        'source_depths': _vector(fid, 'source depths', path),
-        'receiver_depths': _vector(fid, 'receiver depths', path),
+        'source_depths': np.sort(_vector(fid, 'source depths', path)),
+        'receiver_depths': np.sort(_vector(fid, 'receiver depths', path)),
         'receiver_ranges': None,
     }
     if (topopt[4] in _SPARC_OUTPUT_MODES
@@ -633,15 +640,22 @@ def _kraken_tail(fid, path, topopt: str) -> Dict[str, Any]:
     return tail
 
 
-def _bellhop_tail(fid, path) -> Dict[str, Any]:
+def _bellhop_tail(fid, path, topopt: str) -> Dict[str, Any]:
     """Bellhop after the bottom (``ReadEnvironmentBell.f90:108-240``):
-    source depths, receiver depths and ranges, RunType, the launch angles,
-    ``STEP ZBOX RBOX``, and the Cerveny beam records."""
+    source depths, receiver depths and ranges, the frequency vector of a
+    broadband (TopOpt(6) ``'B'``) deck (``ReadfreqVec``, :118), RunType, the
+    launch angles, ``STEP ZBOX RBOX``, and the Cerveny beam records."""
+    # ReadVector sorts every position vector it reads
+    # (misc/SourceReceiverPositions.f90:224, :268); ReadfreqVec keeps the
+    # frequencies as given (:66).
     tail: Dict[str, Any] = {
-        'source_depths': _vector(fid, 'source depths', path),
-        'receiver_depths': _vector(fid, 'receiver depths', path),
-        'receiver_ranges': km_to_m(_vector(fid, 'receiver ranges', path)),
+        'source_depths': np.sort(_vector(fid, 'source depths', path)),
+        'receiver_depths': np.sort(_vector(fid, 'receiver depths', path)),
+        'receiver_ranges': km_to_m(np.sort(
+            _vector(fid, 'receiver ranges', path))),
     }
+    if topopt[5] == 'B':
+        tail['frequencies'] = _vector(fid, 'frequencies', path)
     run = _option(_record(fid, 'RunType', path), 7)
     # ReadRunType (ReadEnvironmentBell.f90:361-377) stops on any other
     # RunType(1); a record that is not one is not a 2-D Bellhop tail.
@@ -649,7 +663,19 @@ def _bellhop_tail(fid, path) -> Dict[str, Any]:
         raise FileFormatError(
             f"read_env: {path} has {run!r} where the Bellhop RunType "
             f"record belongs; RunType(1) is one of R E I S C A a.")
-    n_beams = list_directed_int(_record(fid, 'NBeams', path))
+    # Under TopOpt(6) 'I' the record also carries the index of the one beam
+    # to trace (angleMod.f90:32-33).
+    beams_record = _record(fid, 'NBeams', path)
+    if topopt[5] == 'I':
+        beam_counts = _values(beams_record)
+        if len(beam_counts) < 2:
+            raise FileFormatError(
+                f"read_env: {path}: TopOpt(6) 'I' reads 'Nalpha "
+                f"iSingle_alpha' (angleMod.f90:32-33); the record "
+                f"{beams_record.strip()!r} has no beam index.")
+        n_beams, single_beam = int(beam_counts[0]), int(beam_counts[1])
+    else:
+        n_beams, single_beam = list_directed_int(beams_record), None
     # angleMod.f90:54-58 READs alpha(1:MAX(3, Nalpha)) list-directed: the
     # values may wrap across records and a '/' ends them early.
     angles, _ = _read_vector_values(fid, max(3, n_beams))
@@ -676,16 +702,21 @@ def _bellhop_tail(fid, path) -> Dict[str, Any]:
     # across records: AT's decks write them on one line, uacpy's on two.
     step, z_box, r_box_km = read_list_directed_values(
         fid, 3, 'STEP ZBOX RBOX', path)
+    # ReadRunType keeps RunType(2) only when it is one of C R S b B g and
+    # sets 'G' otherwise (ReadEnvironmentBell.f90:380-395).
+    beam = run[1] if run[1] in ('C', 'R', 'S', 'b', 'B', 'g') else 'G'
     options = dict(
-        run_type=run[0], beam_type=run[1], source_type=run[3],
+        run_type=run[0], beam_type=beam, source_type=run[3],
         grid_type=run[4], source_beam_pattern=run[2] == '*',
         beam_shift=run[6] == 'S', n_beams=n_beams,
         launch_angles_deg=(float(angles[0]), float(angles[-1])), ray_step=float(step),
         z_box=float(z_box), r_box=float(km_to_m(r_box_km)))
+    if single_beam is not None:
+        options['single_beam'] = single_beam
     # ReadEnvironmentBell.f90:192-221 reads the two Cerveny records for a
     # 'C'/'R' beam unless the run is a ray trace; uacpy's writer emits them
     # for a ray trace too, so there they are read when present.
-    if run[1].upper() in ('C', 'R') and (run[0] != 'R' or _skip_blank(fid)):
+    if beam in ('C', 'R') and (run[0] != 'R' or _skip_blank(fid)):
         shape, shape_values = _option_and_values(
             _record(fid, 'beam shape', path), 2)
         eps, r_loop_km = shape_values[:2]
@@ -733,7 +764,10 @@ def read_env(
     is a range-dependent seabed), a ``.ssp`` for a ``'Q'`` range-dependent
     SSP, and a ``.brc``/``.trc``/``.irc`` reflection table (referenced by
     path, not read). A row a ``/`` ends early keeps the previous READ's
-    values, across media and into both half-spaces. Attenuation in
+    values, across media and into both half-spaces. Each SSP / half-space
+    row is read from one line, as the Acoustics Toolbox's shipped decks
+    write them; a row continued on the next line is not supported.
+    Attenuation in
     TopOpt(3) ``'F'``, ``'Q'`` or ``'L'`` is converted to the
     dB/wavelength it equals at each row's own wave speed; Bellhop's
     ``'G'`` grain-size boundary becomes the half-space its formulas give.
@@ -804,7 +838,10 @@ def read_env(
         ``run_type``/``beam_type``/``source_type``/``grid_type``/
         ``source_beam_pattern``/``beam_shift``/``n_beams``/
         ``launch_angles_deg``/``ray_step``/``z_box``/``r_box`` (Bellhop, metres),
-        plus the Cerveny/Gaussian beam-shape entries when the deck has them.
+        plus the Cerveny/Gaussian beam-shape entries when the deck has them
+        and ``single_beam`` for a TopOpt(6) ``'I'`` deck; ``beam_type`` is
+        the beam Bellhop runs, ``'G'`` for a letter its ReadRunType does not
+        keep (a lowercase ``'c'``, ``ReadEnvironmentBell.f90:380-395``).
         A KRAKEN deck read beside a ``field.exe`` ``.flp`` adds
         ``'mode_depths'``, the ``.env``'s own receiver depths (the
         Receiver holds the ``.flp``'s), which also describes the deck.
@@ -837,7 +874,7 @@ def read_env(
     ConfigurationError
         No file at ``filepath``, or values an Environment, Source or
         Receiver refuses (e.g. receivers above the surface, a water density
-        outside 0.9-1.1 g/cm³).
+        in kg/m³).
 
     Warns
     -----
@@ -937,7 +974,7 @@ def read_env(
             model = 'kraken' if len(probe) >= 2 else 'bellhop'
         try:
             tail = (_kraken_tail(fid, path, topopt) if model == 'kraken'
-                    else _bellhop_tail(fid, path))
+                    else _bellhop_tail(fid, path, topopt))
         except (FileFormatError, *PARSE_ERRORS):
             fid.seek(pos)
             if _is_bellhop3d_tail(fid, path):
@@ -1057,11 +1094,11 @@ def read_env(
                 alternatives_label='decks')
 
     if ssp_code == 'Q':
-        from uacpy.io.oalib_reader import _parse_ssp_2d
-        ssp2d = _parse_ssp_2d(path.with_suffix('.ssp'))
+        from uacpy.io.oalib_reader import read_ssp_2d
+        ssp2d = read_ssp_2d(path.with_suffix('.ssp'))
         ssp_ranges, speeds = _without_guard_columns(
-            np.asarray(ssp2d['r_prof'], dtype=float),
-            np.asarray(ssp2d['c_mat'], dtype=float),
+            np.asarray(ssp2d.ranges, dtype=float),
+            np.asarray(ssp2d.sound_speed, dtype=float),
             options.get('r_box'))
         ssp_depths, speeds = _without_guard_rows(water_depths, speeds)
         ssp = SoundSpeedProfile(depths=ssp_depths, sound_speed=speeds,
@@ -1079,16 +1116,19 @@ def read_env(
     # segment by segment (bellhop.f90:192-199, :474-481); only an 'A'
     # boundary reflects off them.
     if model == 'bellhop' and botopt[1] in ('~', '*'):
-        from uacpy.io.bathy_io import _parse_bathymetry
-        bty, _ = _parse_bathymetry(path.with_suffix('.bty'))
-        bathymetry = bty[:2, 1:-1].T
-        if bty.shape[0] > 2 and botopt[0] == 'A':
-            bottom_hs = _range_dependent_halfspace(bty[:, 1:-1], unit_code,
-                                                   bot_sigma, path)
+        from uacpy.io.bathy_io import read_bathymetry
+        bty = read_bathymetry(path.with_suffix('.bty'))
+        bathymetry = np.column_stack([bty.ranges, bty.depths])
+        if bty.is_long_format and botopt[0] == 'A':
+            bottom_hs = _range_dependent_halfspace(
+                np.vstack([bty.ranges, bty.depths, bty.sound_speed,
+                           bty.shear_speed, bty.density, bty.attenuation,
+                           bty.shear_attenuation]),
+                unit_code, bot_sigma, path)
     if model == 'bellhop' and topopt[4] in ('~', '*'):
-        from uacpy.io.bathy_io import _parse_altimetry
-        ati, _ = _parse_altimetry(path.with_suffix('.ati'))
-        if ati.shape[0] > 2 and top_code == 'A':
+        from uacpy.io.bathy_io import read_altimetry
+        ati = read_altimetry(path.with_suffix('.ati'))
+        if ati.is_long_format and top_code == 'A':
             raise UnsupportedFeatureError(
                 'read_env', f"{path.with_suffix('.ati')}: a long-format "
                 f"altimetry file under an 'A' top, a range-dependent top "
@@ -1097,7 +1137,7 @@ def read_env(
                 alternatives_label='files')
         # The .ati is positive-down on Bellhop's z axis; Environment
         # altimetry is height, positive up.
-        altimetry = np.column_stack([ati[0, 1:-1], -ati[1, 1:-1]])
+        altimetry = np.column_stack([ati.ranges, -ati.depths])
 
     surface = _boundary(top_code, path, top_row, surface_sigma, '.trc')
     bottom = (SeabedColumn(layers=layers, halfspace=bottom_hs) if layers

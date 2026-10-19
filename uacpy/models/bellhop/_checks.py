@@ -21,7 +21,7 @@ from uacpy.io.bellhop_writer import (
     validate_beam_type,
 )
 from uacpy.core._validate import equally_spaced
-from uacpy.models._knobs import is_real_number, is_whole_number, whole_count
+from uacpy.models._knobs import is_real_number, whole_count
 from uacpy.io.refl_io import read_source_beam_pattern
 from uacpy.models.bellhop._plan import _STEP_PER_DEPTH
 from uacpy.models.bellhop._tables import (
@@ -34,7 +34,7 @@ from uacpy.models.bellhop._tables import (
 def check_knobs(*, beam_type, beam_width_type, beam_curvature, component,
                 eps_multiplier, r_loop, n_image, ib_win,
                 n_beams, grid_type, launch_angles_deg, ray_step, z_box, r_box,
-                n_frequencies, bandwidth_factor, single_beam=None) -> None:
+                single_beam=None) -> None:
     """Refuse a constructor knob no run could use: an unknown beam type
     or beam shape letter, a Cerveny ``eps_multiplier`` / ``r_loop`` that is
     not one real number, an ``n_image`` / ``ib_win`` that is not a whole
@@ -42,8 +42,7 @@ def check_knobs(*, beam_type, beam_width_type, beam_curvature, component,
     beam (:func:`check_component`), a beam count that is not a whole
     number >= 0, a grid type other than 'R'/'I', a launch fan that is not
     an ascending pair of numbers, a negative or non-finite step, a ray box
-    that is not a positive number, a band of fewer than two bins (or a
-    fractional count) or a width outside (0, 2).
+    that is not a positive number.
 
     Run at construction and again by every run (stage 2), since the
     attributes can be reassigned in between.
@@ -138,30 +137,9 @@ def check_knobs(*, beam_type, beam_width_type, beam_curvature, component,
                 f"metres, or None for {BELLHOP_RAY_BOX_FACTOR:g} x the "
                 f"extent the rays must cover. bellhop.f90:571-572 drops a ray once "
                 f"ABS(x) exceeds the box, so a box at or below zero "
-                f"drops every ray and the run returns an all-NaN field "
-                f"at exit 0."
+                f"drops every ray and the run returns a field of exact "
+                f"zeros (the 600 dB no-energy marker) at exit 0."
             )
-    if n_frequencies is not None and not is_whole_number(n_frequencies):
-        raise ConfigurationError(
-            f"Bellhop(n_frequencies={n_frequencies!r}) must be a whole "
-            f"number of frequencies in the band.")
-    if n_frequencies is not None and n_frequencies < 2:
-        raise ConfigurationError(
-            f"Bellhop(n_frequencies={n_frequencies}) cannot span a frequency "
-            f"band: the grid a BROADBAND run expands a single centre "
-            f"frequency to needs at least its two edges.",
-            remediation=("Use n_frequencies >= 2, or pass frequencies=[fc] "
-                         "to run a single bin."),
-        )
-    if bandwidth_factor is not None and not (
-            np.isfinite(bandwidth_factor) and 0 < bandwidth_factor < 2):
-        raise ConfigurationError(
-            f"Bellhop(bandwidth_factor={bandwidth_factor:g}) must "
-            f"lie in (0, 2): the band a BROADBAND run expands a "
-            f"single centre frequency to is fc*(1 +/- "
-            f"bandwidth_factor/2), whose lower edge reaches 0 Hz from 2 up.",
-            remediation="Use 0 < bandwidth_factor < 2 (default 0.5).",
-        )
 
 
 def check_component(*, component, beam_type) -> None:
@@ -246,8 +224,10 @@ def reject_source_outside_the_medium(env, source) -> None:
     DistBegBot <= 0`` and, when either holds, sets ``Beam%Nsteps = 1``,
     prints *"Terminating the ray trace because the source is on or outside
     the boundaries"* and returns — *"source must be within the medium"*.
-    Every beam is then one point long, so the run exits 0 with an all-NaN
-    field, zero arrivals and 1-point rays, and warns about none of it.
+    Every beam is then one point long, so the run exits 0 with a field of
+    exact zeros (``U`` is zeroed before the beam sum, ``bellhop.f90:240-241``;
+    the 600 dB no-energy marker), zero arrivals and 1-point rays, and warns
+    about none of it.
     The test is ``<= 0``, so **on** the boundary already counts as outside.
 
     Measured against the seafloor at **r = 0**, not ``env.depth``:
@@ -269,7 +249,8 @@ def reject_source_outside_the_medium(env, source) -> None:
             f"{seafloor:g} m. Bellhop terminates every ray at step 1 when "
             f"the source is on or outside a boundary "
             f"(Bellhop/bellhop.f90:488-492, 'source must be within the "
-            f"medium'), so the run would return an all-NaN field at exit 0.",
+            f"medium'), so the run would return a field of exact zeros "
+            f"(the 600 dB no-energy marker) at exit 0.",
             remediation="Move the source above the seafloor, or use "
                         "Kraken / Scooter, which resolve a source at or "
                         "below the seabed.")
@@ -280,8 +261,8 @@ def reject_source_outside_the_medium(env, source) -> None:
     # z = -height(0) with altimetry (``bellhop_writer`` writes the
     # .ati depth column as -heights: env.altimetry is positive-up,
     # the .ati positive-down), so a source at or above it has
-    # every ray terminated at step 1 and the run returns an all-NaN
-    # field at exit 0.
+    # every ray terminated at step 1 and the run returns a field of
+    # exact zeros (the 600 dB no-energy marker) at exit 0.
     top = 0.0
     if env.altimetry is not None:
         top = -float(np.asarray(env.altimetry.eval(range=0.0)).flat[0])
@@ -292,8 +273,8 @@ def reject_source_outside_the_medium(env, source) -> None:
             f"at z = {top:g} m. Bellhop terminates every ray at step 1 "
             f"when the source is on or outside a boundary "
             f"(Bellhop/bellhop.f90:488-492, 'source must be within the "
-            f"medium'), so the run would return an all-NaN field at "
-            f"exit 0.",
+            f"medium'), so the run would return a field of exact zeros "
+            f"(the 600 dB no-energy marker) at exit 0.",
             remediation="Move the source below the sea surface (below "
                         "the altimetry crest at r = 0, if any).")
 
@@ -407,8 +388,9 @@ def check_beam_type_supports_receiver_grid(receiver, *, beam_type,
             f"receiver range: {_INFLUENCE_ROUTINE[beam_type]} clamps "
             f"the receiver index to Pos%NRr (influence.f90:339,351), so "
             f"irA == irB at every step and influence.f90:354 skips the "
-            f"whole ray — the run exits 0 with an all-NaN field, zero "
-            f"eigenrays and zero arrivals.",
+            f"whole ray — the run exits 0 with a field of exact zeros "
+            f"(the 600 dB no-energy marker), zero eigenrays and zero "
+            f"arrivals.",
             remediation="Use beam_type='G' or 'B', which walk the range "
                         "index with a bracket test, or give "
                         "receiver.ranges at least two equally spaced "
@@ -447,7 +429,7 @@ def reject_unequal_paired_grid(receiver, *, grid_type) -> None:
             f"len(receiver.depths) == len(receiver.ranges); got "
             f"{len(receiver.depths)} depths and "
             f"{len(receiver.ranges)} ranges. BELLHOP sorts both lists "
-            f"before pairing (SourceReceiverPositions.f90:224), so an 'I' "
+            f"before pairing (SourceReceiverPositions.f90:224, :268), so an 'I' "
             f"grid is always a monotone diagonal, shallow-near to "
             f"deep-far. Use grid_type='R' for a rectilinear "
             f"(Cartesian-product) grid — and Field.at for arbitrary "

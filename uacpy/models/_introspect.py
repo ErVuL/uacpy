@@ -17,9 +17,10 @@ def _collect_init_params(cls) -> List[tuple]:
     parameters (excluding ``self`` and ``**kwargs``) in declaration order,
     deduplicated by name (subclass declaration wins).
 
-    Returns a list of ``(name, default_or_NO_DEFAULT)`` pairs. Used by
-    :meth:`PropagationModel.__repr__` and parallels what
-    :meth:`PropagationModel.copy` introspects.
+    Returns a list of ``(name, default_or_NO_DEFAULT)`` pairs. Read by
+    :meth:`PropagationModel.__repr__`, by :func:`model_copy`, by the
+    record a run's settings carry (``PropagationModel._given_knobs``) and by
+    ``from_run_settings`` (``models/_replay.py``).
     """
     import inspect as _inspect
 

@@ -78,7 +78,12 @@ def _require_positive_frequencies(frequency):
 
 def _warn_below_geometric(scale_m: float, frequency, sound_speed,
                           label: str, ka_min: float) -> None:
-    """Warn when ``k·scale`` falls below the geometric-regime bound.
+    """Warn when ``k·scale`` falls below the geometric-regime bound, where
+    the geometric formula is no bound either way: the rigid sphere's form
+    function oscillates about it (1.07 at ka = 3.6, 0.63 at 1.8; Medwin &
+    Clay, *Fundamentals of Acoustical Oceanography*, Table 7.1) and a
+    pressure-release sphere rises above it at low ka (Abraham, *Underwater
+    Acoustic Signal Processing*, sect. 3.4.3.3, Fig. 3.22).
 
     Skipped when ``frequency`` is ``None`` — the frequency-flat
     formulas (sphere / convex / ellipsoid) accept an optional frequency
@@ -92,8 +97,11 @@ def _warn_below_geometric(scale_m: float, frequency, sound_speed,
     if ka < ka_min:
         warnings.warn(
             f"{label}: k·a = {ka:.2f} < {ka_min:g} — below the "
-            f"geometric-scattering regime; the formula overestimates the "
-            f"response of a Rayleigh/resonance-regime scatterer.",
+            f"geometric-scattering regime, where the true TS departs from "
+            f"this limit in either direction: it oscillates about it in the "
+            f"resonance region and, at low k·a, falls as (ka)^4 for a rigid "
+            f"body but rises for a pressure-release one (Medwin & Clay, "
+            f"Table 7.1; Abraham, sect. 3.4.3.3).",
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 

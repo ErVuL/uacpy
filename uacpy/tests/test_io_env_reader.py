@@ -370,6 +370,72 @@ class TestReadEnvReadsDecksOtherToolsWrite:
                                                              4000.0)
         assert opt['launch_angles_deg'] == (-10.0, 10.0)
 
+    def test_unsorted_kraken_positions_read_sorted(self, tmp_path):
+        """ReadVector sorts each position vector after reading it
+        (misc/SourceReceiverPositions.f90:224, :268)."""
+        from uacpy.io import read_env
+        path = tmp_path / 'k.env'
+        path.write_text("'t'\n100.0\n1\n'CVW'\n0 0.0 100.0\n 0.0 1500.0 /\n"
+                        " 100.0 1500.0 /\n'A' 0.0\n 100.0 1700.0 0.0 1.8 /\n"
+                        "1400 2000\n10\n2\n60 20 /\n3\n90 10 50 /\n")
+        _, src, rcv, _ = read_env(path)
+        assert np.asarray(src.depths).tolist() == [20.0, 60.0]
+        assert np.asarray(rcv.depths).tolist() == [10.0, 50.0, 90.0]
+
+    def test_unsorted_bellhop_positions_read_sorted(self, tmp_path):
+        from uacpy.io import read_env
+        path = tmp_path / 'b.env'
+        path.write_text("'t'\n100.0\n1\n'CVW'\n0 0.0 100.0\n 0.0 1500.0 /\n"
+                        " 100.0 1500.0 /\n'V' 0.0\n2\n60.0 25.0 /\n2\n"
+                        "50.0 10.0 /\n2\n2.0 1.0 /\n'CG'\n11\n-10 10 /\n"
+                        "5.0 120.0 4.0\n")
+        _, src, rcv, _ = read_env(path)
+        assert np.asarray(src.depths).tolist() == [25.0, 60.0]
+        assert np.asarray(rcv.depths).tolist() == [10.0, 50.0]
+        assert np.asarray(rcv.ranges).tolist() == [1000.0, 2000.0]
+
+    def test_a_broadband_bellhop_deck_reads_its_frequency_vector(
+            self, tmp_path):
+        """Bellhop reads the frequency vector between the receiver ranges
+        and the RunType when TopOpt(6) is 'B' (ReadEnvironmentBell.f90:118,
+        ReadfreqVec), and keeps it as given (no sort)."""
+        from uacpy.io import read_env
+        path = tmp_path / 'b.env'
+        path.write_text("'t'\n100.0\n1\n'CVW  B'\n0 0.0 100.0\n"
+                        " 0.0 1500.0 /\n 100.0 1500.0 /\n'V' 0.0\n1\n25.0 /\n"
+                        "2\n10.0 50.0 /\n3\n1.0 2.0 3.0 /\n3\n"
+                        "50.0 100.0 200.0 /\n'CG'\n11\n-10 10 /\n"
+                        "5.0 120.0 4.0\n")
+        _, src, _, opt = read_env(path)
+        assert np.asarray(src.frequencies).tolist() == [50.0, 100.0, 200.0]
+        assert opt['run_type'] == 'C'
+
+    def test_a_lowercase_cerveny_letter_runs_as_a_hat_beam(self, tmp_path):
+        """ReadRunType keeps RunType(2) only for C R S b B g and sets 'G'
+        otherwise (ReadEnvironmentBell.f90:380-395); the Cerveny records
+        follow only an uppercase 'C'/'R' (:196), so a 'c' deck has none."""
+        from uacpy.io import read_env
+        path = tmp_path / 'b.env'
+        path.write_text("'t'\n100.0\n1\n'CVW'\n0 0.0 100.0\n 0.0 1500.0 /\n"
+                        " 100.0 1500.0 /\n'V' 0.0\n1\n25.0 /\n2\n10.0 50.0 /"
+                        "\n3\n1.0 3.0 /\n'Cc'\n11\n-10 10 /\n"
+                        "5.0 120.0 4.0\n")
+        *_, opt = read_env(path)
+        assert opt['beam_type'] == 'G'
+        assert 'beam_width_type' not in opt
+
+    def test_a_single_beam_deck_keeps_its_beam_index(self, tmp_path):
+        """Under TopOpt(6) 'I' the NBeams record also carries the index of
+        the one beam to trace (angleMod.f90:32-33)."""
+        from uacpy.io import read_env
+        path = tmp_path / 'b.env'
+        path.write_text("'t'\n100.0\n1\n'CVW  I'\n0 0.0 100.0\n"
+                        " 0.0 1500.0 /\n 100.0 1500.0 /\n'V' 0.0\n1\n25.0 /\n"
+                        "2\n10.0 50.0 /\n3\n1.0 3.0 /\n'CG'\n11 3\n"
+                        "-10 10 /\n5.0 120.0 4.0\n")
+        *_, opt = read_env(path)
+        assert (opt['n_beams'], opt['single_beam']) == (11, 3)
+
     def test_a_bellhop_deck_with_no_beam_angles_is_refused(self, tmp_path):
         """A ``/`` straight after NBeams gives BELLHOP no fan to trace."""
         from uacpy.io import read_env
@@ -656,8 +722,11 @@ class TestReadEnvReadsTheToolboxsOwnDecks:
             self._read('Bellhop3DTests/Munk/slice2dGaussian.env')
 
     def test_the_readable_share_of_the_shipped_decks(self):
-        """244 of the 409 decks: every one that an Environment can hold and
-        the vendored programs themselves can read. The rest are listed with
+        """247 of the 409 decks: every one that an Environment can hold and
+        the vendored programs themselves can read — three of them with a
+        water density far from sea water's, which an Environment takes as
+        any positive g/cm³ value: TabRefCoef/neggradB (1.619) and
+        halfspace/lower_halfS and upper_halfS (0.001). The rest are listed with
         their reasons in the t-io log of 2026-09-26; five of those (VolAtt/
         freeB, freeB_Inc, freeS, free_gbtB, free_gbtB_Inc, a water
         attenuation varying with depth) read as a table at the deck
@@ -679,7 +748,7 @@ class TestReadEnvReadsTheToolboxsOwnDecks:
                         uacpy.core.exceptions.UnsupportedFeatureError):
                     continue
                 ok += 1
-        assert ok == 244
+        assert ok == 247
 
 
 def test_a_francois_garrison_deck_reads_as_the_law_with_its_water():

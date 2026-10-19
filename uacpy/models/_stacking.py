@@ -5,6 +5,7 @@ result, the scratch subdirectory of each depth, the weights stamp, and the
 common time axis of time-domain fields."""
 
 import dataclasses
+from types import SimpleNamespace
 from typing import List
 
 import numpy as np
@@ -12,8 +13,8 @@ import numpy as np
 from uacpy._log import log_message
 from uacpy.core.results import Field, ResultStack
 from uacpy.core.run_settings import RunMode, RunSettings
-from uacpy.core.results._superposition import (_check_sources_weightable,
-                                               _dB_weight_refusal,
+from uacpy.core.results._superposition import (_check_field_weightable,
+                                               _check_sources_weightable,
                                                _stack_fields, _weighted_sum)
 from uacpy.core.source import Source
 
@@ -203,19 +204,38 @@ def apply_single_source_weight(result, source: 'Source', *, model_name: str):
         'weights': [w.real if not result.is_complex else w]})
 
 
-def refuse_a_one_depth_weight_on_dB(source: 'Source',
-                                    settings: RunSettings, *,
-                                    model_name: str) -> None:
-    """Refuse, before the engine runs, the weight of a one-depth ``Source``
-    that :func:`apply_single_source_weight` would apply to a field the run
-    declares as real dB (``settings.output.unit``), with the reason
-    ``superpose`` gives such a field."""
-    if (source.depths.size == 1 and settings.source_weights is not None
-            and settings.weights_applied and settings.output is not None
-            and settings.output.unit == 'dB'):
-        raise _dB_weight_refusal(
-            unit='dB', where=f"{model_name}: Source(weights="
-                        f"{complex(source.weights[0])})")
+def refuse_a_weight_the_output_cannot_take(source: 'Source',
+                                           settings: RunSettings, *,
+                                           model_name: str) -> None:
+    """Refuse, before the engine runs, a ``Source`` weight the run's
+    declared output (``settings.output``) can never take, by the rule and
+    with the words the result itself would get: a one-depth weight
+    (:func:`apply_single_source_weight`) through
+    :func:`_check_field_weightable`, a several-depth one through
+    :func:`_check_sources_weightable` — a dB field takes no one-depth
+    weight, and no output without phase takes a complex weight (a real
+    TIME_SERIES trace, a dB field). The declared output stands in for the
+    field: a time axis on TIME_SERIES, complex pressure on any other Pa
+    mode, real values in dB."""
+    out = settings.output
+    if (settings.source_weights is None or not settings.weights_applied
+            or out is None or out.result_type != 'Field'):
+        return
+    time_domain = settings.mode == RunMode.TIME_SERIES
+    declared = SimpleNamespace(
+        coords={'time': None} if time_domain else {},
+        is_complex=out.unit == 'Pa' and not time_domain,
+        unit=out.unit, phase_reference=out.phase_reference)
+    if source.depths.size == 1:
+        _check_field_weightable(
+            declared, source.weights,
+            where=f"{model_name}: Source(weights="
+                  f"{complex(source.weights[0])})")
+    else:
+        _check_sources_weightable(
+            declared, source.weights,
+            where=f"{model_name}: Source(weights="
+                  f"{source.weights.tolist()})")
 
 
 def run_depth_loop(source, settings: RunSettings, run_one, *,

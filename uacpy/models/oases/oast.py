@@ -11,7 +11,8 @@ import numpy as np
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._spec import ModelSpec
 from uacpy.models._window import (
-    check_pinned_window, interface_wave_notice, refuse_inverted_window,
+    check_pinned_window, scholte_wave_notice, oases_integration_edge,
+    refuse_inverted_window,
 )
 from uacpy.core.run_settings import EngineSettings, OutputSpec, RunMode
 from uacpy.core.results import Field
@@ -20,15 +21,16 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.oases_writer import (
     write_oast_input, oases_wavenumber_bounds,
-    refuse_non_power_of_two_wavenumbers, _resolve_freq_sweep,
+    refuse_non_power_of_two_wavenumbers, oases_frequency_sweep,
+    refuse_unusable_integration_window, oases_source_layer_speed,
 )
-from uacpy.io._parsers import parse_oast_tl
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, _host_options
+from uacpy.io._parsers import oast_depth_average_field, parse_oast_tl
+from uacpy.models.base import DEFAULT_RUN_TIMEOUT, _host_options
 from uacpy.models.oases._common import (
     _OASES_TRAITS, _SCTOUT_BARE_FORT46, _geometry_options,
     _oases_binary, _reject_plane_geometry_letter_on_a_point_source,
-    _check_n_wavenumbers_knob, _reject_unreadable_oast_options,
-    _warn_offset_ignored_under_auto_sampling,
+    _check_n_wavenumbers_knob, _offset_ignored_notice, _pinned_count_note,
+    _reject_unreadable_oast_options, resolve_integration_window,
 )
 from uacpy.models.oases._base import OASES
 from uacpy.core.engine_defaults import (
@@ -81,6 +83,10 @@ class OASTSettings(EngineSettings):
     n_wavenumbers : int or None
         Block VII's wavenumber count ``NW``; ``None`` is OASES' automatic
         sampling.
+    integration_window : tuple of (int, int) or None
+        Block VII's ``IC1 IC2``: the given window, the whole ``(1, NW)``
+        under a pinned ``n_wavenumbers``, ``None`` under automatic sampling
+        (where OASES sets them).
     integration_offset : float
         The contour offset (dB/wavelength) on the frequency line.
     range_min, range_max : float
@@ -100,6 +106,7 @@ class OASTSettings(EngineSettings):
     c_high: float
     c_high_origin: str
     n_wavenumbers: Optional[int]
+    integration_window: Optional[Tuple[int, int]]
     integration_offset: float
     range_min: float
     range_max: float
@@ -107,16 +114,18 @@ class OASTSettings(EngineSettings):
     dip_angle_deg: Optional[float]
 
     def __post_init__(self):
-        # A list (the to_dict form) is stored as the tuple a frozen record
+        # Lists (the to_dict form) are stored as the tuples a frozen record
         # holds.
         freq_min, freq_max, n = self.frequency_sweep
         object.__setattr__(self, 'frequency_sweep',
                            (float(freq_min), float(freq_max), int(n)))
+        if self.integration_window is not None:
+            object.__setattr__(self, 'integration_window',
+                               tuple(int(v) for v in self.integration_window))
         super().__post_init__()
 
 
-def _oast_options(options, complex_contour, compute_contour,
-                  compute_depth_average) -> str:
+def _oast_options(options, complex_contour, compute_depth_average) -> str:
     """The OASES option line for this run.
 
     A raw ``options`` string is written verbatim; otherwise the letters
@@ -125,15 +134,14 @@ def _oast_options(options, complex_contour, compute_contour,
     With the default flags the line is ``K T J``: the manual's worked OAST
     deck, ``N I T J Z`` (oast.tex:476), with the bulk pressure in place of
     the normal stress and without its plot-only letters. The constructor
-    rejects the two being combined.
+    rejects the two being combined, and ``compute_contour=True`` (``'C'``,
+    see :func:`_check_oast_knobs`), so no typed flag adds ``'C'``.
     """
     if options is not None:
         return options
     opt = [OASES_PRESSURE_LETTER, 'T']
     if complex_contour is None or complex_contour:
         opt.append('J')
-    if compute_contour:
-        opt.append('C')
     if compute_depth_average:
         opt.append('A')
     return ' '.join(opt)
@@ -142,12 +150,24 @@ def _oast_options(options, complex_contour, compute_contour,
 def _check_oast_knobs(options, complex_contour, compute_contour,
                       compute_depth_average, vrec) -> None:
     """Refuse an OAST knob no run could use: a raw ``options``
-    string beside the typed option flags it would discard, a raw line
-    whose TL is not a pressure (:func:`~uacpy.models.oases._common.
+    string beside the typed option flags it would discard,
+    ``compute_contour=True``, whose contour files uacpy does not read, a
+    raw line without ``'T'``, the TL table uacpy reads, a raw line whose
+    TL is not a pressure (:func:`~uacpy.models.oases._common.
     _reject_unreadable_oast_options`), and a
     ``vrec`` the option line cannot carry. Run at construction and again
     by every run (:meth:`OAST._validate_engine`), since the attributes
     can be reassigned in between."""
+    if compute_contour:
+        raise ConfigurationError(
+            "OAST(compute_contour=True): option 'C' makes OAST write "
+            "range-depth contour files on units 28/29 (unoast31.f:332-334) "
+            "holding, decimated in range, the TL the returned Field already "
+            "holds (unoast31.f:776-797); uacpy reads no contour file.",
+            remediation="Drop compute_contour: the returned Field is the TL "
+                        "on the receiver grid, and "
+                        "result.components['native'] the TL on OAST's own "
+                        "range grid when the two differ.")
     if options is not None:
         pinned = [n for n, value in (
             ('compute_contour', compute_contour),
@@ -170,7 +190,18 @@ def _check_oast_knobs(options, complex_contour, compute_contour,
     # reading after COFF (unoast31.f:125-127) — rejected here the way
     # dip_angle_deg is rejected without '4'.
     option_line = _oast_options(options, complex_contour,
-                                compute_contour, compute_depth_average)
+                                compute_depth_average)
+    # OAST writes its TL curves only under 'T' (GETOPT sets PLTL,
+    # unoast31.f:1036-1038; PLTLOS runs under it, :629); without them the
+    # run leaves nothing uacpy reads.
+    if 'T' not in set(option_line):
+        raise ConfigurationError(
+            f"OAST: options={option_line!r} carries no 'T': OAST writes the "
+            f"TL table (.plp/.plt) uacpy reads only under 'T' (PLTL, "
+            f"unoast31.f:1036-1038, :629).",
+            remediation=f"Add 'T' to the option line (e.g. "
+                        f"options={option_line + ' T'!r}), or pass "
+                        f"options=None for the default 'K T J'.")
     _reject_unreadable_oast_options(option_line)
     if vrec and 'd' not in set(option_line) - set(' \t\n'):
         raise ConfigurationError(
@@ -230,15 +261,17 @@ def _oast_multi_frequency_refusal(source) -> Exception:
 
 
 def _oast_settings(option_line, *, c_low_pinned, c_high_pinned,
-                   n_wavenumbers, integration_offset, range_min,
+                   n_wavenumbers, integration_window, integration_offset,
+                   range_min,
                    range_max, vrec, dip_angle_deg, env, source,
                    receiver) -> OASTSettings:
     """Every value the OAST deck is written from, resolved once on the
     projected ``env``: the option line (with ``'P'`` for a line
     Source), Block III's frequency line, Block VII's phase-speed window
-    and wavenumber count, and Block VIII's range window. A derived
-    ``c_low`` that leaves out the seabed interface wave the geometry can
-    see is noticed (:func:`~uacpy.models._window.interface_wave_notice`)."""
+    and wavenumber count, and Block VIII's range window. A window whose
+    lower edge (:func:`~uacpy.models._window.oases_integration_edge`)
+    leaves out a Scholte wave the geometry can see is noticed
+    (:func:`~uacpy.models._window.scholte_wave_notice`)."""
     options = _geometry_options(option_line, source)
     c_low, c_high = oases_wavenumber_bounds(env)
     if c_low_pinned is not None:
@@ -251,12 +284,25 @@ def _oast_settings(option_line, *, c_low_pinned, c_high_pinned,
                     else default_c_low(env)[1])
     c_high_origin = ('OAST(c_high=…)' if c_high_pinned is not None
                      else "1e8, OASES' no upper limit (oast.tex:487, :568)")
-    frequency_sweep = _resolve_freq_sweep(
-        'write_oast_input', source, float(source.frequencies[0]))
-    notices = () if c_low_pinned is not None else tuple(
-        n for n in [interface_wave_notice(
-            env, source, receiver, float(c_low), frequency_sweep[0],
-            model_name='OAST')] if n is not None)
+    frequency_sweep = oases_frequency_sweep(source.frequencies, 'OAST')
+    window, window_notice = resolve_integration_window(
+        'OAST', integration_window, n_wavenumbers, 'oast.tex:548-549')
+    range_min = OAST_RANGE_MIN if range_min is None else range_min
+    range_max = (float(receiver.ranges.max()) if range_max is None
+                 else range_max)
+    edge, edge_text = oases_integration_edge(
+        float(c_low), float(c_high), automatic=n_wavenumbers is None,
+        frequency=frequency_sweep[0], range_min=range_min,
+        range_max=range_max,
+        source_speed=oases_source_layer_speed(
+            env, float(np.atleast_1d(source.depths)[0])),
+        full_hankel='f' in options)
+    notices = tuple(n for n in [scholte_wave_notice(
+        env, source, receiver, edge, frequency_sweep[0], model_name='OAST',
+        edge_text=edge_text,
+        remediation="Leave c_low unset (its derived value sits under "
+                    "every Scholte wave) or pass c_low below the wave "
+                    "speed to include it.")] if n is not None)
     return OASTSettings(
         options=options,
         frequency_sweep=frequency_sweep,
@@ -265,14 +311,18 @@ def _oast_settings(option_line, *, c_low_pinned, c_high_pinned,
         c_high=float(c_high),
         c_high_origin=c_high_origin,
         n_wavenumbers=n_wavenumbers,
+        integration_window=window,
         integration_offset=integration_offset,
-        range_min=(OAST_RANGE_MIN if range_min is None
-                   else range_min),
-        range_max=(float(receiver.ranges.max())
-                   if range_max is None else range_max),
+        range_min=range_min,
+        range_max=range_max,
         vrec=vrec,
         dip_angle_deg=dip_angle_deg,
-        notices=notices,
+        # OAST reads the offset token under 'J', 'O' (complex frequency) or
+        # 'd' (dynamics) — unoast31.f:126-133 — and applies it only under
+        # 'J' (:499).
+        notices=notices + tuple(n for n in [_offset_ignored_notice(
+            'OAST', integration_offset, n_wavenumbers, options,
+            offset_letters='JOd'), window_notice] if n is not None),
     )
 
 
@@ -284,6 +334,7 @@ def _write_oast_deck(deck: Path, inputs) -> None:
     writer_kwargs: dict = {
         'integration_offset': engine.integration_offset,
         'n_wavenumbers': engine.n_wavenumbers,
+        'integration_window': engine.integration_window,
         'vrec': engine.vrec,
         'c_low': engine.c_low,
         'c_high': engine.c_high,
@@ -396,20 +447,31 @@ class OAST(OASES):
     executable : Path, optional
         Path to OAST binary. Auto-detected if ``None``.
     compute_contour : bool, optional
-        Add ``'C'`` option (range-depth contour plot). Effective default
-        ``False``.
+        ``True`` is refused (``ConfigurationError``): option ``'C'`` writes
+        range-depth contour files on units 28/29 (``unoast31.f:332-334``)
+        holding, decimated in range, the TL the returned Field already holds
+        (``unoast31.f:776-797``), and uacpy reads none of them. ``None`` or
+        ``False`` adds no ``'C'``.
     compute_depth_average : bool, optional
-        Add ``'A'`` option (depth-averaged TL). Effective default ``False``.
+        Add the ``'A'`` option: OAST also computes the depth-averaged TL,
+        ``-10·log10`` of ``|p|²`` averaged with equal weights over every
+        receiver depth (``oasfun22.f:209-242``; "the averaging is performed
+        over the specified number of receivers", oast.tex:144-146), returned
+        as ``result.components['depth_average']``, a real dB Field on
+        ``{'range'}`` over OAST's native range grid. Effective default
+        ``False``.
     complex_contour : bool, optional
         ``'J'`` option (complex integration contour). Effective default
         ``True``.
     options : str, optional
-        Raw OASES options string (e.g. ``'K J T C'``), written verbatim;
+        Raw OASES options string (e.g. ``'K J T A'``), written verbatim;
         ``None`` derives it from ``compute_contour`` /
         ``compute_depth_average`` / ``complex_contour``. Combining a raw
         string with any of those three flags raises
         ``ConfigurationError`` — the string replaces the whole option
-        line, so a flag passed alongside it would be discarded.
+        line, so a flag passed alongside it would be discarded. A raw
+        string without ``'T'`` is refused: OAST writes the TL table uacpy
+        reads only under ``'T'`` (``unoast31.f:1036-1038``, ``:629``).
     integration_offset : float
         Wavenumber-integration contour offset (dB/wavelength). Default 0, which
         under the 'J' option of the default option line is not "no offset":
@@ -425,20 +487,36 @@ class OAST(OASES):
         (oast.tex:543-550). The manual requires a power of two
         (``NW = 2^M``, oast.tex:73), and another count is refused naming the
         two neighbouring powers: OAST cuts the integral at the deck's count
-        before rounding its grid up (unoast31.f:441-458).
+        before rounding its grid up (unoast31.f:441-458). A pinned count is
+        written as given, with an info-level note (``verbose='info'``) that
+        the manual leaves it to the convergence test.
+    integration_window : (int, int), optional
+        ``(IC1, IC2)``, the first and last wavenumber samples integrated:
+        the samples outside are zeroed and the edge smoothed
+        (oast.tex:528-538). Two whole numbers with ``1 <= IC1 <= IC2 <=
+        n_wavenumbers`` (oast.tex:74-75); it applies with a pinned
+        ``n_wavenumbers``, and under automatic sampling, where "the
+        parameters IC1 and IC2 have no effect" (oast.tex:548-549), the run
+        says so. ``None`` integrates the whole window.
     c_low, c_high : float, optional
         ``CMIN``/``CMAX`` (m/s), Block VII's phase-speed window
         (``unoast31.f:213``). ``None`` derives the pair
-        (:func:`oases_wavenumber_bounds`): ``c_low`` is the slowest speed of
-        every medium, shear speeds included, × 0.85 over an elastic
-        half-space and × 0.90 otherwise
-        (:func:`~uacpy.core.engine_defaults.default_c_low`,
-        ``scooter.f90:193-259``), so an elastic seabed's shear and interface
-        branches enter the integral; ``c_high`` is 1e8. A derived ``c_low``
-        that still lies above an interface (Scholte) wave, ~0.85 × a shear
-        speed (JKPS §5.10.5), is noticed when the source or a receiver lies
-        within one of its wavelengths of the seafloor
-        (:func:`~uacpy.models._window.interface_wave_notice`).
+        (:func:`oases_wavenumber_bounds`): ``c_low`` is 0.90 × the slowest
+        wave of the problem — every medium's speed, shear speeds included,
+        and every Scholte wave a liquid carries against a solid,
+        solved from Brekhovskikh & Lysanov §3.4.2, eq. 3.4.29 — the margin of
+        ``scooter.f90:258``
+        (:func:`~uacpy.core.engine_defaults.default_c_low`), so an elastic
+        seabed's shear and interface branches enter the integral; ``c_high``
+        is 1e8. A pinned window whose lower edge — the ``CMIN`` OAST's
+        automatic sampling (AUTSAM) reaches on the deck's ``c_low``, range
+        axis and frequency
+        (:func:`~uacpy.models._window.oases_integration_edge`), or
+        ``c_low`` itself with a pinned ``n_wavenumbers`` — lies above a
+        Scholte wave is
+        noticed when the source or a receiver lies within one of its
+        wavelengths of that interface
+        (:func:`~uacpy.models._window.scholte_wave_notice`).
     range_min, range_max : float, optional
         First and last range (m) of OAST's native TL grid, ``XLEFT`` /
         ``XRIGHT`` (unoast31.f:482-490); ``None`` → 0, the manual's worked
@@ -552,6 +630,7 @@ class OAST(OASES):
         options: Optional[str] = None,
         integration_offset: float = OAST_INTEGRATION_OFFSET,
         n_wavenumbers: Optional[int] = None,
+        integration_window: Optional[Tuple[int, int]] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         range_min: Optional[float] = None,
@@ -562,7 +641,7 @@ class OAST(OASES):
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         super().__init__(**_host_options(locals()))
@@ -572,7 +651,7 @@ class OAST(OASES):
         self.compute_contour = compute_contour
         self.compute_depth_average = compute_depth_average
         self.complex_contour = complex_contour
-        # Raw OASES option string (e.g. ``'K J T C'``). ``None`` lets the
+        # Raw OASES option string (e.g. ``'K J T A'``). ``None`` lets the
         # wrapper derive it from compute_contour / compute_depth_average /
         # complex_contour; a raw string replaces the deck's option line
         # outright, so the two ways of specifying it are exclusive.
@@ -582,6 +661,8 @@ class OAST(OASES):
         # Stored as given, so a count that is not a whole number is refused
         # by _check_knobs rather than truncated.
         self.n_wavenumbers = n_wavenumbers
+        # Block VII's IC1/IC2, stored as given (checked by _check_knobs).
+        self.integration_window = integration_window
         # Block VII's CMIN/CMAX. ``None`` leaves the derivation
         # (oases_wavenumber_bounds) in place; a value replaces that side of
         # the window.
@@ -595,15 +676,8 @@ class OAST(OASES):
         # DA, the dip angle INSRC reads only under the '4' (dip-slip) option.
         self.dip_angle_deg = float(dip_angle_deg) if dip_angle_deg is not None else None
         self._check_knobs()
-        # OAST reads the offset token under 'J', 'O' (complex frequency) or
-        # 'd' (dynamics) — unoast31.f:126-133 — and applies it only under 'J'
-        # (:499). The derived line carries 'J' unless complex_contour=False.
-        _warn_offset_ignored_under_auto_sampling(
-            'OAST', self.integration_offset, self.n_wavenumbers,
-            options=_oast_options(self.options, self.complex_contour,
-                                  self.compute_contour,
-                                  self.compute_depth_average),
-            offset_letters='JOd')
+        if self.n_wavenumbers is not None:
+            self._log(_pinned_count_note('OAST', self.n_wavenumbers))
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
@@ -625,6 +699,8 @@ class OAST(OASES):
         if self.n_wavenumbers is not None:
             refuse_non_power_of_two_wavenumbers('OAST', self.n_wavenumbers)
         check_pinned_window('OAST', c_low=self.c_low, c_high=self.c_high)
+        refuse_unusable_integration_window('OAST', self.integration_window,
+                                           self.n_wavenumbers)
         _check_oast_knobs(self.options, self.complex_contour,
                           self.compute_contour, self.compute_depth_average,
                           self.vrec)
@@ -646,7 +722,6 @@ class OAST(OASES):
                                  request=request)
         _reject_plane_geometry_letter_on_a_point_source(
             'OAST', _oast_options(self.options, self.complex_contour,
-                                  self.compute_contour,
                                   self.compute_depth_average),
             self.options, source,
             'unoast31.f:1046-1050')
@@ -656,10 +731,10 @@ class OAST(OASES):
         """Stage 3: :func:`_oast_settings` for this model's knobs."""
         return _oast_settings(
             _oast_options(self.options, self.complex_contour,
-                          self.compute_contour,
                           self.compute_depth_average),
             c_low_pinned=self.c_low, c_high_pinned=self.c_high,
             n_wavenumbers=self.n_wavenumbers,
+            integration_window=self.integration_window,
             integration_offset=self.integration_offset,
             range_min=self.range_min, range_max=self.range_max,
             vrec=self.vrec, dip_angle_deg=self.dip_angle_deg,
@@ -708,6 +783,8 @@ class OAST(OASES):
         than a wavelength is warned about
         (:func:`_warn_if_native_range_step_is_coarse`). The TL on OAST's own
         grid is ``result.components['native']`` whenever the two differ.
+        Under option ``'A'`` both carry OAST's depth-averaged TL, on its
+        native range grid, as ``components['depth_average']``.
         """
         source = inputs.source
         receiver = inputs.receiver
@@ -716,10 +793,16 @@ class OAST(OASES):
         native_ranges = raw['ranges']
         metadata = raw['metadata']
 
+        frequency = float(np.atleast_1d(source.frequencies)[0])
+        components = {}
+        if raw['depth_average'] is not None:
+            components['depth_average'] = oast_depth_average_field(
+                raw['depth_average'], native_ranges,
+                **result_kwargs(self.model_name, self.provenance, source,
+                                backend='oast', frequencies=frequency))
         kw = result_kwargs(
             self.model_name, self.provenance, source,
-            backend='oast',
-            frequencies=float(np.atleast_1d(source.frequencies)[0]),
+            backend='oast', frequencies=frequency, components=components,
         )
         kw['metadata'].update(metadata)
         # The .plt holds real dB with no phase, so the run mode is the one

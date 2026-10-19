@@ -12,7 +12,7 @@ from dataclasses import replace as _replace_fields
 from uacpy.core._repr import axis, build, extent
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.deck_limits import (
-    AT_LAST_SSP_POINT_EPS_M, DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
+    AT_LAST_SSP_POINT_EPS, DECK_DEPTH_RESOLUTION, DECK_RANGE_RESOLUTION,
 )
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
@@ -68,10 +68,8 @@ def _columns_on_union_axis(columns, depths=None):
     end values beyond its own depths (``np.interp``'s constant-edge fill).
     The union keeps every cast's nodes: an axis taken from one cast would
     drop the others' and re-interpolate across the gaps
-    (:meth:`SoundSpeedProfile.from_casts`'s stacking;
-    ``uacpy.data.sound_speed._assemble_range_dependent`` writes the same three lines,
-    a private name across the data/core layer boundary being refused by the
-    layering gate)."""
+    (:meth:`SoundSpeedProfile.from_casts`'s stacking, which the data layer's
+    transect assembler calls too)."""
     if depths is None:
         axis = np.unique(np.concatenate(
             [np.asarray(z, dtype=float) for z, _ in columns]))
@@ -168,7 +166,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         warn_speed_typed_in_km_per_s(self.sound_speed,
                                      "SoundSpeedProfile sound speeds")
         require_strictly_increasing(self.depths, "SoundSpeedProfile.depths",
-                                    min_step=DECK_DEPTH_RESOLUTION_M)
+                                    min_step=DECK_DEPTH_RESOLUTION)
         if self.ranges is not None:
             self.ranges = require_real_array(
                 self.ranges, "SoundSpeedProfile.ranges",
@@ -182,7 +180,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 self.ranges, "SoundSpeedProfile.ranges", hint="metres")
             require_strictly_increasing(
                 self.ranges, "SoundSpeedProfile.ranges",
-                min_step=DECK_RANGE_RESOLUTION_M)
+                min_step=DECK_RANGE_RESOLUTION)
         elif self.sound_speed.shape[1] != 1:
             raise ConfigurationError(
                 f"SoundSpeedProfile: ranges=None requires single-column sound_speed; "
@@ -296,7 +294,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         range : float, optional
             Range (m) to slice at; required on a range-dependent profile.
         """
-        return self._slice(depth=depth, range=range, interp='nearest',
+        return self._slice(depth=depth, range=range, method='nearest',
                            call='at')
 
     def eval(
@@ -325,7 +323,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         method : {'linear', 'nearest', 'cubic'}, optional
             Interpolation scheme. Default ``'linear'``.
         """
-        return self._slice(depth=depth, range=range, interp=method,
+        return self._slice(depth=depth, range=range, method=method,
                            call='eval')
 
     def sound_speed_at(
@@ -435,16 +433,16 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         return sliced
 
     def _slice(
-        self, *, depth: Optional[float], range: Optional[float], interp: str,
+        self, *, depth: Optional[float], range: Optional[float], method: str,
         call: str,
     ) -> 'SoundSpeedProfile':
-        """The profile selected at ``depth`` / ``range`` by ``interp``,
+        """The profile selected at ``depth`` / ``range`` by ``method``,
         its refusals naming ``SoundSpeedProfile.<call>``, the method the
         user called."""
-        if interp not in INTERP_METHODS:
+        if method not in INTERP_METHODS:
             raise ConfigurationError(
                 f"SoundSpeedProfile: interpolation method must be one of "
-                f"{INTERP_METHODS}; got {interp!r}.")
+                f"{INTERP_METHODS}; got {method!r}.")
         who = f"SoundSpeedProfile.{call}"
         if depth is not None and range is None:
             self._require_pinned_range(call)
@@ -463,7 +461,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 finite_scalar_label(range, 'range', who=who)
                 col = data[:, 0]
             else:
-                col, _ = collapse_axis(data, self.ranges, range, interp,
+                col, _ = collapse_axis(data, self.ranges, range, method,
                                        axis=1, name='range', who=who)
                 out_ranges = None
             data = col.reshape(-1, 1)
@@ -471,7 +469,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             if range is None:
                 return self
             return self._replace(sound_speed=data, ranges=out_ranges)
-        c, dv = collapse_axis(data[:, 0], self.depths, depth, interp,
+        c, dv = collapse_axis(data[:, 0], self.depths, depth, method,
                               axis=0, name='depth', who=who)
         return self._replace(
             depths=np.array([float(dv)]), sound_speed=np.array([[float(c)]]),
@@ -545,7 +543,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
           ``depth_max`` so writers that require ``ssp[-1] == env.depth``
           (Bellhop / Kraken) round-trip without manual alignment. When the
           deepest surviving sample already sits within
-          ``AT_LAST_SSP_POINT_EPS_M`` of ``depth_max`` it is *moved* onto it
+          ``AT_LAST_SSP_POINT_EPS`` of ``depth_max`` it is *moved* onto it
           instead, for the reason the comment below gives.
 
         ``depth_max`` must be a finite depth below the profile's first
@@ -573,7 +571,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 f"at it."
             )
         # ``misc/sspMod.f90:353`` ends a medium's SSP block at the first sample
-        # within AT_LAST_SSP_POINT_EPS_M of the declared medium depth, so a second
+        # within AT_LAST_SSP_POINT_EPS of the declared medium depth, so a second
         # sample inside that window is never read as an SSP row — the reader takes
         # it as the bottom-option record and the boundary condition comes out of a
         # sound speed. Anything the reader would already call the last point must
@@ -586,7 +584,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         gap = abs(float(depth_max) - last)
         if gap <= _ROUND_TRIP_NOISE_M:
             return self          # a float round-trip artefact, not a request
-        if gap < AT_LAST_SSP_POINT_EPS_M:
+        if gap < AT_LAST_SSP_POINT_EPS:
             # Rebuild through the constructor so the moved sample is validated:
             # a downward snap larger than the deck resolution can land at or
             # below ``depths[-2]``, and that must raise as an invalid axis
@@ -614,7 +612,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             kept_depths = self.depths[keep]
             kept_data = self.sound_speed[keep]
             if (kept_depths.size
-                    and depth_max - kept_depths[-1] < AT_LAST_SSP_POINT_EPS_M):
+                    and depth_max - kept_depths[-1] < AT_LAST_SSP_POINT_EPS):
                 # The deepest surviving sample already falls inside the
                 # reader's last-point window, so it is the row the reader will
                 # treat as the end of the block: snap it onto depth_max rather
@@ -964,7 +962,7 @@ class SoundSpeedProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         stated in depth and is evaluated on ``depths`` directly. The
         conversion is Leroy & Parthiot's standard ocean and needs a latitude,
         which defaults to the equation's own reference 45 deg — see
-        ``REFERENCE_LATITUDE_DEG`` for what that costs. The array-level
+        ``REFERENCE_LATITUDE`` for what that costs. The array-level
         function is :func:`uacpy.acoustics.sound_speed_at_depth`.
 
         The profile records ``formula``, so

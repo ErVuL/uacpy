@@ -944,6 +944,35 @@ class TestRaysKinds:
         with pytest.raises(ValueError, match='read-only'):
             kinds[0] = 'both'
 
+    def test_a_bounce_question_without_counts_is_refused(self):
+        """'direct' is a class no data produced: rays or arrivals that carry
+        no bounce counts refuse their class and the bounce filter, one
+        typed error naming the missing counts, by every door."""
+        from uacpy.core.results import Arrivals, Rays
+        rays = Rays(rays=[{'r': np.array([0.0, 1000.0]),
+                           'z': np.array([10.0, 50.0])}] * 2,
+                    model='Test', frequencies=100.0)
+        records = Arrivals(arrivals=[{'delay': 0.1, 'amplitude': 1.0}],
+                           receiver_depths=[10.0], receiver_ranges=[100.0])
+        cells = Arrivals(by_receiver=[[[{'amplitudes': np.array([1.0]),
+                                          'delays': np.array([0.1]),
+                                          'n_arrivals': 1}]]],
+                         receiver_depths=[10.0], receiver_ranges=[100.0])
+        for name, ask in (
+                ('Rays.kinds', lambda: rays.kinds),
+                ('Rays.filter_by_bounces',
+                 lambda: rays.filter_by_bounces('direct')),
+                ('Arrivals.kinds', lambda: records.kinds),
+                ('Arrivals.kinds', lambda: cells.kinds),
+                ('Arrivals.filter_by_bounces',
+                 lambda: cells.filter_by_bounces('direct'))):
+            with pytest.raises(ConfigurationError,
+                               match=rf"^{name}: \d of \d (rays|arrivals) "
+                                     r"carry no bounce counts"):
+                ask()
+        assert 'n_top_bounces' not in cells.by_receiver[0][0][0]
+        assert list(self._fan(['direct']).kinds) == ['direct']
+
     def test_the_class_of_a_ray_is_the_class_its_filter_keeps(self):
         rays = self._fan(['both', 'direct', 'bottom', 'surface', 'bottom'])
         for kind in self.COUNTS:
@@ -1204,6 +1233,38 @@ class TestArrivalsChannelView:
         sub = arr.filter(lambda a: a['range_idx'] == 1)
         assert sub.channel_taps(1000.0, fc=100.0).first_arrival == 0.4
 
+    def test_a_receiver_nothing_reaches_is_silent_through_every_door(self):
+        """The channel of a shadow cell is the empty sum whichever way it is
+        asked for: zeros on the grid and with receiver=, one zero tap from
+        t_start, an empty Arrivals; the statistics, which have no value on
+        an empty profile, keep their refusal."""
+        shadow = TestArrivalsFilterChain()._arrivals().filter_by_bounces(
+            kind='both')
+        cell = (50.0, 2000.0)
+        f = np.linspace(100.0, 200.0, 11)
+        H = shadow.transfer_function(f, receiver=cell)
+        assert H.data.shape == (1, 1, 11) and np.all(H.data == 0.0)
+        assert np.all(shadow.transfer_function(f).at(
+            depth=50.0, range=2000.0).data == 0.0)
+        ir = shadow.impulse_response(1000.0, receiver=cell)
+        assert ir.data.shape == (1, 1, 1) and np.all(ir.data == 0.0)
+        assert ir.times[0] == 0.0 and ir.reduction_speed is None
+        assert shadow.impulse_response(
+            1000.0, receiver=cell, t_start=0.25).times[0] == 0.25
+        assert shadow.at_receiver(cell).n_arrivals == 0
+        # A grid no cell of which is reached: the same empty sum per cell.
+        silent = shadow.filter_by_bounces(kind='direct')
+        assert silent.n_arrivals == 0
+        grid = silent.impulse_response(1000.0)
+        assert grid.data.shape == (1, 2, 1) and np.all(grid.data == 0.0)
+        assert silent.impulse_response(
+            1000.0, output_duration=0.01).data.shape == (1, 2, 10)
+        for statistic in (shadow.rms_delay_spread, shadow.energy_support,
+                          shadow.coherence_bandwidth):
+            with pytest.raises(ConfigurationError,
+                               match="no arrivals at receiver depth 50 m"):
+                statistic(receiver=cell)
+
     @staticmethod
     def _decimated_reference(arr, fc, rolloff, span, sps=16):
         """Symbol-spaced taps the long way: ``sps``-spaced root-raised-
@@ -1361,7 +1422,7 @@ class TestArrivalsRoundTripThroughDictAndNpSavez:
 
 class TestArrivalsSynthesiseEveryCell:
     """``Arrivals.transfer_function()`` with no receiver and
-    ``Arrivals.to_time_series`` take every cell of the per-receiver grid
+    ``Arrivals.synthesize_time_series`` take every cell of the per-receiver grid
     (M-20), through the user-level grid functions, NaN where no arrival
     reached; Bellhop's BROADBAND and TIME_SERIES are these methods."""
 
@@ -1474,15 +1535,15 @@ class TestArrivalsSynthesiseEveryCell:
         with pytest.raises(ConfigurationError, match='2 source depths'):
             arr.transfer_function(self.FREQS)
         with pytest.raises(ConfigurationError, match='2 source depths'):
-            arr.to_time_series(source_waveform=np.ones(16),
-                               sample_rate=self.FS)
+            arr.synthesize_time_series(source_waveform=np.ones(16),
+                                       sample_rate=self.FS)
 
     def test_the_time_series_is_the_grid_synthesis(self):
         from uacpy.acoustic_signal import simulate_arrival_grid
         arr = self._grid()
         pulse = np.hanning(32)
-        series = arr.to_time_series(source_waveform=pulse,
-                                    sample_rate=self.FS)
+        series = arr.synthesize_time_series(source_waveform=pulse,
+                                            sample_rate=self.FS)
         t_ref, ref = simulate_arrival_grid(arr.by_receiver[0],
                                            source_waveform=pulse,
                                            sample_rate=self.FS,
@@ -1498,7 +1559,7 @@ class TestArrivalsSynthesiseEveryCell:
 
     def test_the_time_series_takes_its_waveform_by_keyword(self):
         import inspect
-        params = inspect.signature(Arrivals.to_time_series).parameters
+        params = inspect.signature(Arrivals.synthesize_time_series).parameters
         assert all(p.kind is inspect.Parameter.KEYWORD_ONLY
                    for name, p in params.items() if name != 'self')
         assert set(params) == {'self', 'source_waveform', 'sample_rate',
@@ -1510,8 +1571,8 @@ class TestArrivalsSynthesiseEveryCell:
                        receiver_depths=[20.0, 40.0],
                        receiver_ranges=[700.0, 1500.0],
                        frequencies=[1000.0])
-        series = arr.to_time_series(source_waveform=np.hanning(32),
-                                    sample_rate=self.FS)
+        series = arr.synthesize_time_series(source_waveform=np.hanning(32),
+                                            sample_rate=self.FS)
         assert series.axes == ['range', 'time']
         np.testing.assert_array_equal(
             series.aux_coords['receiver_depth'][1], [20.0, 40.0])
@@ -1805,3 +1866,92 @@ class TestArrivalsImpulseResponse:
         assert ir.reduction_speed is None
         assert ir.times[0] == pytest.approx(1.0 - 0.02)
         assert ir.times[-1] >= 2.02
+
+
+def _arrivals(**kw):
+    cell = [{'delay': 0.1, 'delay_imag': -1e-5, 'amplitude': 1.0,
+             'phase': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0,
+             'source_angle': 1.0, 'receiver_angle': 1.0}]
+    return Arrivals(by_receiver=[[[cell]]], receiver_depths=[20.0],
+                    receiver_ranges=[1000.0], frequencies=[1000.0], **kw)
+
+
+LAW = uacpy.Thorp()
+
+
+class TestArrivalsAbsorption:
+    """``Arrivals.absorption`` (the water-column law the arrivals' Im tau
+    carries) travels as an attribute: carried by a filter, round-tripped
+    through to_dict and the xarray export, refused as metadata."""
+
+    @pytest.mark.parametrize('imag, refused', [(-1e-5, True), (0.0, False)])
+    def test_absorption_with_no_frequency_has_no_received_amplitude(
+            self, imag, refused):
+        """Im tau states the loss at the trace frequency: with no f0 the
+        received amplitude is undefined, refused as the receptions refuse
+        it, and left out of the table; lossless arrivals need no f0."""
+        cell = {'amplitudes': np.array([1.0]), 'delays': np.array([0.1]),
+                'delays_imag': np.array([imag]), 'phases': np.array([0.0]),
+                'n_arrivals': 1}
+        bare = Arrivals(by_receiver=[[[cell]]], receiver_depths=[20.0],
+                        receiver_ranges=[1000.0])
+        assert bare.f0 is None and bare.n_arrivals == 1
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match=r"^Arrivals\.received_amplitudes: the "
+                                     r"arrivals carry volume absorption"):
+                bare.received_amplitudes
+            assert 'received_amplitude' not in bare._table()
+        else:
+            np.testing.assert_array_equal(bare.received_amplitudes, [1.0])
+            assert 'received_amplitude' in bare._table()
+
+    def test_the_constructor_keyword_is_the_attribute(self):
+        assert _arrivals(absorption=LAW).absorption is LAW
+        assert _arrivals().absorption is None
+
+    def test_a_filtered_set_carries_it(self):
+        kept = _arrivals(absorption=LAW).filter(lambda a: True)
+        assert kept.absorption is LAW
+
+    def test_to_dict_round_trips_it(self):
+        back = Arrivals.from_dict(_arrivals(absorption=LAW).to_dict())
+        assert type(back.absorption) is type(LAW)
+        assert back.absorption.to_dict() == LAW.to_dict()
+
+    def test_the_xarray_export_round_trips_it(self):
+        pytest.importorskip('xarray')
+        back = Arrivals.from_xarray(_arrivals(absorption=LAW).to_xarray())
+        assert back.absorption.to_dict() == LAW.to_dict()
+        assert 'absorption' not in back.metadata
+
+    def test_a_measured_table_round_trips_as_the_table(self):
+        # A traced environment's measured table is what the arrivals hold
+        # (env.absorption as it is), and what both exports bring back.
+        from uacpy.core.absorption import AbsorptionCoefficient
+        from uacpy.tests.conftest import measured_absorption_table
+        table = measured_absorption_table()
+        arrivals = _arrivals(absorption=table)
+        backs = [Arrivals.from_dict(arrivals.to_dict())]
+        try:
+            import xarray  # noqa: F401
+            backs.append(Arrivals.from_xarray(arrivals.to_xarray()))
+        except ImportError:
+            pass
+        for back in backs:
+            assert type(back.absorption) is AbsorptionCoefficient
+            np.testing.assert_array_equal(back.absorption.data, table.data)
+            np.testing.assert_array_equal(back.absorption.depths,
+                                          table.depths)
+            np.testing.assert_array_equal(
+                back.received_amplitudes, arrivals.received_amplitudes)
+
+    def test_a_saved_dict_keeping_it_in_metadata_is_refused(self):
+        d = _arrivals().to_dict()
+        d['metadata'] = {'absorption': LAW}
+        with pytest.raises(ConfigurationError, match='absorption'):
+            Arrivals.from_dict(d)
+
+    def test_a_metadata_entry_naming_it_is_refused(self):
+        with pytest.raises(ConfigurationError, match='absorption'):
+            _arrivals(metadata={'absorption': LAW})

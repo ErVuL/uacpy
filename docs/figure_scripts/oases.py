@@ -83,11 +83,14 @@ def _range_average(tl_dB, n=15):
 def shear_loss():
     """What shear costs: the same rock seabed as a fluid and as a solid.
 
-    Below the critical angle a fluid rock half-space reflects perfectly, so
-    the only loss is cylindrical spreading. Shear conversion leaks a little
-    energy at every bounce, and over 10 km of multipath that compounds. The
-    TL cuts are averaged in intensity over 500 m so the trend, rather than
-    the interference pattern, is what you read.
+    Below both critical angles a lossless rock reflects totally (Ainslie,
+    Principles of Sonar Performance Modelling, Sect. 8.1.3.3), so what the
+    rock costs there comes from its attenuations; with a shear speed above
+    the water's, the shear attenuation is an important parameter (Jensen et
+    al., Computational Ocean Acoustics, Sect. 1.6.2). The elastic rock loses
+    a little more at every bounce, and over 10 km of multipath that
+    compounds. The TL cuts are averaged in intensity over 500 m so the trend,
+    rather than the interference pattern, is what you read.
     """
     source = uacpy.Source(depths=25.0, frequencies=200.0)
     receiver = uacpy.Receiver(depths=50.0,
@@ -171,7 +174,7 @@ def oasp_gather():
     pulse = (np.sin(2 * np.pi * 100.0 * (t - t0))
              * np.exp(-((t - t0) ** 2) / (2 * 0.012 ** 2)))
 
-    ts = OASP(n_time_samples=512, freq_max=200.0).run(
+    ts = OASP(n_time_samples=512).run(
         env, source, receiver, run_mode=RunMode.TIME_SERIES,
         source_waveform=pulse, sample_rate=sample_rate, output_duration=1.2)
     gather = ts.at(depth=90.0)

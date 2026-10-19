@@ -476,13 +476,13 @@ class TestEveryKeyedTableCoversItsVocabulary:
         from uacpy.io.oalib_writer import SOURCE_TYPE_CODE
         from uacpy.models.bellhop._tables import (_BEAM_TYPE_RUN_TYPES,
                                                   _INFLUENCE_ROUTINE)
-        from uacpy.visualization.plots.rays_modes import RAY_CLASS_COLOURS
+        from uacpy.visualization.style import RAY_CLASS_COLOURS
         from uacpy.acoustic_signal._results import POWER_UNITS
         from uacpy.visualization.plots.signal import (
             _HISTOGRAM_KIND, _RADON_AXIS, _SCALING_KIND)
         return [
             ('rays._BOUNCE_KINDS', _BOUNCE_KINDS,
-             'rays_modes.RAY_CLASS_COLOURS', RAY_CLASS_COLOURS),
+             'style.RAY_CLASS_COLOURS', RAY_CLASS_COLOURS),
             ('source.VALID_SOURCE_TYPES', VALID_SOURCE_TYPES,
              'oalib_writer.SOURCE_TYPE_CODE', SOURCE_TYPE_CODE),
             ('estimate._SPECTRAL_SCALINGS', _SPECTRAL_SCALINGS,
@@ -738,7 +738,7 @@ class TestEveryDrawableTypeNamesItsPlotter:
         from uacpy.core.results import Result
         found = {}
         for mod_name in ('uacpy', 'uacpy.acoustic_signal', 'uacpy.comms',
-                         'uacpy.noise', 'uacpy.sonar'):
+                         'uacpy.noise', 'uacpy.sonar', 'uacpy.data'):
             mod = importlib.import_module(mod_name)
             for name in getattr(mod, '__all__', ()):
                 obj = getattr(mod, name, None)
@@ -788,7 +788,8 @@ class TestEveryDrawableTypeNamesItsPlotter:
         assert {'Environment', 'SoundSpeedProfile', 'Bathymetry'} <= set(
             carriers)
         assert len(drawing) >= 15, sorted(drawing)
-        assert {'SpectralEstimate', 'FKResult', 'WenzNoise'} <= set(drawing)
+        assert {'SpectralEstimate', 'FKResult', 'WenzNoise',
+                'BathyGrid'} <= set(drawing)
 
     def test_every_named_plotter_is_a_plotter_of_the_package(self):
         from uacpy.visualization import plots
@@ -923,6 +924,22 @@ class TestEveryResultCarrierCanDrawItself:
                      'and neither is this carrier',
         'Warped': 'an intermediate on the way back through unwarp_signal; '
                   'what you read is its spectrogram, a result of its own',
+        'AlongTrack': 'a fetched quantity at transect waypoints; '
+                      'plot_environment(sea_ice=...) draws a sea-ice one, no '
+                      'plotter takes the record on its own',
+        'TSProfile': 'temperature/salinity columns; what is drawn is the '
+                     'sound-speed profile computed from them',
+        'ArgoProfile': 'one cast\'s temperature/salinity columns; as '
+                       'TSProfile, the sound-speed profile computed from it '
+                       'is what plots',
+        'PHProfile': 'a pH column, an input of the absorption laws; no '
+                     'plotter draws it',
+        'SeaStateRecord': 'one point\'s sea state: scalars, no axis to draw',
+        'SeabedSample': 'one seabed record at a point: scalars, no axis to '
+                        'draw',
+        'Crust1Profile': 'a layered column that becomes a seabed, which '
+                         'plot_environment and plot_bottom_properties draw; '
+                         'no plotter takes the record on its own',
     }
 
     @staticmethod
@@ -936,18 +953,24 @@ class TestEveryResultCarrierCanDrawItself:
         """
         import importlib
         import inspect
+        from uacpy.core._export import ExportRecord
         from uacpy.core.results._base import Result
         found = {}
         for mod_name in ('uacpy', 'uacpy.acoustic_signal', 'uacpy.comms',
-                         'uacpy.noise', 'uacpy.sonar', 'uacpy.core.results'):
+                         'uacpy.noise', 'uacpy.sonar', 'uacpy.core.results',
+                         'uacpy.data'):
             mod = importlib.import_module(mod_name)
             for attr in getattr(mod, '__all__', ()):
                 obj = getattr(mod, attr, None)
                 if not inspect.isclass(obj):
                     continue
+                # The data layer's fetched records (BathyGrid, TSProfile …)
+                # are carriers too: what a fetcher returns.
                 is_carrier = (issubclass(obj, tuple)
                               and hasattr(obj, '_fields')) or (
-                                  issubclass(obj, Result) and obj is not Result)
+                                  issubclass(obj, Result) and obj is not Result
+                              ) or (mod_name == 'uacpy.data'
+                                    and issubclass(obj, ExportRecord))
                 if is_carrier:
                     found[attr] = obj
         return found
@@ -957,7 +980,7 @@ class TestEveryResultCarrierCanDrawItself:
         found = self._public_carriers()
         assert len(found) >= 15, sorted(found)
         for expect in ('SpectralEstimate', 'FKResult', 'ComplexCepstrum',
-                       'Field', 'ChannelTaps'):
+                       'Field', 'ChannelTaps', 'BathyGrid'):
             assert expect in found, (expect, sorted(found))
 
     def test_each_one_has_a_plot_method(self):
@@ -1152,7 +1175,7 @@ class TestBothSpellingsOfAPlotAgree:
         panel.
         """
         import numpy as np
-        if isinstance(ax, tuple):
+        if isinstance(ax, (tuple, np.ndarray)):
             return [TestBothSpellingsOfAPlotAgree._drawn(one) for one in ax]
         lines = [tuple(np.asarray(ln.get_ydata()).ravel()[:8])
                  for ln in ax.lines]
@@ -1523,8 +1546,8 @@ class TestAPlotterDrawsOnlyItsOwnCarrier:
 # constants. A submodule listed there reads as a callable in tab completion
 # beside the functions (``sonar.target_strength`` sat next to ``ts_sphere``)
 # and is still reachable as an attribute without being listed.
-_ALL_WITHOUT_SUBMODULES = ('models', 'io', 'acoustic_signal', 'comms', 'data',
-                           'sonar', 'noise', 'core.results')
+_ALL_WITHOUT_SUBMODULES = ('core', 'models', 'io', 'acoustic_signal', 'comms',
+                           'data', 'sonar', 'noise', 'core.results')
 
 
 @pytest.mark.parametrize('package', _ALL_WITHOUT_SUBMODULES)
@@ -1912,7 +1935,6 @@ _LAYER_ORDER = (
 _UPWARD_IMPORTS = frozenset({
     ('uacpy.acoustic_signal.beamforming', 'lazy', 'uacpy.core.results'),
     ('uacpy.core._plotting', 'lazy', 'uacpy.visualization.plots'),
-    ('uacpy.core.metrics', 'top', 'uacpy.core.results'),
 })
 
 #: ``(importer, module, name)`` for every module-private name (``_x``, not
@@ -1936,6 +1958,9 @@ _PRIVATE_NAMES_ACROSS_LAYERS = frozenset({
      '_truncate_response'),
     ('uacpy.core.results.field', 'uacpy.acoustic_signal.channel',
      '_transfer_function_from_impulse_response'),
+    # labelled twin of impulse_response_from_transfer_function
+    ('uacpy.core.results._field_synthesis', 'uacpy.acoustic_signal.channel',
+     '_impulse_response_from_transfer_function'),
     ('uacpy.core.results.field', 'uacpy.acoustic_signal.spectrum_at',
      '_tone_phasor'),
     ('uacpy.core.results.modes', 'uacpy.core.acoustics.modal',
@@ -1983,8 +2008,6 @@ _PRIVATE_NAMES_ACROSS_LAYERS = frozenset({
     ('uacpy.models.oases._sampling', 'uacpy.io.oases_writer',
      '_OASES_MAX_WAVENUMBERS'),
     ('uacpy.models.oases.oasn', 'uacpy.io.oases_writer',
-     '_resolve_freq_sweep'),
-    ('uacpy.models.oases.oasn', 'uacpy.io.oases_writer',
      '_check_oasn_discrete_sources'),
     ('uacpy.models.oases.oasn', 'uacpy.io.oases_writer',
      '_check_oasn_noise_level'),
@@ -1996,8 +2019,6 @@ _PRIVATE_NAMES_ACROSS_LAYERS = frozenset({
      '_OASS_REVERB_OPTIONS'),
     ('uacpy.models.oases.oass', 'uacpy.io.oases_writer',
      '_check_oass_range_count'),
-    ('uacpy.models.oases.oast', 'uacpy.io.oases_writer',
-     '_resolve_freq_sweep'),
     # Helpers a layer above shares that are not for users: the check every
     # engine that freezes the water absorption law over a band runs, with
     # its threshold and depths; the law an environment's absorption is
@@ -2404,6 +2425,41 @@ _SI_UNIT_SUFFIXES = ('_m', '_s', '_sec', '_hz', '_Hz', '_mps', '_ms', '_m_s',
 #: is a level per metre (``Modes.with_attenuation(alpha_dB_per_m)``).
 _NON_SI_SUFFIXES = ('_dB_per_m',)
 
+#: The further suffixes a constant's name could spell its unit with: the SI
+#: pascal and m/s², and the units of the quantities that keep plain names —
+#: density (g/cm³), temperature (°C), salinity (PSU), latitude / longitude (°).
+_CONSTANT_UNIT_SUFFIXES = ('_pa', '_m_s2', '_g_cm3', '_c', '_psu', '_lat_deg',
+                           '_latitude_deg', '_lon_deg', '_longitude_deg')
+
+#: Conversion factors, named by the two units they convert between.
+_UNIT_RATIO_CONSTANTS = frozenset({'KNOTS_PER_M_PER_S'})
+
+
+def _public_constants():
+    """``(module, NAME)`` for every module-level upper-case binding of the
+    package that has no leading underscore."""
+    for path, tree in _sources():
+        for node in tree.body:
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target] if isinstance(node, ast.AnnAssign)
+                       else [])
+            for target in targets:
+                if (isinstance(target, ast.Name) and target.id.isupper()
+                        and not target.id.startswith('_')):
+                    yield _rel(path), target.id
+
+
+def _constants_with_a_unit_suffix(constants):
+    """The constants whose name spells an SI unit or the unit of a
+    plain-named quantity."""
+    suffixes = (tuple(s.lower() for s in _SI_UNIT_SUFFIXES)
+                + _CONSTANT_UNIT_SUFFIXES)
+    non_si = tuple(s.lower() for s in _NON_SI_SUFFIXES)
+    return sorted(f"{module}: {name}" for module, name in constants
+                  if name not in _UNIT_RATIO_CONSTANTS
+                  and name.lower().endswith(suffixes)
+                  and not name.lower().endswith(non_si))
+
 
 class TestNoPublicNameCarriesAnSIUnitSuffix:
     """A name carries a unit suffix only when its unit is not SI, on inputs
@@ -2422,6 +2478,37 @@ class TestNoPublicNameCarriesAnSIUnitSuffix:
         assert not offenders, (
             "public name(s) spelling an SI unit, which a public name leaves "
             "unsaid:\n" + "\n".join(offenders))
+
+    def test_no_public_constant_ends_in_an_si_unit_suffix(self):
+        """Constants follow the same rule: ``DEFAULT_WATER_DENSITY``
+        (g/cm³), ``EARTH_RADIUS`` (m), ``DEFAULT_RUN_TIMEOUT`` (s),
+        ``REFERENCE_TEMPERATURE`` (°C), but ``EARTH_RADIUS_KM`` and
+        ``NO_ENERGY_DB``."""
+        offenders = _constants_with_a_unit_suffix(_public_constants())
+        assert not offenders, (
+            "public constant(s) spelling an SI unit or the unit of a "
+            "plain-named quantity:\n" + "\n".join(offenders))
+
+    def test_the_constant_sweep_reads_the_constants_the_rule_is_about(self):
+        """The far side of the constant gate: the sweep sees the constants
+        that once carried a suffix and those that keep a non-SI one, and its
+        match flags each suffix kind while passing a unit ratio."""
+        names = {name for _, name in _public_constants()}
+        for name in ('DEFAULT_WATER_DENSITY', 'EARTH_RADIUS',
+                     'DEFAULT_RUN_TIMEOUT', 'REFERENCE_TEMPERATURE',
+                     'REFERENCE_SALINITY', 'REFERENCE_LATITUDE',
+                     'STANDARD_GRAVITY', 'MAX_ATTENUATION', 'EARTH_RADIUS_KM',
+                     'NO_ENERGY_DB', 'KNOTS_PER_M_PER_S'):
+            assert name in names, name
+        flagged = _constants_with_a_unit_suffix(
+            [('m', n) for n in ('RADIUS_M', 'WAIT_S', 'DENSITY_G_CM3',
+                                'GRAVITY_M_S2', 'TEMPERATURE_C', 'MAX_LAT_DEG',
+                                'LOSS_DB_PER_WAVELENGTH', 'RADIUS_KM',
+                                'LEVEL_DB', 'ALPHA_DB_PER_M',
+                                'KNOTS_PER_M_PER_S')])
+        assert flagged == ['m: DENSITY_G_CM3', 'm: GRAVITY_M_S2',
+                           'm: LOSS_DB_PER_WAVELENGTH', 'm: MAX_LAT_DEG',
+                           'm: RADIUS_M', 'm: TEMPERATURE_C', 'm: WAIT_S']
 
     def test_the_sweep_reads_the_sites_the_rule_is_about(self):
         """The far side of the gate: silence there must mean the sweep
@@ -2620,8 +2707,8 @@ class TestTheWindArgumentsTakeKnots:
 
     def test_the_sea_surface_sizing_reads_its_m_per_s_from_knots(self):
         from uacpy.core.altimetry import sea_surface_n_points
-        from uacpy.core.constants import STANDARD_GRAVITY_M_S2
-        lambda_p = 2 * np.pi * 10.0 ** 2 / STANDARD_GRAVITY_M_S2     # U = 10 m/s
+        from uacpy.core.constants import STANDARD_GRAVITY
+        lambda_p = 2 * np.pi * 10.0 ** 2 / STANDARD_GRAVITY     # U = 10 m/s
         n, needed = sea_surface_n_points(10_000.0, uacpy.units.ms_to_knots(10.0))
         assert needed == int(np.ceil(8 * 10_000.0 / lambda_p)) + 1
 
@@ -2697,6 +2784,24 @@ class TestTheHostHasOneAvailableMemoryReader:
         monkeypatch.setattr(_host, '_host_available_memory_bytes',
                             lambda: 10 ** 12)
         assert _host.available_memory_bytes() == 600000
+
+    def test_the_inactive_page_cache_counts_as_headroom(self, tmp_path):
+        """A cgroup's usage includes the page cache the kernel reclaims for
+        a new allocation: its inactive file list (``memory.stat``) is
+        headroom, as ``MemAvailable`` counts it on the host; the active
+        list stays counted as used."""
+        from uacpy.core import _host
+        proc, root = self._cgroup(tmp_path, ['0::/job'], {
+            'job/memory.max': '1000000', 'job/memory.current': '900000',
+            'job/memory.stat': 'anon 200000\nfile 700000\n'
+                               'active_file 300000\ninactive_file 400000\n'})
+        assert _host._cgroup_memory_headroom(proc, root) == 500000
+        proc, root = self._cgroup(tmp_path, ['3:memory:/job'], {
+            'memory/job/memory.limit_in_bytes': '2048',
+            'memory/job/memory.usage_in_bytes': '1848',
+            'memory/job/memory.stat': 'cache 1500\ninactive_file 1\n'
+                                      'total_inactive_file 1000\n'})
+        assert _host._cgroup_memory_headroom(proc, root) == 1200
 
     def test_an_unlimited_or_absent_cgroup_leaves_the_host_figure(self,
                                                                  tmp_path):

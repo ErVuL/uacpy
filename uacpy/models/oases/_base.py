@@ -1,5 +1,4 @@
-"""The abstract base of the OASES programs and the factory that picks one
-by run mode (:meth:`OASES.for_mode`)."""
+"""The abstract base of the OASES programs."""
 
 import warnings
 import dataclasses
@@ -8,10 +7,8 @@ from pathlib import Path
 from uacpy.models.base import PropagationModel
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._launch import _tail, prt_launch, run_launch
-from uacpy.core.run_settings import RunMode
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, IOWarning, ModelExecutionError,
-    UnsupportedFeatureError,
+    ConfigurationError, IOWarning, ModelExecutionError,
 )
 from uacpy.models.oases._common import _oases_subprocess_env
 from uacpy.io.oases_writer import refuse_boundaries_without_deck_spelling
@@ -19,15 +16,15 @@ from uacpy.models._extract import stamp_result
 
 
 class OASES(PropagationModel):
-    """Public base + factory for the OASES sub-models
+    """Public base of the OASES sub-models
     (OAST/OASN/OASR/OASP/OASS/OASSP).
 
     Each sub-model wraps one OASES binary with its own deck writer, output
     reader, knobs, run modes and ``FORnnn`` unit-number map
     (``_FOR_FILES``); all share the one ``_execute`` below. They subclass ``OASES``, so ``isinstance(model,
-    OASES)`` is True for any of them. ``OASES`` itself is abstract — instantiate
-    a sub-model directly, or use :meth:`OASES.for_mode` to pick one by
-    ``RunMode``."""
+    OASES)`` is True for any of them. ``OASES`` itself is abstract —
+    instantiate the sub-model that computes the run (docs/models/oases.md
+    §2 lists each one's run modes)."""
 
     _FOR_FILES: dict = {}
     # The option line is composed from the other knobs (a raw ``options=``
@@ -44,73 +41,16 @@ class OASES(PropagationModel):
     def __new__(cls, *args, **kwargs):
         if cls is OASES:
             raise ConfigurationError(
-                "OASES is the abstract base for "
-                "OAST/OASN/OASR/OASP/OASS/OASSP. "
-                "Instantiate a sub-model directly, or use "
-                "OASES.for_mode(run_mode=...) to pick one by RunMode."
+                "OASES is the abstract base of the OASES programs and runs "
+                "nothing itself.",
+                remediation=(
+                    "Instantiate the program for the run: OAST "
+                    "(COHERENT_TL), OASP (COHERENT_TL, BROADBAND, "
+                    "TIME_SERIES), OASR (REFLECTION), OASN (COVARIANCE, "
+                    "REPLICA), OASS (REVERBERATION, COVARIANCE) or OASSP "
+                    "(the scattered field: BROADBAND, TIME_SERIES)."),
             )
         return super().__new__(cls)
-
-    @classmethod
-    def for_mode(cls, run_mode: RunMode = RunMode.COHERENT_TL, *,
-                 broadband: bool = False, reverberation: bool = False,
-                 **kwargs) -> PropagationModel:
-        """Instantiate the OASES sub-model that handles ``run_mode``.
-
-        ``COHERENT_TL`` → ``OAST`` (``OASP`` when ``broadband=True``);
-        ``COVARIANCE`` → ``OASN`` (``OASS`` when ``reverberation=True``);
-        ``REPLICA`` → ``OASN``; ``REFLECTION`` → ``OASR``;
-        ``BROADBAND``/``TIME_SERIES`` → ``OASP`` (``OASSP`` when
-        ``reverberation=True``, which returns the scattered field rather than
-        the coherent one); ``REVERBERATION`` → ``OASS``, which needs no flag
-        because nothing else emits it. ``**kwargs`` forward to the chosen
-        sub-model (a kwarg it doesn't accept raises ``TypeError``). A flag
-        the run mode does not read gives a ``FallbackWarning``.
-
-        Parameters
-        ----------
-        run_mode : RunMode, optional
-            The run mode. Default ``COHERENT_TL``.
-        broadband : bool, optional
-            ``COHERENT_TL`` from OASP rather than OAST. Default False.
-        reverberation : bool, optional
-            The reverberant sub-model where one exists (see above). Default
-            False.
-        **kwargs
-            Keywords of the chosen sub-model's constructor.
-        """
-        from uacpy.models.oases import (
-            OASN, OASP, OASR, OASS, OASSP, OAST,
-        )
-        dispatch = {
-            RunMode.COHERENT_TL: OASP if broadband else OAST,
-            RunMode.COVARIANCE: OASS if reverberation else OASN,
-            RunMode.REPLICA: OASN,
-            RunMode.REFLECTION: OASR,
-            RunMode.BROADBAND: OASSP if reverberation else OASP,
-            RunMode.TIME_SERIES: OASSP if reverberation else OASP,
-            RunMode.REVERBERATION: OASS,
-        }
-        target = dispatch.get(run_mode)
-        if target is None:
-            raise UnsupportedFeatureError(
-                'OASES', str(run_mode),
-                alternatives=[str(m) for m in dispatch],
-                alternatives_label='run modes',
-            )
-        unused = [name for name, value, modes in (
-            ('broadband', broadband, {RunMode.COHERENT_TL}),
-            ('reverberation', reverberation,
-             {RunMode.COVARIANCE, RunMode.BROADBAND, RunMode.TIME_SERIES,
-              RunMode.REVERBERATION}))
-            if value and run_mode not in modes]
-        if unused:
-            warnings.warn(
-                f"OASES.for_mode: {', '.join(f'{u}=True' for u in unused)} "
-                f"is not read for run_mode={run_mode.name}; the call returns "
-                f"{target.__name__}.",
-                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-        return target(**kwargs)
 
     def _validate_engine(self, env, source, receiver, run_mode, *,
                          request=None) -> None:

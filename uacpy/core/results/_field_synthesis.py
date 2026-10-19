@@ -183,6 +183,7 @@ def _synthesize_time_series(
     window: str,
     who: str = 'Field.synthesize_time_series',
     exposure: bool = False,
+    weighting=None,
     fold_report: Optional[dict] = None,
 ) -> "Field":
     """Convolve every grid cell of a broadband Field with a source waveform.
@@ -196,7 +197,8 @@ def _synthesize_time_series(
     record on the reduced time axis (:func:`_record_placement`). ``who`` is
     the public method the caller called, and names every diagnostic;
     ``exposure`` words the band-edge warning for an exposure
-    (:func:`~uacpy.acoustic_signal._synthesis.warn_band_edge_cuts_spectrum`);
+    (:func:`~uacpy.acoustic_signal._synthesis.warn_band_edge_cuts_spectrum`),
+    judging its share of the energy under the exposure's ``weighting``;
     ``fold_report`` collects the shared record's fold findings for the
     caller to say — the late arrival (:func:`_record_placement`), a
     range span longer than the record (``'range_span'``: the span in m and
@@ -213,7 +215,7 @@ def _synthesize_time_series(
     _refuse_time_domain_native(tf, who)
     source_spectrum, plan = waveform_synthesis_setup(
         np.asarray(tf.coords['frequency'], dtype=float), wf, sample_rate,
-        window=window, who=who, exposure=exposure)
+        window=window, who=who, exposure=exposure, weighting=weighting)
     df = plan.df
     bandwidth = float(np.ptp(plan.freqs)) if len(plan.freqs) > 1 else 0.0
     t_start_estimated = t_start is None or isinstance(t_start, str)
@@ -312,13 +314,13 @@ def _impulse_response(
     # Deferred: acoustic_signal pulls scipy, and uacpy's public surface is
     # imported without it (test_lazy_imports).
     from uacpy.acoustic_signal.channel import (
-        impulse_response_from_transfer_function,
+        _impulse_response_from_transfer_function,
     )
-    _, taps = impulse_response_from_transfer_function(
+    _, taps = _impulse_response_from_transfer_function(
         spectra.reshape(lead + (n_f,)) * plan.win, frequencies=freqs,
         sample_rate=fs,
         t_start=np.broadcast_to(starts, lead),
-        n_samples=plan.n_samples)
+        n_samples=plan.n_samples, axis=-1, who=who)
     time_vec = origin + np.arange(plan.n_samples) / fs
     if reduction_speed is None:
         _check_range_span(

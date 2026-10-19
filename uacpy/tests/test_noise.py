@@ -520,6 +520,39 @@ class TestMarineMammalWeighting:
         # 500-point grid (the Southall closed form trapezoid-integrated).
         assert wl_fine == pytest.approx(160.9719, abs=1e-3)
 
+    def test_apply_weighting_weighs_along_the_axis_named(self):
+        """A (frequency, depth) map is weighted along axis 0 with axis=0,
+        as weighted_level reads it; the default is the last axis, and a
+        length that matches no frequency is a typed refusal, not numpy's
+        broadcast error."""
+        from uacpy.noise import apply_weighting, auditory_weighting
+        f = np.array([100.0, 1000.0, 10000.0])
+        w = auditory_weighting(f, 'VHF')
+        square = np.full((3, 3), 100.0)
+        np.testing.assert_allclose(
+            apply_weighting(square, frequency=f, weighting='VHF', axis=0),
+            np.broadcast_to(100.0 + w[:, None], (3, 3)))
+        np.testing.assert_allclose(
+            apply_weighting(square, frequency=f, weighting='VHF'),
+            np.broadcast_to(100.0 + w[None, :], (3, 3)))
+        with pytest.raises(ConfigurationError, match='one level per frequency'):
+            apply_weighting(np.full((3, 5), 100.0), frequency=f,
+                            weighting='VHF')
+        assert apply_weighting(np.full((3, 5), 100.0), frequency=f,
+                               weighting='VHF', axis=0).shape == (3, 5)
+
+    @pytest.mark.parametrize('group', ['LF', 'VHF'])
+    def test_a_silent_spectrum_weighs_to_the_marker(self, group):
+        """Every bin at the no-energy marker (a silent record's welch
+        level): the weighting does not move a marker bin, so the weighted
+        level is the marker, not -600 + W + 10·log10(bandwidth) (-559.3 dB
+        LF-weighted over 1-20 kHz, which the mask reads as a level)."""
+        from uacpy.acoustics import power_to_dB
+        from uacpy.noise import weighted_level
+        f = np.linspace(1000.0, 20000.0, 200)
+        assert weighted_level(power_to_dB(np.zeros(200)), frequency=f,
+                              weighting=group) == -600.0
+
     def test_weighted_level_refuses_fewer_than_two_frequencies(self):
         """The integral over frequency spans no bandwidth on fewer than two
         samples, so a scalar and a one-element spectrum both raise the typed
@@ -922,7 +955,7 @@ def test_wenz_decidecade_levels_carry_their_bands_and_reference():
     np.testing.assert_array_equal(result.lower, lower)
     np.testing.assert_array_equal(result.upper, upper)
     assert (result.band_type, result.ref) == ('decidecade', 1e-6)
-    assert result.levels[3] == w.band_level(lower[3], upper[3])
+    assert result.levels_dB[3] == w.band_level(lower[3], upper[3])
 
 
 class TestTheMeanShipSourceSpectrumIsWalesAndHeitmeyer:

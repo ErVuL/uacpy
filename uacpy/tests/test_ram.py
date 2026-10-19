@@ -16,10 +16,10 @@ from types import SimpleNamespace
 import uacpy
 from uacpy.models import RAM, RunMode
 from uacpy.models.ram.collins import MAX_BATHY_SECTIONS
-from uacpy.models.ram.mpirams import MPIRAMS_RANGE_TOL_M
+from uacpy.models.ram.mpirams import MPIRAMS_RANGE_TOL
 from uacpy.core.exceptions import (
-    ConfigurationError, ExecutableNotFoundError, ModelExecutionError,
-    NumericsWarning,
+    ConfigurationError, ExecutableNotFoundError, FallbackWarning,
+    ModelExecutionError, NumericsWarning,
 )
 from uacpy import Field
 from uacpy.core import (Altimetry, Bathymetry, 
@@ -396,9 +396,9 @@ class TestAPinnedAccuracyIsMetAsGiven:
             self.ENV, knobs=knobs)
         return grid_error(
             dr=grid.dr, dz=grid.dz, frequency=grid.frequency, c_min=c_min,
-            c_max=c_max, x_max=5000.0, c0=c0,
+            c_max=c_max, rmax=5000.0, c0=c0,
             angle_max_deg=ram_domain.resolve_angle_max(self.ENV, knobs=knobs),
-            p=knobs.n_pade, alpha=0.0, c_min_all=c_min_all,
+            n_pade=knobs.n_pade, alpha=0.0, c_min_all=c_min_all,
             c_max_all=c_max_all)
 
     def test_an_unset_accuracy_keeps_the_floored_default_grid_silently(self):
@@ -2015,17 +2015,18 @@ class TestConstructorGuards:
             RAM.from_run_settings(record)
         assert 'rams_rotation_angle_deg=theta_fn' in str(caught.value)
 
-    def test_low_absorber_attenuation_warns(self):
-        """Below 1 dB/λ the artificial absorber lets domain-bottom
-        reflections back into the field (the RAM wrapper's Collins-readme note)."""
-        with pytest.warns(UserWarning, match='absorber_attenuation'):
-            RAM(absorber_attenuation=0.5, verbose=False)
-
-    def test_ordinary_absorber_attenuation_is_silent(self):
+    @pytest.mark.parametrize('pinned', [0.5, 5.0])
+    def test_a_pinned_absorber_is_taken_without_a_constructor_warning(
+            self, pinned):
+        """No manual gives a floor for the absorber's attenuation, so the
+        constructor says nothing about a set value; the run's one notice is
+        for a ramp the pin makes decrease (below the seabed's own
+        attenuation, ``ram.pdf`` p.7), recorded with the run's settings."""
         with recorded_warnings() as caught:
-            RAM(absorber_attenuation=5.0, verbose=False)
+            model = RAM(absorber_attenuation=pinned, verbose=False)
         assert not [w for w in caught
                     if 'absorber_attenuation' in str(w.message)]
+        assert model.absorber_attenuation == pinned
 
     @pytest.mark.parametrize('pinned, seabed, said', [
         (2.0, 3.0, True), (3.0, 3.0, False), (5.0, 0.5, False),
@@ -2566,7 +2567,8 @@ class TestRangeDependentBottomIsHonoured:
 
 
 def test_near_side_receivers_lie_within_the_march_exit_tolerance() -> None:
-    """The premise the near-side ``np.clip(..., rout[0], None)`` rests on.
+    """The premise the near side of the mpiramS range rule
+    (``ram.mpirams._psif_on_receiver_grid``) rests on.
 
     ``rout[0]`` is the achieved range of ``receiver.ranges[0]``: the deck
     writer emits ``receiver.ranges`` verbatim and in order, and the carrier
@@ -2577,7 +2579,7 @@ def test_near_side_receivers_lie_within_the_march_exit_tolerance() -> None:
     side carries no tolerance of its own.
     """
     from uacpy.io.mpirams_writer import write_mpirams_ranges
-    from uacpy.models.ram.mpirams import MPIRAMS_RANGE_TOL_M
+    from uacpy.models.ram.mpirams import MPIRAMS_RANGE_TOL
 
     ranges = [500.0, 1500.0, 3000.0]
     receiver = Receiver(depths=[10.0, 20.0], ranges=ranges)
@@ -2606,7 +2608,7 @@ def test_near_side_receivers_lie_within_the_march_exit_tolerance() -> None:
               "src" / "ram.f90")
     if not source.is_file():
         pytest.skip("vendored mpiramS source not present")
-    assert (f"abs(rnow-rend)<{MPIRAMS_RANGE_TOL_M}_wp"
+    assert (f"abs(rnow-rend)<{MPIRAMS_RANGE_TOL}_wp"
             in source.read_text(encoding="utf-8", errors="replace"))
 
 
@@ -2662,12 +2664,12 @@ class TestMpiramsOutputRangeSpacing:
         message = str(exc.value)
         assert '1000.05' in message
         assert '0.05 m apart' in message
-        assert f'{MPIRAMS_RANGE_TOL_M} m' in message
+        assert f'{MPIRAMS_RANGE_TOL} m' in message
         assert 'ranges' in exc.value.remediation
 
     def test_a_pair_at_the_exit_tolerance_is_accepted(self):
         ranges = [500.0, 1000.0, 1000.1, 1500.0]
-        assert ranges[2] - ranges[1] >= MPIRAMS_RANGE_TOL_M
+        assert ranges[2] - ranges[1] >= MPIRAMS_RANGE_TOL
         RAM(backend='mpirams', verbose=False).validate_inputs(
             self.ENV, self.SOURCE, self._receiver(ranges),
             run_mode=RunMode.COHERENT_TL)
@@ -2681,7 +2683,7 @@ class TestMpiramsOutputRangeSpacing:
         the march applies its exit test to those same doubles. The guard has
         to follow the arithmetic rather than the nominal spacing."""
         ranges = [base, base + 0.1]
-        assert ((ranges[1] - ranges[0]) < MPIRAMS_RANGE_TOL_M) is collapses
+        assert ((ranges[1] - ranges[0]) < MPIRAMS_RANGE_TOL) is collapses
         rout = self._march(ranges)
         assert bool(rout[1] - rout[0] <= 0.0) is collapses
         model = RAM(backend='mpirams', verbose=False)
@@ -3560,7 +3562,7 @@ class TestRamLeavesRealSeabedBeforeTheAbsorber:
         # A faster seabed has a longer wavelength and so needs a thicker pad;
         # reading a 'sound_speed' attribute off Bottom (which has none) would
         # silently size it by the water column instead.
-        assert ram_domain.seabed_sound_speed(self._half_space(), 1500.0) == \
+        assert ram_domain.seabed_sound_speed(self._half_space()) == \
             pytest.approx(1800.0)
 
     def test_a_layered_bottom_pads_below_the_whole_stack(self):
@@ -3770,14 +3772,14 @@ class TestMpiramsRangesBeyondTheMarchAreNotRelabelled:
                               tmp_path=tmp_path)
         assert not np.array_equal(field.data[:, 1], field.data[:, 2])
 
-    def test_a_range_inside_the_march_exit_band_is_interpolated(
+    def test_a_range_inside_the_march_exit_band_is_kept(
             self, tmp_path):
         """``ram.f90:169`` stops stepping once it is within 10 cm of an output
         range and records that position, so a completed march can report
-        ``rout[-1]`` up to ``MPIRAMS_RANGE_TOL_M`` short. That is the same
+        ``rout[-1]`` up to ``MPIRAMS_RANGE_TOL`` short. That is the same
         range under a rounding, and must not be dropped."""
         model = _mpirams_model()
-        last = 3000.0 - MPIRAMS_RANGE_TOL_M
+        last = 3000.0 - MPIRAMS_RANGE_TOL
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             field = _assemble(model, rout=[1000.0, 2000.0, last],
@@ -3788,7 +3790,7 @@ class TestMpiramsRangesBeyondTheMarchAreNotRelabelled:
     def test_a_range_just_past_the_exit_band_is_dropped(self, tmp_path):
         """The other side of the same threshold, 1 µm further out."""
         model = _mpirams_model()
-        last = 3000.0 - MPIRAMS_RANGE_TOL_M - 1e-6
+        last = 3000.0 - MPIRAMS_RANGE_TOL - 1e-6
         with pytest.warns(UserWarning, match='exceed the PE marched range'):
             field = _assemble(model, rout=[1000.0, 2000.0, last],
                               ranges=[1000.0, 2000.0, 3000.0],
@@ -3807,6 +3809,31 @@ class TestMpiramsRangesBeyondTheMarchAreNotRelabelled:
                               tmp_path=tmp_path)
         assert np.all(np.isnan(field.data[:, 2]))
 
+    def test_a_range_recorded_off_its_request_takes_that_column(
+            self, tmp_path):
+        """A range the march recorded a few cm from the requested one is
+        the column the march computed there, under the requested label:
+        its 1/√r factor is the recorded range's, with no interpolation
+        toward the next column — the band path's rule, so the TL and the
+        band assemblies return the same pressure for one march."""
+        model = _mpirams_model()
+        off = 2000.0 - 0.05
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field = _assemble(model, rout=[1000.0, off, 3000.0],
+                              ranges=[1000.0, 2000.0, 3000.0],
+                              tmp_path=tmp_path)
+            band = _assemble_band(model, rout=[1000.0, off, 3000.0],
+                                  ranges=[1000.0, 2000.0, 3000.0],
+                                  tmp_path=tmp_path)
+        np.testing.assert_array_equal(field.coords['range'],
+                                      [1000.0, 2000.0, 3000.0])
+        expected = 4.0 * np.pi * 1e-3 / np.sqrt(off)
+        assert np.abs(field.data[0, 1]) == pytest.approx(expected,
+                                                        rel=1e-12)
+        np.testing.assert_allclose(np.asarray(band.data)[:, :, 1],
+                                   np.asarray(field.data), rtol=1e-12)
+
     def test_a_complete_march_is_silent_and_finite_on_every_column(self, tmp_path):
         """The identity case, which is what every real mpiramS run does:
         ``rout`` is ``receiver.ranges``, no warning, every column finite."""
@@ -3819,14 +3846,14 @@ class TestMpiramsRangesBeyondTheMarchAreNotRelabelled:
         assert np.all(np.isfinite(field.data))
 
     def test_the_tolerance_constant_matches_the_fortran_exit_test(self):
-        """``MPIRAMS_RANGE_TOL_M`` is not a tuned number: it is the march's own
+        """``MPIRAMS_RANGE_TOL`` is not a tuned number: it is the march's own
         ``if (abs(rnow-rend)<0.1_wp) exit``."""
         src = (Path(uacpy.__file__).parent / 'third_party' / 'mpiramS' /
                'src' / 'ram.f90')
         if not src.is_file():
             pytest.skip("vendored mpiramS source not present")
         text = src.read_text(encoding='utf-8', errors='replace')
-        assert f'abs(rnow-rend)<{MPIRAMS_RANGE_TOL_M}_wp' in text
+        assert f'abs(rnow-rend)<{MPIRAMS_RANGE_TOL}_wp' in text
 
 
 def _assemble_band(model, rout, ranges, tmp_path):
@@ -3861,13 +3888,13 @@ def _assemble_band(model, rout, ranges, tmp_path):
 class TestMpiramsBandIsLabelledWithTheRequestedRanges:
     """The BROADBAND assembly labels its range axis with the ranges the call
     asked for, as the TL path does: a recorded range within the march's
-    10 cm exit band (``MPIRAMS_RANGE_TOL_M``) is that range, and a range the
+    10 cm exit band (``MPIRAMS_RANGE_TOL``) is that range, and a range the
     march did not reach is NaN with a warning."""
 
     def test_a_range_inside_the_exit_band_carries_the_requested_label(
             self, tmp_path):
         model = _mpirams_model()
-        last = 3000.0 - MPIRAMS_RANGE_TOL_M
+        last = 3000.0 - MPIRAMS_RANGE_TOL
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             field = _assemble_band(model, rout=[1000.0, 2000.0, last],
@@ -3880,7 +3907,7 @@ class TestMpiramsBandIsLabelledWithTheRequestedRanges:
     def test_a_range_the_march_did_not_reach_is_nan_and_said(self,
                                                              tmp_path):
         model = _mpirams_model()
-        last = 3000.0 - MPIRAMS_RANGE_TOL_M - 1e-6
+        last = 3000.0 - MPIRAMS_RANGE_TOL - 1e-6
         with pytest.warns(UserWarning, match='exceed the PE marched range'):
             field = _assemble_band(model, rout=[1000.0, 2000.0, last],
                                    ranges=[1000.0, 2000.0, 3000.0],
@@ -3999,6 +4026,21 @@ class TestRamReturnsItsSedimentFieldDownToTheAbsorbingLayer:
     @staticmethod
     def _flat_env():
         return make_pekeris(density=1.7)
+
+    @pytest.mark.parametrize('top, says', [
+        ([300.0, 300.0], 'from 300.0 m down'),
+        ([300.0, 350.0], 'its top follows the seafloor, shallowest 300.0 m'),
+    ])
+    def test_the_absorber_notice_says_where_the_layer_starts(self, top, says):
+        """On mpiramS the layer starts ``sedlayer`` under the local seafloor,
+        so on a sloping track its top varies with range: the notice names
+        the shallowest top as such rather than as one depth for all
+        ranges."""
+        with recorded_warnings() as caught:
+            ram_domain.mask_absorbing_layer(
+                'RAM', np.zeros((3, 2)), [100.0, 320.0, 400.0], top)
+        (message,) = [str(w.message) for w in caught]
+        assert f"absorbing layer ({says})" in message, message
 
     def test_the_resolvable_depth_is_the_media_column(self):
         model = RAM(verbose=False)
@@ -4719,8 +4761,9 @@ class TestTheSeafloorSitsAQuarterCellBelowItsWaterNode:
 class TestTheTrappedModeWarning:
     """When the seabed's critical angle is wider than the aperture, the
     steepest scored component is a trapped mode that reaches the receivers;
-    a score at or above ``TRAPPED_MODE_SCORE_LIMIT`` means its phase is
-    lost. The automatic grid refines ``dz`` from the λ/15 floor until the
+    at or above ``TRAPPED_MODE_SCORE_LIMIT`` its score, Lytaev's (2023,
+    §4.1) accumulated error bound, no longer bounds its phase. The
+    automatic grid refines ``dz`` from the λ/15 floor until the
     mode passes, within ``MAX_DEPTH_POINTS``; the grid MARCHED — pinned, or
     automatic and cut short by the budget — warns at the default
     ``accuracy`` when it still cannot carry the mode, naming a ``dz`` that
@@ -4761,8 +4804,8 @@ class TestTheTrappedModeWarning:
         from uacpy.models.pe_grid import optimize_grid
         c0 = ram_domain.resolve_c0(self._env(c_b), knobs=m._knob_record())
         return optimize_grid(
-            grid=(dr, dz), frequency=200.0, c_min=1500.0, c_max=c0, x_max=5000.0,
-            c0=c0, angle_max_deg=30.0, p=int(m.n_pade), alpha=0.0,
+            grid=(dr, dz), frequency=200.0, c_min=1500.0, c_max=c0, rmax=5000.0,
+            c0=c0, angle_max_deg=30.0, n_pade=int(m.n_pade), alpha=0.0,
             c_min_all=1500.0, c_max_all=c_b)
 
     def test_rock_gets_dz_refined_below_the_floor_and_no_warning(self,
@@ -4868,6 +4911,15 @@ class TestTheTrappedModeWarning:
         assert not [ln for ln in logged if 'Lytaev grid' in ln]
         assert len(texts) == 1
         assert 'dr=19 m, dz=1 m' in texts[0] and '51°' in texts[0]
+        # The notice states the bound (Lytaev 2023, §4.1), not a verdict on
+        # the field.
+        assert 'accumulated error estimate' in texts[0]
+        assert ('Lytaev 2023, §4.1: the per-step error of the propagation '
+                'operator on the (dr, dz) grid times the number of steps'
+                in texts[0])
+        assert 'depth-operator' not in texts[0]
+        assert 'no longer bounds that mode' in texts[0]
+        assert 'wrong' not in texts[0] and 'Kraken' not in texts[0]
 
     def test_the_grid_line_reports_both_bands(self, monkeypatch):
         _m, _dr, _dz, _texts, logged = self._grid(monkeypatch, 2400.0)
@@ -4946,10 +4998,37 @@ class TestRamInWaterBlock:
             _write(tmp_path / 'ramgeo.in', 'ramgeo', segs)
 
 
+class TestRamInSaysWhatItDoesNotWrite:
+    """Only ``ramsurf`` reads a surface block (ramsurf1.5.f:83) and only
+    ``rams`` the shear blocks (rams0.5.f:193, :196): a profile given to
+    another kind is left out of the deck, with a notice."""
+
+    def test_a_surface_on_a_ramgeo_deck_is_noticed(self, tmp_path):
+        with pytest.warns(FallbackWarning, match=r"surface \(only"):
+            lines = _write(tmp_path / 'ramgeo.in', 'ramgeo',
+                           [_segment(False)],
+                           surface=[(0.0, 2.0), (3000.0, 2.0)])
+        assert sum(1 for ln in lines if ln.startswith('-1')) == 5
+
+    def test_shear_blocks_on_a_fluid_deck_are_noticed(self, tmp_path):
+        with pytest.warns(FallbackWarning, match='bottom_attns, bottom_cs'):
+            _write(tmp_path / 'ramsurf.in', 'ramsurf',
+                   [_segment(False, shear=True)])
+
+    @pytest.mark.parametrize('kind, shear', [
+        ('ramgeo', False), ('ramsurf', False), ('rams', True)])
+    def test_a_deck_that_writes_everything_given_is_quiet(self, tmp_path,
+                                                          kind, shear):
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            _write(tmp_path / f'{kind}.in', kind,
+                   [_segment(False, shear=shear)])
+
+
 class TestMpiramsWaterTable:
 
     def _inpe(self, path, **kw):
-        write_mpirams_inpe(path, fc=400.0, q_factor=1e6, record_duration=1.0, zsrc=30.0, dz=0.25,
+        write_mpirams_inpe(path, fc=400.0, q_factor=1e6, record_duration=1.0, zs=30.0, dz=0.25,
                            dr=5.0, n_pade=4, n_stability=1, stability_range=3000.0, depth_decimation=1,
                            ssp_filename='ssp.dat', earth_curvature=0, horizontal_interpolation=0, bathymetry_from_file=1,
                            bth_filename='bth.dat', sedlayer=50.0, n_sediment_points=4,
@@ -5199,8 +5278,8 @@ class TestRamsRangeStepStability:
     blew up within the first few hundred metres."""
 
     SAND = dict(c0=1591.0, water_sound_speed=1500.0, water_density=1.0,
-                seabed_speed=1700.0, seabed_density=1.8,
-                seabed_attenuation=0.5, n_pade=6, theta_deg=45.0)
+                seabed_sound_speed=1700.0, seabed_density=1.8,
+                seabed_attenuation=0.5, n_pade=6, rams_rotation_angle_deg=45.0)
     #: (frequency Hz, dr m, water depth m, what the binary did)
     MEASURED = [(1000.0, 1.0, 100.0, 'ran'), (1500.0, 1.0, 100.0, 'diverged'),
                 (1500.0, 0.5, 100.0, 'ran'), (1500.0, 0.25, 100.0, 'ran'),
@@ -5523,7 +5602,7 @@ class TestRamsStabilityRuleMeasuresXiAgainstK0:
     refinement over a 2400 m/s seabed (0.189 against 0.412 m)."""
 
     _SEABED = dict(water_sound_speed=1500.0, water_density=1.027,
-                   seabed_speed=1700.0, seabed_density=1.8,
+                   seabed_sound_speed=1700.0, seabed_density=1.8,
                    seabed_attenuation=0.5, depth=100.0)
 
     def test_the_leak_is_the_rayleigh_loss_at_the_water_grazing_angle(self):
@@ -5758,6 +5837,43 @@ def test_a_record_reruns_the_band_it_records(backend):
                  'q_factor', 'record_duration'):
         a, b = getattr(again.engine, name), getattr(first.engine, name)
         assert (a is None and b is None) or np.array_equal(a, b), name
+
+
+@pytest.mark.parametrize('knobs, elastic', [
+    ({'accuracy': 1e-3}, False),
+    ({'accuracy': 1e-3, 'backend': 'ramgeo'}, False),
+    ({'backend': 'rams', 'rams_dr_factor': 2.0}, True),
+])
+def test_a_rebuilt_run_says_what_the_recorded_run_said(knobs, elastic):
+    """``RAM.from_run_settings`` pins the ``dr`` / ``dz`` the run derived;
+    the notices that a caller's ``accuracy`` or ``rams_dr_factor`` goes
+    unused beside a pinned grid read whether the CALLER pinned it
+    (``PropagationModel._caller_set``), so the rebuilt run is as silent as
+    the recorded one."""
+    env = (Environment(bathymetry=100.0, ssp=1500.0,
+                       bottom=_elastic_halfspace()) if elastic
+           else _pekeris_guide())
+    call = (env, Source(depths=30.0, frequencies=100.0),
+            Receiver(depths=[30.0, 60.0], ranges=np.linspace(200.0, 3000.0,
+                                                             15)))
+    said, first = _notices(lambda: RAM(verbose=False, **knobs)
+                           .run_settings(*call))
+    rebuilt = RAM.from_run_settings(first)
+    assert {'dr', 'dz'} <= rebuilt._pinned_from_record
+    said_again, again = _notices(lambda: rebuilt.run_settings(*call))
+    assert said_again == said
+    assert not [t for t in said_again if 'is pinned, so it is not used' in t
+                or 'are both pinned, so it is not used' in t]
+    assert (again.engine.grids[0].dr, again.engine.grids[0].dz) == (
+        first.engine.grids[0].dr, first.engine.grids[0].dz)
+
+
+def test_a_callers_pinned_grid_says_accuracy_is_unused():
+    said, _ = _notices(lambda: RAM(verbose=False, accuracy=1e-3, dr=50.0,
+                                   dz=0.5).run_settings(
+        _pekeris_guide(), Source(depths=30.0, frequencies=100.0),
+        Receiver(depths=[30.0], ranges=[1000.0])))
+    assert [t for t in said if 'chooses the (dr, dz) grid' in t]
 
 
 class TestASourceBelowTheSeafloorIsComputed:
@@ -5997,13 +6113,14 @@ class TestStageThreeNoticesComeFromRunAndRunSettingsOnly:
     def test_validate_inputs_is_silent_where_run_settings_warns(self):
         src = Source(depths=50.0, frequencies=100.0)
         rcv = Receiver(depths=[20.0], ranges=[1000.0])
-        model = RAM(verbose=False, dz=1.0)
+        model = RAM(verbose=False, dr=50.0, dz=0.5, accuracy=1e-3)
+        token = 'chooses the (dr, dz) grid'
         said, settings = _notices(lambda: model.run_settings(
             _pekeris_guide(), src, rcv))
-        assert any('of a cell from the quarter cell' in t for t in said)
-        assert any('of a cell from the quarter cell' in t for t in (x.message for x in settings.engine.notices))
+        assert any(token in t for t in said)
+        assert any(token in t for t in (x.message for x in settings.engine.notices))
         said, _ = _notices(lambda: model.validate_inputs(_pekeris_guide(), src, rcv))
-        assert not any('of a cell from the quarter cell' in t for t in said)
+        assert not any(token in t for t in said)
 
     def test_validate_inputs_refuses_a_time_series_without_a_pulse_like_run(
             self, monkeypatch):
@@ -6030,68 +6147,27 @@ class TestStageThreeNoticesComeFromRunAndRunSettingsOnly:
         assert len([t for t in said if 'ignoring source_waveform' in t]) == 1
 
 
-class TestAPinnedDzFarFromTheQuarterCellWarns:
-    """On the fluid backends a pinned ``dz`` that puts the shallowest
-    seafloor more than ``SEAFLOOR_QUARTER_TOLERANCE`` (0.1) of a cell from
-    the quarter-cell placement warns and names the aligned value
-    ``h/(n + 1/4)``; the ``dz`` is marched as given. The notice states the
-    binaries' rule — water on nodes ``1..int(1 + h/dz)``, the seabed from
-    the next (``ramgeo1.5.f:133``, ``:255-268``) — and labels the quarter
-    cell and its tolerance as uacpy's guidance. The rule reads the distance
-    round the cell, so a node and a placement past mid-cell both warn.
-    rams0.5 wants the node and is not checked."""
+class TestAPinnedDzIsMarchedWithoutAPlacementNotice:
+    """A pinned ``dz`` is marched as given wherever ``h/dz`` puts the
+    seafloor in its cell, with no notice: the quarter-cell placement the
+    automatic grid uses (``SEAFLOOR_CELL_OFFSET``) is a preference measured
+    against another model, not a property of the binaries, so no warning
+    rests on it (docs/models/ram.md holds the measurements)."""
 
     SRC = Source(depths=50.0, frequencies=100.0)
     RCV = Receiver(depths=[20.0], ranges=[1000.0])
 
-    def _said(self, **kw):
-        said, settings = _notices(lambda: RAM(verbose=False, **kw)
+    @pytest.mark.parametrize('backend', ['ramgeo', 'mpirams'])
+    @pytest.mark.parametrize('dz', [1.0, 0.5, 0.25, 100.0 / 100.6,
+                                    100.0 / 100.95])
+    def test_a_pinned_dz_says_nothing_about_its_seafloor_cell(self, backend,
+                                                              dz):
+        said, settings = _notices(lambda: RAM(verbose=False, dz=dz,
+                                              backend=backend)
                                   .run_settings(_pekeris_guide(), self.SRC,
                                                 self.RCV))
-        return [t for t in said if 'of a cell from the quarter cell' in t], \
-            settings
-
-    @pytest.mark.parametrize('dz, aligned', [(1.0, '0.997506'),
-                                             (0.5, '0.499376'),
-                                             (0.25, '0.249844')])
-    def test_a_round_dz_warns_naming_the_aligned_value(self, dz, aligned):
-        said, settings = self._said(dz=dz)
-        assert len(said) == 1 and f"dz={aligned} m" in said[0]
+        assert not [t for t in said if 'quarter cell' in t], said
         assert settings.engine.grids[0].dz == dz
-
-    def test_the_notice_states_the_binaries_rule_and_labels_the_guidance(
-            self):
-        said, _ = self._said(dz=1.0)
-        assert 'int(1 + h/dz)' in said[0] and 'ramgeo1.5.f:133' in said[0]
-        assert 'between its nodes at 100 m and 101 m' in said[0]
-        assert "uacpy's guidance" in said[0]
-        assert 'Kraken' not in said[0]
-
-    def test_the_aligned_value_is_silent(self):
-        assert self._said(dz=100.0 / 100.25)[0] == []
-
-    @pytest.mark.parametrize('frac', [0.6, 0.75, 0.95])
-    def test_a_seafloor_past_mid_cell_warns(self, frac):
-        """Off the node and still far from the quarter: the placements the
-        on-node rule left silent, measured 3.1-4.6 dB rms."""
-        said, _ = self._said(dz=100.0 / (100.0 + frac))
-        assert len(said) == 1 and f"{frac:.3g} of a cell below" in said[0]
-
-    @pytest.mark.parametrize('frac, warns', [(0.1499, True),
-                                             (0.1501, False),
-                                             (0.3499, False),
-                                             (0.3501, True)])
-    def test_the_tolerance_is_a_tenth_of_a_cell_either_side(self, frac,
-                                                            warns):
-        """frac 0.15 and 0.35 are 0.1 cell above and below the quarter."""
-        from uacpy.models.ram.grid import SEAFLOOR_QUARTER_TOLERANCE
-        assert SEAFLOOR_QUARTER_TOLERANCE == 0.1
-        said, _ = self._said(dz=100.0 / (100.0 + frac))
-        assert bool(said) is warns
-
-    @pytest.mark.parametrize('backend', ['ramgeo', 'mpirams'])
-    def test_every_fluid_backend_warns(self, backend):
-        assert self._said(dz=1.0, backend=backend)[0]
 
 
 class TestRamsurfPutsTheSurfaceOnADepthNode:
@@ -6644,7 +6720,9 @@ class TestNearRangePathsSteeperThanTheBand:
         (message,) = self._notices('sand', 147.0)
         assert 'band reaches 30.0° (angle_max_deg=30°)' in message
         assert 'from 148 m on' in message
-        assert 'Scooter(c_high=1e9)' in message
+        # Scooter's default c_high is already the unbounded one.
+        assert 'run Scooter, whose default c_high integrates from k = 0' \
+            in message
 
     def test_a_receiver_past_the_clear_range_is_silent(self):
         assert self._notices('sand', 147.5) == []
@@ -6711,9 +6789,19 @@ class TestTheSeabedPadHoldsTheContinuousSpectrum:
         # 20 dB over z / sin θ_b at 0.5 dB/λ_b: z <= 40 λ_b sin θ_b.
         assert self._depth(lossy, 20000.0) <= 40.0 * 15.05
 
-    def test_a_vacuum_seabed_has_no_field_below_it(self):
-        assert self._depth(BoundaryProperties(acoustic_type='vacuum'),
-                           20000.0) == 0.0
+    def test_a_vacuum_seabed_never_reaches_the_pad(self):
+        """A vacuum seabed has no medium to leak into. RAM refuses it in
+        stage 2 (``RAM._validate_engine``), before stage 3 sizes the
+        domain, so ``leaky_field_depth`` only ever reads geoacoustic
+        seabeds."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(acoustic_type='vacuum'))
+        with pytest.raises(UnsupportedFeatureError,
+                           match="acoustic_type='vacuum'"):
+            RAM(verbose=False).run_settings(
+                env, Source(depths=30.0, frequencies=100.0),
+                Receiver(depths=[30.0], ranges=[1000.0]))
 
     _SOFT = BoundaryProperties(acoustic_type='half-space', sound_speed=1500.0,
                                density=1e-4, attenuation=0.0)

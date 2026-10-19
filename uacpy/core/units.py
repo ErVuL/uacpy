@@ -6,10 +6,9 @@ arrives with (Beaufort force, sea state), so every layer —
 ``io`` at the file-format boundary, ``visualization`` at the axis-label
 boundary — can reach them without importing a sibling package for arithmetic.
 The io writers and readers import them from here: every writer that emits
-a km-on-disk axis goes through ``m_to_km``, every reader that returns a
-metres-API axis through ``km_to_m``, and phase columns through
-``deg_to_rad`` / ``rad_to_deg``, so the "did I convert?" question stays
-grep-able.
+a km-on-disk axis goes through ``m_to_km`` and every reader that returns a
+metres-API axis through ``km_to_m``, so the "did I convert?" question stays
+grep-able for lengths.
 """
 
 from __future__ import annotations
@@ -111,8 +110,8 @@ def knots_to_ms(x):
 #: is force 7 (mean 30.5 kn). Sea state 0 here is force 0 (0.5 kn, Wenz) where
 #: the WMO table lists 1.5 kn, and sea state 1/2 exists only in Wenz's scale.
 #: So a reader reproducing a curve indexed by Wenz's sea state 6 should ask
-#: for force 7 (30.5 kn), not sea state 6 (37 kn) — worth 1.7 dB in the
-#: ``'knudsen'`` wind model.
+#: for force 7 (30.5 kn), not sea state 6 (37 kn) — worth 1.67 dB in the
+#: default wind term at 1 kHz.
 #:
 #: Sea state 6 appears twice (forces 7 and 8), which is why the inverse
 #: direction below is a one-way map: a sea state names a *band* of winds and
@@ -144,20 +143,28 @@ def beaufort_to_wind_speed(force, *, units="kn"):
 
     Parameters
     ----------
-    force : int
-        Beaufort force, 0-8.
+    force : int or array_like of int
+        Beaufort force, 0-8: one, or an array of them (a record).
     units : {'kn', 'm/s'}
         Unit of the returned speed. Default knots, the unit
         ``wind_speed_kn`` takes.
+
+    Returns
+    -------
+    float or ndarray
+        The speed: a float for one force, an array of ``force``'s shape
+        otherwise.
     """
-    if force not in BEAUFORT_SCALE:
+    forces, values = _table_keys(force)
+    bad = [v for v in values if v not in BEAUFORT_SCALE]
+    if bad:
         raise ConfigurationError(
             f"beaufort_to_wind_speed: force must be one of "
-            f"{sorted(BEAUFORT_SCALE)}; got {force!r}. The table this "
+            f"{sorted(BEAUFORT_SCALE)}; got {bad[0]!r}. The table this "
             f"reads (BEAUFORT_SCALE, Wenz's ranges) stops at force 8 "
             f"(40 knots).")
-    low, high = BEAUFORT_SCALE[force][1]
-    kn = 0.5 * (low + high)
+    kn = np.reshape([0.5 * sum(BEAUFORT_SCALE[v][1]) for v in values],
+                    forces.shape)
     return _in_wind_units(kn, units, "beaufort_to_wind_speed")
 
 
@@ -178,18 +185,31 @@ def sea_state_to_wind_speed(sea_state, *, units="kn"):
 
     Parameters
     ----------
-    sea_state : float
-        A sea state of :data:`BEAUFORT_SCALE`: 0, 0.5 or 1 to 6.
+    sea_state : float or array_like
+        A sea state of :data:`BEAUFORT_SCALE`: 0, 0.5 or 1 to 6; or an
+        array of them.
     units : {'kn', 'm/s'}, optional
         Unit of the returned speed. Default knots.
+
+    Returns
+    -------
+    float or ndarray
+        The speed: a float for one sea state, an array of ``sea_state``'s
+        shape otherwise.
     """
-    matches = [f for f, (ss, _) in BEAUFORT_SCALE.items() if ss == sea_state]
-    if not matches:
-        raise ConfigurationError(
-            f"sea_state_to_wind_speed: sea_state must be one of "
-            f"{sorted({ss for ss, _ in BEAUFORT_SCALE.values()})}; got "
-            f"{sea_state!r}.")
-    return beaufort_to_wind_speed(max(matches), units=units)
+    states, values = _table_keys(sea_state)
+    known = sorted({ss for ss, _ in BEAUFORT_SCALE.values()})
+    forces = []
+    for value in values:
+        matches = [f for f, (ss, _) in BEAUFORT_SCALE.items() if ss == value]
+        if not matches:
+            raise ConfigurationError(
+                f"sea_state_to_wind_speed: sea_state must be one of "
+                f"{known}; got {value!r}.")
+        forces.append(max(matches))
+    forces = np.reshape(forces, states.shape)
+    return beaufort_to_wind_speed(forces if forces.ndim else int(forces),
+                                  units=units)
 
 
 def wind_speed_to_beaufort(speed, *, units="kn"):
@@ -197,44 +217,55 @@ def wind_speed_to_beaufort(speed, *, units="kn"):
 
     The inverse of :func:`beaufort_to_wind_speed` at band resolution: a
     speed above force 8's range returns 8, which is the table's ceiling
-    rather than the scale's.
+    rather than the scale's. An array of speeds (a wind record) gives the
+    force of each.
 
     Parameters
     ----------
-    speed : float
-        One wind speed, >= 0.
+    speed : float or array_like
+        Wind speed(s), >= 0.
     units : {'kn', 'm/s'}, optional
         Unit of ``speed``. Default knots.
+
+    Returns
+    -------
+    int or ndarray of int
+        The force: an int for one speed, an array of ``speed``'s shape
+        otherwise.
     """
     if units not in ("kn", "m/s"):
         raise ConfigurationError(
             f"wind_speed_to_beaufort: units must be 'kn' or 'm/s'; got "
             f"{units!r}.")
-    # One speed, one force. Refused by name rather than left to numpy's
-    # "only 0-dimensional arrays can be converted" from the float() below,
-    # which names neither this function nor the argument.
-    if np.ndim(speed) != 0:
+    kn = np.asarray(speed, dtype=float)
+    if units == "m/s":
+        kn = np.asarray(ms_to_knots(kn), dtype=float)
+    if not np.all(kn >= 0.0):
+        bad = kn[~(kn >= 0.0)].ravel()[0]
         raise ConfigurationError(
-            f"wind_speed_to_beaufort: takes one speed, not an array of "
-            f"{np.shape(speed)}. A force is a band, so mapping many speeds "
-            f"at once hides which ones share a force; call it per speed.")
-    kn = float(speed) if units == "kn" else float(ms_to_knots(speed))
-    if not kn >= 0.0:
-        raise ConfigurationError(
-            f"wind_speed_to_beaufort: wind speed must be >= 0; got {speed!r}.")
+            f"wind_speed_to_beaufort: wind speed must be >= 0; got "
+            f"{float(bad):g}{'' if kn.ndim == 0 else ' in the array'}.")
     edges = [BEAUFORT_SCALE[f][1][1] for f in sorted(BEAUFORT_SCALE)]
-    return int(np.searchsorted(edges, float(kn), side="left"
-                               ).clip(0, max(BEAUFORT_SCALE)))
+    force = np.searchsorted(edges, kn, side="left").clip(
+        0, max(BEAUFORT_SCALE))
+    return int(force) if force.ndim == 0 else force.astype(int)
+
+
+def _table_keys(value):
+    """``(array, values)``: ``value`` as an array, and its entries as plain
+    Python values, the keys :data:`BEAUFORT_SCALE` is looked up with."""
+    array = np.asarray(value)
+    return array, array.ravel().tolist()
 
 
 def _in_wind_units(kn, units, who):
-    """Return a knots value in the requested wind unit."""
-    if units == "kn":
-        return float(kn)
-    if units == "m/s":
-        return float(knots_to_ms(kn))
-    raise ConfigurationError(
-        f"{who}: units must be 'kn' or 'm/s'; got {units!r}.")
+    """Return a knots value (or array) in the requested wind unit: a float
+    for one value, an array otherwise."""
+    if units not in ("kn", "m/s"):
+        raise ConfigurationError(
+            f"{who}: units must be 'kn' or 'm/s'; got {units!r}.")
+    out = np.asarray(kn if units == "kn" else knots_to_ms(kn), dtype=float)
+    return float(out) if out.ndim == 0 else out
 
 
 __all__ = ["km_to_m", "m_to_km", "deg_to_rad", "rad_to_deg",

@@ -5,8 +5,8 @@
 run-mode / run-kwarg resolution, broadband and time-series grid derivation,
 work-dir setup and logging, input validation, the ``compute_*`` convenience
 wrappers, executable lookup and subprocess launch, environment projection,
-output-path and ``.prt`` bookkeeping, result stamping, depth policy,
-``__repr__``.
+output-path bookkeeping, result stamping, depth policy, ``__repr__`` (a
+binary's ``.prt`` is read by :mod:`uacpy.models._launch`).
 
 The module-level code these read lives beside this module, one concern per
 module: the collapse policy and the roughness helpers
@@ -63,8 +63,8 @@ from uacpy.core.run_settings import (
 )
 from uacpy.models._registry import engines_running
 from uacpy.models._band import (
-    BandResolution, check_run_frequencies, frequencies_text, resolve_band,
-    time_settings,
+    BandResolution, check_run_frequencies, frequencies_text,
+    refuse_a_record_shorter_than_the_pulse, resolve_band, time_settings,
 )
 from uacpy.models._checks import (
     check_carrier_types, check_run_signature, check_source_depths,
@@ -88,10 +88,11 @@ from uacpy.models._launch import (
 from uacpy.models._notices import (
     _INSIDE_RUN, _WARNED_MODEL_PROVENANCE, _warn_if_volume_absorption_is_missing,
 )
-from uacpy.models._projection import environment_projection
+from uacpy.models._projection import (absent_feature_notices,
+                                      environment_projection)
 from uacpy.models._spec import _CAPABILITY_FLAGS, EngineTraits, ModelSpec
 from uacpy.models._stacking import (
-    _slabs_of, refuse_a_one_depth_weight_on_dB, run_depth_loop,
+    _slabs_of, refuse_a_weight_the_output_cannot_take, run_depth_loop,
 )
 from uacpy.models._workspace import (
     FileManager, ScratchPolicy, _effective_work_dir, scratch_subdir,
@@ -114,7 +115,7 @@ from uacpy.models._host import check_host_parameters, set_host_options
 #: s — how long one engine launch may run before it is stopped; every
 #: engine's ``timeout`` default. uacpy guidance: a wall-clock guard on the
 #: host, not a numerical setting — no engine reads a time limit.
-DEFAULT_RUN_TIMEOUT_S = 600.0
+DEFAULT_RUN_TIMEOUT = 600.0
 
 #: The traits of a class that declares no spec.
 _DEFAULT_TRAITS = EngineTraits()
@@ -148,7 +149,7 @@ _ENGINE_HOOKS = (
     '_source_below_domain_note', '_receiver_grid_is_paired',
     '_validate_engine',
     # stage 3: the settings
-    '_broadband_band_knobs', '_requested_frequencies',
+    '_requested_frequencies',
     '_resolve_engine_settings', '_announce_engine_settings',
     '_marched_frequencies',
     # stages 4-5: the launches and the result
@@ -293,10 +294,12 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         directories it created. ``cleanup=False`` with an unpinned
         ``work_dir`` keeps the temp directory (and the ``*_file`` metadata
         paths that point into it); the caller then owns its removal.
-    timeout : float, optional
-        Wall-clock limit (s) on each binary launch; a run that exceeds it is
-        killed and raises :class:`ModelExecutionError` with ``timed_out``
-        set. Default 600.0.
+    timeout : float or None, optional
+        Wall-clock limit (s) on each binary launch, a positive finite
+        number, or ``None`` for no limit (``subprocess``'s own; anything
+        else is refused at construction); a run that exceeds it is killed
+        and raises :class:`ModelExecutionError` with ``timed_out`` set.
+        Default 600.0 (uacpy guidance).
     collapse : dict, optional
         Per-feature policies applied when an environment carries a feature
         this model does not read (``'bathymetry'``, ``'ssp'``,
@@ -304,6 +307,9 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         ``'surface'``, ``'elastic'``); any subset overrides
         ``DEFAULT_COLLAPSE``, and the resolved policy is what
         ``_project_environment`` applies. See :meth:`_project_environment`.
+        A key that reduces nothing in a run (the model reads the feature
+        natively, or the environment does not have it) gets a
+        ``FallbackWarning``.
 
     Attributes
     ----------
@@ -448,7 +454,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         self.model_name = self.__class__.__name__
@@ -736,7 +742,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         the source waveform internally so the auto-derived broadband
         grid is tight enough (``Δf = 1/output_duration``), Bellhop
         takes it as its arrival reception's record length, and SPARC
-        takes it as ``time_max`` when ``time_max`` is unpinned. Models
+        takes it as the end of its own record, ``time_max``. Models
         with a broadband path consume ``frequencies`` as an explicit
         override for ``source.frequencies``. No other kwargs are accepted —
         passing one raises :class:`TypeError`.
@@ -962,7 +968,15 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         the TIME_SERIES keywords (:meth:`_check_time_series_keywords`), then
         the projection of the environment and the carriers checked against
         it, both handed ``request=call``. Returns ``call`` carrying the
-        projected environment."""
+        projected environment. A ``collapse=`` key whose feature the
+        caller's ``env`` does not carry gets a ``FallbackWarning`` first
+        (:func:`~uacpy.models._projection.absent_feature_notices`): it
+        reduces nothing."""
+        for message in absent_feature_notices(
+                env, model_name=self.model_name,
+                user_collapse=self._user_collapse):
+            warnings.warn(message, FallbackWarning,
+                          skip_file_prefixes=USER_FRAME_SKIP)
         env = self._normalise_env(env, call.mode)
         self._check_time_series_keywords(call)
         projected = self._project_environment(env, request=call)
@@ -973,7 +987,9 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
     def _normalise_env(self, env, mode):
         """Engine hook, stage 1: the environment ``mode`` reads, before the
         shared projection. The base returns ``env``; Kraken's MODES reduces a
-        range-dependent environment to its r = 0 profile."""
+        range-dependent environment to one profile by the collapse policy
+        (``kraken._checks.modes_single_profile``; by default the deepest
+        bathymetry, the median seabed, the SSP and surface at r = 0)."""
         return env
 
     def _check_time_series_keywords(self, call: _RunCall) -> None:
@@ -1243,8 +1259,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             waveguide=WaveguideSpeeds(*speed_bounds(call.env)),
             output=self.outputs.get(mode),
         )
-        refuse_a_one_depth_weight_on_dB(source, settings,
-                                        model_name=self.model_name)
+        refuse_a_weight_the_output_cannot_take(source, settings,
+                                               model_name=self.model_name)
         engine = self._resolve_engine_settings(
             call.env, source, receiver, settings, given_env=env,
             request=call)
@@ -1271,8 +1287,17 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
                 f"and this mode returns none. Run a TL, BROADBAND or "
                 f"TIME_SERIES mode for a weighted field.",
                 FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-        return settings._replace(
+        settings = settings._replace(
             frequencies=self._marched_frequencies(settings))
+        # The IFFT synthesis of a TIME_SERIES trace reads the pulse and the
+        # marched grid, both fixed now, so its record-length refusal is
+        # raised before anything launches (an engine whose trace is its own
+        # — Bellhop's delay-and-sum, SPARC's march — synthesises nothing).
+        if (self._traits.time_series_ignores_frequencies is None
+                and self._traits.pads_pulse_to_output_duration):
+            refuse_a_record_shorter_than_the_pulse(
+                settings, model_name=self.model_name)
+        return settings
 
     @classmethod
     def from_run_settings(cls, run_settings) -> 'PropagationModel':
@@ -1309,7 +1334,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         - Kraken's ``c_high`` under ``leaky_modes``: the unbounded upper
           speed ``leaky_modes`` itself sets;
         - SPARC's ``n_mesh``: by default one count per medium, derived from
-          the call's environment, which one pinned count cannot rebuild;
+          the call's environment and band top, which a pin would hold to
+          the recorded environment's media;
         - OASS / OASSP's ``spectral_exponent``: by default OASES' own 2.5,
           which as a pin under the Gaussian spectrum would draw the notice
           that the run does not use it.
@@ -1363,6 +1389,15 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
     #: settings' ``backend``) — and so are not recorded in the settings.
     _HOST_KNOBS = frozenset({'use_tmpfs', 'verbose', 'work_dir', 'cleanup',
                              'timeout', 'executable', 'field_executable'})
+
+    def _caller_set(self, name) -> bool:
+        """Whether the caller set knob ``name``: given, and not a value a
+        model rebuilt from a run's record took from what that run derived
+        (``models/_replay.py``, ``_pinned_from_record``). A notice about
+        the caller's choice reads this, so a re-run says what the recorded
+        run said."""
+        return (getattr(self, name) is not None
+                and name not in getattr(self, '_pinned_from_record', ()))
 
     def _given_knobs(self) -> Dict[str, Any]:
         """Every constructor knob of this model by name, as given (``None``
@@ -1420,8 +1455,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         """Engine hook, stage 3: the frequency grid (Hz) the call asks for
         and the notice that states it, as a
         :class:`~uacpy.models._band.BandResolution` — by the base rules
-        (:func:`~uacpy.models._band.resolve_band`, with this model's band
-        knobs, :meth:`_broadband_band_knobs`), resolved once. ``frequencies``
+        (:func:`~uacpy.models._band.resolve_band`), resolved once. ``frequencies``
         is the call's keyword as the band rules read it
         (:meth:`_call_frequencies`). Stage 3 gives the notice on the modes the
         engine announces (``spec.traits.announced_band_modes``), resolves the
@@ -1429,11 +1463,9 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         records the grid the engine propagates. A TIME_SERIES grid's notice
         names the solves of a large grid for the engines that solve each of
         its bins, not for one whose TIME_SERIES ignores ``frequencies=``."""
-        n_frequencies, bandwidth_factor = self._broadband_band_knobs()
         return resolve_band(
             mode, source, frequencies, time,
-            model_name=self.model_name, n_frequencies=n_frequencies,
-            bandwidth_factor=bandwidth_factor,
+            model_name=self.model_name,
             solves_each_bin=(
                 self._traits.time_series_ignores_frequencies is None))
 
@@ -1589,8 +1621,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
 
     def _default_run_mode(self) -> RunMode:
         """The mode ``run(run_mode=None)`` resolves to: the first declared
-        mode. Kraken overrides it, because its list opens with ``MODES``
-        while its ``run`` defaults to a TL mode."""
+        mode (``spec.modes``)."""
         return self._supported_modes[0]
 
     def _default_run_mode_for(self, frequencies) -> RunMode:
@@ -1606,14 +1637,6 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         return (mode in self._FIELD_MODES
                 or mode in self._traits.native_multi_depth_modes
                 or mode in self._traits.python_stacked_modes)
-
-    def _broadband_band_knobs(self):
-        """``(n_frequencies, bandwidth_factor)`` a single BROADBAND carrier
-        expands with; ``None`` takes the package default
-        (:data:`~uacpy.models._defaults.DEFAULT_BROADBAND_N_FREQUENCIES`,
-        :data:`~uacpy.models._defaults.DEFAULT_BROADBAND_BANDWIDTH_FACTOR`).
-        A model with constructor knobs for the band returns them."""
-        return None, None
 
     def scratch_policy(self) -> ScratchPolicy:
         """Where this model's runs put their scratch files and what happens
@@ -1735,15 +1758,13 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
-        run_mode: Optional['RunMode'] = None,
+        run_mode: 'RunMode',
     ) -> None:
-        """Check the source/receiver geometry against what the model resolves.
-
-        Split out of :meth:`validate_inputs` so a model that reads no
-        geometry at all can opt out wholesale. The source's angular geometry
-        (its beam pattern) belongs here for that reason: a reflection-only
-        engine never launches a ray fan, so rejecting a pattern it simply
-        ignores would break reusing one ``Source`` across models.
+        """Check the source/receiver geometry against what the model resolves
+        for the resolved ``run_mode``
+        (:func:`~uacpy.models._checks.validate_geometry`). A REFLECTION run
+        reads no geometry and checks none, so one ``Source`` — its depths
+        and its beam pattern included — can be reused across models.
         """
         validate_geometry(self, env, source, receiver, run_mode)
 
@@ -1826,20 +1847,16 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         # is importable by then), so a new engine joins the advice without
         # an edit here.
         self._require_mode(RunMode.COHERENT_TL, "pressure field computation")
-        if run_mode is None:
-            run_mode = RunMode.COHERENT_TL
         tl_modes = (
             RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
         )
-        # ``run()`` accepts a RunMode value string (``'coherent_tl'``), so
-        # the membership test runs on the coerced enum.
-        if isinstance(run_mode, str):
-            try:
-                run_mode = RunMode(run_mode)
-            except ValueError:
-                pass
+        # ``run()``'s one reading of the argument (a RunMode, its value
+        # string, or None for COHERENT_TL), then the TL-only membership
+        # compute_field adds.
+        run_mode = self._resolve_run_mode(run_mode,
+                                          default=RunMode.COHERENT_TL)
         if run_mode not in tl_modes:
-            got = run_mode.name if isinstance(run_mode, RunMode) else repr(run_mode)
+            got = run_mode.name
             raise ConfigurationError(
                 f"compute_field() got run_mode={got}; only COHERENT_TL / "
                 f"INCOHERENT_TL / SEMICOHERENT_TL (or their value strings "
@@ -1972,23 +1989,22 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         """
         self._require_mode(RunMode.MODES, "normal mode computation")
 
-        # The carriers are typed before ``source`` is copied below; every
+        # The carriers are typed first; every
         # source depth is then checked in stage 2 (``_validate_geometry``)
         # before the solve, as run() checks it (the modes are solved once
         # for the whole Source; Kraken tabulates them at every depth).
         check_carrier_types(self.model_name, env, source, None,
                             allow_none_receiver=True)
-        # A unit copy of the source: MODES applies no weight, and the
-        # caller's weights would only be announced as unused.
-        unit = dataclasses.replace(source, weights=None)
-        # The env is passed through as-is: the run projects it exactly once
-        # (Kraken's MODES path reduces a range-dependent env to its r=0
-        # profile and then projects).
+        # The caller's source as given: MODES applies no weight, and a
+        # weighted source gets the notice run() gives for it. The env is
+        # passed through as-is: the run projects it exactly once (Kraken's
+        # MODES path reduces a range-dependent env to one profile by the
+        # collapse policy and then projects).
         call = self._check_call(
-            env, unit, None, RunMode.MODES, frequencies=None,
+            env, source, None, RunMode.MODES, frequencies=None,
             source_waveform=None, sample_rate=None, output_duration=None,
             t_start=None)
-        return self._run_call(env, unit, None, call)
+        return self._run_call(env, source, None, call)
 
     def compute_eigenrays(
         self,
@@ -2076,8 +2092,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         the broadband synthesizers (Bellhop / RAM / Scooter / Kraken /
         OASP) — e.g. the length of an animation. SPARC marches
         ``source_waveform`` when its ``pulse_type`` is unpinned (its own
-        pulse otherwise) and takes ``output_duration`` as ``time_max`` when
-        ``time_max`` is unpinned; it cannot place ``t_start``. Every other
+        pulse otherwise) and takes ``output_duration`` as the end of its
+        own record, ``time_max``; it cannot place ``t_start``. Every other
         TIME_SERIES model requires the waveform/rate.
 
         ``sample_rate`` is the rate of ``source_waveform`` (Hz) and of the
@@ -2351,7 +2367,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         return environment_projection(
             env, model_name=self.model_name,
             supported=frozenset(self.supported_features),
-            collapse=self._collapse)
+            collapse=self._collapse, user_collapse=self._user_collapse)
 
     def _max_receiver_depth(self, env: 'Environment') -> float:
         """Deepest receiver depth this model can resolve the field at: the

@@ -15,10 +15,10 @@ from uacpy.core.absorption import Absorption, AbsorptionCoefficient
 from uacpy.core.environment import Environment
 from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.visualization.style import (
-    BOTTOM_FILL_STYLE, BOTTOM_CMAP, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
-    hatched_fill,
+    BOTTOM_FILL_STYLE, BOTTOM_CMAP, BOTTOM_HALFSPACE_COLOR, BOTTOM_LINE_STYLE,
+    BOTTOM_LINE_STYLE_FLAT, SURFACE_LINE_COLOR, hatched_fill,
 )
-from uacpy.visualization.plots._common import _plot_warn, ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, _fill_margins, fig_ax, typed_plot_error, invert_yaxis_once, _title_or, _grid_figure
+from uacpy.visualization.plots._common import _plot_warn, ZORDER_SEDIMENT, _colorbar_extend, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, _fill_margins, fig_ax, typed_plot_error, invert_yaxis_once, _title_or, _grid_figure
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core.units import km_to_m, m_to_km
 
@@ -26,11 +26,14 @@ from uacpy.core.units import km_to_m, m_to_km
 # A single half-space is shaded by sound speed on a fixed (absolute) scale so
 # different half-spaces read differently, while the '///' hatch still flags the
 # region as the semi-infinite half-space (vs the solid-filled finite layers).
-# The scale spans realistic *surficial* seabeds (clay ≈1450 → coarse/cemented
-# ≈2300 m/s) so ordinary sediments spread across the ramp instead of clustering
-# at the soft end; harder bottoms (rock basements) simply saturate at the dark
-# end. The right-margin 'Bottom cp' colorbar spans exactly this scale, so the
-# fill reads back to a cp value.
+# The scale is a display choice (uacpy guidance) that spreads the
+# unconsolidated sediments of Jensen et al., Computational Ocean Acoustics,
+# Table 1.3 (clay 1500 → moraine 1950 m/s) across the ramp instead of
+# clustering them at the soft end. The right-margin 'Bottom cp' colorbar spans
+# exactly this scale, so the fill reads back to a cp value; a speed off the
+# scale (the same table's chalk 2400, limestone 3000, basalt 5250 m/s, or a
+# seabed slower than 1450 m/s) takes the end colour, and the bar ends in an
+# arrow on that side.
 _HALFSPACE_CP_LO, _HALFSPACE_CP_HI = 1450.0, 2300.0
 
 # The sound-speed colourbar labels, on two lines: the stacked water/seabed
@@ -348,18 +351,22 @@ def plot_environment(
     * layered column — coloured per-layer fills (earthy ground
       colormap) + hatched half-space.
     * range-dependent half-space — Voronoi-tiled solid-colour bands
-      under the seafloor, one per range node.
+      under the seafloor, one per range node, each switching midway between
+      two nodes; a dot on the seafloor and a grey dashed vertical line mark
+      each node itself.
     * range-dependent layered — one column per profile, each column
-      drawing the layer stack at that range.
+      drawing the layer stack at that range, a dashed line between columns.
 
     Everything is coloured by ``sound_speed`` (water ``c``, seabed ``cp``); for
     the seabed's other geoacoustic properties (cs, ρ, αp, αs) use
     :func:`plot_bottom_properties`.
 
-    Two colorbars: ``Water c`` (Blues) on the profile's own speed range, and
-    ``Bottom cp`` (earthy brown) on the seabed's own cp range for a layered or
-    range-dependent bottom, or on the fixed 1450–2300 m/s surficial-sediment
-    scale for a single half-space — so neither is washed out by the other.
+    Two colorbars, so neither is washed out by the other: ``Water c`` (Blues)
+    on the profile's own speed range, and ``Bottom cp`` (earthy brown) on the
+    seabed's own cp range for a layered or range-dependent bottom, or on a
+    fixed 1450–2300 m/s display scale for a single half-space, so different
+    half-spaces read differently. A half-space faster or slower than that
+    scale takes its end colour and the bar ends in an arrow on that side.
 
     Pass ``ax=`` to draw into an existing axis (for composite figures); returns
     ``(fig, ax)``. The two colorbars are insets just right of the panel and
@@ -370,10 +377,11 @@ def plot_environment(
     ``show_bottom_colorbar=False`` drops the second (bottom cp) colorbar —
     useful in narrow/composite panels.
 
-    ``show_data_credit`` adds a licence-required data-source credit footnote (for a
-    standalone figure, ``ax=None``): ``True`` (default) uses ``env.data_sources``
-    (nothing shown if the env carries none); ``None`` / ``False`` hides it; or
-    pass an ``Environment`` / ``Result`` / list of ``DataSource`` / strings.
+    ``show_data_credit`` adds a licence-required data-source credit to the
+    footnote of the figure the environment is drawn in (its own, or the one
+    ``ax`` belongs to): ``True`` (default) uses ``env.data_sources`` (nothing
+    shown if the env carries none); ``None`` / ``False`` hides it; or pass an
+    ``Environment`` / ``Result`` / list of ``DataSource`` / strings.
 
     ``sea_ice`` overlays a (symbolic, not-to-scale) ice cover at the surface — a
     concentration 0–1 (uniform), or the ``AlongTrack``
@@ -398,7 +406,7 @@ def plot_environment(
     show_bottom_colorbar : bool, optional
         Draw the seabed ``cp`` colorbar. Default True.
     show_data_credit : bool, Environment, Result or sequence, optional
-        The data-source credit footnote of a standalone figure (see above).
+        The data-source credit of the figure's footnote (see above).
     sea_ice : float or AlongTrack, optional
         Ice cover drawn at the surface (see above).
     title : str, optional
@@ -596,8 +604,11 @@ def plot_environment(
         bottom_cax = ax_bathy.inset_axes([1.04, 0.01, 0.03, 0.45])
         cbar_water = fig.colorbar(water_sm, cax=water_cax,
                                   label=WATER_C_LABEL)
-        cbar_bottom = fig.colorbar(bottom_sm, cax=bottom_cax,
-                                   label=BOTTOM_CP_LABEL)
+        # A speed past the bar's scale (a single half-space's fixed scale)
+        # takes the end colour, so the bar says it with an arrow.
+        cbar_bottom = fig.colorbar(
+            bottom_sm, cax=bottom_cax, label=BOTTOM_CP_LABEL,
+            extend=_colorbar_extend(bottom_cs_pool, (bot_cs_min, bot_cs_max)))
         for cb in (cbar_water, cbar_bottom):
             cb.ax.tick_params(labelsize='x-small')
             # Relative like the ticks beside it: an absolute 7 pt here left the
@@ -657,10 +668,12 @@ def plot_environment(
                        else f"{name} — seabed: {_bottom_kind(bottom)}",
                        fontweight='bold', fontsize='large')
 
+    _draw_credit(fig, _credit_attributions(show_data_credit, carrier=env),
+                 reserve=ax is not None)
     if ax is None:
-        credit = _credit_attributions(show_data_credit, carrier=env)
-        fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
-        _draw_credit(fig, credit, reserve=False)
+        # The credit is the figure's supxlabel, which tight_layout lays out
+        # with the panels.
+        fig.tight_layout()
     return fig, ax_bathy
 
 
@@ -733,6 +746,10 @@ def plot_ssp(env_or_ssp, ax=None, *, depths=None, ranges=None,
     the default (``None``) draws one exactly when some artist on the axis
     carries a label. Remaining ``line_kwargs`` (``linestyle``, ``alpha``, ``zorder`` ...)
     are forwarded to ``ax.plot``.
+
+    The profile's data sources (``ssp.data_sources``, a fetched profile's
+    dataset) are credited in the footnote of the figure it is drawn in, as
+    :func:`plot_environment` credits an environment's.
 
     Parameters
     ----------
@@ -807,6 +824,7 @@ def plot_ssp(env_or_ssp, ax=None, *, depths=None, ranges=None,
     if show_legend or (show_legend is None
                         and ax.get_legend_handles_labels()[1]):
         ax.legend()
+    _draw_credit(fig, _credit_attributions(True, carrier=ssp))
     return fig, ax
 
 
@@ -913,8 +931,9 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
     ``'shear_attenuation'``) or its symbol (``'cp'``, ``'cs'``, ``'ρ'``,
     ``'αp'``, ``'αs'``); any other name is refused with the list. ``title=``
     overrides the figure title. ``fig=`` draws the panels into an existing
-    ``Figure`` or ``SubFigure`` (a panel of a larger figure) whose size,
-    layout and credit line are then the caller's. Returns ``(fig, axes)``.
+    ``Figure`` or ``SubFigure`` (a panel of a larger figure) whose size and
+    layout are then the caller's; the data credit joins that figure's
+    footnote. Returns ``(fig, axes)``.
 
     Parameters
     ----------
@@ -924,7 +943,8 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
         Panels to draw, by attribute or symbol (see above); ``None`` is every
         property present.
     title : str, optional
-        Figure title; none is drawn when unset.
+        Figure title. ``None`` draws the default caption ("Seabed properties
+        — <seabed shape>"); ``''`` draws none.
     figsize : tuple, optional
         Size (inches) of the new figure; ``None`` sizes it from the panel
         grid.
@@ -932,7 +952,8 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
         Samples of each heatmap along range and depth (plus the samples
         each thin layer adds, see above). Default 240 and 200.
     show_data_credit : bool, Environment, Result or sequence, optional
-        The data-source credit footnote of a standalone figure (see above).
+        The data-source credit of the figure's footnote, as on
+        :func:`plot_environment`.
     fig : Figure or SubFigure, optional
         Draw the panels into this (see above).
     """
@@ -1014,10 +1035,9 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
     nrows = int(np.ceil(n / ncols))
     # Shared range/depth axes (every panel is the same cross-section) so only
     # the edge axes carry labels — far less clutter than per-panel labels.
-    fig, axes, owns_fig = _grid_figure(
+    fig, axes, _ = _grid_figure(
         fig, nrows, ncols, figsize, (4.4 * ncols, 3.1 * nrows + 0.4),
-        who='plot_bottom_properties', sharex=True, sharey=True,
-        **({} if fig is not None else {'constrained_layout': True}))
+        who='plot_bottom_properties', sharex=True, sharey=True)
     axes_flat = axes.ravel()
 
     for idx, (ax_p, (prop, sym, unit, cmap, grid)) in enumerate(
@@ -1048,9 +1068,7 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
     fig.suptitle(title if title is not None
                  else f"Seabed properties — {_bottom_kind(bottom)}",
                  fontweight='bold', fontsize='large')
-    if owns_fig:
-        _draw_credit(fig, _credit_attributions(show_data_credit, carrier=env),
-                     reserve=False)
+    _draw_credit(fig, _credit_attributions(show_data_credit, carrier=env))
     return fig, axes
 
 
@@ -1112,7 +1130,9 @@ def plot_absorption(coefficient, ax=None, *, frequencies=None, depths=None,
     ``FrancoisGarrison(...)``, …) is refused — evaluate it first,
     ``law.table(f, depths).plot()`` or ``plot_absorption(law.table(f))``.
     Choosing a formula, and the ocean Francois-Garrison is evaluated in, is
-    the caller's job; the carrier records that ocean in ``parameters``.
+    the caller's job; the carrier records that ocean in ``parameters``, and
+    where a fetched ocean came from in ``data_sources``, which are credited
+    in the footnote of the figure it is drawn in.
 
     Call repeatedly with ``ax=`` to overlay several models.
 
@@ -1180,6 +1200,7 @@ def plot_absorption(coefficient, ax=None, *, frequencies=None, depths=None,
             ax.legend(fontsize='small')
     ax.set_xlabel("Frequency (Hz)")
     ax.set_title(_title_or(title, "Volume absorption"))
+    _draw_credit(fig, _credit_attributions(True, carrier=coefficient))
     return fig, ax
 
 
@@ -1197,7 +1218,9 @@ def plot_range_profile(profile, ax=None, *, title=None, figsize=(10, 4),
     The carrier declares what it holds: ``_values``, ``_VALUE_LABEL`` /
     ``_VALUE_UNIT`` for the axis label, and ``_AXIS_DOWN`` for the
     orientation. A new range-profile carrier is drawn correctly without
-    touching this function.
+    touching this function. Its data sources (``profile.data_sources``, a
+    fetched profile's dataset) are credited in the footnote of the figure it
+    is drawn in.
 
     Parameters
     ----------
@@ -1224,7 +1247,8 @@ def plot_range_profile(profile, ax=None, *, title=None, figsize=(10, 4),
     label = f"{profile._VALUE_LABEL.capitalize()} ({profile._VALUE_UNIT})"
     fig, ax = fig_ax(ax, figsize)
     r_km = m_to_km(np.asarray(profile.ranges, dtype=float))
-    style = {'color': 'saddlebrown' if axis_down else 'steelblue',
+    style = {'color': BOTTOM_HALFSPACE_COLOR if axis_down
+             else SURFACE_LINE_COLOR,
              'linewidth': 1.6}
     style.update(mpl_kw)
     if r_km.size == 1:
@@ -1239,4 +1263,5 @@ def plot_range_profile(profile, ax=None, *, title=None, figsize=(10, 4),
     ax.set_title(title if title is not None
                  else f"{type(profile).__name__} profile",
                  fontweight='bold', fontsize='large')
+    _draw_credit(fig, _credit_attributions(True, carrier=profile))
     return fig, ax

@@ -26,10 +26,11 @@ __all__ = ['FieldsRepr', 'SettingsRepr', 'SHOWN_VALUES', 'knob', 'settings_repr'
 #: and an extent.
 SHOWN_VALUES = 4
 
-#: The unit a field name's suffix states, for a record that declares none.
-_SUFFIX_UNITS = (('_dB', 'dB'), ('_hz', 'Hz'), ('_Hz', 'Hz'),
-                 ('_km', 'km'), ('_m', 'm'), ('_s', 's'), ('_c', '°C'),
-                 ('_psu', 'psu'), ('_deg', '°'), ('_dbar', 'dbar'))
+#: The unit a field name's suffix states, for a record that declares none:
+#: the non-SI suffixes a public name carries (an SI unit goes unsaid,
+#: DOCUMENTATION §15, so no other suffix names one).
+_SUFFIX_UNITS = (('_dB', 'dB'), ('_km', 'km'), ('_deg', '°'),
+                 ('_dbar', 'dbar'), ('_kn', 'kn'))
 
 
 #: The unit of a field whose name is one of the package's axis names (or a
@@ -104,24 +105,40 @@ def axis(values, plural: str, unit: str = '',
         return f"{singular or _singular(plural)} {num(arr[0])}{tail}"
     if arr.size <= SHOWN_VALUES:
         return f"{plural} [{', '.join(num(v) for v in arr)}]{tail}"
-    return f"{arr.size} {plural} {extent(arr)}{tail}"
+    return f"{arr.size} {plural} {extent(arr, unit)}"
 
 
 def extent(values, unit: str = '') -> str:
-    """``'1500 m/s'`` for one value, else ``'1495–1520 m/s'``."""
+    """``'1500 m/s'`` for one value, else ``'1495–1520 m/s'``. NaN entries
+    (a no-data marker) are left out of the span and counted after it
+    (``'73.5–111 dB, 2 NaN'``); an all-NaN array is ``'nan'``."""
     arr = np.asarray(values).real
-    lo, hi = np.min(arr), np.max(arr)
-    span = num(lo) if lo == hi else f"{num(lo)}–{num(hi)}"
-    return f"{span} {unit}" if unit else span
+    nan = (np.isnan(arr) if arr.dtype.kind == 'f'
+           else np.zeros(arr.shape, dtype=bool))
+    n_nan = int(np.count_nonzero(nan))
+    if n_nan == arr.size:
+        span = num(np.nan)
+    else:
+        lo, hi = np.min(arr[~nan]), np.max(arr[~nan])
+        span = num(lo) if lo == hi else f"{num(lo)}–{num(hi)}"
+    text = f"{span} {unit}" if unit else span
+    return f"{text}, {n_nan} NaN" if 0 < n_nan < arr.size else text
 
 
 def array_bit(name: str, value, unit: str = '') -> str:
     """A data array: a 1-D real one by its count and extent (or values,
-    when few), any other by its shape (``'power 129×63 Pa²/Hz'``)."""
+    when few), any other by its shape (``'power 129×63 Pa²/Hz'``). A
+    longer 1-D integer array holding only 0 and 1 is a bit vector, whose
+    extent says nothing: it is its count of bits (``'app_data 34 bits'``,
+    ``'64 bits'`` for a field named ``bits``)."""
     arr = np.asarray(value)
     tail = f" {unit}" if unit else ''
     if arr.ndim == 0:
         return f"{name}={qty(arr.item(), unit)}"
+    if (arr.ndim == 1 and arr.dtype.kind in 'iu' and arr.size > SHOWN_VALUES
+            and np.all((arr == 0) | (arr == 1))):
+        return f"{arr.size} bits" if name == 'bits' else (
+            f"{name} {arr.size} bits")
     if arr.ndim == 1 and arr.dtype.kind in 'biuf':
         return axis(arr, name, unit, singular=name)
     kind = ' complex' if arr.dtype.kind == 'c' else ''

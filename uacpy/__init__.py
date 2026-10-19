@@ -28,7 +28,6 @@ engine declaration a model author writes, ``ModelSpec``, is in
 """
 
 import importlib as _importlib
-from importlib.util import find_spec as _find_spec
 from typing import TYPE_CHECKING as _TYPE_CHECKING
 
 from uacpy._version import __version__
@@ -52,7 +51,7 @@ _LAZY_SUBMODULES = {
     'data': 'uacpy.data',
     'parallel': 'uacpy.parallel',
     # The user-helper physics and the comparison metrics, as root modules
-    # over uacpy.core.acoustics / uacpy.core.metrics.
+    # over uacpy.core.acoustics / uacpy.core.results.metrics.
     'acoustics': 'uacpy.acoustics',
     'metrics': 'uacpy.metrics',
     # The seabed catalogue and the knot, Beaufort and sea-state conversions,
@@ -71,10 +70,9 @@ _MODEL_NAMES = (tuple(entry.class_name for entry in _ENGINES.values())
                 + ('OASES', 'PropagationModel', 'RunMode'))
 
 _LAZY_ATTRS = {
-    # Every core name that is not a submodule, read through uacpy.core, so
-    # importing a layer below the result types does not load them.
-    **{name: ('uacpy.core', name) for name in _core.__all__
-       if _find_spec(f'uacpy.core.{name}') is None},
+    # Every core name, read through uacpy.core, so importing a layer below
+    # the result types does not load them.
+    **{name: ('uacpy.core', name) for name in _core.__all__},
     **{name: ('uacpy.models', name) for name in _MODEL_NAMES},
     # parallel execution
     'run_parallel': ('uacpy.parallel', 'run_parallel'),
@@ -100,14 +98,14 @@ if _TYPE_CHECKING:
         Absorption, AbsorptionCoefficient, Altimetry, Arrivals, Bathymetry,
         Biological, BiologicalLayer, Bottom, BoundaryProperties, BoundaryType,
         ConfigurationError, ConstantAbsorption, Covariance, DataFetchError,
-        DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3, Environment,
+        DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY, Environment,
         ExecutableNotFoundError, Field, FileFormatError, FrancoisGarrison,
         GreensFunction, InvalidDepthError, MATERIALS, MediaTable,
         MissingFileError, ModelExecutionError, Modes, OutputContractError,
         PhaseReference,
         Rays, Receiver,
-        REFERENCE_DEPTH_M, REFERENCE_PH, REFERENCE_SALINITY_PSU,
-        REFERENCE_TEMPERATURE_C, ReflectionCoefficient, Replicas, Result,
+        REFERENCE_DEPTH, REFERENCE_PH, REFERENCE_SALINITY,
+        REFERENCE_TEMPERATURE, ReflectionCoefficient, Replicas, Result,
         ResultStack, SeabedColumn, SedimentLayer, SoundSpeedProfile,
         SoundSpeeds, Source,
         Surface, Thorp, UACPYError, UACPYWarning, NumericsWarning,

@@ -339,12 +339,13 @@ modal sum gives for free where a ray fan has to be converged into it. **The
 sonar equation does not notice the change**: swap the model and the same
 `passive_signal_excess_field` call takes its output.
 
-**Left:** the FOM as a horizontal line on a TL plot. TL climbs from 37 dB at
-the first sampled range through the 57.6 dB FOM at 3.01 km. Everything to the
-left of the crossing is detectable; everything to the right is not. That picture is the
-entire passive budget, and it is why `figure_of_merit` is worth having as its
-own call — one number, comparable across sonars, that you can cross with any
-model's TL.
+**Left:** the cut's own view, `cut.plot()`: the signal excess `SE = FOM − TL`
+at 60 m, with the SE = 0 dB line and the detected ranges shaded. SE falls from
+20.5 dB at the first sampled range (TL 37 dB under the 57.6 dB FOM) through
+0 dB at 3.01 km. Everything shaded is detectable; everything beyond is not.
+That crossing is the entire passive budget, and it is why `figure_of_merit` is
+worth having as its own call — one number, comparable across sonars, that you
+can cross with any model's TL.
 
 **Right:** the same crossing repeated at every receiver depth.
 `detection_ranges_field` on the 2-D field finds the crossing of each depth row.
@@ -363,6 +364,11 @@ receiver, killed by the pressure-release surface, and there is a second bad band
 near 74 m. A 9× swing in detection range across the water column, from one
 environment and one budget: that is the argument for computing a field instead
 of quoting a radius.
+
+`cut.plot()` draws that curve: the signal excess against range, the SE = 0 dB
+line, and the ranges where SE ≥ 0 shaded, one region per `detection_annuli`
+interval, as Etter (*Underwater Acoustic Modeling and Simulation*, Fig. 11.10)
+marks detection ranges.
 
 `detection_ranges` reports the outermost crossing by default; in deep water,
 where a convergence zone gives + / − / + along range, `crossing='first'` gives
@@ -1135,6 +1141,10 @@ surface** is the localisation estimate.
 | `bartlett(covariance, replicas)` | `P_B = eᴴKe / (eᴴe · tr K)` (`K` = `covariance`), in `[0, 1]`, as an ambiguity `Field` on the candidates: `kind='ambiguity'` in dB re its peak, `.max()` the estimate, its coordinates in `.pinned` (and its repr), `.reference` the peak `P_B` itself |
 | `mvdr(covariance, replicas, *, diagonal_loading=1e-2)` | `P_MV = 1 / (eᴴK⁻¹e)`, max scaled to 1, as the same kind of Field |
 
+A bank carries the `model`, `backend` and engine (`model_source`) of the modes
+or field it was built from, and both processors hand them to their surface, so
+`surface.plot()` credits the engine that computed the replicas.
+
 `replica_bank` evaluates the Kraken far-field modal sum directly, so the
 eigenpairs are computed once and every grid point is a cheap analytic re-sum. It
 models a **vertical line array**: every element shares the candidate range. Both
@@ -1444,8 +1454,8 @@ to make the mismatch behaviour visible.
   and their `ka` bounds, §3.5.3-§3.5.4 for the single-angle boundary
   reverberation form (Eq. 3.237) and the signal-to-reverberation ratio in a
   waveguide (after Zhou and Harrison), §9.2 for the incoherent energy detector.
-- Etter, P. C., *Underwater Acoustic Modeling and Simulation* — Table 11.1 for
-  the sonar-parameter grouping, Ch. 9 and §10.3 for scattering and
+- Etter, P. C., *Underwater Acoustic Modeling and Simulation* — Tables 11.1 and
+  11.2 for the sonar parameters and their combinations, Ch. 9 and §10.3 for scattering and
   reverberation, §11.5.7.1 for matched-field processing.
 - Chapman, R. P. & Harris, J. H., "Surface backscattering strengths measured
   with explosive sound sources", *JASA* 34, 1592–1597, 1962 — the empirical fit,

@@ -37,6 +37,7 @@ def _instances():
                                     ReflectionCoefficient, ResultStack)
     from uacpy.core.results.modes import MediaTable
     from uacpy.core.results.speeds import SoundSpeeds
+    from uacpy.core.engine_defaults import ScholteWave
     from uacpy.core import run_settings as RS
     from uacpy.acoustic_signal import (bands, beamforming, cqt, detect, frf,
                                        gathers, spectral, timefreq,
@@ -155,6 +156,8 @@ def _instances():
     c['SoundSpeeds'] = lambda: SoundSpeeds(surface=1520.0, water_min=1495.0,
                                            water_max=1520.0, waveguide_min=1495.0,
                                            waveguide_max=1650.0)
+    c['ScholteWave'] = lambda: ScholteWave(
+        1240.44, 30.0, 'between the water and the bottom half-space')
     # records
     c['TimeSettings'] = lambda: RS.TimeSettings(source_waveform=np.zeros(128),
                                                 sample_rate=8000.0, output_duration=1.0)
@@ -165,13 +168,13 @@ def _instances():
                                     uacpy.ValidityWarning)
     # signal
     c['BandLevels'] = lambda: bands.BandLevels(centers=np.array([125.0, 250.0, 500.0, 1000.0, 2000.0]),
-                                                levels=np.array([80.0, 78.0, 75.0, 72.0, 70.0]),
+                                                levels_dB=np.array([80.0, 78.0, 75.0, 72.0, 70.0]),
         lower=np.array([111.0, 223, 445, 891, 1782]), upper=np.array([140.0, 281, 561, 1122, 2245]),
         band_type='octave', ref=1e-6)
     c['SpectralEstimate'] = lambda: spectral.SpectralEstimate(
         frequencies=np.linspace(0, 4000, 257), power=np.ones(257))
     c['ProbabilisticSpectralEstimate'] = lambda: spectral.ProbabilisticSpectralEstimate(
-        frequencies=np.linspace(0, 4000, 257), level_edges=np.linspace(40, 120, 81),
+        frequencies=np.linspace(0, 4000, 257), level_edges_dB=np.linspace(40, 120, 81),
         pdf=np.zeros((257, 80)))
     c['SpectrogramResult'] = lambda: timefreq.SpectrogramResult(
         frequencies=np.linspace(0, 4000, 129), times=np.linspace(0, 1, 63),
@@ -181,7 +184,8 @@ def _instances():
         coefficients=np.zeros((129, 63), dtype=complex))
     c['CWTResult'] = lambda: timefreq.CWTResult(
         frequencies=np.geomspace(100, 4000, 32), times=t64,
-        coefficients=np.zeros((32, 64), complex))
+        coefficients=np.zeros((32, 64), complex), sample_rate=1000.0,
+        wavelet='morlet', w0=6.0)
     c['WignerVilleResult'] = lambda: timefreq.WignerVilleResult(
         frequencies=np.linspace(0, 4000, 64), times=t64, distribution=np.zeros((64, 64)))
     c['Cepstrum'] = lambda: timefreq.Cepstrum(quefrencies=t64, cepstrum=np.zeros(64))
@@ -200,9 +204,10 @@ def _instances():
         power=np.zeros((65, 32)), spectrum=np.zeros((65, 32), complex), scaling='density')
     c['RadonResult'] = lambda: gathers.RadonResult(
         moveout=np.linspace(0, 1e-3, 21), taus=t64, panel=np.zeros((21, 64)),
-        kind='parabolic')
+        kind='parabolic', sample_rate=1000.0, dx=5.0, nx=16)
     c['TauPResult'] = lambda: gathers.TauPResult(
-        slownesses=np.linspace(0, 1e-3, 21), taus=t64, panel=np.zeros((21, 64)))
+        slownesses=np.linspace(0, 1e-3, 21), taus=t64, panel=np.zeros((21, 64)),
+        sample_rate=1000.0, dx=5.0, nx=16)
     c['BeamformedField'] = lambda: beamforming.BeamformedField(
         response=np.zeros((181, 12)), angles_deg=np.linspace(-90, 90, 181),
         element_power=np.ones(12), frequencies=f12)
@@ -249,6 +254,7 @@ def _instances():
     from uacpy.data._geo import AlongTrack
     from uacpy.data.argo import ArgoProfile
     from uacpy.data.bathymetry import BathyGrid
+    from uacpy.data.seaice_local import SeaIceGrid
     from uacpy.data.crust1_local import Crust1Profile
     from uacpy.data.glodap_local import PHProfile
     from uacpy.data.sediment import SeabedSample
@@ -272,6 +278,8 @@ def _instances():
         salinity=np.full(5, 38.0), provenance=prov)
     c['BathyGrid'] = lambda: BathyGrid(lats=np.linspace(43, 43.1, 11),
         lons=np.linspace(5, 5.2, 21), depths=np.full((11, 21), 100.0), provenance=prov)
+    c['SeaIceGrid'] = lambda: SeaIceGrid(concentration=np.full((448, 304), 0.5),
+        hemi='N', month=3, provenance=prov)
     c['Crust1Profile'] = lambda: Crust1Profile(water_depth=2500.0, sediment_thickness=300.0,
         layer_names=('upper sediments', 'middle sediments'), thickness=np.array([100.0, 200.0]),
         sound_speed=np.array([1600.0, 1800.0]), shear_speed=np.array([0.0, 400.0]),
@@ -386,7 +394,7 @@ def _instances():
     c['OasesRhsHeader'] = lambda: OasesRhsHeader(n_time_samples=1024, freq_min=50.0,
         freq_max=350.0, time_step=0.001, frequency=200.0, source_layer=2,
         n_wavenumbers=4096, interface=0)
-    c['OasnNoise'] = lambda: OasnNoise(surface_level=60.0, white_level=40.0)
+    c['OasnNoise'] = lambda: OasnNoise(surface_noise_level_dB=60.0, white_noise_level_dB=40.0)
     c['OasnReplicaGrid'] = lambda: OasnReplicaGrid(z=(10.0, 100.0, 10), c_low=1400.0,
                                                    c_high=1e8)
     # records the compute functions behind the plotters return
@@ -403,10 +411,14 @@ def _instances():
     c['CumulativeExposure'] = lambda: __import__(
         'uacpy.core.acoustics.levels', fromlist=['CumulativeExposure']
     ).CumulativeExposure(times=np.array([0.25, 0.5, 0.75, 1.0]),
-                         levels=np.array([114.0, 117.0, 118.75, 120.0]),
+                         levels_dB=np.array([114.0, 117.0, 118.75, 120.0]),
                          ref=1e-6)
+    c['WavenumberSampling'] = lambda: uacpy.acoustics.wavenumber_sampling(
+        200.0, c_low=1400.0, c_high=1e9, delta_k=1e-4, rmax=8000.0,
+        water_sound_speed=1500.0, seabed_sound_speed=1700.0)
     c['FieldStatistics'] = lambda: __import__(
-        'uacpy.core.metrics', fromlist=['FieldStatistics']).FieldStatistics(
+        'uacpy.core.results.metrics',
+        fromlist=['FieldStatistics']).FieldStatistics(
         labels=('Bellhop', 'Kraken'), mean_dB=np.array([62.0, 63.5]),
         std_dB=np.array([8.0, 7.5]),
         rms_dB=np.array([[0.0, 4.4], [4.4, 0.0]]), depth=50.0,
@@ -431,7 +443,7 @@ def _instances():
     from uacpy.models import pe_grid
     c['GridChoice'] = lambda: pe_grid.GridChoice(
         dr=5.0, dz=0.25, predicted_error=8e-4, growth=0.0, c0=1500.0,
-        kz_max=0.42, alpha=0.08, p=8, xi_min=-0.2, xi_max=0.0,
+        kz_max=0.42, alpha=0.08, n_pade=8, xi_min=-0.2, xi_max=0.0,
         xi_stab_min=-1.0, xi_stab_max=0.1, trapped_end_binds=False)
     c['GrowthMargin'] = lambda: pe_grid.GrowthMargin(
         floor=1e-5, floor_leak=2e-5, floor_xi=-0.6, floor_excess=-1e-5,
@@ -448,7 +460,9 @@ EXPECTED = {
     'RocCurve':
         'RocCurve(16 pfa 1e-06–0.977237, 16 pd 0.1–1, deflection=2)',
     'CumulativeExposure':
-        'CumulativeExposure(times [0.25, 0.5, 0.75, 1] s, levels [114, 117, 118.75, 120] dB, ref=1e-06)',
+        'CumulativeExposure(times [0.25, 0.5, 0.75, 1] s, levels_dB [114, 117, 118.75, 120] dB, ref=1e-06)',
+    'WavenumberSampling':
+        'WavenumberSampling(frequency=200 Hz, c_low=1400 m/s, c_high=1e+09 m/s, delta_k=0.0001 rad/m, k_min=1.25664e-06 rad/m, k_max=0.897598 rad/m, alias_period=62831.9 m, rmax=8000 m, fits=True, water_sound_speed=1500 m/s, seabed_sound_speed=1700 m/s, water_wavenumber=0.837758 rad/m, seabed_wavenumber=0.739198 rad/m)',
     'FieldStatistics':
         'FieldStatistics(labels [Bellhop, Kraken], mean_dB [62, 63.5] dB, std_dB [8, 7.5] dB, rms_dB 2×2 dB, depth=50 m, kinds [pressure, pressure])',
     'ModeDispersion':
@@ -535,6 +549,8 @@ EXPECTED = {
         'MediaTable(water_density=1 g/cm³, tops 100 m, densities 1.9 g/cm³, bottom_depth=100 m, halfspace_density=1.9 g/cm³)',
     'SoundSpeeds':
         'SoundSpeeds(surface=1520 m/s, water_min=1495 m/s, water_max=1520 m/s, waveguide_min=1495 m/s, waveguide_max=1650 m/s)',
+    'ScholteWave':
+        'ScholteWave(speed=1240.44 m/s, depth=30 m, where=between the water and the bottom half-space)',
     'TimeSettings':
         'TimeSettings(pulse 128 samples, at 8000 Hz, record 1 s, t_start auto)',
     'WaveguideSpeeds':
@@ -544,17 +560,17 @@ EXPECTED = {
     'Notice':
         "Notice('rays clipped', 'rays clipped at 80 deg', ValidityWarning)",
     'BandLevels':
-        'BandLevels(5 centers 125–2000 Hz, 5 levels 70–80 dB re 1 µPa², band_type=octave, ref=1e-06)',
+        'BandLevels(5 centers 125–2000 Hz, 5 levels_dB 70–80 dB re 1 µPa², band_type=octave, ref=1e-06)',
     'SpectralEstimate':
         'SpectralEstimate(257 frequencies 0–4000 Hz, 257 power 1 Pa²/Hz, scaling=density, method=welch)',
     'ProbabilisticSpectralEstimate':
-        'ProbabilisticSpectralEstimate(257 frequencies 0–4000 Hz, 81 level_edges 40–120 dB re 1 µPa²/Hz, pdf 257×80 1/dB, ref=1e-06, scaling=density, method=welch)',
+        'ProbabilisticSpectralEstimate(257 frequencies 0–4000 Hz, 81 level_edges_dB 40–120 dB re 1 µPa²/Hz, pdf 257×80 1/dB, ref=1e-06, scaling=density, method=welch)',
     'SpectrogramResult':
         'SpectrogramResult(129 frequencies 0–4000 Hz, 63 times 0–1 s, power 129×63 Pa²/Hz, scaling=density)',
     'STFTResult':
         'STFTResult(129 frequencies 0–4000 Hz, 63 times 0–1 s, coefficients 129×63 complex Pa/√Hz, scaling=density)',
     'CWTResult':
-        'CWTResult(32 frequencies 100–4000 Hz, 64 times 0–0.063 s, coefficients 32×64 complex)',
+        'CWTResult(32 frequencies 100–4000 Hz, 64 times 0–0.063 s, coefficients 32×64 complex, sample_rate=1000, wavelet=morlet, w0=6)',
     'WignerVilleResult':
         'WignerVilleResult(64 frequencies 0–4000 Hz, 64 times 0–0.063 s, distribution 64×64)',
     'Cepstrum':
@@ -572,15 +588,15 @@ EXPECTED = {
     'FKResult':
         'FKResult(65 frequencies 0–500 Hz, 32 wavenumbers -0.5–0.5 rad/m, power 65×32 Pa²/(Hz·rad/m), spectrum 65×32 complex, scaling=density)',
     'RadonResult':
-        'RadonResult(21 moveout 0–0.001 s/m², 64 taus 0–0.063 s, panel 21×64, kind=parabolic)',
+        'RadonResult(21 moveout 0–0.001 s/m², 64 taus 0–0.063 s, panel 21×64, kind=parabolic, sample_rate=1000, dx=5, nx=16, x0=0)',
     'TauPResult':
-        'TauPResult(21 slownesses 0–0.001 s/m, 64 taus 0–0.063 s, panel 21×64)',
+        'TauPResult(21 slownesses 0–0.001 s/m, 64 taus 0–0.063 s, panel 21×64, sample_rate=1000, dx=5, nx=16, x0=0)',
     'BeamformedField':
         'BeamformedField(response 181×12, 181 angles_deg -90–90 deg, 12 element_power 1, 12 frequencies 100–1000 Hz)',
     'Snapshots':
         'Snapshots(frequency=500 Hz, data 8×16 complex)',
     'Warped':
-        'Warped(64 times 0–0.5 s, 64 data 0, sample_rate=1000, range=5000, sound_speed=1500, interpolation=linear)',
+        'Warped(64 times 0–0.5 s, 64 data 0, sample_rate=1000, range=5000, sound_speed=1500, method=sinc)',
     'ChannelRegime':
         'ChannelRegime(coherence_bandwidth=250 Hz, signal_bandwidth=1000 Hz, rms_delay_spread=0.004 s, symbol_duration=0.001 s, frequency_selective=True, isi_symbols=4, convention=0.5)',
     'ChannelTaps':
@@ -588,7 +604,7 @@ EXPECTED = {
     'BerCurve':
         'BerCurve(6 ebn0_dB 0–10 dB, 6 ber 1e-06–0.1, scheme=qpsk, n_bits=100000, n_train=400)',
     'JanusReception':
-        'JanusReception(64 bits 0, crc_ok=True, doppler_scale=0)',
+        'JanusReception(64 bits, crc_ok=True, doppler_scale=0)',
     'DopplerEstimate':
         'DopplerEstimate(best_scale=0.0015, 61 scales 0–0.003, 61 peak_metric 0–1)',
     'NoiseComponents':
@@ -615,6 +631,8 @@ EXPECTED = {
         'ArgoProfile(platform=6902746, cycle=12, lat=43 °, lon=5 °, time=2024-05-01, 5 pressure_dbar 0–500 dbar, 5 temperature 13–20 °C, 5 salinity 38 psu, provenance=gebco)',
     'BathyGrid':
         'BathyGrid(11 lats 43–43.1 °, 21 lons 5–5.2 °, depths 11×21 m, provenance=gebco)',
+    'SeaIceGrid':
+        'SeaIceGrid(concentration 448×304, hemi=N, month=3, provenance=gebco)',
     'Crust1Profile':
         'Crust1Profile(water_depth=2500 m, sediment_thickness=300 m, layer_names [upper sediments, middle sediments], thickness [100, 200] m, sound_speed [1600, 1800] m/s, shear_speed [0, 400] m/s, density [1.7, 1.9] g/cm³, provenance=gebco)',
     'PHProfile':
@@ -646,11 +664,11 @@ EXPECTED = {
     'SonarBudget':
         'SonarBudget(mode=passive, source_level_dB=180 dB, detection_threshold_dB=10 dB, noise_level_dB=60 dB, directivity_index_dB=15 dB)',
     'JanusPacket':
-        'JanusPacket(34 app_data 0)',
+        'JanusPacket(app_data 34 bits)',
     'LinkResult':
         'LinkResult(ber=0.001, evm=0.12, scheme=qpsk, ebn0_dB=10 dB, tx_symbols 1000 complex, rx_symbols 1000 complex)',
     'ReceiverDiagnostics':
-        'ReceiverDiagnostics(2000 bits 0, symbols 1000 complex, 4000 sync_metric 0, start=120)',
+        'ReceiverDiagnostics(2000 bits, symbols 1000 complex, 4000 sync_metric 0, start=120)',
     'FRF':
         'FRF()',
     'ConvCode':
@@ -710,7 +728,7 @@ EXPECTED = {
     'OasesRhsHeader':
         'OasesRhsHeader(n_time_samples=1024, freq_min=50 Hz, freq_max=350 Hz, time_step=0.001 s, frequency=200 Hz, source_layer=2, n_wavenumbers=4096, interface=0)',
     'OasnNoise':
-        'OasnNoise(surface_level=60 dB, white_level=40 dB)',
+        'OasnNoise(surface_noise_level_dB=60 dB, white_noise_level_dB=40 dB)',
     'OasnReplicaGrid':
         'OasnReplicaGrid(z [10, 100, 10], c_low=1400 m/s, c_high=1e+08 m/s)',
 }
@@ -787,3 +805,31 @@ def test_every_public_class_prints_one_line_without_a_nested_constructor(built):
             if not ok:
                 bad.append(f"{dotted}: {text[:160]!r}")
     assert not bad, '\n'.join(bad)
+
+
+def test_a_span_leaves_out_its_nan_entries_and_counts_them():
+    """A NaN entry is a no-data marker (a band with no spectral support),
+    so the span is the finite entries' and the NaNs are counted after the
+    unit; an all-NaN array is 'nan'. Without the rule one NaN made the span
+    'nan–nan' however many finite values the array held."""
+    from uacpy.core._repr import axis, extent
+    levels = np.array([np.nan, 73.5, 90.0, 111.0, np.nan, 80.0])
+    assert extent(levels, 'dB') == '73.5–111 dB, 2 NaN'
+    assert axis(levels, 'levels', 'dB') == '6 levels 73.5–111 dB, 2 NaN'
+    assert extent(np.full(5, np.nan), 'dB') == 'nan dB'
+    assert axis(np.arange(6.0), 'depths', 'm') == '6 depths 0–5 m'
+
+
+@pytest.mark.parametrize('name, values, text', [
+    ('app_data', np.zeros(34, int), 'app_data 34 bits'),
+    ('bits', np.tile([0, 1], 32), '64 bits'),
+    ('codes', np.array([0, 1, 2, 1, 0]), '5 codes 0–2'),
+    ('bits', np.array([0, 1, 1]), 'bits [0, 1, 1]'),
+    ('flags', np.zeros(6, bool), '6 flags False'),
+])
+def test_a_long_integer_zero_one_vector_reads_as_bits(name, values, text):
+    """A 1-D integer array of more than SHOWN_VALUES entries, all 0 or 1,
+    is a bit vector, shown by its count of bits ('0–1' says nothing); any
+    other integer array, a short one, or a boolean mask keeps the span."""
+    from uacpy.core._repr import array_bit
+    assert array_bit(name, values) == text

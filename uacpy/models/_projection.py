@@ -19,6 +19,60 @@ from uacpy.core.surface import Surface
 from uacpy.models._registry import engines_supporting
 
 
+#: The feature each ``collapse=`` key reduces, as a notice names it when
+#: the model reads that feature natively and the key reduces nothing
+#: (``'surface'`` is not listed: no model reads a range-dependent surface,
+#: so that key always reduces one).
+_FEATURE_READ_NATIVELY: Dict[str, str] = {
+    'altimetry': 'the sea-surface altimetry',
+    'bathymetry': 'the range-dependent bathymetry',
+    'ssp': 'the range-dependent SSP',
+    'bottom_range': 'the range-dependent seabed',
+    'bottom_layers': 'the layered seabed',
+    'elastic': 'the elastic media',
+}
+
+#: What an environment lacks when a ``collapse=`` key's feature is absent,
+#: as the notice names it: the key then reduces nothing in any model.
+_FEATURE_ABSENT: Dict[str, str] = {
+    'altimetry': "the environment has no sea-surface altimetry",
+    'bathymetry': "the environment's bathymetry is range-independent",
+    'ssp': "the environment's SSP is range-independent",
+    'bottom_range': "the environment's seabed is range-independent",
+    'bottom_layers': "the environment's seabed has no sediment layers",
+    'elastic': "the environment has no elastic media",
+    'surface': "the environment's surface is range-independent",
+}
+
+
+def _features_present(env) -> Dict[str, bool]:
+    """Whether ``env`` carries the feature each ``collapse=`` key reduces."""
+    surface = env.surface
+    return {
+        'altimetry': env.altimetry is not None,
+        'bathymetry': env.bathymetry.varies_with_range,
+        'ssp': env.ssp.is_range_dependent,
+        'bottom_range': env.bottom.is_range_dependent,
+        'bottom_layers': env.bottom.is_layered,
+        'elastic': env.bottom.is_elastic
+        or (surface is not None and has_shear(surface)),
+        'surface': surface is not None and surface.is_range_dependent,
+    }
+
+
+def absent_feature_notices(env, *, model_name, user_collapse):
+    """The notice each key of the caller's ``collapse=`` gets whose feature
+    ``env`` (the environment the caller passed) does not carry: the key
+    reduces nothing in this run, whatever the model reads (a setting the
+    run does not use gets a notice). One per key, in the caller's order."""
+    present = _features_present(env)
+    return tuple(
+        f"{model_name}: collapse[{key!r}]={value!r} reduces nothing: "
+        f"{_FEATURE_ABSENT[key]}."
+        for key, value in (user_collapse or {}).items()
+        if not present[key])
+
+
 #: The reduction each feature a model cannot read gets when neither the
 #: engine's spec nor the caller names one. uacpy guidance: no engine manual
 #: or textbook names a reduction of a range-dependent environment to one
@@ -189,7 +243,7 @@ def collapse_elastic_boundary(boundary, method: str):
 
 
 def environment_projection(env: 'Environment', *, model_name: str,
-                           supported, collapse):
+                           supported, collapse, user_collapse=None):
     """``(projected, notices)``: a copy of ``env`` with every unsupported
     feature collapsed, and the text of the notice each dropped feature
     gets, in order. Pure: warns nothing, so a nested model's projection
@@ -198,7 +252,12 @@ def environment_projection(env: 'Environment', *, model_name: str,
     Each per-feature axis is checked against ``supported`` (the capability
     names the model carries, :attr:`PropagationModel.supported_features`)
     and reduced via the matching key of ``collapse`` (the model's resolved
-    policy); each dropped feature adds one notice.
+    policy); each dropped feature adds one notice. A key of
+    ``user_collapse`` (the caller's ``collapse=``) whose feature ``env``
+    carries and the model keeps adds one notice too: the model reads that
+    feature natively, so the key reduces nothing in its deck (a producer
+    the model runs, Bellhop's BOUNCE, projects with the same keys and says
+    what they did there).
 
     Notes
     -----
@@ -218,6 +277,11 @@ def environment_projection(env: 'Environment', *, model_name: str,
     """
     e = env.copy()
     notices = []
+    # A range-dependent surface is collapsed whatever the model reads, so
+    # its key always reduces it and has no native-read notice.
+    carried = {key for key, present in _features_present(env).items()
+               if present and key != 'surface'}
+    used = set()
 
     if e.altimetry is not None and 'altimetry' not in supported:
         method = collapse["altimetry"]
@@ -234,6 +298,7 @@ def environment_projection(env: 'Environment', *, model_name: str,
                 "Currently only 'drop' is supported."
             )
         e.altimetry = None
+        used.add('altimetry')
         notices.append(
             f"{model_name} does not support sea-surface altimetry; "
             f"using flat surface (collapse['altimetry']={method!r})."
@@ -281,9 +346,12 @@ def environment_projection(env: 'Environment', *, model_name: str,
         # seafloor down to it (Environment._assignment), so a collapse
         # method that picks a deeper column than the profile was
         # tabulated for (``'max'``, the default, on a sloping bottom)
-        # leaves no gap the AT writers would reject.
+        # leaves no gap the AT writers would reject. The collapsed seafloor
+        # is still the fetched data, so it keeps its provenance records.
         e.bathymetry = Bathymetry(
-            ranges=np.array([0.0]), depths=np.array([new_depth]))
+            ranges=np.array([0.0]), depths=np.array([new_depth]),
+            data_sources=e.bathymetry.data_sources)
+        used.add('bathymetry')
         notices.append(
             f"{model_name} does not support range-dependent "
             f"bathymetry; collapsed to {new_depth:.1f} m "
@@ -295,6 +363,7 @@ def environment_projection(env: 'Environment', *, model_name: str,
     if e.ssp.is_range_dependent and 'range_dependent_ssp' not in supported:
         method = collapse["ssp"]
         e.ssp = e.ssp.collapse_range(method)
+        used.add('ssp')
         notices.append(
             f"{model_name} does not support range-dependent SSP; "
             f"collapsed to 1-D (collapse['ssp']={method!r})."
@@ -308,6 +377,7 @@ def environment_projection(env: 'Environment', *, model_name: str,
             and 'range_dependent_bottom' not in supported):
         method = collapse["bottom_range"]
         e.bottom = e.bottom.collapse_range(method)
+        used.add('bottom_range')
         notices.append(
             f"{model_name} does not support range-dependent bottoms; "
             f"reduced to a single column "
@@ -317,6 +387,7 @@ def environment_projection(env: 'Environment', *, model_name: str,
     if e.bottom.is_layered and 'layered_bottom' not in supported:
         method = collapse["bottom_layers"]
         e.bottom = e.bottom.collapse(layers=method)
+        used.add('bottom_layers')
         notices.append(
             f"{model_name} does not support layered (depth-dependent) "
             f"bottoms; flattened each column to a half-space "
@@ -336,6 +407,7 @@ def environment_projection(env: 'Environment', *, model_name: str,
             )
             collapsed_at.append('bottom')
         if collapsed_at:
+            used.add('elastic')
             method = collapse["elastic"]
             where = '/'.join(collapsed_at)
             notices.append(
@@ -344,4 +416,10 @@ def environment_projection(env: 'Environment', *, model_name: str,
                 f"(collapse['elastic']={method!r})."
             )
 
+    for key, value in (user_collapse or {}).items():
+        if key in carried and key not in used:
+            notices.append(
+                f"{model_name}: collapse[{key!r}]={value!r} reduces nothing "
+                f"in {model_name}'s deck: {model_name} reads "
+                f"{_FEATURE_READ_NATIVELY[key]} natively.")
     return e, tuple(notices)

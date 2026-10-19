@@ -27,9 +27,10 @@ _DEFAULT_NPERSEG = 8192
 #: a flat-top window yields. Segments may be spaced at most ``N / eta_w``
 #: apart (Abraham, *Underwater Acoustic Signal Processing*, 2019, §9.2.10.1,
 #: Eq. 9.162), ``eta_w`` being the window's independent sample rate (§4.10,
-#: Eq. 4.122). That equation gives eta_w = 4.60 for scipy's ``flattop`` at
-#: any N from 128 up (hann 2.08, boxcar 1.50 as in Table 4.2), so the overlap
-#: is 1 - 1/4.60 = 78.3 %.
+#: Eq. 4.122). That equation gives eta_w = 4.60 for scipy's periodic
+#: ``flattop`` at any N from 128 up (hann 2.08, boxcar 1.50; Table 4.2's
+#: 2.10 and 1.5 are the symmetric windows at N = 128), so the overlap is
+#: 1 - 1/4.60 = 78.3 %.
 _FLATTOP_OVERLAP = 1.0 - 1.0 / 4.60
 
 #: Phase-averaged power bias (dB) above which a real tone's negative-frequency
@@ -60,14 +61,56 @@ def _default_noverlap(window, nperseg: int) -> int:
     guidance: one overlap for every window but flat-top), which meets the
     rule only for ``eta_w <= 2``: rectangular (1.50) needs 33.3 % and
     Hamming (1.90) 47.3 %, but Kaiser ``beta = 2.5π`` (2.31) needs 56.7 %
-    and Blackman (2.41) 58.5 % (Eq. 4.122 on scipy's windows at N = 1024,
-    matching Table 4.2), so half a segment leaves those estimates with more
-    variance than the record allows. Pass ``noverlap`` for them.
+    and Blackman (2.41) 58.5 % (Eq. 4.122 on scipy's periodic windows at
+    N = 1024; Table 4.2's 1.91, 2.33 and 2.43 are the symmetric windows at
+    N = 128), so half a segment leaves those estimates with more variance
+    than the record allows. Pass ``noverlap`` for them.
     """
     nperseg = int(nperseg)
     if isinstance(window, str) and window.lower() == 'flattop':
         return min(nperseg - 1, int(np.ceil(_FLATTOP_OVERLAP * nperseg)))
     return nperseg // 2
+
+
+def _welch_nperseg(nperseg, window, n, who, *, span="the record"):
+    """The ``nperseg`` a Welch segmentation hands scipy on ``span``, ``n``
+    samples long, the one rule every Welch-based estimator uses.
+
+    Unset (``None``), it is an array window's own length, else
+    :data:`_DEFAULT_NPERSEG` clamped to the span: the segment scipy would
+    clamp it to, without scipy's UserWarning for a segment longer than the
+    input. A given one goes as given, and is refused when longer than the
+    span, which holds no segment of it. An array window IS the segment: a
+    given ``nperseg`` that differs from its length is refused, as is a window
+    longer than the span (scipy's own refusals of both name neither the
+    function called nor the fix)."""
+    if not isinstance(window, (str, tuple)):
+        if (nperseg is not None and np.ndim(window) == 1
+                and len(window) != int(nperseg)):
+            raise ConfigurationError(
+                f"{who}: an array window of {len(window)} samples sets the "
+                f"segment length, and nperseg={nperseg} differs from it.",
+                remediation=(f"Pass nperseg={len(window)}, or nperseg=None to "
+                             f"take the window's length, or a named window "
+                             f"such as 'hann'."))
+        size = len(window) if nperseg is None else int(nperseg)
+        if size > n:
+            raise ConfigurationError(
+                f"{who}: the array window of {size} samples is longer than "
+                f"{span} ({n} samples), which holds no segment of it.",
+                remediation=(f"Pass a window of {n} samples or fewer, or a "
+                             f"named window such as 'hann'."))
+        return size
+    if nperseg is None:
+        return min(_DEFAULT_NPERSEG, n)
+    if int(nperseg) > n:
+        raise ConfigurationError(
+            f"{who}: nperseg={nperseg} is longer than {span} ({n} "
+            f"samples), which holds no segment of that length.",
+            remediation=(f"Pass nperseg={n} or fewer, or leave nperseg "
+                         f"unset: it then takes {_DEFAULT_NPERSEG} samples, "
+                         f"or all {n} when that is shorter."))
+    return int(nperseg)
 
 
 def _taper(name, n: int, *, who: str) -> np.ndarray:

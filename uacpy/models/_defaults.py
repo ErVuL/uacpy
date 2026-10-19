@@ -14,8 +14,8 @@ DEFAULT_C_MIN = 1400.0
 # broadband-capable wrapper (Bellhop, Scooter, Kraken, RAM, OASP)
 # without an explicit ``frequencies=`` override, the wrapper picks
 # ``N`` bins linearly spaced over ``[fc·(1 - BW/2), fc·(1 + BW/2)]``
-# where ``fc = source.frequencies[0]`` (``bandwidth_factor`` below 2, so
-# the band stays above 0 Hz).
+# where ``fc = source.frequencies[0]`` (BW below 2, so the band stays
+# above 0 Hz); any other band is the run's ``frequencies=``.
 # Default BW=0.5, uacpy guidance: the Bellhop User Guide §9 recommends
 # dividing a wide band into sub-bands "so that the appropriate attenuation
 # is used in each sub-band" and names no width.

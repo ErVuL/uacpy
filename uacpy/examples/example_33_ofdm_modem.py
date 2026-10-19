@@ -9,10 +9,10 @@ phase tracking, Viterbi decode, check the CRC.
 
 Uses: comms.OFDMTransmitter.transmit_passband ·
 OFDMReceiver.receive_passband(return_diagnostics=) ·
-comms.estimate_doppler_scale · comms.awgn ·
-schmidl_cox_sync · schmidl_cox_metric · remove_cfo · estimate_channel ·
+comms.estimate_doppler_scale · comms.awgn · OFDMTransmitter.to_passband ·
+ReceiverDiagnostics.channel_estimate ·
 uacpy.io.write_wav · acoustic_signal.spectrogram · plot_sync_metric ·
-plot_subcarriers · plot_scatter
+plot_subcarriers · plot_received_symbols
 """
 
 import os
@@ -24,8 +24,6 @@ from scipy.signal import resample_poly
 import uacpy
 from uacpy import comms
 from uacpy.acoustic_signal import spectrogram
-from uacpy.comms import (estimate_channel, remove_cfo, schmidl_cox_metric,
-                         schmidl_cox_sync)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -41,7 +39,7 @@ frame_bits = comms.pack_frame(message)
 
 code = comms.ConvCode(interleave_depth=16)
 tx = comms.OFDMTransmitter("qpsk", nsc, cp, code=code)
-waveform = tx.transmit_passband(frame_bits, fs, fc, oversample=oversampling)
+waveform = tx.transmit_passband(frame_bits, sample_rate=fs, fc=fc, oversample=oversampling)
 uacpy.io.write_wav(OUT / 'example_33_ofdm.wav', waveform, fs, normalize=True)
 band = fs / oversampling
 print(f"  payload  : {len(message)} bytes → {frame_bits.size} framed bits")
@@ -62,11 +60,12 @@ received = comms.awgn(received, snr_dB, rng=rng)
 receiver = comms.OFDMReceiver("qpsk", nsc, cp, code=code)
 scale, _, _ = comms.estimate_doppler_scale(
     received,
-    comms.upconvert(resample_poly(receiver.preamble, oversampling, 1), fs, fc),
+    tx.to_passband(tx.preamble, sample_rate=fs, fc=fc, oversample=oversampling),
     np.linspace(-3e-4, 3e-4, 31))
-# return_diagnostics keeps the Schmidl-Cox timing metric the receiver searched
-# and the phase-corrected payload symbols it decided on; n_symbols trims those
-# to the data symbols frame_bits filled, dropping the block's zero padding.
+# return_diagnostics keeps the Schmidl-Cox timing metric the receiver searched,
+# the per-subcarrier channel it equalised by and the phase-corrected payload
+# symbols it decided on; n_symbols trims those to the data symbols frame_bits
+# filled, dropping the block's zero padding.
 diag = receiver.receive_passband(
     received, fs, fc, oversample=oversampling, doppler_scale=scale,
     return_diagnostics=True,
@@ -79,17 +78,6 @@ print(f"  CRC      : {'OK' if crc_ok else 'FAIL'}, "
       f"payload match {payload == message}")
 print(f"  recovered: {payload[:60]!r}{'...' if len(payload) > 60 else ''}")
 
-# The timing metric and the per-subcarrier channel for the figure, from the
-# same public steps the receiver takes: the Schmidl-Cox metric of the
-# baseband, sync on it, remove the CFO, estimate H from the pilot block
-# (block 0 is the Schmidl-Cox preamble, block 1 the pilot).
-baseband = receiver.from_passband(received, fs, fc, oversample=oversampling,
-                                  doppler_scale=scale)
-metric = schmidl_cox_metric(baseband, nsc)
-start, cfo = schmidl_cox_sync(baseband, nsc)
-block = nsc + cp
-x = remove_cfo(baseband[start:], cfo)
-H = estimate_channel(x[block:2 * block], receiver.pilot_values, nsc, cp)
 constellation = receiver.modulator.constellation
 
 fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
@@ -101,15 +89,15 @@ axes[0, 0].axhline(fc, color='w', ls='--', lw=1)
 
 # schmidl_cox_sync takes the metric's peak as the preamble when it reaches
 # the 0.5 default threshold.
-uacpy.plot.plot_sync_metric(metric, ax=axes[0, 1], threshold=0.5,
+uacpy.plot.plot_sync_metric(diag.sync_metric, ax=axes[0, 1], threshold=0.5,
                             title='Schmidl-Cox timing metric')
 
-uacpy.plot.plot_subcarriers(H, ax=axes[1, 0],
+uacpy.plot.plot_subcarriers(diag.channel_estimate, ax=axes[1, 0],
                             title='per-subcarrier channel |H|')
 
-uacpy.plot.plot_scatter(diag.symbols, ax=axes[1, 1], ideal=constellation,
-                        title=f"recovered QPSK "
-                              f"(CRC {'OK' if crc_ok else 'FAIL'})")
+uacpy.plot.plot_received_symbols(diag.symbols, ax=axes[1, 1], ideal=constellation,
+                                 title=f"recovered QPSK "
+                                       f"(CRC {'OK' if crc_ok else 'FAIL'})")
 
 fig.savefig(OUT / 'example_33_ofdm_modem.png', dpi=120)
 plt.close(fig)

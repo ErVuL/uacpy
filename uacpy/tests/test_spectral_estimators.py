@@ -413,6 +413,37 @@ class TestEveryLadderComesFromOneBuilder:
         else:
             assert call().power.shape == (1025,)
 
+    @pytest.mark.parametrize('band_type', ['decidecade', 'octave'])
+    def test_a_density_estimate_gives_its_band_levels(self, band_type):
+        """``est.band_levels()`` is ``band_levels(est.power,
+        est.frequencies)``, band for band, for one channel and several, with
+        ``band_type`` and ``ref`` passed on."""
+        import uacpy.acoustic_signal as sig
+        x = np.random.default_rng(0).standard_normal((2, 48000))
+        est = sig.welch(x, 48000.0, nperseg=4096)
+        got = est.band_levels(band_type=band_type, ref=1.0)
+        want = sig.band_levels(est.power, est.frequencies,
+                               band_type=band_type, ref=1.0)
+        assert isinstance(got, sig.BandLevels)
+        np.testing.assert_array_equal(got.centers, want.centers)
+        np.testing.assert_array_equal(got.levels_dB, want.levels_dB)
+        assert got.levels_dB.shape[0] == 2 and got.ref == 1.0
+
+    def test_band_levels_of_another_statistic_are_refused(self):
+        """Band levels integrate a density: a per-bin spectrum (its bins
+        would be counted again by their width) and an estimate already on
+        bands are refused by name."""
+        import uacpy.acoustic_signal as sig
+        x = np.random.default_rng(1).standard_normal(48000)
+        with pytest.raises(ConfigurationError,
+                           match=r"^SpectralEstimate\.band_levels: band levels "
+                                 r"integrate a density \(Pa²/Hz\), and this "
+                                 r"estimate holds scaling='spectrum'"):
+            sig.welch(x, 48000.0, scaling='spectrum').band_levels()
+        with pytest.raises(ConfigurationError,
+                           match=r"already sit on decidecade bands"):
+            sig.sound_exposure(x, 48000.0).band_levels()
+
     @pytest.mark.parametrize('band_type, ladder', [
         ('decidecade', 'decidecade_bands'), ('octave', 'octave_bands')])
     def test_band_levels_integrate_a_flat_psd_over_each_band_width(
@@ -450,9 +481,9 @@ class TestEveryLadderComesFromOneBuilder:
         for twin in (copy.deepcopy(result), pickle.loads(pickle.dumps(result))):
             assert (twin.band_type, twin.ref) == ('octave', 1.0)
             np.testing.assert_array_equal(twin.upper, upper)
-        assert result.units == {'centers': 'Hz', 'levels': 'dB re 1 Pa²'}
+        assert result.units == {'centers': 'Hz', 'levels_dB': 'dB re 1 Pa²'}
         assert sig.band_levels(np.full(f.size, 1e-10),
-                                          frequencies=f).units['levels'] == 'dB re 1 µPa²'
+                                          frequencies=f).units['levels_dB'] == 'dB re 1 µPa²'
 
     @pytest.mark.parametrize('ref', [1e-6, 1.0])
     def test_band_levels_draw_against_their_own_reference(self, ref):
@@ -484,7 +515,7 @@ class TestEveryLadderComesFromOneBuilder:
             assert ('µPa' in ax.get_ylabel()) == (ref == 1e-6)
             assert 'octave bands' in ax.get_xlabel()
             np.testing.assert_array_equal(
-                [p.get_height() for p in ax.patches], result.levels)
+                [p.get_height() for p in ax.patches], result.levels_dB)
         finally:
             plt.close(fig)
 
@@ -580,11 +611,11 @@ class TestPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
         r = self._run()
         # The tuple is the measurement; everything that says what it MEANS is
         # an attribute, and a result built without them takes the defaults.
-        assert r._fields == ('frequencies', 'level_edges', 'pdf')
+        assert r._fields == ('frequencies', 'level_edges_dB', 'pdf')
         from uacpy.acoustic_signal.spectral import (
             ProbabilisticSpectralEstimate,
         )
-        built = ProbabilisticSpectralEstimate(r.frequencies, r.level_edges,
+        built = ProbabilisticSpectralEstimate(r.frequencies, r.level_edges_dB,
                                               r.pdf)
         assert built.ref == r.ref
         assert (built.scaling, built.method) == ('density', 'welch')
@@ -604,7 +635,7 @@ def test_ppsd_columns_are_densities_with_empty_bins_at_zero():
     assert np.allclose(integral, 1.0)
     assert (r.pdf == 0).any() and not np.isnan(r.pdf).any()
 
-    centres = (r.level_edges[:-1] + r.level_edges[1:]) / 2
+    centres = (r.level_edges_dB[:-1] + r.level_edges_dB[1:]) / 2
     first_moment = (r.pdf * centres[:, None]).sum(axis=0) * r.level_step_dB
     band = (r.frequencies > 200) & (r.frequencies < 3500)
     assert np.abs(r.mean_dB[band] - first_moment[band]).max() < r.level_step_dB
@@ -652,8 +683,11 @@ class TestSELBandGridIsAnchoredAt1kHz:
 
 
 class TestPpsdNoverlap:
-    """A caller-provided Welch noverlap is respected; it is only replaced
-    (with a warning) when the segment clamp leaves no room for it."""
+    """A caller-provided Welch ``noverlap`` and ``nperseg`` are used as
+    given or refused: ``nperseg`` unset is 8192 samples or the whole time
+    segment when that is shorter, a given one longer than the time segment is
+    refused naming ``segment_duration``, and a ``noverlap`` not shorter than
+    the segment is refused rather than replaced."""
 
     FS = 8000
 
@@ -667,11 +701,41 @@ class TestPpsdNoverlap:
         b = probabilistic_welch(x, self.FS, segment_duration=1.0, nperseg=2048, noverlap=1536)
         assert not np.array_equal(np.nan_to_num(a.pdf), np.nan_to_num(b.pdf))
 
-    def test_unfittable_noverlap_warns_and_falls_back(self):
+    def test_a_noverlap_that_does_not_fit_the_segment_is_refused(self):
         x = self._sig()
-        with pytest.warns(UserWarning, match="noverlap"):
-            r = probabilistic_welch(x, self.FS, segment_duration=0.1, noverlap=4096)
-        assert np.isfinite(np.nansum(r.pdf))
+        # 0.1 s at 8 kHz: an 800-sample time segment, so nperseg is 800.
+        with pytest.raises(ConfigurationError,
+                           match=r"^probabilistic_welch: noverlap=800 is not "
+                                 r"shorter than the Welch segment "
+                                 r"\(nperseg=800 samples\)"):
+            probabilistic_welch(x, self.FS, segment_duration=0.1, noverlap=800)
+        r = probabilistic_welch(x, self.FS, segment_duration=0.1, noverlap=799)
+        assert r.frequencies.size == 401
+
+    def test_nperseg_resolves_on_the_time_segment(self):
+        """Unset: the whole 800-sample time segment, silently (no 4x coarser
+        axis than asked without a word); given up to the segment: as given;
+        one sample longer: refused, naming segment_duration."""
+        import inspect
+        assert inspect.signature(probabilistic_welch).parameters[
+            'nperseg'].default is None
+        x = self._sig()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            unset = probabilistic_welch(x, self.FS, segment_duration=0.1,
+                                        level_min_dB=-200, level_max_dB=200)
+        assert unset.frequencies.size == 401
+        given = probabilistic_welch(x, self.FS, segment_duration=0.1,
+                                    nperseg=800, level_min_dB=-200,
+                                    level_max_dB=200)
+        np.testing.assert_array_equal(np.nan_to_num(given.pdf),
+                                      np.nan_to_num(unset.pdf))
+        with pytest.raises(ConfigurationError,
+                           match=r"^probabilistic_welch: nperseg=801 is longer "
+                                 r"than one time segment "
+                                 r"\(segment_duration=0.1 s\) \(800 "
+                                 r"samples\)"):
+            probabilistic_welch(x, self.FS, segment_duration=0.1, nperseg=801)
 
     def test_default_matches_half_nperseg(self):
         x = self._sig()
@@ -1254,7 +1318,7 @@ class TestEveryEstimatorAnswersAndSaysWhatItReturned:
             warnings.simplefilter('ignore')
             est = door(self._signal(), self.FS, **options)
         assert (est.scaling, est.method) == (scaling, method)
-        assert est.pdf.shape == (est.level_edges.size - 1,
+        assert est.pdf.shape == (est.level_edges_dB.size - 1,
                                  est.frequencies.size)
         assert est.mean_dB.shape == est.frequencies.shape
         assert est.ref == pytest.approx(1e-6)
@@ -1604,7 +1668,7 @@ class TestTheExposureHistogramSummarisesPerSegmentEnergy:
                                                       'decidecade')
         assert r.bands is not None and len(r.bands) == r.frequencies.size
         assert r.segment_duration == 1.0
-        assert r.pdf.shape == (r.level_edges.size - 1, r.frequencies.size)
+        assert r.pdf.shape == (r.level_edges_dB.size - 1, r.frequencies.size)
 
     def test_doubling_the_segment_adds_three_dB_to_every_sample(self):
         """Each sample is that segment's energy, so twice the segment is twice
@@ -1848,7 +1912,6 @@ class TestSpectralResultsKeepWhatTheyMean:
     @pytest.mark.parametrize('kwargs, match', [
         (dict(scaling='bogus'), r"^spectrogram: unknown scaling 'bogus'"),
         (dict(scaling='exposure'), r"^spectrogram: unknown scaling"),
-        (dict(nperseg=None), r"^spectrogram: nperseg must be an integer"),
         (dict(nperseg=100.5), r"^spectrogram: nperseg must be an integer"),
         (dict(nperseg=256.0), r"^spectrogram: nperseg must be an integer"),
         (dict(nperseg=True), r"^spectrogram: nperseg must be an integer"),
@@ -1856,10 +1919,9 @@ class TestSpectralResultsKeepWhatTheyMean:
     ])
     def test_spectrogram_refuses_what_scipy_would_reject_untyped(
             self, kwargs, match):
-        """scipy answered these with a bare ValueError ('window must be
-        1-D', 'Unknown scaling', 'Nx=256.0 is not a positive integer') or a
-        TypeError from int(None); the estimator's siblings refuse with a
-        ConfigurationError."""
+        """scipy answers these with a bare ValueError ('window must be
+        1-D', 'Unknown scaling', 'Nx=256.0 is not a positive integer'); the
+        estimator's siblings refuse with a ConfigurationError."""
         from uacpy.acoustic_signal import spectrogram
         x = np.random.default_rng(2).standard_normal(2048)
         with pytest.raises(ConfigurationError, match=match):
@@ -2027,7 +2089,7 @@ class TestAHistogramKeepsItsSegments:
                                                             kw):
         from uacpy import acoustic_signal as S
         r = getattr(S, estimator)(self._noise(), self.FS, **kw)
-        pdf, mean, std = S.level_histogram(r.segment_levels_dB, r.level_edges)
+        pdf, mean, std = S.level_histogram(r.segment_levels_dB, r.level_edges_dB)
         assert np.array_equal(pdf, r.pdf, equal_nan=True)
         assert np.array_equal(mean, r.mean_dB)
         assert np.array_equal(std, r.std_dB)
@@ -2107,12 +2169,32 @@ class TestLevelHistogramIsTheArrayForm:
             assert np.array_equal(x, y, equal_nan=True)
         assert a[0].shape == (20, 4)
 
+    @pytest.mark.parametrize('estimator', ['probabilistic_welch',
+                                           'probabilistic_constant_q'])
+    @pytest.mark.parametrize('step, n_edges, last', [
+        (0.3, 501, 150.0), (0.1, 1501, 150.0), (1.0, 151, 150.0),
+        (0.7, 216, 150.5)])
+    def test_the_level_edges_end_at_the_window(self, estimator, step,
+                                               n_edges, last):
+        """Both histogram cores cut the 0-150 dB window into
+        ``level_step_dB`` bins from one rule: 0.3 dB gives 500 bins ending
+        at 150 dB (a float ``np.arange`` gave a 501st, 150-150.3 dB); a step
+        that does not divide the window ends on the first edge past it."""
+        from uacpy import acoustic_signal as S
+        x = np.random.default_rng(1).standard_normal(4000)
+        r = getattr(S, estimator)(x, 1000.0, level_step_dB=step,
+                                  level_min_dB=0, level_max_dB=150)
+        assert r.level_edges_dB.size == n_edges
+        assert r.level_edges_dB[0] == 0.0
+        assert r.level_edges_dB[-1] == pytest.approx(last, abs=1e-9)
+        assert r.pdf.shape[0] == n_edges - 1
+
     @pytest.mark.parametrize('edges', [[60.0], [61.0, 60.0], [60.0, 60.0],
                                        [[60.0, 61.0]]])
     def test_edges_that_are_not_increasing_bins_are_refused(self, edges):
         from uacpy.acoustic_signal import level_histogram
         from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError, match='level_edges must be'):
+        with pytest.raises(ConfigurationError, match='level_edges_dB must be'):
             level_histogram(np.ones(3), edges)
 
     def test_a_scalar_is_refused(self):

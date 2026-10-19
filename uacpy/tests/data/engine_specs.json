@@ -211,8 +211,8 @@
     "scaled"
    ],
    "supported_modes": [
-    "MODES",
     "COHERENT_TL",
+    "MODES",
     "INCOHERENT_TL",
     "BROADBAND",
     "TIME_SERIES"
@@ -221,8 +221,8 @@
   "spec": {
    "collapse": {},
    "modes": [
-    "MODES",
     "COHERENT_TL",
+    "MODES",
     "INCOHERENT_TL",
     "BROADBAND",
     "TIME_SERIES"
@@ -464,7 +464,7 @@
     "source_beam_pattern": false,
     "volume_attenuation": false
    },
-   "multi_depth_source_in_default_mode": "refused",
+   "multi_depth_source_in_default_mode": "ignored",
    "source_types": [
     "line",
     "point",

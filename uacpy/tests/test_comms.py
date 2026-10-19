@@ -22,6 +22,8 @@ from uacpy.comms.phy import rrc_matched_filter as phy_matched_filter
 from uacpy.comms.phy import pulse_shape
 from uacpy.comms.sync import symbol_sync
 from uacpy.comms.sync import detect_preamble, matched_filter_metric
+from uacpy.comms import JanusPacket, ReceiverDiagnostics
+from uacpy.core._export import CarrierExport, ExportRecord
 from uacpy.core.exceptions import ConfigurationError
 
 NAN = float('nan')
@@ -54,11 +56,11 @@ class TestModulation:
             comms.constellation("32qam")
 
     def test_plot_helpers_return_fig_ax(self):
-        from uacpy.plot import plot_constellation, plot_scatter
+        from uacpy.plot import plot_constellation, plot_received_symbols
         mod = comms.Modulator("qpsk")
         fig, ax = plot_constellation(mod.constellation, scheme=mod.scheme)
         assert ax.has_data()
-        fig2, ax2 = plot_scatter(mod.constellation, ideal=mod.constellation)
+        fig2, ax2 = plot_received_symbols(mod.constellation, ideal=mod.constellation)
         assert ax2.has_data()
 
     @pytest.mark.parametrize("M", [2, 4])
@@ -72,7 +74,7 @@ class TestModulation:
         rng = np.random.default_rng(2)
         bits = rng.integers(0, 2, 200)
         freqs = [1000, 2000, 3000, 4000]
-        wav = comms.fsk_modulate(bits, freqs, 0.01, 48000)
+        wav = comms.fsk_modulate(bits, freqs, 0.01, sample_rate=48000)
         out = comms.fsk_demodulate(wav, freqs, 0.01, 48000)
         assert np.array_equal(bits, out[: bits.size])
 
@@ -131,7 +133,7 @@ class TestMetrics:
         fs, T, freqs = 8000.0, 0.01, [1000.0, 1100.0]
         g = 10 ** 0.6
         bits = rng.integers(0, 2, 40000)
-        x = fsk_modulate(bits, freqs, T, fs)
+        x = fsk_modulate(bits, freqs, T, sample_rate=fs)
         sigma = np.sqrt(np.mean(x ** 2) * T / g * fs / 2)
         out = fsk_demodulate(x + sigma * rng.standard_normal(x.size),
                              freqs, T, fs)
@@ -367,6 +369,31 @@ class TestFadingChannelConvention:
         # direct path: x itself; delayed path: taps[1, m]*x[m] shifted by 2
         expected = np.array([1.0, 2.0, 3.0 + 10.0, 40.0, 90.0], dtype=complex)
         assert np.allclose(y, expected)
+        # A whole-number float delay is that delay.
+        assert np.array_equal(comms.apply_fading_channel(x, taps, [0.0, 2.0]),
+                              y)
+
+    @pytest.mark.parametrize('delays', [[0, 1.7], [], [[0, 2]], [0, np.nan]])
+    def test_a_delay_that_is_not_a_whole_sample_count_is_refused(self,
+                                                                  delays):
+        # 1.7 was truncated to 1 sample, an empty list raised a bare
+        # numpy error.
+        x = np.ones(3, dtype=complex)
+        taps = np.ones((2, 3), dtype=complex)
+        with pytest.raises(ConfigurationError,
+                           match="^apply_fading_channel: delays_samples must "
+                                 "be a 1-D list of whole numbers"):
+            comms.apply_fading_channel(x, taps, delays)
+
+    @pytest.mark.parametrize('n_samples', [0, -4, 2.5, np.nan])
+    def test_fading_taps_need_a_whole_positive_block(self, n_samples):
+        with pytest.raises(ConfigurationError,
+                           match="^fading_taps: n_samples must be a whole "
+                                 "number of samples, at least 1"):
+            comms.fading_taps(2, n_samples, 1.0, sample_rate=100.0,
+                              rng=np.random.default_rng(0))
+        assert comms.fading_taps(2, 4.0, 1.0, sample_rate=100.0,
+                                 rng=np.random.default_rng(0)).shape == (2, 4)
 
 
 class TestFadingStatistics:
@@ -834,6 +861,30 @@ class TestTransceiver:
         else:
             assert diag.mse is None
 
+    def test_the_one_call_path_detects_the_preamble_by_receives_rule(
+            self, monkeypatch):
+        """``receive_passband`` is ``from_passband`` then ``receive``: unset,
+        the preamble threshold it runs ``receive`` with is ``receive``'s own
+        default, PREAMBLE_THRESHOLD = 0.5, not a second rule; a given one
+        goes through as given."""
+        fs, fc, sps = 48000.0, 12000.0, 8
+        bits = np.random.default_rng(3).integers(0, 2, 200)
+        wav = comms.Transmitter("qpsk", preamble=64).transmit_passband(
+            bits, sample_rate=fs, fc=fc, sps=sps)
+        rx = comms.CommsReceiver("qpsk", preamble=64)
+        seen = []
+        receive = rx.receive
+
+        def spy(symbols, *args, **kwargs):
+            seen.append(kwargs["threshold"])
+            return receive(symbols, *args, **kwargs)
+
+        monkeypatch.setattr(rx, "receive", spy)
+        rx.receive_passband(wav, fs, fc, sps=sps)
+        rx.receive_passband(wav, fs, fc, sps=sps, threshold=0.42)
+        assert seen == [comms.sync.PREAMBLE_THRESHOLD, 0.42]
+        assert comms.sync.PREAMBLE_THRESHOLD == 0.5
+
     def test_real_payload_through_passband_channel(self):
         rng = np.random.default_rng(26)
         from scipy.signal import resample_poly
@@ -841,7 +892,7 @@ class TestTransceiver:
         message = b"uacpy comms passband round-trip test 0123456789"
         code = comms.ConvCode(interleave_depth=16)
         tx = comms.Transmitter("qpsk", code=code, preamble=256)
-        wav = tx.transmit_passband(comms.pack_frame(message), fs, fc, sps=sps)
+        wav = tx.transmit_passband(comms.pack_frame(message), sample_rate=fs, fc=fc, sps=sps)
         assert np.isrealobj(wav)
         rxsig = np.convolve(wav, np.array([1.0, 0, 0.4, 0, 0.2]))   # multipath
         rxsig = resample_poly(rxsig, 100020, 100000)               # clock skew
@@ -883,7 +934,7 @@ class TestTransceiver:
         message = b"a frame whose tail must survive the equalizer delay"
         code = comms.ConvCode(interleave_depth=16)
         tx = comms.Transmitter("qpsk", code=code, preamble=512)
-        wav = tx.transmit_passband(comms.pack_frame(message), fs, fc, sps=sps)
+        wav = tx.transmit_passband(comms.pack_frame(message), sample_rate=fs, fc=fc, sps=sps)
         rx = comms.CommsReceiver(
             "qpsk", code=comms.ConvCode(interleave_depth=16),
             equalizer=comms.DFE(n_ff=n_ff, n_fb=4, forget=0.995),
@@ -921,7 +972,7 @@ class TestPassbandCarrierPlacement:
         rx = comms.CommsReceiver("qpsk", preamble=64)
         bits = np.random.default_rng(3).integers(0, 2, 400)
         with pytest.raises(ConfigurationError, match='must lie in'):
-            tx.transmit_passband(bits, self.FS, fc, sps=self.SPS,
+            tx.transmit_passband(bits, sample_rate=self.FS, fc=fc, sps=self.SPS,
                                  rolloff=self.ROLLOFF)
         with pytest.raises(ConfigurationError, match='must lie in'):
             rx.from_passband(np.zeros(4096), self.FS, fc, sps=self.SPS,
@@ -935,7 +986,7 @@ class TestPassbandCarrierPlacement:
         tx = comms.Transmitter("qpsk", preamble=64)
         rx = comms.CommsReceiver("qpsk", preamble=64)
         bits = np.random.default_rng(3).integers(0, 2, 4000)
-        pb = tx.transmit_passband(bits, self.FS, fc, sps=self.SPS,
+        pb = tx.transmit_passband(bits, sample_rate=self.FS, fc=fc, sps=self.SPS,
                                   rolloff=self.ROLLOFF)
         out = rx.receive_passband(pb, self.FS, fc, sps=self.SPS,
                                   rolloff=self.ROLLOFF)
@@ -1018,7 +1069,7 @@ class TestOFDMModem:
         message = b"OFDM passband round-trip 0123456789 abcdefghij"
         tx = comms.OFDMTransmitter("qpsk", nsc, cp, code=code)
         rx = comms.OFDMReceiver("qpsk", nsc, cp, code=code)
-        pb = tx.transmit_passband(comms.pack_frame(message), fs, fc, oversample=os)
+        pb = tx.transmit_passband(comms.pack_frame(message), sample_rate=fs, fc=fc, oversample=os)
         assert np.isrealobj(pb)
         sig = np.convolve(pb, [1, 0, 0, 0.3, 0, 0, 0.2])
         sig = resample_poly(sig, 100015, 100000)          # 150 ppm Doppler
@@ -1125,6 +1176,26 @@ class TestOFDMModem:
         assert diag.symbols.size == diag.mse.size > 0
         # QPSK at this SNR sits tight on its constellation.
         assert float(np.median(diag.mse)) < 0.05
+
+    def test_ofdm_diagnostics_carry_the_channel_estimate(self):
+        """The per-subcarrier response the payload was equalised by is on
+        the diagnostics (no re-run of the receiver to reach it): through
+        taps [1, 0, 0, 0.4] its magnitude is the channel's own
+        |subcarrier_response| (the sync offset only rotates the phase),
+        within the unaveraged pilot's noise; a single-carrier receiver
+        has none."""
+        rx, y, _, nsc = self._ofdm_frame()
+        diag = rx.receive(y, return_diagnostics=True)
+        H = comms.subcarrier_response(np.array([1.0, 0, 0, 0.4]), nsc)
+        assert diag.channel_estimate.shape == (nsc,)
+        assert np.iscomplexobj(diag.channel_estimate)
+        np.testing.assert_allclose(np.abs(diag.channel_estimate), np.abs(H),
+                                   atol=0.1)
+        assert float(np.ptp(np.abs(diag.channel_estimate))) > 0.6
+        tx = comms.Transmitter("qpsk", preamble=64)
+        sc = comms.CommsReceiver("qpsk", preamble=64).receive(
+            tx.transmit(np.zeros(64, int)), return_diagnostics=True)
+        assert sc.channel_estimate is None
 
     @pytest.mark.parametrize("modulation, depth", [("qpsk", 16), ("16qam", None),
                                                    ("8psk", 8)])
@@ -1235,6 +1306,61 @@ class TestJanus:
         assert start is not None and metric.size > 0
         bits_out, ok = comms.janus_demodulate(wav, fs)
         assert ok and np.array_equal(bits_out, bits)
+
+    def test_doppler_settings_the_run_does_not_read_get_a_notice(self):
+        """``start=`` skips the detector and the Doppler stage, and
+        ``doppler_max_speed=0`` the Doppler stage: a Doppler setting either
+        leaves unread is named in a FallbackWarning and the decode is the
+        unset one. Unset settings, or ones the run reads, pass silently."""
+        from uacpy.core.exceptions import FallbackWarning
+        fs = 48000.0
+        bits = comms.JanusPacket().to_bits()
+        wav = np.concatenate([np.zeros(960), comms.janus_modulate(
+            bits, sample_rate=fs)])
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            at = comms.janus_demodulate(wav, fs, start=960)
+            comms.janus_demodulate(wav, fs, doppler_max_speed=0)
+            comms.janus_demodulate(wav, fs, sound_speed=1480.0)
+        cases = [({'start': 960, 'doppler_max_speed': 3.0},
+                  r"start= skips the detector and the Doppler compensation, "
+                  r"so doppler_max_speed=3\.0 is not used"),
+                 ({'start': 960, 'doppler_max_speed': 3.0,
+                   'sound_speed': 1480.0},
+                  r"so doppler_max_speed=3\.0 and sound_speed=1480\.0 are "
+                  r"not used"),
+                 ({'doppler_max_speed': 0, 'sound_speed': 1480.0},
+                  r"doppler_max_speed=0 disables the Doppler compensation, "
+                  r"so sound_speed=1480\.0 is not used")]
+        for kwargs, match in cases:
+            with pytest.warns(FallbackWarning,
+                              match=rf"^janus_demodulate: .*{match}"):
+                got = comms.janus_demodulate(wav, fs, **kwargs)
+            assert np.array_equal(got.bits, at.bits) and got.crc_ok
+
+    def test_a_doppler_estimate_at_the_search_edge_gets_a_notice(self):
+        """The Doppler search spans |a| <= doppler_max_speed/sound_speed and
+        clips there: a 6 m/s packet under the 5 m/s default comes back at
+        the edge, 5/1500, and a NumericsWarning says the true speed may lie
+        beyond it; searched to 10 m/s it is found inside, silently."""
+        from uacpy.core.exceptions import NumericsWarning
+        fs = 48000.0
+        bits = comms.JanusPacket().to_bits()
+        wav = np.concatenate([np.zeros(4800), comms.janus_modulate(
+            bits, sample_rate=fs), np.zeros(4800)])
+        moving = np.real(comms.compensate_doppler(wav, -6.0 / 1500.0))
+        moving = moving + 1e-3 * np.random.default_rng(0).standard_normal(
+            moving.size)
+        with pytest.warns(NumericsWarning,
+                          match=r"^janus_demodulate: the Doppler estimate "
+                                r"a = v/c = \+0\.003333 sits at the edge"):
+            edge = comms.janus_demodulate(moving, fs)
+        assert edge.doppler_scale == pytest.approx(5.0 / 1500.0, rel=1e-12)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            wide = comms.janus_demodulate(moving, fs, doppler_max_speed=10.0)
+        assert abs(wide.doppler_scale - 6.0 / 1500.0) < 2e-4
+        assert wide.crc_ok
 
     def test_demodulation_refuses_a_rate_that_aliases_the_band(self):
         # The upper band edge is fc + bw/2 = 13 600 Hz: 27 200 Hz is the
@@ -1912,6 +2038,117 @@ class TestBerSweepReturnsACurve:
         plt.close(fig)
 
 
+@pytest.mark.parametrize('make', [
+    lambda: comms.fsk_modulate([0, 1], [1000.0, 2000.0], 0.01, 48000.0),
+    lambda: comms.Transmitter('qpsk').transmit_passband(
+        np.zeros(8, int), 48000.0, 12000.0),
+    lambda: comms.Transmitter('qpsk').to_passband(
+        np.ones(4, complex), 48000.0, 12000.0),
+    lambda: comms.OFDMTransmitter('qpsk', 64, 16).transmit_passband(
+        np.zeros(8, int), 48000.0, 12000.0),
+    lambda: comms.OFDMTransmitter('qpsk', 64, 16).to_passband(
+        np.ones(80, complex), 48000.0, 12000.0),
+])
+def test_a_function_that_creates_samples_takes_its_rate_by_keyword(make):
+    """DOCUMENTATION §15: a function that creates samples takes
+    ``sample_rate=`` keyword-only, as lfm_chirp, bpsk_modulate and
+    janus_modulate do; a rate passed by position is a TypeError."""
+    with pytest.raises(TypeError, match='positional argument'):
+        make()
+
+
+class TestOfdmBerSweep:
+    """``ofdm_ber_sweep`` is ``ber_sweep`` for the OFDM pair: frames of
+    ``frame_bits`` through OFDMTransmitter → channel → AWGN →
+    OFDMReceiver at each Eb/N0, the noise from the same Eb/N0 rule referred
+    to the payload's received power, the result a BerCurve."""
+
+    @staticmethod
+    def _pair(modulation='qpsk', nsc=256, cp=32, code=None):
+        return (comms.OFDMTransmitter(modulation, nsc, cp, code=code),
+                comms.OFDMReceiver(modulation, nsc, cp, code=code))
+
+    def test_the_noise_realises_the_eb_n0_on_the_payload(self, monkeypatch):
+        """In the payload blocks the noise variance is the payload's power
+        over ``Eb/N0 · k · R · nsc/(nsc+cp)`` — the cyclic prefix is energy
+        spent — although awgn scales off the whole record, whose silence,
+        preamble, pilot and guard carry other powers. Checked on the very
+        samples awgn received and returned."""
+        from uacpy.comms import link
+        seen = []
+        awgn = link.awgn
+
+        def spy(signal, snr_dB, rng=None):
+            out = awgn(signal, snr_dB, rng=rng)
+            seen.append((np.asarray(signal), out))
+            return out
+
+        monkeypatch.setattr(link, 'awgn', spy)
+        tx, rx = self._pair('16qam', code=comms.ConvCode())
+        comms.ofdm_ber_sweep(tx, rx, ebn0_dB=[6.0], n_bits=40000,
+                             frame_bits=40000, rng=np.random.default_rng(2))
+        clean, noisy = seen[0]
+        block = 288
+        n_data = clean.size // block - 4
+        span = slice(3 * block, (3 + n_data - 1) * block)
+        p_payload = np.mean(np.abs(clean[span]) ** 2)
+        snr = 10 ** 0.6 * 4 * 0.5 * 256 / 288
+        n0 = np.mean(np.abs(noisy[span] - clean[span]) ** 2)
+        assert n0 == pytest.approx(p_payload / snr, rel=0.03)
+
+    def test_the_curve_falls_with_eb_n0_and_carries_its_settings(self):
+        tx, rx = self._pair()
+        h = np.array([1.0, 0.0, 0.5j, 0.0, 0.2])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')     # sync misses at 0 dB
+            curve = comms.ofdm_ber_sweep(tx, rx, ebn0_dB=[0.0, 8.0, 14.0],
+                                         n_bits=8192, channel=h,
+                                         rng=np.random.default_rng(3))
+        assert isinstance(curve, comms.BerCurve)
+        assert np.array_equal(curve.ebn0_dB, [0.0, 8.0, 14.0])
+        # Measured over seeds 3-4: 0.31-0.38, 0.042-0.045, 0.0066-0.0082
+        # (the channel's weakest subcarrier is at |H| = 0.3).
+        assert curve.ber[0] > curve.ber[1] > curve.ber[2]
+        assert curve.ber[0] > 0.2 and curve.ber[1] < 0.1
+        assert curve.ber[2] < 0.02
+        assert curve.scheme == 'OFDM qpsk' and curve.n_bits == 8192
+        assert curve.channel is h and curve.code is None
+
+    def test_the_bits_go_in_frames_of_frame_bits(self, monkeypatch):
+        tx, rx = self._pair()
+        sent = []
+        transmit = tx.transmit
+        monkeypatch.setattr(tx, 'transmit',
+                            lambda bits: sent.append(len(bits))
+                            or transmit(bits))
+        comms.ofdm_ber_sweep(tx, rx, ebn0_dB=[20.0], n_bits=5000,
+                             rng=np.random.default_rng(4))
+        assert sent == [2048, 2048, 904]
+
+    def test_a_pair_that_cannot_talk_is_refused(self):
+        tx, _ = self._pair()
+        _, rx = self._pair(nsc=128, code=comms.ConvCode())
+        with pytest.raises(ConfigurationError,
+                           match=r"^ofdm_ber_sweep: the transmitter and the "
+                                 r"receiver differ in n_subcarriers, code"):
+            comms.ofdm_ber_sweep(tx, rx, ebn0_dB=[10.0])
+
+    def test_a_frame_the_receiver_refuses_names_the_point(self,
+                                                          monkeypatch):
+        tx, rx = self._pair()
+
+        def refuse(baseband):
+            raise ConfigurationError("OFDMReceiver: frame too short.")
+
+        monkeypatch.setattr(rx, 'receive', refuse)
+        with pytest.raises(ConfigurationError,
+                           match=r"^ofdm_ber_sweep: at Eb/N0 = 4 dB the "
+                                 r"receiver could not decode a frame "
+                                 r"\(OFDMReceiver: frame too short\.\)"):
+            comms.ofdm_ber_sweep(tx, rx, ebn0_dB=[4.0], n_bits=100,
+                                 rng=np.random.default_rng(5))
+
+
 class TestSchmidlCoxThreshold:
     """The plateau a preamble reaches falls with the SNR, so the peak that
     counts as a preamble is the caller's ``threshold``; both sides of it are
@@ -1963,7 +2200,7 @@ class TestFskToneOrthogonality:
 
     @staticmethod
     def _warnings(freqs, dur=0.01, fs=8000.0):
-        wav = comms.fsk_modulate([0, 1, 1, 0], freqs, dur, fs)
+        wav = comms.fsk_modulate([0, 1, 1, 0], freqs, dur, sample_rate=fs)
         with recorded_warnings() as rec:
             comms.fsk_demodulate(wav, freqs, dur, fs)
         return [w for w in rec if 'cycles apart' in str(w.message)]
@@ -2324,7 +2561,7 @@ class TestFskDemodulateCarriesItsModulatorsGuards:
 
     def _waveform(self):
         bits = np.random.default_rng(21).integers(0, 2, 32)
-        return comms.fsk_modulate(bits, self.FREQS, 0.01, self.FS)
+        return comms.fsk_modulate(bits, self.FREQS, 0.01, sample_rate=self.FS)
 
     @pytest.mark.parametrize("dur", [-0.01, NAN, np.inf])
     def test_non_positive_or_non_finite_symbol_duration_raises(self, dur):
@@ -2346,7 +2583,7 @@ class TestFskDemodulateCarriesItsModulatorsGuards:
 
     def test_a_valid_call_round_trips(self):
         bits = np.random.default_rng(21).integers(0, 2, 32)
-        wav = comms.fsk_modulate(bits, self.FREQS, 0.01, self.FS)
+        wav = comms.fsk_modulate(bits, self.FREQS, 0.01, sample_rate=self.FS)
         assert np.array_equal(
             comms.fsk_demodulate(wav, self.FREQS, 0.01, self.FS), bits)
 
@@ -2571,7 +2808,7 @@ class TestNyquistGuards:
 
     def test_fsk_modulate_rejects_a_tone_at_nyquist(self):
         with pytest.raises(ConfigurationError, match='Nyquist'):
-            comms.fsk_modulate([0, 1], [1000.0, 24000.0], 0.01, 48000.0)
+            comms.fsk_modulate([0, 1], [1000.0, 24000.0], 0.01, sample_rate=48000.0)
 
     def test_fsk_demodulate_rejects_a_tone_at_nyquist(self):
         # The detector builds its correlation bank from the same tone list, so
@@ -2918,16 +3155,16 @@ class TestSmallCommsGuards:
     def test_fsk_modulate_bad_symbol_duration_raises(self, bad):
         with pytest.raises(ConfigurationError,
                            match="symbol_duration must be > 0 s"):
-            comms.fsk_modulate([0, 1], [1000.0, 2000.0], bad, 48000.0)
+            comms.fsk_modulate([0, 1], [1000.0, 2000.0], bad, sample_rate=48000.0)
 
     def test_fsk_modulate_subsample_symbol_duration_raises(self):
         # 1e-6 s at 48 kHz is 0.048 samples per symbol, which int(round())
         # turned into silently empty output.
         with pytest.raises(ConfigurationError, match="rounds to zero"):
-            comms.fsk_modulate([0, 1], [1000.0, 2000.0], 1e-6, 48000.0)
+            comms.fsk_modulate([0, 1], [1000.0, 2000.0], 1e-6, sample_rate=48000.0)
 
     def test_fsk_modulate_emits_n_samples_per_symbol(self):
-        wav = comms.fsk_modulate([0, 1], [1000.0, 2000.0], 0.001, 48000.0)
+        wav = comms.fsk_modulate([0, 1], [1000.0, 2000.0], 0.001, sample_rate=48000.0)
         assert wav.size == 2 * 48
 
 
@@ -2946,7 +3183,7 @@ class TestDpskFskBitValidation:
                            match=r"fsk_modulate: bits must be 0/1"
                                  r".*\(1 - chips\) // 2"):
             comms.fsk_modulate([-1, -1], [1000.0, 2000.0, 3000.0, 4000.0],
-                               0.01, 48000.0)
+                               0.01, sample_rate=48000.0)
 
     def test_dpsk_modulate_rejects_string_bits(self):
         with pytest.raises(ConfigurationError, match="str"):
@@ -2960,7 +3197,7 @@ class TestDpskFskBitValidation:
     def test_fsk_round_trips_zero_one_bits(self):
         bits = np.random.default_rng(21).integers(0, 2, 40)
         freqs = [1000.0, 2000.0, 3000.0, 4000.0]
-        wav = comms.fsk_modulate(bits, freqs, 0.01, 48000.0)
+        wav = comms.fsk_modulate(bits, freqs, 0.01, sample_rate=48000.0)
         out = comms.fsk_demodulate(wav, freqs, 0.01, 48000.0)
         np.testing.assert_array_equal(out[:bits.size], bits)
 
@@ -3523,7 +3760,7 @@ class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
         rng = np.random.default_rng(3)
         bits = rng.integers(0, 2, n_bits)
         tx = comms.Transmitter(modulation, preamble=64)
-        wav = tx.transmit_passband(bits, self.FS, self.FC, sps=self.SPS)
+        wav = tx.transmit_passband(bits, sample_rate=self.FS, fc=self.FC, sps=self.SPS)
         whole, frac = int(np.floor(delay_samples)), delay_samples - int(np.floor(delay_samples))
         rxsig = amplitude * np.convolve(np.concatenate([np.zeros(whole), wav]),
                                         fractional_delay_taps(frac))
@@ -3967,6 +4204,24 @@ class TestOfdmDemodulateTakesTapsOrAResponse:
         rx = np.convolve(tx, self.TAPS)[: tx.size]
         return syms, rx
 
+    def test_an_snr_with_no_channel_to_equalize_gets_a_notice(self):
+        """``snr_linear`` picks the MMSE weight of the equalizer; with no
+        channel nothing is equalized, so a given one is named in a
+        FallbackWarning and the symbols are the unequalized ones."""
+        from uacpy.core.exceptions import FallbackWarning
+        _, rx = self._link()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            plain = comms.ofdm_demodulate(rx, self.NSC, self.CP)
+            comms.ofdm_demodulate(rx, self.NSC, self.CP, channel=self.TAPS,
+                                  snr_linear=100.0)
+        with pytest.warns(FallbackWarning,
+                          match=r"^ofdm_demodulate: snr_linear=100\.0 selects "
+                                r"the MMSE weight"):
+            got = comms.ofdm_demodulate(rx, self.NSC, self.CP,
+                                        snr_linear=100.0)
+        np.testing.assert_array_equal(got, plain)
+
     def test_taps_and_the_response_equalize_alike(self):
         syms, rx = self._link()
         H = np.fft.fft(self.TAPS, self.NSC)
@@ -4016,6 +4271,19 @@ class TestOneSchemeTable:
         assert comms.constellation(scheme).size == order
         assert comms.Modulator(scheme).bits_per_symbol == int(np.log2(order))
         assert np.isfinite(comms.ber_theory(scheme, 10.0))
+
+    @pytest.mark.parametrize('who', ['simulate_link', 'ber_sweep'])
+    @pytest.mark.parametrize('scheme', ['ofdm', '32qam'])
+    def test_the_link_harness_names_itself_and_the_ofdm_pair(self, who,
+                                                             scheme):
+        """The link harness refuses a scheme it cannot run under its own
+        name (not ``constellation``'s), listing its single-carrier schemes
+        and pointing a multicarrier link at the OFDM pair."""
+        with pytest.raises(ConfigurationError,
+                           match=rf"^{who}: unknown scheme '{scheme}'; this "
+                                 r"harness runs the single-carrier") as e:
+            getattr(comms, who)(scheme, 10.0, 200)
+        assert 'OFDMTransmitter / OFDMReceiver' in str(e.value)
 
     def test_a_scheme_outside_the_table_is_refused_by_both(self):
         with pytest.raises(ConfigurationError, match='unknown scheme'):
@@ -4151,6 +4419,37 @@ class TestJanusAndPhyInputGuards:
                            match='janus_modulate: sample_rate must be > 0'):
             comms.janus_modulate(bits, sample_rate=rate)
 
+    @pytest.mark.parametrize('kwargs, match', [
+        ({'chip_duration': 0.0}, r'chip_duration must be > 0 s'),
+        ({'chip_duration': -0.00625}, r'chip_duration must be > 0 s'),
+        ({'chip_duration': np.inf}, r'chip_duration must be > 0 s'),
+        ({'bandwidth': -4160.0}, r'bandwidth must be > 0 Hz'),
+        ({'bandwidth': 0.0}, r'bandwidth must be > 0 Hz'),
+        ({'fc': -11520.0}, r'fc must be > 0 Hz'),
+        ({'fc': 2080.0}, r'a 4160 Hz band centred on 2080 Hz starts at 0 Hz, '
+                         r'at or below 0 Hz'),
+    ])
+    @pytest.mark.parametrize('who', ['janus_modulate', 'janus_detect',
+                                     'janus_demodulate'])
+    def test_a_band_or_chip_that_carries_no_packet_is_refused(self, who,
+                                                              kwargs, match):
+        """A zero or negative chip, a non-positive band or carrier, or a
+        band reaching 0 Hz (fc = bw/2) is refused by name at all three entry
+        points — the modulator built an empty waveform from them and the
+        receivers died in numpy. The edge case just inside (fc a hertz
+        above bw/2) runs."""
+        bits = comms.JanusPacket().to_bits()
+        if who == 'janus_modulate':
+            call = lambda **kw: comms.janus_modulate(bits, sample_rate=48000.0,
+                                                     **kw)
+        else:
+            wav = comms.janus_modulate(bits, sample_rate=48000.0)
+            call = lambda **kw: getattr(comms, who)(wav, 48000.0, **kw)
+        with pytest.raises(ConfigurationError, match=rf'^{who}: {match}'):
+            call(**kwargs)
+        if who == 'janus_modulate':
+            assert call(fc=2081.0).size > 0
+
     @pytest.mark.parametrize('wakeup, refused', [(True, True), (False, False)])
     def test_the_wakeup_tone_may_not_sit_on_nyquist(self, wakeup, refused):
         """At sample_rate = 2·(fc + bw/2) the top wake-up tone is exactly
@@ -4242,12 +4541,26 @@ class TestTheDopplerScanReadsTheProbesNeighbourhood:
         rng = np.random.default_rng(12)
         tx = comms.OFDMTransmitter("qpsk", 64, 16)
         rx = comms.OFDMReceiver("qpsk", 64, 16)
-        pb = tx.transmit_passband(rng.integers(0, 2, 256), 48000.0, 12000.0,
+        pb = tx.transmit_passband(rng.integers(0, 2, 256), sample_rate=48000.0, fc=12000.0,
                                   oversample=4)
         capture = np.concatenate([0.01 * rng.standard_normal(200_000), pb,
                                   0.01 * rng.standard_normal(200_000)])
         rx.from_passband(capture, 48000.0, 12000.0)
         assert seen and seen[0] < capture.size / 4
+
+    def test_a_given_doppler_scale_with_a_scan_grid_is_refused(self):
+        """``scales`` is the grid an estimate of the Doppler scale searches;
+        a given ``doppler_scale`` is not estimated, so the pair is refused
+        naming both rather than the grid dropped."""
+        rx = comms.OFDMReceiver("qpsk", 64, 16)
+        with pytest.raises(ConfigurationError,
+                           match=r"^OFDMReceiver\.from_passband: "
+                                 r"doppler_scale=0\.001 states the Doppler "
+                                 r"scale, and scales= is the grid"):
+            rx.from_passband(np.zeros(4096), 48000.0, 12000.0,
+                             doppler_scale=1e-3, scales=np.array([0.0]))
+        assert rx.from_passband(np.zeros(4096), 48000.0, 12000.0,
+                                doppler_scale=1e-3).size > 0
 
 
 @pytest.mark.parametrize('call', [
@@ -4357,3 +4670,109 @@ def test_viterbi_from_branch_metrics_is_the_decoders_core():
     np.testing.assert_array_equal(decoded, info)
     assert callable(comms.viterbi_from_branch_metrics)
     assert not hasattr(comms, 'viterbi_hard')
+
+
+# ── ReceiverDiagnostics ───────────────────────────────────────────────────
+
+def _diagnostics(mse=True, channel=True):
+    return ReceiverDiagnostics(
+        bits=np.array([1, 0, 1, 1]), symbols=np.array([1 + 1j, -1 - 1j]),
+        mse=np.array([0.1, 0.05]) if mse else None,
+        sync_metric=np.array([0.0, 0.4, 1.0]), start=1,
+        channel_estimate=(np.array([1.0 + 0.5j, 0.8 - 0.2j, 0.3j])
+                          if channel else None))
+
+
+def _same_records(a, b, fields):
+    assert type(a) is type(b)
+    for name in fields:
+        x, y = getattr(a, name), getattr(b, name)
+        if isinstance(x, np.ndarray) or isinstance(y, np.ndarray):
+            np.testing.assert_array_equal(x, y, err_msg=name)
+        else:
+            assert x == y, name
+
+
+_DIAGNOSTIC_FIELDS = ('bits', 'symbols', 'mse', 'sync_metric', 'start',
+                      'channel_estimate')
+
+
+class TestReceiverDiagnosticsIsAnExportRecord:
+    """Every save form reads back the record it saved."""
+
+    def test_it_is_on_the_protocol(self):
+        assert issubclass(ReceiverDiagnostics, ExportRecord)
+
+    @pytest.mark.parametrize('mse', [True, False])
+    def test_from_dict_of_to_dict_is_the_record(self, mse):
+        d = _diagnostics(mse, channel=mse)
+        _same_records(d, ReceiverDiagnostics.from_dict(d.to_dict()),
+                      _DIAGNOSTIC_FIELDS)
+
+    def test_the_npz_round_trip_is_the_record(self, tmp_path):
+        d = _diagnostics()
+        np.savez(tmp_path / 'd.npz', **d.to_dict())
+        with np.load(tmp_path / 'd.npz', allow_pickle=True) as f:
+            back = ReceiverDiagnostics.from_dict(dict(f))
+        _same_records(d, back, _DIAGNOSTIC_FIELDS)
+
+    def test_from_xarray_of_to_xarray_is_the_record(self):
+        pytest.importorskip('xarray')
+        d = _diagnostics()
+        _same_records(d, ReceiverDiagnostics.from_xarray(d.to_xarray()),
+                      _DIAGNOSTIC_FIELDS)
+
+    def test_the_netcdf_round_trip_is_the_record(self, tmp_path):
+        xr = pytest.importorskip('xarray')
+        pytest.importorskip('h5netcdf')
+        pytest.importorskip('h5py')
+        d = _diagnostics()
+        d.to_netcdf(tmp_path / 'd.nc')
+        with xr.open_dataset(tmp_path / 'd.nc', engine='h5netcdf') as ds:
+            back = ReceiverDiagnostics.from_xarray(ds.load())
+        _same_records(d, back, _DIAGNOSTIC_FIELDS)
+
+    def test_its_arrays_are_read_only(self):
+        d = _diagnostics()
+        with pytest.raises(ValueError, match='read-only'):
+            d.bits[0] = 0
+
+
+# ── JanusPacket ───────────────────────────────────────────────────────────
+
+def _packet():
+    return JanusPacket(class_id=16, app_type=3,
+                       app_data=np.arange(34) % 2, mobility=1, forward=1)
+
+
+class TestJanusPacketIsACarrier:
+    """Every save form reads back the packet it saved."""
+
+    def test_it_is_on_the_protocol(self):
+        assert issubclass(JanusPacket, CarrierExport)
+
+    def test_from_dict_of_to_dict_is_the_packet(self):
+        p = _packet()
+        assert JanusPacket.from_dict(p.to_dict()) == p
+
+    def test_the_npz_round_trip_is_the_packet(self, tmp_path):
+        p = _packet()
+        np.savez(tmp_path / 'p.npz', **p.to_dict())
+        with np.load(tmp_path / 'p.npz', allow_pickle=True) as f:
+            back = JanusPacket.from_dict(dict(f))
+        assert back == p
+        assert back.to_bits().tolist() == p.to_bits().tolist()
+
+    def test_from_xarray_of_to_xarray_is_the_packet(self):
+        pytest.importorskip('xarray')
+        p = _packet()
+        assert JanusPacket.from_xarray(p.to_xarray()) == p
+
+    def test_the_netcdf_round_trip_is_the_packet(self, tmp_path):
+        xr = pytest.importorskip('xarray')
+        pytest.importorskip('h5netcdf')
+        pytest.importorskip('h5py')
+        p = _packet()
+        p.to_netcdf(tmp_path / 'p.nc')
+        with xr.open_dataset(tmp_path / 'p.nc', engine='h5netcdf') as ds:
+            assert JanusPacket.from_xarray(ds.load()) == p

@@ -136,6 +136,29 @@ def test_full_scale_is_not_clipped_but_anything_past_it_is(tmp_path):
     assert data[0] == 32767
 
 
+@pytest.mark.parametrize('encoding, bits', [('pcm16', 16), ('pcm24', 24),
+                                            ('pcm32', 32)])
+def test_the_most_negative_code_reads_and_writes_back_unclipped(
+        tmp_path, encoding, bits):
+    """read_wav divides by the symmetric full scale 2**(b-1) - 1, so the
+    most negative code reads just below -1; written back it is that code
+    again, silently. One step below it is clipped to it, with the
+    warning."""
+    full = 2 ** (bits - 1) - 1
+    lowest = np.array([-(full + 1) / full, 0.5, 1.0])
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        write_wav(tmp_path / 'low.wav', lowest, FS, encoding=encoding)
+    back, _ = read_wav(tmp_path / 'low.wav')
+    np.testing.assert_array_equal(back, np.round(lowest * full) / full)
+    assert back[0] * full == -(full + 1)
+    with pytest.warns(UserWarning, match='1 of 3 samples are past full'):
+        write_wav(tmp_path / 'below.wav',
+                  np.array([lowest[0] - 2.0 / full, 0.5, 1.0]), FS,
+                  encoding=encoding)
+    np.testing.assert_array_equal(read_wav(tmp_path / 'below.wav')[0], back)
+
+
 def test_a_float_encoding_does_not_clip(tmp_path):
     """Unbounded is the whole contract — no warning, no ceiling."""
     with warnings.catch_warnings():
@@ -651,7 +674,7 @@ def test_read_wav_output_goes_straight_into_pressure_from_recording(
         _riff(fmt, struct.pack(f'<{codes.size}h', *codes)))
     x, _ = read_wav(tmp_path / 'codes.wav')
     p = pressure_from_recording(
-        x, sensitivity=0, gain=0,
+        x, sensitivity_dB=0, gain_dB=0,
         volt_params=(read_wav_info(tmp_path / 'codes.wav').bits, 2.0),
         x_scale='read_wav')
     np.testing.assert_allclose(p, 1e-6 * 2.0 * codes / 2 ** 15,

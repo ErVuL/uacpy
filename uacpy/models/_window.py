@@ -2,8 +2,8 @@
 searches or integrates over: the default rule the engines derive an
 unpinned bound from, the window a wavenumber integral resolves with the
 origin of each bound, the check that a pinned pair is ordered, and what a
-derived window leaves out — the steep paths its ``c_high`` cuts, the seabed
-interface wave below its ``c_low`` — with the notices that state it.
+window leaves out — the steep paths its ``c_high`` cuts, a Scholte wave
+below its lower edge — with the notices that state it.
 
 The rules an engine derives on its own (Kraken's ``c_low`` of 0 and its
 reflection-table ``c_high``, BOUNCE's ``min(SSP)``) stay in that engine; what
@@ -15,7 +15,7 @@ from typing import NamedTuple, Optional, Tuple
 import numpy as np
 
 from uacpy.core.boundary import BoundaryType
-from uacpy.core.engine_defaults import default_c_low
+from uacpy.core.engine_defaults import default_c_low, scholte_waves
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.core.run_settings import Notice
@@ -82,15 +82,16 @@ def resolve_phase_speed_bounds(
     :data:`DEFAULT_C_MAX_UNBOUNDED` instead — the AT idiom for "no upper
     limit".
 
-    The derived ``c_low`` is the documented rule: the slowest speed of
-    every medium, shear speeds and half-spaces included, × 0.85 over an
-    elastic half-space and × 0.90 otherwise (``scooter.f90:193-259``;
-    Jensen et al., *Computational Ocean Acoustics*, ch. 4 App. 1 step 1,
-    "the lowest wave speed in the problem"). Over an elastic seabed it
-    reaches below the shear speed, so the seabed interface wave is in the
-    window, at the cost of wavenumbers: about 14× on elastic sand (``Nk``
-    grows as ``1/c_low``, 1341/93.5 m/s; docs/models/scooter.md, "Layered
-    and elastic seabeds", measures the run 14× slower).
+    The derived ``c_low`` is the documented rule: 0.90 × the slowest wave
+    of the problem — every medium's speed, shear speeds and half-spaces
+    included, and every Scholte wave solved from Brekhovskikh
+    & Lysanov eq. 3.4.29 (``scooter.f90:258``; Jensen et al.,
+    *Computational Ocean Acoustics*, ch. 4 App. 1 step 1, "the lowest wave
+    speed in the problem"; :func:`~uacpy.core.engine_defaults.default_c_low`).
+    Over an elastic seabed the Scholte wave is then in the window, at
+    the cost of wavenumbers: ``Nk`` grows as ``1/c_low``
+    (docs/models/scooter.md, "Layered and elastic seabeds", measures the
+    run on elastic sand against a water-only window).
     """
     if c_low is not None and c_high is not None:
         return float(c_low), float(c_high)
@@ -162,8 +163,8 @@ def resolve_window(env, *, c_low, c_high, c_high_unbounded: float,
                    model_name: str) -> PhaseSpeedWindow:
     """The window of a wavenumber integral (Scooter, SPARC): the pinned
     bounds; an unpinned ``c_low`` from :func:`resolve_phase_speed_bounds`
-    on the projected ``env`` (the slowest speed of every medium × 0.85 over
-    an elastic half-space, × 0.90 otherwise,
+    on the projected ``env`` (0.90 × the slowest wave of the problem,
+    Scholte waves included,
     :func:`~uacpy.core.engine_defaults.default_c_low`); an unpinned ``c_high``
     of ``c_high_unbounded`` over every seabed — the engine's own "no upper
     limit", which puts ``k_min = omega/c_high`` at 0 to every grazing angle
@@ -250,8 +251,8 @@ def steep_path_notice(env, source, receiver, c_high: float, *,
                       model_name: str, kept: str, summed_in: str,
                       evidence: str, remediation: str,
                       pinned: bool = False) -> Optional[Notice]:
-    """``(note, warning)`` when a receiver's direct or surface-reflected
-    path is steeper than ``c_high`` keeps (:func:`steep_path_cut`, at the
+    """A :class:`~uacpy.core.run_settings.Notice` when a receiver's direct
+    or surface-reflected path is steeper than ``c_high`` keeps (:func:`steep_path_cut`, at the
     fastest water speed), else ``None``.
 
     The engine names what its window keeps (``kept``: Scooter's paths,
@@ -282,61 +283,196 @@ def steep_path_notice(env, source, receiver, c_high: float, *,
     )
 
 
-#: Phase speed of the seabed interface (Scholte) wave as a fraction of the
-#: slowest shear speed of the medium under the water: "generally about 0.85
-#: times the minimum shear-wave speed" (JKPS §5.10.5; the wave itself is
-#: introduced in §4.10.1).
-SCHOLTE_SPEED_FRACTION = 0.85
+#: OAST's automatic wavenumber sampling, SUBROUTINE AUTSAM
+#: (``unoast31.f:1181-1227``): ``NR`` points over the deck's range axis set
+#: the least wavenumber span, ``NKMIN`` the least count, and the period
+#: factor ``RFAC`` is 6 under the full Hankel transform (option ``'f'``,
+#: ``INTTYP = 2``, ``:1139``) and 3 otherwise (``:1192``, ``:1197-1201``).
+#: OASN's discrete-source sampling, SUBROUTINE AUTSMN
+#: (``oasnun22.f:1677-1718``), is the same scheme with ``NR = 10``,
+#: ``RFAC = 3`` and a fixed ``CREFA = 1500`` m/s (``:1687-1694``).
+_AUTSAM_NR = 300
+_AUTSAM_NKMIN = 256
+_AUTSMN_NR = 10
+_AUTSMN_RFAC = 3.0
+_AUTSMN_CREFA = 1500.0
 
 
-def interface_wave_notice(env, source, receiver, c_low: float, frequency: float,
-                          *, model_name: str) -> Optional[Notice]:
-    """A notice when the derived ``c_low`` leaves out the seabed interface
-    (Scholte) wave that the geometry can see, else ``None``.
+def _autsam_edge(c_low: float, c_high: float, *, frequency: float,
+                 r_min: float, r_max: float, reference_speed: float,
+                 rfac: float, n_ranges: int) -> Tuple[float, int]:
+    """``(CMIN, NW)``: the slowest phase speed (m/s) and the wavenumber
+    count of OAST's AUTSAM / OASN's AUTSMN, which compute it alike
+    (``unoast31.f:1202-1224``, ``oasnun22.f:1693-1715``), from the deck's
+    range span ``r_min``..``r_max`` (m):
 
-    The wave travels at about :data:`SCHOLTE_SPEED_FRACTION` × the slowest
-    shear speed of the medium touching the water. A derived ``c_low``
-    (:func:`~uacpy.core.engine_defaults.default_c_low`) is below it over an
-    elastic half-space (0.85 × a speed no faster than that shear speed);
-    over elastic layers on a fluid half-space it is 0.90 × the slowest
-    speed, which can sit above the wave. The wave is confined to
-    the seafloor: it counts only when the source or a receiver lies within
-    one of its wavelengths, ``0.85·c_s / f`` at the lowest frequency
-    ``frequency``, of the seafloor (``env.depth``) — the one-wavelength
-    reach is uacpy guidance, set by the measurement it rests on. Far from
-    the bed leaving the wave out costs nothing measurable
-    (docs/models/scooter.md, "Layered and elastic seabeds": 0.004 dB median
-    for a source 75 m above an elastic sand seabed); 1 m above it, up to
-    2.4 dB.
+    * ``DK = min(2π/(RFAC·r_max), 2πf/(CREFA·NKMIN))``;
+    * ``WM = 2π/DR`` with ``DR = (r_max − r_min)/(NR − 1)``;
+    * ``WN1 = 2πf/c_high``, ``WN2 = 2πf/c_low``, ``WNMAX = max(WM,
+      1.1·(WN2 − WN1) + WN1)``, ``WNMIN = max(min(WNMAX − WM, WN1 −
+      0.1·(WN2 − WN1)), DK/2)``;
+    * ``NW`` the smallest power of two from NKMIN up holding
+      ``(WNMAX − WNMIN)/DK + 1`` wavenumbers, ``WNMAX = WNMIN + (NW −
+      1)·DK`` and ``CMIN = 2πf/WNMAX``.
+
+    A span of 0 makes ``WM = 2π/DR`` infinite: no edge, ``(0, 0)``."""
+    if not r_max > r_min:
+        return 0.0, 0
+    omega = 2.0 * np.pi * float(frequency)
+    dk = min(2.0 * np.pi / (rfac * r_max),
+             omega / (float(reference_speed) * _AUTSAM_NKMIN))
+    wm = 2.0 * np.pi * (n_ranges - 1) / (r_max - r_min)
+    wn1 = omega / float(c_high)
+    wn2 = omega / float(c_low)
+    wnmax = max(wm, 1.1 * (wn2 - wn1) + wn1)
+    wnmin = max(min(wnmax - wm, wn1 - 0.1 * (wn2 - wn1)), 0.5 * dk)
+    needed = int((wnmax - wnmin) / dk + 1)
+    nw = _AUTSAM_NKMIN
+    while nw < needed:
+        nw *= 2
+    return omega / (wnmin + (nw - 1) * dk), nw
+
+
+def oases_integration_edge(c_low: float, c_high: float, *,
+                           automatic: bool, frequency: float,
+                           range_min: float, range_max: float,
+                           source_speed: float,
+                           full_hankel: bool) -> Tuple[float, str]:
+    """``(edge, text)``: the slowest phase speed (m/s) OAST's wavenumber
+    integral reaches on its deck, and the sentence stating its source.
+
+    A pinned count integrates from ``c_low`` as given
+    (``unoast31.f:432-433``). Under automatic sampling (no
+    ``n_wavenumbers``) the edge is AUTSAM's ``CMIN`` (:func:`_autsam_edge`,
+    ``unoast31.f:1224``) on the deck's values: ``r_max = max(|XLEFT|,
+    |XRIGHT|)`` and ``r_min = r_max − |XRIGHT − XLEFT|`` (``:427-428``),
+    here ``range_min`` / ``range_max`` in metres; CREFA the compressional
+    speed of the source's layer (``source_speed``, ``:1203``); RFAC 6
+    under option ``'f'`` (``full_hankel``), else 3.
+
+    The kernel past ``2πf/c_low`` is integrated under a cosine taper that
+    falls to zero at WNMAX (CALIN3, ``oaseun31.f:2157-2159``): a wave
+    between ``c_low`` and the edge is in the field, attenuated by the
+    taper, not left out; a wave slower than the edge has no sample.
     """
-    shear = []
-    for column in env.bottom.columns:
-        top = column.layers[0] if column.layers else column.halfspace
-        if (column.layers or BoundaryType.from_string(
-                top.acoustic_type).is_geoacoustic) and top.shear_speed > 0:
-            shear.append(float(top.shear_speed))
-    if not shear:
-        return None
-    speed = SCHOLTE_SPEED_FRACTION * min(shear)
-    if not speed < c_low:
-        return None
-    wavelength = speed / float(frequency)
-    seafloor = float(env.depth)
-    heights = np.abs(seafloor - np.concatenate([
+    if not automatic:
+        return float(c_low), (f"c_low = {c_low:.1f} m/s with a pinned "
+                              f"n_wavenumbers (unoast31.f:432-433)")
+    r_max = max(abs(float(range_min)), abs(float(range_max)))
+    r_min = r_max - abs(float(range_max) - float(range_min))
+    edge, nw = _autsam_edge(c_low, c_high, frequency=frequency,
+                            r_min=r_min, r_max=r_max,
+                            reference_speed=source_speed,
+                            rfac=6.0 if full_hankel else 3.0,
+                            n_ranges=_AUTSAM_NR)
+    if nw == 0:
+        return 0.0, "0 m/s: the deck's range axis has no span"
+    return edge, (f"{edge:.1f} m/s at {float(frequency):g} Hz: OAST's "
+                  f"automatic sampling (AUTSAM, unoast31.f:1202-1224) "
+                  f"integrates {nw} wavenumbers up to it on this deck, "
+                  f"c_low = {c_low:.1f} m/s over a {r_min:g}-{r_max:g} m "
+                  f"range axis")
+
+
+def oasn_discrete_integration_edge(c_low: float, c_high: float, *,
+                                   automatic: bool, frequency: float,
+                                   first_range: float) -> Tuple[float, str]:
+    """``(edge, text)``: the slowest phase speed (m/s) OASN's
+    discrete-source wavenumber integral reaches. A pinned count integrates
+    from ``c_low`` as given (``oasnun22.f:436-437``). Under automatic
+    sampling AUTSMN runs once, at the band centre ``frequency`` (``FREQ =
+    0.5·(FREQ1 + FREQ2)``, ``unoasn22.f:147``), on the FIRST record's range
+    ``first_range`` (m) as ``RMAX`` and a tenth of it as ``RMIN``
+    (``oasnun22.f:424-433``), with ``NR = 10``, ``RFAC = 3`` and ``CREFA =
+    1500`` m/s (:func:`_autsam_edge`). Its ``CMIND`` bounds the integral in
+    slowness, ``SLOW2D = 2π/CMIND`` (``oasnun22.f:447``), so the edge is
+    that phase speed at every frequency."""
+    if not automatic:
+        return float(c_low), (f"c_low = {c_low:.1f} m/s with a pinned "
+                              f"n_wavenumbers (oasnun22.f:436-437)")
+    edge, nw = _autsam_edge(c_low, c_high, frequency=frequency,
+                            r_min=0.1 * float(first_range),
+                            r_max=float(first_range),
+                            reference_speed=_AUTSMN_CREFA,
+                            rfac=_AUTSMN_RFAC, n_ranges=_AUTSMN_NR)
+    if nw == 0:
+        return 0.0, "0 m/s: the first discrete source sits at range 0"
+    return edge, (f"{edge:.1f} m/s: OASN's automatic discrete-source "
+                  f"sampling (AUTSMN, oasnun22.f:422-447, :1677-1718) "
+                  f"integrates {nw} wavenumbers to it at the "
+                  f"{float(frequency):g} Hz band centre, c_low = "
+                  f"{c_low:.1f} m/s, the first source "
+                  f"{float(first_range):g} m out")
+
+
+def scholte_wave_notice(env, source, receiver, edge: float,
+                        frequency: float, *, model_name: str,
+                        edge_text: str, remediation: str,
+                        wavenumber_edge: Optional[float] = None,
+                        ) -> Optional[Notice]:
+    """A notice when the slowest phase speed the engine reaches, ``edge``
+    (m/s), lies above a Scholte wave of ``env``
+    (:func:`~uacpy.core.engine_defaults.scholte_waves`, Brekhovskikh &
+    Lysanov §3.4.2, eq. 3.4.29) that the source or a receiver lies close
+    to, else ``None``.
+
+    ``edge`` is the engine's own — the lower edge of its wavenumber
+    integral or the floor of its mode search — and the caller states it
+    with its source in ``edge_text``, and the engine's remedy in
+    ``remediation``. A derived
+    :func:`~uacpy.core.engine_defaults.default_c_low` sits under every
+    solved wave, so the notice concerns a pinned ``c_low`` and Kraken's
+    window over shear. The wave's "amplitude decreases exponentially in
+    both media with distance from the interface" (Brekhovskikh & Lysanov
+    §3.4.2), and "interface waves can only be excited in a stratified
+    waveguide by sources close in terms of wavelength to the interface"
+    (Jensen et al., *Computational Ocean Acoustics*, §9.2.6.2): a wave
+    counts when the source or a receiver lies within one of its
+    wavelengths, ``v / f`` at the lowest frequency ``frequency``, of its
+    interface. The one-wavelength reach is uacpy guidance, set by the
+    measurement it rests on: far from the bed leaving the wave out costs
+    nothing measurable (docs/models/scooter.md, "Layered and elastic
+    seabeds": 0.004 dB median for a source 75 m above an elastic sand
+    seabed); 1 m above it, up to 2.4 dB.
+
+    OAST and OASP integrate the kernel past ``2πf/c_low`` under a cosine
+    taper down to their edge (CALIN3, ``oaseun31.f:2157-2159``): a wave
+    inside that taper zone is attenuated, not left out, and is not told.
+    An engine that fixes its window in wavenumber for the whole band (OASP,
+    ``unoasp22.f:394``, :605-617) passes its top wavenumber
+    ``wavenumber_edge`` (rad/m), ``edge`` being its phase speed at
+    ``frequency``: the notice then says below which frequency, ``v ·
+    wavenumber_edge / 2π``, the wave is inside the window.
+    """
+    depths = np.concatenate([
         np.atleast_1d(np.asarray(source.depths, dtype=float)),
-        np.atleast_1d(np.asarray(receiver.depths, dtype=float))]))
-    nearest = float(heights.min())
-    if nearest > wavelength:
-        return None
-    return Notice(
-        f"c_low {c_low:.1f} m/s leaves out the seabed interface wave "
-        f"(~{speed:.0f} m/s) within {nearest:.3g} m of the seafloor",
-        f"{model_name}: the auto-derived c_low = {c_low:.1f} m/s lies above "
-        f"the seabed interface (Scholte) wave, about {speed:.0f} m/s "
-        f"({SCHOLTE_SPEED_FRACTION:g} × the {min(shear):g} m/s shear speed, "
-        f"JKPS §5.10.5), so the integral leaves it out; the geometry reaches "
-        f"within {nearest:.3g} m of the seafloor, inside the wave's "
-        f"{wavelength:.3g} m wavelength at {float(frequency):g} Hz, where it "
-        f"carries energy (up to 2.4 dB measured 1 m above an elastic sand "
-        f"seabed). Pass c_low below {speed:.0f} m/s to include it, at the "
-        f"cost of more wavenumbers.", NumericsWarning)
+        np.atleast_1d(np.asarray(receiver.depths, dtype=float))])
+    for wave in sorted(scholte_waves(env), key=lambda w: w.speed):
+        if not wave.speed < edge:
+            return None
+        wavelength = wave.speed / float(frequency)
+        nearest = float(np.abs(depths - wave.depth).min())
+        if nearest > wavelength:
+            continue
+        inside = ('' if wavenumber_edge is None else
+                  f" at {float(frequency):g} Hz; the window is fixed in "
+                  f"wavenumber at {float(wavenumber_edge):.4g} rad/m, so "
+                  f"the wave is inside it below "
+                  f"{wave.speed * float(wavenumber_edge) / (2 * np.pi):.1f}"
+                  f" Hz")
+        return Notice(
+            f"the window's edge {edge:.1f} m/s leaves out the Scholte "
+            f"wave ({wave.speed:.0f} m/s) within {nearest:.3g} m of its "
+            f"interface",
+            f"{model_name}: the slowest phase speed the run reaches is "
+            f"{edge_text}, above the Scholte wave "
+            f"{wave.where}, {wave.speed:.1f} m/s (Brekhovskikh & Lysanov "
+            f"§3.4.2, eq. 3.4.29, for the two media as half-spaces), so "
+            f"the field leaves it out{inside}; the geometry reaches within "
+            f"{nearest:.3g} m of that interface, inside the wave's "
+            f"{wavelength:.3g} m wavelength at {float(frequency):g} Hz, "
+            f"where it carries energy (up to 2.4 dB measured 1 m above an "
+            f"elastic sand seabed; 33 dB at 1 km on the limestone preset "
+            f"in 30 m of water, docs/models/scooter.md). {remediation}",
+            NumericsWarning)
+    return None

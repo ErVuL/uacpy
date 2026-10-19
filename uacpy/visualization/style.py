@@ -40,6 +40,23 @@ MAGNITUDE_COLORMAP = 'viridis'
 # A replica bank's |R| over the candidate (depth, range) grid.
 REPLICA_COLORMAP = 'magma'
 
+# A level image of a signal in dB (a spectrogram, a constant-Q spectrogram,
+# a scalogram, a Wigner-Ville distribution): a perceptually ordered map. The
+# f-k panel takes matplotlib's own default (``rcParams['image.cmap']``).
+LEVEL_IMAGE_COLORMAP = 'viridis'
+
+# The probability density of levels (the PPSD histograms).
+PPSD_COLORMAP = 'jet'
+
+# The Radon and tau-p panels of a gather transform.
+SLANT_STACK_COLORMAP = 'jet'
+
+# The model-to-model RMS difference panel of ``plot_field_statistics``: green
+# where two models agree, red where they differ; a pair with no answer (no
+# shared range, different kinds) is the light grey.
+FIELD_SPREAD_COLORMAP = 'RdYlGn_r'
+FIELD_SPREAD_EMPTY_COLOR = '0.85'
+
 # A probability is bounded [0, 1] and unsigned, so the signed diverging map
 # above cannot describe it: half of that map is unreachable and its neutral
 # midpoint lands on P_D = 0. Red = lost, green = detected, on a fixed [0, 1]
@@ -47,6 +64,10 @@ REPLICA_COLORMAP = 'magma'
 # the same through the dedicated plotter and through ``Field.plot``.
 PROBABILITY_COLORMAP = 'RdYlGn'
 PROBABILITY_LIMITS = (0.0, 1.0)
+
+# The ranges a signal-excess curve is non-negative over (detected), shaded on
+# its 1-D view: the green end of the probability map above.
+DETECTED_COLOR = 'tab:green'
 
 # A cell the model reported no energy for (the 600 dB no-energy marker,
 # ``uacpy.core.acoustics.levels.no_energy_mask``) on a dB heatmap. It is not a
@@ -137,6 +158,30 @@ BOTTOM_LINE_STYLE_FLAT = {
     'linewidth': 2.0,
     'linestyle': '--',
 }
+
+# Multipath class -> colour, for the ray fan and the arrival stems alike:
+# direct red, surface-reflected green, bottom-reflected blue, both black.
+RAY_CLASS_COLOURS = {
+    'direct': '#e53935',
+    'surface': '#43a047',
+    'bottom': '#1e88e5',
+    'both': '#000000',
+}
+
+# The sea surface line under a ray fan, and a surface (altimetry) range
+# profile; a seabed range profile takes ``BOTTOM_HALFSPACE_COLOR``.
+SURFACE_LINE_COLOR = 'steelblue'
+
+# Sea ice on a cross-section: the concentration line runs dark → violet with
+# concentration, under its own caption colour; a solid (ice) top boundary is a
+# hatched pale band.
+SEA_ICE_COLORS = ('#05051a', '#3a0d63', '#7a2da8')
+SEA_ICE_LABEL_COLOR = '#5b1a8b'
+ICE_BOUNDARY_FILL_COLOR = '#cfe6f2'
+ICE_BOUNDARY_EDGE_COLOR = '#3a6e8f'
+
+# A rough sea surface (altimetry) on a cross-section.
+ALTIMETRY_COLOR = '#1f6f9f'
 
 # Source/receiver marker styles — applied via ``ax.plot(..., **STYLE)``.
 SOURCE_MARKER_STYLE = {

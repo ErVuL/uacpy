@@ -15,7 +15,7 @@ from collections import namedtuple
 import numpy as np
 import scipy.signal as _sig
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, NumericsWarning, ValidityWarning,
+    ConfigurationError, NumericsWarning, ValidityWarning,
 )
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core.acoustics import power_to_dB
@@ -24,7 +24,9 @@ from uacpy.core._validate import (
     _MAX_CHANNELS_GUESSED, refuse_non_finite_samples, require_finite_signal,
     require_positive_finite_scalar,
 )
-from uacpy.acoustic_signal.windows import _DEFAULT_NPERSEG, _default_noverlap
+from uacpy.acoustic_signal.windows import (
+    _DEFAULT_NPERSEG, _default_noverlap, _welch_nperseg,
+)
 from uacpy.acoustic_signal._results import (
     POWER_UNITS, PlottedResult, level_unit,
 )
@@ -90,9 +92,6 @@ _SPECTRAL_SCALINGS = ("density", "spectrum", "exposure")
 _BIN_SCALINGS = ("density", "spectrum")
 
 
-#: How the frequency axis is resolved, orthogonal to :data:`_SPECTRAL_SCALINGS`.
-#:
-
 #: Standard ladders :func:`sound_exposure` can integrate its bins into.
 #:
 #: ``'decidecade'`` (centres ``1000*10**(n/10)``, ISO 18405) and ``'octave'``
@@ -130,28 +129,6 @@ def _scipy_segment(window, nperseg, n):
     if not isinstance(window, (str, tuple)):
         return len(window) if nperseg is None else int(nperseg)
     return min(256 if nperseg is None else int(nperseg), n)
-
-
-def _welch_nperseg(nperseg, window, n, who):
-    """The ``nperseg`` a Welch estimate hands :func:`scipy.signal.welch` on
-    an ``n``-sample record. A given one goes as given, and a named window's
-    is refused when longer than the record, which holds no segment of it.
-    Unset (``None``), it is an array window's own length, else
-    :data:`~uacpy.acoustic_signal.windows._DEFAULT_NPERSEG` clamped to the
-    record: the segment scipy would clamp it to, without scipy's
-    UserWarning for a segment longer than the input."""
-    if not isinstance(window, (str, tuple)):
-        return len(window) if nperseg is None else int(nperseg)
-    if nperseg is None:
-        return min(_DEFAULT_NPERSEG, n)
-    if int(nperseg) > n:
-        raise ConfigurationError(
-            f"{who}: nperseg={nperseg} is longer than the record ({n} "
-            f"samples), which holds no segment of that length.",
-            remediation=(f"Pass nperseg={n} or fewer, or leave nperseg "
-                         f"unset: it then takes {_DEFAULT_NPERSEG} samples, "
-                         f"or the whole record when that is shorter."))
-    return int(nperseg)
 
 
 def _welch_in_batches(data, sample_rate, *, window, nperseg, noverlap,
@@ -374,7 +351,7 @@ class SpectralEstimate(PlottedResult,
     can be told the wrong one.
 
     :meth:`level_dB` gives ``power`` as a level in dB re a reference
-    pressure.
+    pressure, and :meth:`band_levels` a density's standard band levels.
     """
 
     _attrs = ("scaling", "method", "bands", "band_type")
@@ -417,6 +394,37 @@ class SpectralEstimate(PlottedResult,
         """
         return power_to_dB(self.power, ref)
 
+    def band_levels(self, *, band_type="decidecade",
+                    ref=REFERENCE_PRESSURE_WATER):
+        """The estimate integrated into the band levels of a standard
+        ladder: :func:`~uacpy.acoustic_signal.band_levels` of ``power`` over
+        ``frequencies`` (``band_type``, ``ref`` passed on), a
+        :class:`~uacpy.acoustic_signal.BandLevels` with one band row per
+        channel of a multichannel estimate.
+
+        Band levels integrate a density over each band, so an estimate of
+        another ``scaling`` — per-bin power, whose bins would be counted
+        again by their width, or an exposure — is refused, as is one whose
+        values already sit on standard bands.
+        """
+        who = "SpectralEstimate.band_levels"
+        if self.bands is not None:
+            raise ConfigurationError(
+                f"{who}: this estimate's values already sit on "
+                f"{self.band_type} bands.",
+                remediation="Read its levels with level_dB(), or estimate "
+                            "on bins (welch) to integrate another ladder.")
+        if self.scaling != "density":
+            raise ConfigurationError(
+                f"{who}: band levels integrate a density (Pa²/Hz), and this "
+                f"estimate holds scaling={self.scaling!r}.",
+                remediation="Estimate with scaling='density' (welch's "
+                            "default).")
+        # Deferred: bands imports this module at load time.
+        from uacpy.acoustic_signal.bands import band_levels
+        return band_levels(self.power, self.frequencies, band_type=band_type,
+                           ref=ref)
+
     def _field_units(self):
         return {"frequencies": "Hz", "power": POWER_UNITS[self.scaling]}
 
@@ -424,11 +432,11 @@ class SpectralEstimate(PlottedResult,
 class ProbabilisticSpectralEstimate(
         PlottedResult,
         namedtuple("ProbabilisticSpectralEstimate",
-                   "frequencies level_edges pdf")):
+                   "frequencies level_edges_dB pdf")):
     """A histogram of spectral levels: one probability column per frequency.
 
     What the ``probabilistic_*`` estimators return, whichever statistic they
-    name. The tuple is the measurement — ``frequencies``, ``level_edges`` and
+    name. The tuple is the measurement — ``frequencies``, ``level_edges_dB`` and
     the ``pdf`` over them — and everything that says what it MEANS is an
     attribute, the same names :class:`SpectralEstimate` uses where they
     overlap:
@@ -465,18 +473,18 @@ class ProbabilisticSpectralEstimate(
               "segment_levels_dB", "segment_times")
 
     def _declared_dims(self):
-        # pdf's level axis has no field of its own length (level_edges is
-        # one longer), and level_edges itself is no axis of pdf, so a length
+        # pdf's level axis has no field of its own length (level_edges_dB is
+        # one longer), and level_edges_dB itself is no axis of pdf, so a length
         # match could name either after frequencies.
         return {"pdf": ("level", "frequencies"),
-                "level_edges": ("level_edges_dim0",)}
+                "level_edges_dB": ("level_edges_dB_dim0",)}
 
-    def __new__(cls, frequencies, level_edges, pdf, *, mean_dB=None,
+    def __new__(cls, frequencies, level_edges_dB, pdf, *, mean_dB=None,
                 std_dB=None, level_step_dB=None, segment_duration=None,
                 ref=REFERENCE_PRESSURE_WATER, scaling="density",
                 method="welch", bands=None, band_type=None,
                 segment_levels_dB=None, segment_times=None):
-        self = super().__new__(cls, frequencies, level_edges, pdf)
+        self = super().__new__(cls, frequencies, level_edges_dB, pdf)
         self.segment_levels_dB = segment_levels_dB
         self.segment_times = segment_times
         self.mean_dB = mean_dB
@@ -507,15 +515,14 @@ class ProbabilisticSpectralEstimate(
         return level_percentiles(self.segment_levels_dB, q)
 
     def _plotter_name(self):
-        # Both plotters read ref and scaling off the result, so the level
-        # axis names the reference the estimate was computed against and
-        # claims "/Hz" only over a density.
-        return ("plot_constant_q_ppsd" if self.method == "constant_q"
-                else "plot_ppsd")
+        # One plotter for every estimator: it reads ref, scaling and the
+        # method off the result, so the level axis names the reference the
+        # estimate was computed against and claims "/Hz" only over a density.
+        return "plot_ppsd"
 
     def _field_units(self):
         return {"frequencies": "Hz",
-                "level_edges": level_unit(self.ref, self.scaling),
+                "level_edges_dB": level_unit(self.ref, self.scaling),
                 "pdf": "1/dB"}
 
 
@@ -679,19 +686,8 @@ def _estimate(data, sample_rate, *, method="welch", scaling="density",
             data = np.pad(np.asarray(data),
                           [(0, 0)] * (np.ndim(data) - 1) + [(0, pad)])
         duration = n_seg * nps / float(sample_rate)
-    nperseg = options.get("nperseg")
-    if (not isinstance(window, (str, tuple)) and nperseg is not None
-            and np.ndim(window) == 1 and len(window) != int(nperseg)):
-        # An array window IS the segment; scipy's own refusal of the pair
-        # ("nperseg=8192 does not equal len(win)=2048") names neither welch
-        # nor the fix.
-        raise ConfigurationError(
-            f"{who}: an array window of {len(window)} samples sets the "
-            f"segment length, and nperseg={nperseg} differs from it.",
-            remediation=(f"Pass nperseg={len(window)}, or nperseg=None to "
-                         f"take the window's length, or a named window such "
-                         f"as 'hann'."))
-    nperseg = _welch_nperseg(nperseg, window, np.shape(data)[-1], who)
+    nperseg = _welch_nperseg(options.get("nperseg"), window,
+                             np.shape(data)[-1], who)
     noverlap = options.get("noverlap")
     if noverlap is None:
         # The overlap is sized on the segment scipy will use.
@@ -914,7 +910,7 @@ def sound_exposure(data, sample_rate, *, band_type="decidecade",
     weighting : str, callable or (array_like, array_like), optional
         Frequency weighting, unweighted by default: a hearing group of
         :data:`~uacpy.noise.HEARING_GROUPS` (Southall et al. 2019), a
-        function ``W(frequency_Hz) -> dB``, or a ``(frequencies_Hz, W_dB)``
+        function ``W(frequency) -> dB``, or a ``(frequencies, W_dB)``
         table (:func:`~uacpy.acoustics.frequency_weighting`). Each FFT bin's
         energy is weighted at the bin's own frequency before the bands sum
         it, so the bands hold the weighted exposure and their total is the
@@ -1000,12 +996,13 @@ def _probabilistic_estimate(
     :func:`welch`.
 
     ``segment_overlap_percent`` steps the *time segments*; ``nperseg``/``noverlap`` are the
-    Welch parameters *within* a segment. ``nperseg`` is clamped to the segment
-    length when ``segment_duration`` is shorter. ``noverlap=None`` (default)
-    derives the window's overlap on the (clamped) ``nperseg``, as on
-    :func:`welch`; an explicit ``noverlap`` is used as given, unless the
-    clamp leaves no room for it (``noverlap >= nperseg``), in which case it
-    falls back to that default with a warning.
+    Welch parameters *within* a segment, resolved as on :func:`welch` with
+    the time segment in place of the record: unset, ``nperseg`` is 8192
+    samples or the whole time segment when that is shorter, and a given one
+    longer than the time segment is refused, naming ``segment_duration``.
+    ``noverlap=None`` (default) derives the window's overlap on that
+    ``nperseg``, as on :func:`welch`; a given ``noverlap`` is used as given,
+    and refused when it is not shorter than ``nperseg``.
 
     ``pdf`` is a probability *density*: each frequency column integrates to 1
     over the level axis (``col.sum() * level_step_dB == 1``), and a level
@@ -1060,7 +1057,7 @@ def _probabilistic_estimate(
             data, sample_rate, window=window, scaling=scaling, who=who,
             level_step_dB=level_step_dB, level_min_dB=level_min_dB, level_max_dB=level_max_dB, ref=ref,
             **frequency_range, **options)
-    nperseg = options.get("nperseg", _DEFAULT_NPERSEG)
+    nperseg = options.get("nperseg")
     noverlap = options.get("noverlap")
     detrend = options.pop("detrend", "constant")
     records = _split_records(data, who)
@@ -1101,23 +1098,25 @@ def _probabilistic_estimate(
 
     window = (_BAND_WINDOW if band_type is not None else
               _DEFAULT_WINDOW[method][scaling]) if window is None else window
-    level_edges = np.arange(level_min_dB, level_max_dB + level_step_dB, level_step_dB)
+    level_edges_dB = _level_edges(level_min_dB, level_max_dB, level_step_dB)
     # The Welch segmentation inside each time segment. A banded histogram
     # resolves its own (the band route takes nperseg through, defaulting to
-    # one-hertz bins), so this clamp is the bin path's alone.
-    nps = min(int(nperseg if nperseg is not None else _DEFAULT_NPERSEG),
-              segment_samples)
-    if noverlap is None:
-        nov = _default_noverlap(window, nps)
-    else:
-        nov = int(noverlap)
+    # one-hertz bins), so this one is the bin path's alone.
+    nps = nov = None
+    if band_type is None:
+        nps = _welch_nperseg(
+            nperseg, window, segment_samples, who,
+            span=f"one time segment (segment_duration={segment_duration} s)")
+        nov = (_default_noverlap(window, nps) if noverlap is None
+               else int(noverlap))
         if nov >= nps:
-            warnings.warn(
-                f"{who}: noverlap={noverlap} does not fit the Welch segment "
-                f"length nperseg={nps} (clamped to the {segment_duration}s "
-                f"chunk); using {_default_noverlap(window, nps)} instead.",
-                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-            nov = _default_noverlap(window, nps)
+            raise ConfigurationError(
+                f"{who}: noverlap={noverlap} is not shorter than the Welch "
+                f"segment (nperseg={nps} samples), so the segments never "
+                f"advance.",
+                remediation=(f"Pass noverlap={nps - 1} or less, or leave it "
+                             f"unset for the window's overlap "
+                             f"({_default_noverlap(window, nps)} samples)."))
     psd_list = []
     segment_times = []
     bands = None                 # set by the band method, whose values sit
@@ -1154,7 +1153,7 @@ def _probabilistic_estimate(
         freqs, psd_array = _crop_to_range(freqs, psd_array, freq_min, freq_max)
     psd_segments_dB = power_to_dB(psd_array, ref)
     pdf_matrix, mean_psd, std_psd = level_histogram(psd_segments_dB,
-                                                    level_edges)
+                                                    level_edges_dB)
     if np.all(np.isnan(pdf_matrix)):
         warnings.warn(
             f"{who}: no PSD level falls inside the histogram window "
@@ -1168,7 +1167,7 @@ def _probabilistic_estimate(
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
     else:
         _warn_levels_outside_window(
-            who, list(psd_segments_dB.T), freqs, level_edges)
+            who, list(psd_segments_dB.T), freqs, level_edges_dB)
 
     # ``ref`` and ``scaling`` ride along because the levels mean nothing
     # without them: the same signal read against a Pascal reference sits
@@ -1176,7 +1175,7 @@ def _probabilistic_estimate(
     # 'density' levels are per hertz. A consumer that has to be told them
     # separately is a consumer that can be told the wrong ones.
     return ProbabilisticSpectralEstimate(
-        freqs, level_edges, pdf_matrix, mean_dB=mean_psd, std_dB=std_psd,
+        freqs, level_edges_dB, pdf_matrix, mean_dB=mean_psd, std_dB=std_psd,
         level_step_dB=level_step_dB, segment_duration=segment_duration, ref=float(ref),
         scaling=str(scaling), method=str(method), bands=bands,
         band_type=band_type, segment_levels_dB=psd_segments_dB,
@@ -1231,15 +1230,29 @@ def spectral_centroid(frequencies, weights, *, axis=-1):
     return float(centroid) if centroid.ndim == 0 else centroid
 
 
-def level_histogram(levels_dB, level_edges, *, axis=0):
-    """The probability density of dB levels over ``level_edges``, with
+def _level_edges(level_min_dB, level_max_dB, level_step_dB):
+    """The level-bin edges (dB) of a probabilistic estimate, the one rule
+    both histogram cores use: ``level_step_dB`` apart from ``level_min_dB``,
+    as few as reach ``level_max_dB``. Built from the bin count rather than a
+    float ``np.arange``, whose rounding can add an edge past
+    ``level_max_dB`` (step 0.3 dB over 0-150 dB: 502 edges ending at
+    150.3)."""
+    ratio = (level_max_dB - level_min_dB) / level_step_dB
+    # The relative slack absorbs the division's rounding (500.00000000000006
+    # bins is 500), scaled with the count it protects.
+    n_bins = int(np.ceil(ratio * (1.0 - 1e-9)))
+    return level_min_dB + level_step_dB * np.arange(n_bins + 1)
+
+
+def level_histogram(levels_dB, level_edges_dB, *, axis=0):
+    """The probability density of dB levels over ``level_edges_dB``, with
     their mean and standard deviation: ``(pdf, mean_dB, std_dB)``.
 
     Each 1-D slice of ``levels_dB`` along ``axis`` is one population (a
     frequency's levels over the segments, as the ``probabilistic_*``
     estimators pass it) and gets its own density column,
     ``np.histogram(..., density=True)``: it integrates to 1 over the levels
-    inside ``[level_edges[0], level_edges[-1]]``, and a bin holding no level
+    inside ``[level_edges_dB[0], level_edges_dB[-1]]``, and a bin holding no level
     is 0. A population with no level inside the window has no density at
     all: its whole column is ``NaN``.
     ``mean_dB`` and ``std_dB`` are taken over every level of the slice,
@@ -1249,7 +1262,7 @@ def level_histogram(levels_dB, level_edges, *, axis=0):
     ----------
     levels_dB : array_like
         Levels (dB); the populations run along ``axis``.
-    level_edges : array_like, 1-D
+    level_edges_dB : array_like, 1-D
         Increasing bin edges (dB).
     axis : int
         The axis each population runs along.
@@ -1257,7 +1270,7 @@ def level_histogram(levels_dB, level_edges, *, axis=0):
     Returns
     -------
     pdf : ndarray
-        ``(len(level_edges) - 1, *other axes)``: one density column per
+        ``(len(level_edges_dB) - 1, *other axes)``: one density column per
         population.
     mean_dB, std_dB : ndarray
         The shape of ``levels_dB`` without ``axis``.
@@ -1273,10 +1286,10 @@ def level_histogram(levels_dB, level_edges, *, axis=0):
     (63.125, 4.006)
     """
     levels = np.asarray(levels_dB, dtype=float)
-    edges = np.asarray(level_edges, dtype=float)
+    edges = np.asarray(level_edges_dB, dtype=float)
     if edges.ndim != 1 or edges.size < 2 or np.any(np.diff(edges) <= 0):
         raise ConfigurationError(
-            f"level_histogram: level_edges must be 1-D, at least 2 long and "
+            f"level_histogram: level_edges_dB must be 1-D, at least 2 long and "
             f"increasing; got shape {edges.shape}.")
     if levels.ndim == 0:
         raise ConfigurationError(
@@ -1333,17 +1346,17 @@ def level_percentiles(levels_dB, q, *, axis=0):
 _LEVELS_OUTSIDE_WARN_FRACTION = 0.05
 
 
-def _warn_levels_outside_window(who, columns, freqs, level_edges):
+def _warn_levels_outside_window(who, columns, freqs, level_edges_dB):
     """Warn when a column loses more than
     :data:`_LEVELS_OUTSIDE_WARN_FRACTION` of its levels to the window.
 
     ``columns`` holds each frequency's dB levels (one 1-D array per
     frequency). ``np.histogram(density=True)`` normalises a column over the
-    levels inside ``[level_edges[0], level_edges[-1]]`` alone, so a column
+    levels inside ``[level_edges_dB[0], level_edges_dB[-1]]`` alone, so a column
     that lost 90 % of them still integrates to 1 and every quantile read off
     it describes the surviving 10 %.
     """
-    lo, hi = float(level_edges[0]), float(level_edges[-1])
+    lo, hi = float(level_edges_dB[0]), float(level_edges_dB[-1])
     outside = np.full(len(columns), np.nan)
     for i, col in enumerate(columns):
         col = np.asarray(col)
@@ -1368,7 +1381,7 @@ def _warn_levels_outside_window(who, columns, freqs, level_edges):
 def probabilistic_welch(
         data, sample_rate, *, scaling="density", segment_duration=1.0,
         segment_overlap_percent=50, level_step_dB=1.0, level_min_dB=0, level_max_dB=150,
-        nperseg=_DEFAULT_NPERSEG,
+        nperseg=None,
         noverlap=None, detrend="constant", window=None, freq_min=None, freq_max=None,
         integration_time=None, ref=REFERENCE_PRESSURE_WATER, axis=None):
     """Probability density of Welch levels, in dB re ref²/Hz or ref² (1 µPa).
@@ -1388,8 +1401,10 @@ def probabilistic_welch(
     sample_rate : float
         Sample rate (Hz).
     scaling, nperseg, noverlap, detrend, window, freq_min, freq_max, integration_time
-        As on :func:`welch`; ``nperseg`` is clamped to the time segment when
-        ``segment_duration`` is shorter.
+        As on :func:`welch`, with the time segment in place of the record:
+        unset, ``nperseg`` is 8192 samples or the whole time segment when
+        that is shorter; a given ``nperseg`` longer than the time segment,
+        or a ``noverlap`` not shorter than ``nperseg``, is refused.
     segment_duration : float, optional
         Seconds per time segment — the interval each sample of the histogram
         describes.
@@ -1413,7 +1428,7 @@ def probabilistic_welch(
     Returns
     -------
     ProbabilisticSpectralEstimate
-        ``(frequencies, level_edges, pdf)`` carrying ``.mean_dB``,
+        ``(frequencies, level_edges_dB, pdf)`` carrying ``.mean_dB``,
         ``.std_dB`` and the descriptors; ``.plot()`` draws the histogram.
         A ``pdf`` bin no segment fell in is 0 (``pdf[:, i].sum() *
         level_step_dB == 1``); a frequency with no level inside the window
@@ -1439,8 +1454,13 @@ def probabilistic_constant_q(
     The constant-Q analogue of a PPSD, and a different population from it:
     each sample here is a *single unaveraged frame*, where the Welch histogram
     samples an average over a whole time segment. Its spread is therefore
-    wider, and ``mean_dB`` sits ``10·γ/ln10`` = 2.51 dB below the power mean
-    :func:`constant_q` returns from the same record.
+    wider. On Gaussian noise, whose frame power is exponentially distributed
+    (Abraham, *Underwater Acoustic Signal Processing*, 2019, §7.3.6),
+    ``mean_dB`` sits ``10·γ/ln10`` = 2.51 dB below the power mean
+    :func:`constant_q` returns from the same record; a steady tone, whose
+    frame power is the same in every frame (§7.5.1's deterministic signal),
+    shows no offset (measured at 8 kHz over 20 s: 2.48 dB on white noise,
+    0.00 dB at a 1 kHz tone's bin).
 
     Parameters
     ----------
@@ -1473,7 +1493,7 @@ def probabilistic_constant_q(
     Returns
     -------
     ProbabilisticSpectralEstimate
-        ``(frequencies, level_edges, pdf)`` with ``.segment_duration = None`` —
+        ``(frequencies, level_edges_dB, pdf)`` with ``.segment_duration = None`` —
         each sample is one kernel frame, whose length is per bin rather than
         one duration for the whole estimate.
     """
@@ -1536,7 +1556,7 @@ def probabilistic_sound_exposure(
     Returns
     -------
     ProbabilisticSpectralEstimate
-        ``(frequencies, level_edges, pdf)`` carrying ``.bands`` and the
+        ``(frequencies, level_edges_dB, pdf)`` carrying ``.bands`` and the
         descriptors; ``.plot()`` draws the histogram.
     """
     _check_band_type(band_type, "probabilistic_sound_exposure")

@@ -10,7 +10,7 @@ carrier PLL, Viterbi-decode, and check the CRC.
 Uses: comms.pack_frame/unpack_frame · Transmitter.transmit_passband ·
 CommsReceiver.from_passband/receive(return_diagnostics=) · comms.DFE ·
 comms.awgn · uacpy.io.write_wav/read_wav · acoustic_signal.spectrogram ·
-plot_scatter · plot_sync_metric · plot_convergence
+plot_received_symbols · plot_sync_metric · plot_convergence
 """
 
 import os
@@ -38,7 +38,7 @@ frame_bits = comms.pack_frame(message)
 # what a transducer would emit, so it is also what goes in the .wav.
 code = comms.ConvCode(interleave_depth=16)
 tx = comms.Transmitter("qpsk", code=code, preamble=256)
-waveform = tx.transmit_passband(frame_bits, fs, fc, sps=sps)
+waveform = tx.transmit_passband(frame_bits, sample_rate=fs, fc=fc, sps=sps)
 wav_path = OUT / 'example_32_modem.wav'
 uacpy.io.write_wav(wav_path, waveform, fs, normalize=True)
 print(f"  payload  : {len(message)} bytes → {frame_bits.size} framed bits")
@@ -82,11 +82,11 @@ spectrogram(received, fs, nperseg=256, noverlap=200).plot(
 axes[0, 0].axhline(fc, color='w', ls='--', lw=1)
 
 # The first 200 payload symbols are left out: the DFE is still settling there.
-uacpy.plot.plot_scatter(diag.symbols[200:], ax=axes[0, 1],
-                        ideal=receiver.modulator.constellation,
-                        title=f"recovered QPSK "
-                              f"(CRC {'OK' if crc_ok else 'FAIL'})")
-uacpy.plot.plot_sync_metric(diag.sync_metric, threshold=0.4, ax=axes[1, 0])
+uacpy.plot.plot_received_symbols(diag.symbols[200:], ax=axes[0, 1],
+                                 ideal=receiver.modulator.constellation,
+                                 title=f"recovered QPSK "
+                                       f"(CRC {'OK' if crc_ok else 'FAIL'})")
+uacpy.plot.plot_sync_metric(diag.sync_metric, threshold=0.5, ax=axes[1, 0])
 uacpy.plot.plot_convergence(diag.mse, ax=axes[1, 1],
                             title='(DFE + carrier PLL)')
 

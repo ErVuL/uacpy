@@ -28,6 +28,23 @@ def _read_int(path: Path) -> Optional[int]:
         return None
 
 
+def _read_stat(path: Path, key: str) -> int:
+    """The value of ``key`` in a cgroup ``memory.stat`` file, or 0 when the
+    file or the key is absent or unreadable."""
+    try:
+        lines = path.read_text(encoding='ascii').splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == key:
+            try:
+                return int(parts[1])
+            except ValueError:
+                return 0
+    return 0
+
+
 def _cgroup_memory_headroom(cgroup_file: str = '/proc/self/cgroup',
                             cgroup_root: str = '/sys/fs/cgroup',
                             ) -> Optional[int]:
@@ -38,10 +55,22 @@ def _cgroup_memory_headroom(cgroup_file: str = '/proc/self/cgroup',
     memory through its cgroup, while ``/proc/meminfo`` keeps reporting the
     HOST, so an allocation sized against ``MemAvailable`` alone is admitted
     and then OOM-killed. cgroup v2 (the ``0::<path>`` line): the tightest
-    ``memory.max - memory.current`` over the process's cgroup and every
-    ancestor, since a parent's limit binds its children. cgroup v1 (the
-    ``memory`` controller line): ``memory.limit_in_bytes -
-    memory.usage_in_bytes``, a limit of 2**60 or more meaning none.
+    ``memory.max - (memory.current - inactive_file)`` over the process's
+    cgroup and every ancestor, since a parent's limit binds its children.
+    cgroup v1 (the ``memory`` controller line): ``memory.limit_in_bytes -
+    (memory.usage_in_bytes - total_inactive_file)``, a limit of 2**60 or
+    more meaning none.
+
+    The usage a cgroup is charged includes its page cache ("Userland
+    memory - page cache and anonymous memory", external: Linux kernel
+    documentation, admin-guide/cgroup-v2, "Memory"), which the kernel
+    reclaims for a new allocation as it does on the host, where
+    ``MemAvailable`` counts "the size of the file LRU lists" (external:
+    filesystems/proc, ``/proc/meminfo``). The inactive file list
+    (``memory.stat``) is taken off the usage for that reason, as
+    :func:`available_memory_bytes` reads ``MemAvailable`` rather than
+    ``MemFree``; the active file list and reclaimable slab stay counted, so
+    the figure errs low. A cgroup with no ``memory.stat`` counts none.
     """
     try:
         lines = Path(cgroup_file).read_text(encoding='ascii').splitlines()
@@ -60,7 +89,8 @@ def _cgroup_memory_headroom(cgroup_file: str = '/proc/self/cgroup',
                 limit = _read_int(node / 'memory.max')
                 used = _read_int(node / 'memory.current')
                 if limit is not None and used is not None:
-                    free = max(limit - used, 0)
+                    used -= _read_stat(node / 'memory.stat', 'inactive_file')
+                    free = max(limit - max(used, 0), 0)
                     headroom = free if headroom is None else min(headroom, free)
                 if node == root or root not in node.parents:
                     break
@@ -71,7 +101,9 @@ def _cgroup_memory_headroom(cgroup_file: str = '/proc/self/cgroup',
             used = _read_int(node / 'memory.usage_in_bytes')
             if (limit is not None and used is not None
                     and limit < _CGROUP_V1_UNLIMITED):
-                free = max(limit - used, 0)
+                used -= _read_stat(node / 'memory.stat',
+                                   'total_inactive_file')
+                free = max(limit - max(used, 0), 0)
                 headroom = free if headroom is None else min(headroom, free)
     return headroom
 

@@ -23,11 +23,12 @@ from uacpy.models._extract import (
     attach_output_paths, mask_unresolvable_depths, stamp_result,
 )
 from uacpy.models._launch import _read_prt_if_present, require_output
+from uacpy.models._stacking import _slabs_of
 from uacpy.models.bellhop._backend import arrivals_need_merge
 from uacpy.models.bellhop._tables import grid_is_paired, writes_origin_column
 
 # A line source carries the 2-D Green's function's exp(-i*pi/4). In AT's
-# e^{+i*omega*t} convention (index.htm:801) the free-space line field is
+# e^{+i*omega*t} convention (Acoustics-Toolbox/index.htm:801) the free-space line field is
 # (-i/4)*H0^(2)(kR) ~ (1/4)*sqrt(2/(pi*k*R))*exp(-i*(kR + pi/4)) for large
 # kR — a phase of -pi/4 against the e^{-ikR} carrier — while both AT scale
 # factors are purely real: ScalePressure's line branch (influence.f90:784,
@@ -122,8 +123,7 @@ def warn_if_arrival_table_filled(result, work_dir, base_name) -> None:
         return
     capacity = int(found.group(1))
     fullest = 0
-    for slab in (result.slabs if isinstance(result, ResultStack)
-                 else [result]):
+    for slab in _slabs_of(result):
         for by_depth in (slab.by_receiver or []):
             for cells in by_depth:
                 for cell in cells:
@@ -143,7 +143,7 @@ def trim_padded_ranges(result, run_type, lo, hi):
     """Drop the range columns
     :func:`~uacpy.models.bellhop._plan.pad_receiver_ranges` added — on
     the raw result, before any assembly reads its axes."""
-    slabs = result.slabs if isinstance(result, ResultStack) else [result]
+    slabs = _slabs_of(result)
     if run_type == 'A':
         for slab in slabs:
             slab._trim_ranges(lo, hi)
@@ -174,8 +174,7 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
         # The law Im(tau) carries, so an Arrivals result scales its
         # absorption to other frequencies as the synthesis here does
         # (Arrivals.absorption).
-        for slab in (result.slabs
-                     if isinstance(result, ResultStack) else [result]):
+        for slab in _slabs_of(result):
             slab._record_absorption(env.absorption)
     if run_type == 'A' and source.source_type == 'line':
         # The .arr amplitudes carry ArrMod.f90:104's purely real
@@ -184,8 +183,7 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
         # function's -pi/4 (in radians, the reader's unit) here, so the
         # Arrivals result, the broadband and time-series syntheses
         # built from it and the .shd field share one phase reference.
-        for slab in (result.slabs
-                     if isinstance(result, ResultStack) else [result]):
+        for slab in _slabs_of(result):
             slab._scale_paths(_LINE_SOURCE_LEVEL, _LINE_SOURCE_PHASE)
 
     # AT's ScalePressure (influence.f90:757-795) carries const = -1
@@ -204,8 +202,7 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
                   'line': _LINE_SOURCE_LEVEL * np.exp(1j * _LINE_SOURCE_PHASE)}
     if run_type in ('C', 'I', 'S'):
         _corr = _shd_phase[source.source_type]
-        for _slab in (result.slabs
-                      if isinstance(result, ResultStack) else [result]):
+        for _slab in _slabs_of(result):
             # Upcast (the .shd payload is complex64) so every uacpy
             # engine returns one dtype, as Kraken and Scooter do.
             _slab.data = np.asarray(_slab.data, dtype=np.complex128) * _corr
@@ -215,10 +212,10 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
         # and the .shd then carries the clamped depth axis with the
         # boundary row repeated — no field is evaluated at the asked
         # depth. Restore the requested depth axis with NaN there,
-        # then NaN below the local seafloor too (a range-dependent
-        # .bty leaves sub-seafloor receivers above the deck depth
-        # unclamped but ray-free), matching the RAM / Scooter /
-        # SPARC below-domain convention. The irregular grid
+        # then NaN below the local seafloor too, by convention (a
+        # range-dependent .bty leaves sub-seafloor receivers above the
+        # deck depth unclamped, and beam tails can still reach them),
+        # matching the RAM / Scooter / SPARC below-domain convention. The irregular grid
         # (RunType(5:5)='I') carries no depth axis: its pairs are
         # masked in place. The r = 0 cells and the unpadded first range
         # column Bellhop never evaluates go first, on either grid.
@@ -248,8 +245,7 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
             # its zero phase is an artefact. Store real dB TL, as Kraken
             # does for its INCOHERENT_TL, so the result claims only what
             # it has and `.phase` refuses on every engine.
-            for _slab in (result.slabs if isinstance(result, ResultStack)
-                          else [result]):
+            for _slab in _slabs_of(result):
                 _slab.data = np.asarray(_slab.dB, dtype=float)
                 # The unit was fixed at construction, from the complex
                 # payload; the payload is its dB view from here on.
@@ -278,9 +274,7 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
         # is labelled with the depth that was asked for.
         rcv_d = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
         rcv_r = np.atleast_1d(np.asarray(receiver.ranges, dtype=float))
-        ray_slabs = (
-            result.slabs if isinstance(result, ResultStack) else [result]
-        )
+        ray_slabs = _slabs_of(result)
         for slab in ray_slabs:
             slab.is_eigen = (run_type == 'E')
             slab.receiver_depths = rcv_d
@@ -290,9 +284,7 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
     f0 = np.atleast_1d(np.asarray(
         float(np.atleast_1d(source.frequencies)[0]), dtype=float,
     ))
-    slabs_to_set = (
-        result.slabs if isinstance(result, ResultStack) else [result]
-    )
+    slabs_to_set = _slabs_of(result)
     for i, slab in enumerate(slabs_to_set):
         stamp_result(
             model_name, provenance, slab, source, backend=backend,
@@ -364,8 +356,9 @@ def mask_paired_receivers_below_seafloor(field, receiver, env, *,
 
     Pair ``i`` is ``(depths[i], ranges[i])``. BELLHOP clamps a depth below
     the deck bottom onto it (``misc/SourceReceiverPositions.f90:136-139``)
-    and reports the clamped depth, and a pair under a shoaling ``.bty`` is
-    ray-free; both are no-data, exactly as on the rectilinear grid
+    and reports the clamped depth, and a pair under a shoaling ``.bty``
+    is masked by convention (beam tails can still reach it); both are
+    no-data, exactly as on the rectilinear grid
     (``_restore_depths_and_mask`` in :func:`assemble` /
     :func:`restore_broadband_depth_axis`).
     The range axis (axis 0) is the pair index, so the one mask serves the
@@ -399,8 +392,7 @@ def restore_arrival_depths(result, receiver, env, *, model_name,
     depths = np.atleast_1d(np.asarray(receiver.depths, dtype=float))
     below = depths > float(env.depth)
     paired = grid_is_paired(grid_type)
-    for slab in (result.slabs
-                 if isinstance(result, ResultStack) else [result]):
+    for slab in _slabs_of(result):
         if slab.receiver_depths.size != depths.size:
             raise ModelExecutionError(
                 model_name, return_code=0, stdout=None,
@@ -422,9 +414,10 @@ def restore_broadband_depth_axis(field, receiver, env, *, model_name):
     (``misc/SourceReceiverPositions.f90:136-139``), so the ``.arr``
     carries the clamped depth axis with the boundary row repeated — no
     arrivals are evaluated at the asked depth. Reattach the requested
-    axis with NaN there, then NaN below the local seafloor too (a
-    range-dependent ``.bty`` leaves sub-seafloor receivers above the deck
-    depth unclamped but ray-free) — the 3-D
+    axis with NaN there, then NaN below the local seafloor too, by
+    convention (a range-dependent ``.bty`` leaves sub-seafloor receivers
+    above the deck depth unclamped, and beam tails can still reach them)
+    — the 3-D
     ``(depth, range, time|frequency)`` counterpart of the
     ``_restore_depths_and_mask`` step the TL modes apply in
     :func:`assemble`. The irregular grid carries no depth axis and takes

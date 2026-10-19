@@ -131,7 +131,7 @@ asked for.
 | You need the modes | No modal decomposition | [Kraken](kraken.md) |
 | Reference-grade accuracy check | The PE is an approximation; a wavenumber integral is not | [Scooter](scooter.md), [OASES](oases.md) |
 | Fast shear seabed (rock) | `rams` needs `dz ≤ λ_s/14` (the automatic grid refines to it) and diverges on a coarser pinned grid — see [Gotchas](#9-gotchas) | [OASES](oases.md), [Scooter](scooter.md) |
-| Stepped bathymetry over a dense seabed | Every backend keeps the field across a step face, which loses energy in proportion to the density contrast: +4.4 to +5.8 dB too quiet past a corrugation over a density-2.5 seabed (`mpirams` +4.41 to +5.31 dB over its grids, `ramgeo` +5.82) — see [Gotchas](#9-gotchas) | No uacpy model is clean here; [Kraken](kraken.md) `mode_coupling='coupled'` lands +2.83 dB on that case (+4.02 dB with `n_segments=209`) |
+| Stepped bathymetry over a dense seabed | Measured +4.4 to +5.8 dB too quiet past a corrugation over a density-2.5 seabed against a two-way reference (`mpirams` +4.41 to +5.31 dB over its grids, `ramgeo` +5.82; `mpirams` +0.69 dB at density 1.5); no source attributes the offset to a cause — see [Gotchas](#9-gotchas) | No uacpy model is clean here; [Kraken](kraken.md) `mode_coupling='coupled'` lands +2.83 dB on that case (+4.02 dB with `n_segments=209`) |
 | Several source depths in one deck | One `(zs, f)` per march; `run()` loops the depths and stacks them | [Bellhop](bellhop.md) marches all depths in one call |
 
 ---
@@ -166,7 +166,7 @@ of four vendored binaries:
 |---|---|---|
 | fluid seabed, flat surface, half-space or broadband | `mpirams` | mpiramS, Dushaw's Fortran 90/95 rewrite of RAM, with a native broadband Q/T loop; seabeds slower than the surface water (soft mud) are supported |
 | fluid seabed, flat surface, **layered**, narrowband | `ramgeo` | Collins' RAMGeo — sediment layers parallel to the bathymetry |
-| **any** `shear_speed > 0` in the seabed | `rams` | Collins' RAMS elastic PE (rotated Padé) |
+| **any** `shear_speed > 0` in the seabed | `rams` | Collins' RAMS elastic PE (rotated Padé). In the seabed its level is the first of the two interleaved field components, the dilatation (`outpt` writes `u(2i-1)`, `rams0.5.f:251`, `:263`; the odd rows of `matrc`, `:489-540`, carry `λ+2μ` on it, as the dilatation equation of Collins's (Δ, w) elastic PE does, JASA 89, 1050-1057, eq. 2) — a compressional quantity, not the normal stress, which Collins & Siegmann (§3.3, Fig. 3.1) show to differ inside a solid |
 | `env.altimetry is not None` | `ramsurf` | Collins' rough-surface / beach-geometry PE |
 | elastic seabed **and** altimetry | — | `UnsupportedFeatureError` |
 
@@ -288,9 +288,9 @@ broadband paths they are resolved from the source — see the `q_factor` and `re
 of [§7](#7-constructor-knobs).
 
 Note that `1/q_factor` is the **half** fractional width: `q_factor=2` spans `fc·(1 ± ½)`.
-Bellhop's `bandwidth_factor` and the base default's
-`DEFAULT_BROADBAND_BANDWIDTH_FACTOR` are the **full** fractional width
-(`fc·(1 ± bandwidth_factor/2)`), so the same band is `Q = 2/bandwidth_factor`.
+The default band every other engine expands a lone `fc` to,
+`DEFAULT_BROADBAND_BANDWIDTH_FACTOR` = 0.5, is a **full** fractional width
+(`fc·(1 ± 0.5/2)`), so the same band is `Q = 2/0.5 = 4`.
 
 ---
 
@@ -369,7 +369,7 @@ The optimiser is exported (module `uacpy.models.pe_grid`, re-exported from
 `optimize_grid` the coarsest pair meeting `eps` as a `GridChoice` (`.dr`,
 `.dz`, `.predicted_error`, …; it raises `GridInfeasibleError`, a
 `ConfigurationError`, when none does). Both score RAM's own Padé order, 8, by
-default (`p=`). The accuracy band's speeds are the water column's, widened to
+default (`n_pade=`). The accuracy band's speeds are the water column's, widened to
 contain `c0`:
 
 ```python
@@ -378,7 +378,7 @@ from uacpy.models import optimal_c0, grid_error
 # 100 m of 1500 m/s water over 1600 m/s sand, 200 Hz, out to 5 km
 c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=1600.0)          # 1591 m/s
 kw = dict(frequency=200.0, c_min=min(1500.0, c0), c_max=max(1500.0, c0),
-          x_max=5000.0, c0=c0, angle_max_deg=30.0, c_max_all=1600.0)
+          rmax=5000.0, c0=c0, angle_max_deg=30.0, c_max_all=1600.0)
 grid_error(dr=38.23, dz=0.5, **kw)     # 1.85 — the λ/15 floor: at or over 1, so RAM refines dz
 grid_error(dr=38.23, dz=0.366, **kw)   # 0.993 — λ/20, the grid RAM picks (verbose='info')
 grid_error(dr=38.23, dz=1.0, **kw)     # 7.39 — about twice the floor
@@ -574,9 +574,11 @@ a trapped mode that carries the far field, and the λ/15 floor cannot resolve
 it: rock (51°) scores 9.3 at 100 Hz and 18 at 200 Hz on the floored grid,
 measured 1.7 and 6.9 dB rms from Kraken at 1–5 km. On sand at 200 Hz the
 steepest scored component is the 30° aperture edge, which scores 1.9 at the
-38 m step, so that grid is refined too. A score at or above 1 (`TRAPPED_MODE_SCORE_LIMIT`)
-means the mode's phase is lost over the march — the answer is wrong, not
-"about a decibel" — so the automatic `dz` is refined from the floor to the
+38 m step, so that grid is refined too. The score is Lytaev's (2023, §4.1)
+accumulated error bound, the per-step error times the number of steps; at or
+above 1 (`TRAPPED_MODE_SCORE_LIMIT`) it no longer bounds the mode's phase over
+the march (the measured field error, in the table below, sits under the
+score), so the automatic `dz` is refined from the floor to the
 coarsest value that scores under 1 at the chosen `dr`, and the seafloor is
 placed a quarter cell below its node (constraints 1–2 above). Measured on the
 100 m channel (source 25 m; 9 receiver depths 10–90 m × 19 ranges 0.5–5 km),
@@ -767,7 +769,7 @@ override one the selected backend cannot read.
 | Name | Default | Meaning |
 |---|---|---|
 | `absorber_width_wavelengths` | `20.0` | Absorbing layer at the base of the PE domain (below the sediment stack and a pad of real seabed), in wavelengths `c0/f` (`freq_min` on the broadband paths). Sizes `zmax` on every backend. uacpy guidance, measured on lossless seabeds (§9, *The domain floor absorbs*); far thicker than the RAM guide's "the attenuation is increased over the lower few wavelengths of the grid" (`ram.pdf` p.7, about 3 wavelengths in Collins' sample deck) or Jensen et al.'s H/3 (*Computational Ocean Acoustics*, Sect. 6.5.3). |
-| `absorber_attenuation` | `None` | Attenuation at the domain floor, dB/wavelength; drives the attenuation ramp on every backend. `None`: 10, the floor of Collins' sample ramp, `900.0 0.5` / `1000.0 10.0` (`ram.pdf` p.12, Fig. 2; upstream mpiramS used 5, `third_party/MODIFICATIONS.md:2431-2432`), raised to the seabed's own attenuation at the top of the absorbing layer where that is higher, so the ramp never decreases (`ram.pdf` p.7, "increased over the lower few wavelengths"). A set value is written as given; one below the seabed half-space's attenuation, which makes the ramp decrease, gives a notice. |
+| `absorber_attenuation` | `None` | Attenuation at the domain floor, dB/wavelength; drives the attenuation ramp on every backend. `None`: 10, the floor of Collins' sample ramp, `900.0 0.5` / `1000.0 10.0` (`ram.pdf` p.12, Fig. 2; upstream mpiramS used 5, `mpiramS/src/peramx_mpi.f90:391-395`), raised to the seabed's own attenuation at the top of the absorbing layer where that is higher, so the ramp never decreases (`ram.pdf` p.7, "increased over the lower few wavelengths"). A set value is written as given; one below the seabed half-space's attenuation, which makes the ramp decrease, gives a notice. |
 | `n_sediment_points` | `None` | Sediment-profile control points, written as given (≥ 4). `None` → one per depth cell over the sediment span, `ceil(sedlayer/dz) + 3`, and at least 1000 (uacpy guidance). **[mpiramS]** |
 | `earth_curvature` | `False` | Earth-curvature correction of the water column (depths and speeds), bathymetry, altimetry and source depth (`peramx.f90:268-281`). Off by default so RAM models the flat Earth every other engine does (uacpy guidance; the vendored mpiramS sample deck also runs flat, `mpiramS/in.pe`); turn it on beyond about 56 km, where it moves the first convergence zone about 1 % closer and agrees better with data (Etter §5.5.2). mpiramS applies it inside the binary; the Collins decks get the same formulas from uacpy and their output depth axis is mapped back. **[all backends]** |
 | `collapse` | `None` | Per-feature collapse policy. |
@@ -776,7 +778,7 @@ override one the selected backend cannot read.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `q_factor` | `None` | `fc / half-bandwidth` (the band spans `2·fc/q_factor`; `q_factor = 2/bandwidth_factor` for Bellhop's full-width `bandwidth_factor`). Broadband only: `COHERENT_TL` always marches one bin (a pinned value gives a notice there). Beside a frequency array you pass it must describe the array's own sweep, else the run is refused (§5); it replaces a pulse-derived TIME_SERIES grid's half-width. Unset it is resolved from what the source carries: a Source with a single frequency and neither `Q` nor `T` pinned → the default band (`DEFAULT_BROADBAND_N_FREQUENCIES` = 128 bins over `fc·(1 ± DEFAULT_BROADBAND_BANDWIDTH_FACTOR/2)`, as Bellhop, Kraken and Scooter), then derived from that array; `run(frequencies=[fc])` → `1e6` (one bin); a single frequency with `T` pinned → `4.0`, the default band's half-width; a multi-frequency source → the array's own half-width, `fc / ((n//2 + ½)·Δf)`. |
+| `q_factor` | `None` | `fc / half-bandwidth` (the band spans `2·fc/q_factor`; `q_factor = 4` for the full-width 0.5 default band of the other engines). Broadband only: `COHERENT_TL` always marches one bin (a pinned value gives a notice there). Beside a frequency array you pass it must describe the array's own sweep, else the run is refused (§5); it replaces a pulse-derived TIME_SERIES grid's half-width. Unset it is resolved from what the source carries: a Source with a single frequency and neither `Q` nor `T` pinned → the default band (`DEFAULT_BROADBAND_N_FREQUENCIES` = 128 bins over `fc·(1 ± DEFAULT_BROADBAND_BANDWIDTH_FACTOR/2)`, as Bellhop, Kraken and Scooter), then derived from that array; `run(frequencies=[fc])` → `1e6` (one bin); a single frequency with `T` pinned → `4.0`, the default band's half-width; a multi-frequency source → the array's own half-width, `fc / ((n//2 + ½)·Δf)`. |
 | `record_duration` | `None` | Time-window width (s), `Δf = 1/record_duration`. Unset, resolved alongside `q_factor`: a single frequency with `Q` also unset → the default band's own spacing (`1.0` for an explicit `run(frequencies=[fc])`, the single-bin band); a single frequency with `Q` pinned → the default band's spacing, `(DEFAULT_BROADBAND_N_FREQUENCIES − 1)/(fc·DEFAULT_BROADBAND_BANDWIDTH_FACTOR)`; a multi-frequency source → `1/Δf` from the array's spacing. |
 
 **Execution**
@@ -788,7 +790,7 @@ override one the selected backend cannot read.
 | `executable` | `None` | Path to the binary of the backend named by `backend` (`s_mpiram` when `backend=None`); auto-detected. A relative path resolves against the working directory at construction. With `backend=None`, a run that dispatches to a Collins backend raises `ConfigurationError` — pin `backend` together with a Collins build. |
 | `work_dir` | `None` | Pin the scratch dir to keep the input decks and outputs. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
-| `timeout` | `600.0` | Subprocess timeout (s). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
+| `timeout` | `600.0` | Subprocess timeout (s), positive and finite, or `None` for no limit (anything else is refused at construction). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
 | `use_tmpfs` | `False` | Stage I/O on a RAM filesystem. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`. `'info'` logs the resolved grid. |
 
@@ -911,14 +913,17 @@ reverberation, a reflecting seamount face, a target echo — is absent from the
 answer, silently and by construction.
 
 **A stepped seafloor over a dense seabed comes out too quiet past the steps.**
-At a range step RAM keeps the field and only re-forms its matrices (`updat` in
-`ramgeo1.5.f`); Collins & Siegmann, *Parabolic Wave Equations with
-Applications*, §2.6, show that conserving the field across stair-step faces
-leaves an amplitude error that grows with the contrast, which an
-energy-conserving or single-scattering face condition removes. Measured on
-Evans & Gilbert's square-wave corrugation (100 m of water, 10 m steps every
-50 m from 5 to 10 km, 25 Hz, 1704.5 m/s seabed) against COUPLE07's two-way
-solution at the reference's water density 1.0, the mean offset over 10–18 km
+At a range step RAM keeps its marched variable `p/α` and only re-forms its
+matrices (`updat` and `matrc` in `ramgeo1.5.f`, `matrc.f90` in mpiramS; `outpt`
+multiplies `α` back), so `p/α` is continuous across a step face: the
+small-angle form of the energy-conservation condition (Collins & Siegmann,
+*Parabolic Wave Equations with Applications*, §2.6.2, Eq. 2.56; RAM user's
+guide Eq. 17), and the pressure itself jumps by `α_B/α_A` in the cells that
+change medium. Measured on Evans & Gilbert's square-wave corrugation (100 m of
+water, 10 m steps every 50 m from 5 to 10 km, 25 Hz, 1704.5 m/s seabed)
+against COUPLE07's two-way solution, whose documentation notes that the 2.5
+density makes the multiply scattered field significant, at the reference's
+water density 1.0, the mean offset over 10–18 km
 with only the seabed density changed (`mpirams` dr 5 m, dz 0.25 m, Padé 6;
 `ramgeo` dr 0.5 m; `rams` on its automatic grid):
 
@@ -927,15 +932,18 @@ with only the seabed density changed (`mpirams` dr 5 m, dz 0.25 m, Padé 6;
 | 2.5 | +4.70 dB | +5.82 dB | +5.81 dB |
 | 1.5 | +0.69 dB | +0.94 dB | +0.81 dB |
 
-(`mpirams` at density 1.0: −0.03 dB.) The `rams` energy-flux correction
-does not remove it. Grid and Padé order move it by under a decibel: over
+(`mpirams` at density 1.0: −0.03 dB.) `rams` applies its own approximate
+energy-flux correction to its elastic variables (`updat` in `rams0.5.f`) and
+lands at the same offset. Grid and Padé order move it by under a decibel: over
 36 grids — dr 1, 2, 5 and 10 m × dz 0.1, 0.25 and 0.5 m × Padé 4, 6 and 8,
 1 m step faces — `mpirams` lands at +4.41 to +5.31 dB. Kraken's
 coupled modes land at +2.83 dB at density 2.5 (+4.02 dB with
 `n_segments=209`), where COUPLE07's own one-way pressure matching gives
 +1.13 dB, and at density 1.5 the coupled sum runs away to −12.9 dB ([Kraken §6.6](kraken.md#66-range-dependence-adiabatic-versus-coupled)
-says how to check a coupled run). Over a gently sloping or a light
-seabed the error is small; over steps onto a dense one, budget for several dB.
+says how to check a coupled run). A one-way march omits the back-scattered
+field (§1); no source attributes this offset to a cause, and what is known is
+the measurement. Over a gently sloping or a light seabed the offset is small;
+over steps onto a dense one, budget for several dB.
 
 **A very fast basement gets a refined grid, and the seafloor's place in its
 cell is half the answer.** Put a hard rock basement (`c_p = 5500 m/s`) under the 100 m
@@ -1093,9 +1101,11 @@ reads 0.74 dB throughout, so raise `absorber_width_wavelengths` only when you mo
 a lossless seabed. A truly rigid seabed cannot
 be expressed — a bottom with `acoustic_type='rigid'` (or `'vacuum'`, or a
 tabulated-reflection `'file'`/`'precalc'`) raises `UnsupportedFeatureError`
-rather than silently modelling placeholder geoacoustics. Dropping
-`absorber_attenuation` below 1 dB/wavelength lets
-reflections leak back in, and uacpy warns if you do.
+rather than silently modelling placeholder geoacoustics. A pinned
+`absorber_attenuation` is written as given; one below the seabed's own
+attenuation makes the ramp decrease, against `ram.pdf` p.7's "the
+attenuation is increased over the lower few wavelengths", and the run says
+so.
 
 **RAM returns its sediment field, down to the absorbing layer.** The PE
 marches through the seabed, and every backend returns what it computed there:

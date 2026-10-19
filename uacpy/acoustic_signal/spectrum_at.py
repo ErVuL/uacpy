@@ -17,9 +17,8 @@ from uacpy.core._validate import (
     normalize_axis, require_finite_signal, require_positive_finite_scalar,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.acoustic_signal._synthesis import _SCRATCH_BLOCK_ELEMS
 from uacpy.acoustic_signal.windows import _taper
-from uacpy.core._fourier import dtft_at
+from uacpy.core._fourier import _BLOCK_ELEMENTS, dtft_at
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -266,10 +265,10 @@ def waveform_spectrum_at(
     # No such contour — and the contract above is ARBITRARY frequencies, which a
     # caller does use (a bare in-band/out-of-band pair, say). Evaluate the
     # sum directly, chunked over frequency so the phase matrix stays bounded
-    # regardless of waveform length x grid size (_SCRATCH_BLOCK_ELEMS per
+    # regardless of waveform length x grid size (_BLOCK_ELEMENTS per
     # block).
     idx = np.arange(n, dtype=np.float64)
-    step = max(1, int(_SCRATCH_BLOCK_ELEMS // max(n, 1)))
+    step = max(1, int(_BLOCK_ELEMENTS // max(n, 1)))
     for a in range(0, sel.size, step):
         blk = sel[a:a + step]
         phase = np.exp(-2j * np.pi * np.outer(frequencies[blk], idx) / fs)

@@ -11,9 +11,9 @@ Everywhere uacpy takes ``weighting=`` it accepts one of three forms:
 
 * a hearing-group name of :data:`HEARING_GROUPS` (``'LF'``, ``'VHF'``, …):
   the Southall et al. (2019) auditory weighting, :func:`auditory_weighting`;
-* a callable ``W(frequency_Hz) -> dB``: any weighting of your own, evaluated
+* a callable ``W(frequency) -> dB``: any weighting of your own, evaluated
   at positive frequencies only;
-* a ``(frequencies_Hz, W_dB)`` table: interpolated linearly in
+* a ``(frequencies, W_dB)`` table: interpolated linearly in
   log-frequency; frequencies outside the table carry no weight, and a table
   that leaves more than half of a record's energy outside its span warns
   (:func:`~uacpy.core._weighting_inputs.warn_table_leaves_energy_out`: a table typed
@@ -66,6 +66,31 @@ __all__ = ['EXPOSURE_THRESHOLDS', 'HEARING_GROUPS', 'WEIGHTING_PARAMS',
 
 
 
+class _SouthallGroups(dict):
+    """A table keyed by Southall et al. (2019) hearing groups whose lookup of
+    an NMFS (2018) name that is no Southall group (``'MF'``, ``'PW'``,
+    ``'OW'``) raises a ``KeyError`` naming the Southall group it is, as
+    :func:`auditory_weighting` refuses it. NMFS ``'HF'`` is a Southall name
+    too (a different group), which no lookup can catch: the module docstring
+    and the guide say it."""
+
+    def __missing__(self, key):
+        note = _nmfs_group_note(key)
+        raise KeyError(key if note is None else note)
+
+
+def _nmfs_group_note(group):
+    """The sentence naming the Southall et al. (2019) group an NMFS (2018)
+    name with no Southall namesake is, or ``None`` for any other name."""
+    g = str(group).upper()
+    if g not in _NMFS_ONLY_GROUPS:
+        return None
+    return (f"{group!r} is an NMFS (2018) group name; this module uses "
+            f"Southall et al. (2019)'s, where NMFS {g} is "
+            f"{_NMFS_ONLY_GROUPS[g]!r}. Note that NMFS 'HF' is Southall "
+            f"'VHF', and Southall 'HF' is NMFS 'MF'.")
+
+
 # Southall et al. (2019) Table 5: a, b, f1 [kHz], f2 [kHz], C [dB] (weighting)
 # and K [dB]. Only a/b/f1/f2/C enter :func:`auditory_weighting`.
 #
@@ -76,7 +101,7 @@ __all__ = ['EXPOSURE_THRESHOLDS', 'HEARING_GROUPS', 'WEIGHTING_PARAMS',
 # Tw = C + K (the discussion of their Eqs. 2-3); C + K rounds to Table 6's
 # TTS column in all eight groups (HF: 1.20 + 177 = 178.2, Table 6: 178).
 # The thresholds themselves are :data:`EXPOSURE_THRESHOLDS`.
-WEIGHTING_PARAMS = {
+WEIGHTING_PARAMS = _SouthallGroups({
     "LF":  {"a": 1.0, "b": 2, "f1": 0.20, "f2": 19.0,  "C": 0.13, "K": 179},
     "HF":  {"a": 1.6, "b": 2, "f1": 8.8,  "f2": 110.0, "C": 1.20, "K": 177},
     "VHF": {"a": 1.8, "b": 2, "f1": 12.0, "f2": 140.0, "C": 1.36, "K": 152},
@@ -85,7 +110,7 @@ WEIGHTING_PARAMS = {
     "OCW": {"a": 2.0, "b": 2, "f1": 0.94, "f2": 25.0,  "C": 0.64, "K": 198},
     "PCA": {"a": 2.0, "b": 2, "f1": 0.75, "f2": 8.3,   "C": 1.50, "K": 132},
     "OCA": {"a": 1.4, "b": 2, "f1": 2.0,  "f2": 20.0,  "C": 1.39, "K": 156},
-}
+})
 
 #: Southall et al. (2019) hearing groups. The cetacean labels are NOT NMFS
 #: (2018)'s: NMFS MF is ``"HF"`` here and NMFS HF is ``"VHF"`` (see the module
@@ -111,7 +136,7 @@ HEARING_GROUPS = {
 #: group's own weighting (``weighting=group``); a peak with none. Their
 #: rules: non-impulsive PTS = TTS + 20 dB; impulsive PTS = TTS + 15 dB
 #: (SEL) and + 6 dB (peak).
-EXPOSURE_THRESHOLDS = {
+EXPOSURE_THRESHOLDS = _SouthallGroups({
     group: {
         'non_impulsive': {'TTS': {'SEL': tts}, 'PTS': {'SEL': pts}},
         'impulsive': {'TTS': {'SEL': i_tts, 'peak': pk_tts},
@@ -128,7 +153,7 @@ EXPOSURE_THRESHOLDS = {
         "PCA": (134, 154, 123, 138, 138, 144),
         "OCA": (157, 177, 146, 161, 161, 167),
     }.items()
-}
+})
 
 
 #: NMFS (2018) group names with no Southall (2019) group of the same name,
@@ -157,12 +182,9 @@ def _hearing_group(group, who):
     """``group`` as an upper-case key of :data:`WEIGHTING_PARAMS`, or a
     refusal naming ``who``."""
     g = str(group).upper()
-    if g in _NMFS_ONLY_GROUPS:
-        raise ConfigurationError(
-            f"{who}: {group!r} is an NMFS (2018) group name; "
-            f"this module uses Southall et al. (2019)'s, where NMFS "
-            f"{g} is {_NMFS_ONLY_GROUPS[g]!r}. Note that NMFS 'HF' is "
-            f"Southall 'VHF', and Southall 'HF' is NMFS 'MF'.")
+    note = _nmfs_group_note(group)
+    if note is not None:
+        raise ConfigurationError(f"{who}: {note}")
     if g not in WEIGHTING_PARAMS:
         raise ConfigurationError(
             f"{who}: unknown group {group!r}; choose from "
@@ -211,7 +233,7 @@ def frequency_weighting(frequency, weighting):
 
     One door for the three forms ``weighting=`` takes everywhere: a hearing
     group of :data:`HEARING_GROUPS` (:func:`auditory_weighting`), a function
-    ``W(frequency_Hz) -> dB``, or a ``(frequencies_Hz, W_dB)`` table,
+    ``W(frequency) -> dB``, or a ``(frequencies, W_dB)`` table,
     interpolated linearly in log-frequency. The result is ``-inf`` wherever
     the weighting carries no weight: at DC and below, and outside a table.
 
@@ -265,7 +287,7 @@ def _weighting_dB(weighting, frequency, who):
         if (table_f.ndim != 1 or table_f.shape != table_w.shape
                 or table_f.size < 2):
             raise ConfigurationError(
-                f"{who}: a weighting table is (frequencies_Hz, W_dB), two "
+                f"{who}: a weighting table is (frequencies, W_dB), two "
                 f"1-D arrays of equal length >= 2; got shapes "
                 f"{table_f.shape} and {table_w.shape}.")
         if not (np.all(table_f > 0) and np.all(np.diff(table_f) > 0)):
@@ -280,8 +302,8 @@ def _weighting_dB(weighting, frequency, who):
         return w
     raise ConfigurationError(
         f"{who}: weighting must be a hearing group name "
-        f"({sorted(WEIGHTING_PARAMS)}), a function W(f_Hz) -> dB, or a "
-        f"(frequencies_Hz, W_dB) table; got {type(weighting).__name__}.")
+        f"({sorted(WEIGHTING_PARAMS)}), a function W(f) -> dB, or a "
+        f"(frequencies, W_dB) table; got {type(weighting).__name__}.")
 
 
 def _weighting_gain(weighting, frequency, who):
@@ -435,7 +457,7 @@ def weighted_pressure(pressure, sample_rate, weighting, *, axis=-1,
         Sample rate (Hz).
     weighting : str, callable or (array_like, array_like)
         A hearing group of :data:`HEARING_GROUPS`; a function
-        ``W(frequency_Hz) -> dB``; or a ``(frequencies_Hz, W_dB)`` table,
+        ``W(frequency) -> dB``; or a ``(frequencies, W_dB)`` table,
         interpolated linearly in log-frequency, outside which a frequency
         carries no weight. DC carries no weight in any form.
     axis : int, default -1

@@ -128,11 +128,12 @@ _ZREAD_LINES = {'ramsurf': 'ramsurf1.5.f:207-219',
 # Ceiling on the number of range records a Collins binary writes. The stride
 # ``ndr`` is otherwise lowered until the first written range reaches the
 # nearest receiver, which for a near-field receiver on a long run would write
-# one record per ``dr``.
+# one record per ``dr``. uacpy guidance (output size, not accuracy).
 _COLLINS_MAX_OUTPUT_RANGES = 20000
 
 # Range records a Collins march writes before the caps of
 # ``collins_output_stride`` lower its stride: max_range / dr over this.
+# uacpy guidance.
 _COLLINS_OUTPUT_RANGES_TARGET = 1000.0
 
 
@@ -149,6 +150,7 @@ _RAM_STOP_MARKERS = ('Laguerre method not converging',
 
 # Cap on profile sections added so a layered elastic seabed follows sloping
 # bathymetry under rams0.5. Each section costs six blocks in the deck.
+# uacpy guidance.
 MAX_BATHY_SECTIONS = 64
 
 
@@ -456,7 +458,7 @@ def resolve_collins_launch(
     zr_line = min(target_depth, max(0.0, (nz_march - 1) * dz))
     return RamGrid(frequency=fc, dr=float(dr), dz=float(dz),
                    zmax=float(zmax), n_depth_points=nz_march,
-                   theta_deg=float(theta), ndr=int(ndr),
+                   rams_rotation_angle_deg=float(theta), ndr=int(ndr),
                    rmax_march=float(rmax_march), zmplt=float(zmplt),
                    zr_line=float(zr_line))
 
@@ -610,7 +612,7 @@ def write_collins_deck(inputs: StageInputs, *, knobs) -> Path:
         n_stability=stability_terms(knobs),
         stability_range=float(engine.stability_range or 0.0),
         rams_rotation=int(knobs.rams_rotation),
-        rams_rotation_angle_deg=float(grid.theta_deg),
+        rams_rotation_angle_deg=float(grid.rams_rotation_angle_deg),
         bathymetry=bathymetry,
         surface=surface,
         range_segments=range_segments,
@@ -647,7 +649,7 @@ def read_collins_output(inputs: StageInputs, *, knobs) -> dict:
         np.atleast_1d(receiver.depths).astype(float),
         np.atleast_1d(receiver.ranges).astype(float),
         carrier_rate=collins_carrier_rate(
-            env, kind, grid.frequency, grid.theta_deg, knobs=knobs))
+            env, kind, grid.frequency, grid.rams_rotation_angle_deg, knobs=knobs))
     return {'psi': psi, 'report': reports[0] if reports else None,
             'frequency': grid.frequency, 'dr': grid.dr, 'dz': grid.dz,
             'zmax': grid.zmax}
@@ -738,7 +740,7 @@ def read_collins_grid(inputs: StageInputs, *, knobs) -> dict:
 
     return {'tl': tl, 'pcomplex': pcomplex, 'depths': depths,
             'ranges': ranges, 'dr': dr, 'dz': dz, 'zmax': grid.zmax,
-            'frequency': grid.frequency, 'theta': grid.theta_deg}
+            'frequency': grid.frequency, 'theta': grid.rams_rotation_angle_deg}
 
 
 def assemble_collins_tl_field(inputs: StageInputs,

@@ -9,11 +9,11 @@ so these limits are checked at construction, before any engine is chosen.
 import math
 
 __all__ = [
-    'AT_DB_PER_NEPER', 'MAX_ATTENUATION_DB_PER_WAVELENGTH',
-    'AT_LAST_SSP_POINT_EPS_M',
-    'DECK_AXIS_DECIMALS', 'DECK_DEPTH_FMT', 'DECK_DEPTH_RESOLUTION_M',
-    'DECK_RANGE_RESOLUTION_M', 'SBP_ANGLE_RESOLUTION_DEG',
-    'NO_RECEIVER_RANGE_FALLBACK_M',
+    'AT_DB_PER_NEPER', 'MAX_ATTENUATION',
+    'AT_LAST_SSP_POINT_EPS',
+    'DECK_AXIS_DECIMALS', 'DECK_DEPTH_FMT', 'DECK_DEPTH_RESOLUTION',
+    'DECK_RANGE_RESOLUTION', 'SBP_ANGLE_RESOLUTION_DEG',
+    'NO_RECEIVER_RANGE_FALLBACK',
 ]
 
 
@@ -29,7 +29,7 @@ __all__ = [
 #: The dB-per-neper factor as ``misc/AttenMod.f90`` writes it, truncated
 #: (the exact one is :data:`~uacpy.core.constants.NEPER_TO_DB`).
 AT_DB_PER_NEPER = 8.6858896
-MAX_ATTENUATION_DB_PER_WAVELENGTH = AT_DB_PER_NEPER * 2.0 * math.pi   # 54.575
+MAX_ATTENUATION = AT_DB_PER_NEPER * 2.0 * math.pi   # 54.575
 
 # ``misc/sspMod.f90:353`` ends a medium's SSP block at the first sample within
 # ``100*EPSILON(1.0e0)`` of the declared medium depth — an absolute tolerance in
@@ -37,7 +37,7 @@ MAX_ATTENUATION_DB_PER_WAVELENGTH = AT_DB_PER_NEPER * 2.0 * math.pi   # 54.575
 # is never read as an SSP row: the next READ consumes it as the bottom-option
 # record (``misc/ReadEnvironmentMod.f90``), so the boundary condition is taken from
 # a sound speed.
-AT_LAST_SSP_POINT_EPS_M = 100.0 * 2.0 ** -23          # 1.1920929e-05 m
+AT_LAST_SSP_POINT_EPS = 100.0 * 2.0 ** -23          # 1.1920929e-05 m
 
 # Resolution at which the AT decks print their axes: depths in metres and ranges in
 # kilometres, both at ``%.6f``. Two samples closer than this collapse to one token.
@@ -51,8 +51,8 @@ AT_LAST_SSP_POINT_EPS_M = 100.0 * 2.0 ** -23          # 1.1920929e-05 m
 #: rule below and the writers' column format (``io/oalib_writer.py``, which
 #: imports these) are the same statement rather than two that agree today.
 DECK_AXIS_DECIMALS = 6
-DECK_DEPTH_RESOLUTION_M = 10.0 ** -DECK_AXIS_DECIMALS            # metres at %.6f
-DECK_RANGE_RESOLUTION_M = 1.0e3 * 10.0 ** -DECK_AXIS_DECIMALS    # km at %.6f
+DECK_DEPTH_RESOLUTION = 10.0 ** -DECK_AXIS_DECIMALS            # metres at %.6f
+DECK_RANGE_RESOLUTION = 1.0e3 * 10.0 ** -DECK_AXIS_DECIMALS    # km at %.6f
 #: The format spec every deck writes a depth with.
 DECK_DEPTH_FMT = f'.{DECK_AXIS_DECIMALS}f'
 
@@ -67,4 +67,4 @@ SBP_ANGLE_RESOLUTION_DEG = 1.0e-6
 # Bellhop's ray-box range and BOUNCE's RMax. uacpy guidance: no manual gives
 # a range for a run with no positive receiver range; 10 km is the RMax of
 # the BOUNCE example deck in doc/bounce.htm.
-NO_RECEIVER_RANGE_FALLBACK_M = 10_000.0
+NO_RECEIVER_RANGE_FALLBACK = 10_000.0

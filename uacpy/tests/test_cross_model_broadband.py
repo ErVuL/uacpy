@@ -354,9 +354,9 @@ def test_synthesize_time_series_honors_user_sample_rate():
 
 @pytest.mark.parametrize('model_cls', [Bellhop, Kraken, Scooter])
 def test_single_frequency_broadband_auto_expands_the_band(model_cls):
-    """source-receiver.md §6 "a single value auto-expands to":
+    """source-receiver.md §6 "expands to the engine's default band":
     for BROADBAND a single-element frequency
-    is a *centre* frequency, auto-expanded to ``fc·(1 ± bandwidth/2)`` — 128
+    is a *centre* frequency, expanded to ``fc·(1 ± bandwidth_factor/2)`` — 128
     uniform bins over ``[0.75·fc, 1.25·fc]`` with the shared defaults
     (``_band.broadband_band``, through ``_requested_frequencies``) — while a multi-element
     vector IS the band, verbatim. Resolver-level, one shared code path per
@@ -429,11 +429,11 @@ def test_sparc_pn_n_pulse_deconvolves_onto_kraken_broadband_at_0_dB():
     ranges = np.array([800.0, 1000.0, 1200.0])
     time_max = 4.0                       # bins at n/4 Hz — targets land exactly
     ts = SPARC(verbose=False, pulse_type='PN+N', output_mode='R',
-               n_time_samples=2048, time_max=time_max, freq_min=5.0, freq_max=75.0,
+               n_time_samples=2048, freq_min=5.0, freq_max=75.0,
                rmax_factor=7.0, timeout=600.0).run(
         env, Source(depths=z_src, frequencies=fc),
         Receiver(depths=np.array([z_rcv]), ranges=ranges),
-        run_mode=RunMode.TIME_SERIES)
+        run_mode=RunMode.TIME_SERIES, output_duration=time_max)
     times = np.asarray(ts.coords['time'], dtype=float)
     dt = float(times[1] - times[0])
     traces = np.asarray(ts.data)[0]               # (n_ranges, n_t)

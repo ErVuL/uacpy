@@ -252,6 +252,26 @@ def test_the_theory_curve_does_not_stretch_the_axis_past_the_run():
         plt.close(fig)
 
 
+def test_the_ber_axis_stops_at_a_rate_of_one():
+    """A rate above 1 is not a value, and the log axis' own margin over a
+    QPSK theory curve reaching 1e-45 puts the autoscaled top at 12.3. The
+    top is 1 at most; a measured curve alone keeps its autoscaled top below
+    it."""
+    from uacpy.comms import ber_theory_curve
+    from uacpy.plot import plot_ber_curve
+    theory = ber_theory_curve('qpsk', np.linspace(0.0, 20.0, 100))
+    ebn0 = np.array([0.0, 5.0, 10.0])
+    measured = [9.98e-2, 6e-3, 1.9e-4]
+    fig, ax = theory.plot()
+    assert ax.get_ylim()[1] == 1.0
+    plt.close(fig)
+    fig, ax = plot_ber_curve(ebn0, measured)
+    assert measured[0] < ax.get_ylim()[1] < 1.0
+    theory.plot(ax=ax)
+    assert ax.get_ylim()[1] == 1.0
+    plt.close(fig)
+
+
 @pytest.mark.parametrize('theory_first', [False, True])
 def test_a_second_measured_curve_does_not_clip_the_first(theory_first):
     """The axis bound reads every measured curve on the axes: a second

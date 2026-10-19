@@ -42,10 +42,12 @@ from uacpy.io._fortran_helpers import (
 )
 from uacpy.core.units import km_to_m
 from uacpy.io._parsers import (
-    _decode_fortran_title, oasp_trf_pressure, parse_oasp_trf, parse_oast_tl,
+    _decode_fortran_title, oasp_trf_pressure, oast_depth_average_field,
+    parse_oasp_trf, parse_oast_tl,
 )
 
 
+@typed_format_error
 def read_oast_tl(
     filepath: Union[str, Path],
     receiver_depths: Optional[np.ndarray] = None,
@@ -91,7 +93,12 @@ def read_oast_tl(
         frequency: ``frequencies`` when given (checked against the ``Freq:``
         labels to their 0.05 Hz print quantum and kept at its own precision,
         as the receiver depths are), else the label (``F7.1``,
-        ``oasfun22.f:368``).
+        ``oasfun22.f:368``). A file from a run with option ``'A'`` also
+        holds OAST's depth-averaged TL, which each Field carries as
+        ``components['depth_average']``: a real dB Field on ``{'range'}``,
+        the same native range axis — ``-10·log10`` of ``|p|²`` averaged
+        over every receiver of the deck (oasfun22.f:209-242,
+        oast.tex:144-146).
 
     Raises
     ------
@@ -101,7 +108,8 @@ def read_oast_tl(
         If the ``.plp`` file cannot be parsed, if it carries
         no TL-vs-range curve, if its ``Freq:``/``RD:`` labels do not form a
         full grid, or if the receivers of one frequency disagree about the
-        range axis, or if it carries no ``Freq:`` labels and no
+        range axis, or if its depth-averaged TL curves do not match the TL
+        curves, or if it carries no ``Freq:`` labels and no
         ``frequencies`` is given.
     ConfigurationError
         If ``frequencies`` does not hold one value per plotted block, or
@@ -140,9 +148,16 @@ def read_oast_tl(
         # matched back to the caller's axis (_match_label_depths).
         if frequencies is None:
             frequencies = labels
+    average = parsed['depth_average']
+    if average is not None and n_freq == 1:
+        average = average[None]
     return [Field(data=tl[i], coords={'depth': parsed['depths'],
                                       'range': ranges[i]},
-                  model='', backend='', frequencies=float(frequencies[i]))
+                  model='', backend='', frequencies=float(frequencies[i]),
+                  components=(None if average is None else {
+                      'depth_average': oast_depth_average_field(
+                          average[i], ranges[i], model='', backend='',
+                          frequencies=float(frequencies[i]))}))
             for i in range(n_freq)]
 
 
@@ -468,6 +483,7 @@ def _read_oasn_replicas_payload(
     }
 
 
+@typed_format_error
 def read_oasp_trf(
     filepath: Union[str, Path],
     receiver_depths: np.ndarray,
@@ -923,6 +939,7 @@ def _header_metadata(data: Dict, arrays) -> Dict:
     return {key: value for key, value in data.items() if key not in arrays}
 
 
+@typed_format_error
 def read_oasn_covariance(
     filepath: Union[str, Path],
     receiver_depths: Optional[np.ndarray] = None,
@@ -978,6 +995,7 @@ def read_oasn_covariance(
     )
 
 
+@typed_format_error
 def read_oasn_replicas(filepath: Union[str, Path]):
     """Read an OASN ``.rpo`` as a :class:`~uacpy.core.results.Replicas`.
 
@@ -1078,6 +1096,7 @@ def _stack_oasr_blocks(data: Dict):
     return theta, R, np.unwrap(phi_rad, axis=0), freqs
 
 
+@typed_format_error
 def read_oasr_reflection_coefficients(
     filepath: Union[str, Path],
     format_type: str = 'auto',

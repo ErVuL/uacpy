@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 
+import contextlib
 import functools
 import inspect
 import warnings
 import numpy as np
 from typing import Tuple
 
+from matplotlib.figure import Figure
+from matplotlib.layout_engine import ConstrainedLayoutEngine
+
 from uacpy.core.environment import Environment
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import (ConfigurationError, FallbackWarning,
+                                   ProvenanceWarning)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.results import Field
 from uacpy.core.results.quantities import (label as quantity_label,
@@ -18,8 +23,10 @@ from uacpy.core.results.quantities import (label as quantity_label,
 from uacpy.core.units import m_to_km
 from uacpy.core.acoustics.levels import no_energy_mask
 from uacpy.visualization.style import (
-    BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
-    RECEIVER_MARKER_STYLE, SOURCE_MARKER_STYLE,
+    ALTIMETRY_COLOR, BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE,
+    BOTTOM_LINE_STYLE_FLAT, ICE_BOUNDARY_EDGE_COLOR, ICE_BOUNDARY_FILL_COLOR,
+    RECEIVER_MARKER_STYLE, SEA_ICE_COLORS, SEA_ICE_LABEL_COLOR,
+    SOURCE_MARKER_STYLE,
 )
 
 
@@ -41,9 +48,11 @@ def typed_plot_error(plotter=None, *, who=None):
 
     Used bare (``@typed_plot_error``) on a public plotter, whose own name is
     the call the user made. A private plotter reached through a result's
-    ``.plot()`` names that call instead, ``@typed_plot_error(who='Rays.plot')``,
-    so a refusal never names a function the user did not call. ``who`` may
-    also be a callable of the plotter's arguments, for a private plotter that
+    ``.plot()`` names that call instead, so a refusal never names a function
+    the user did not call: ``who`` is that name, or a callable of the
+    plotter's arguments — ``who=lambda *args, who, **kwargs: who`` on a
+    labelled twin, which is handed the call's name (``Rays.plot``,
+    ``plot_result``), or a carrier-class reading for a private plotter that
     several carrier classes share.
 
     Many plotters pass arrays straight to matplotlib (or index ``[0]``/``[-1]``
@@ -280,22 +289,82 @@ def fig_ax(ax, figsize):
     return ax.figure, ax
 
 
+#: Gap between a heatmap and its colorbar, as a fraction of the panel's
+#: width (the family's ``pad=0.02``).
+_PANEL_BAR_PAD = 0.02
+
+#: matplotlib's colorbar long-to-short ratio for a bar one panel tall.
+_PANEL_BAR_ASPECT = 20.0
+
+
+def _grid_colorbar(fig, mappable, panels, nrows, ncols, **colorbar_kw):
+    """One colorbar beside an ``(nrows, ncols)`` grid of ``panels``, its room
+    taken from them by the figure's layout engine.
+
+    The bar runs the grid's full height: its long-to-short ratio is
+    matplotlib's ``_PANEL_BAR_ASPECT`` per row, inside matplotlib's default
+    slot (measured: at the fixed ratio and a slot sized for one panel, a bar
+    beside two rows spans about one). Its gap is one panel's
+    ``_PANEL_BAR_PAD`` of the grid width."""
+    return fig.colorbar(mappable, ax=list(panels), pad=_PANEL_BAR_PAD / ncols,
+                        aspect=_PANEL_BAR_ASPECT * nrows, **colorbar_kw)
+
+
+class _ConstrainedFigure(Figure):
+    """The figure a multi-panel plotter opens: laid out by matplotlib's
+    constrained engine, whose ``tight_layout()`` re-runs that engine.
+
+    matplotlib refuses to switch a figure holding a colorbar from the
+    constrained engine to the tight one ("Colorbar layout of new layout
+    engine not compatible with old engine, and a colorbar has been
+    created"), so the ``fig.tight_layout()`` or ``plt.tight_layout()`` a
+    user calls on such a figure would raise; here it lays the figure out
+    again and leaves every panel where the constrained engine put it.
+    ``pad``, ``h_pad``, ``w_pad`` and ``rect`` are tight-layout settings
+    this engine does not read, so passing one gives a notice. On a figure
+    whose engine was changed, ``tight_layout()`` is matplotlib's own."""
+
+    def tight_layout(self, *, pad=1.08, h_pad=None, w_pad=None, rect=None):
+        engine = self.get_layout_engine()
+        if not isinstance(engine, ConstrainedLayoutEngine):
+            return super().tight_layout(pad=pad, h_pad=h_pad, w_pad=w_pad,
+                                        rect=rect)
+        given = ([] if pad == 1.08 else ['pad']) + [
+            name for name, value in (('h_pad', h_pad), ('w_pad', w_pad),
+                                     ('rect', rect)) if value is not None]
+        if given:
+            _plot_warn(
+                f"tight_layout(): {', '.join(given)} "
+                f"{'is' if len(given) == 1 else 'are'} not used, because "
+                f"this figure is laid out by matplotlib's constrained "
+                f"engine, which tight_layout() re-runs. Set its padding "
+                f"with fig.get_layout_engine().set(w_pad=…, h_pad=…, "
+                f"rect=…).", FallbackWarning)
+        engine.execute(self)
+
+
 def _grid_figure(fig, nrows, ncols, figsize, default_figsize, *, who,
                  **subplots_kw):
     """``(fig, axes, owns_fig)`` for a multi-panel plotter's ``fig=`` argument.
 
-    ``fig=None`` opens a new figure of ``figsize`` (``default_figsize`` when
-    that is ``None``), which the plotter owns: it lays it out and credits it.
+    ``fig=None`` opens a new :class:`_ConstrainedFigure` of ``figsize``
+    (``default_figsize`` when that is ``None``), which the plotter owns,
+    laid out by matplotlib's constrained layout: the panels' labels, a
+    colorbar added with ``fig.colorbar(mappable, ax=panels)``, the figure
+    title and the credit footnote all take their room without a measuring
+    pass, and a ``tight_layout()`` call lays it out again.
     A ``Figure`` or ``SubFigure`` handed in takes the ``(nrows, ncols)`` grid
     via its own ``subplots``, so the panels can sit inside a larger
-    publication figure; the caller owns that one's size, layout and credit,
-    so ``figsize=`` alongside it is refused rather than ignored. ``axes`` is
-    always the 2-D ``(nrows, ncols)`` array."""
+    publication figure; the caller owns that one's size and layout, so
+    ``figsize=`` alongside it is refused rather than ignored, and what the
+    panels draw is credited in its figure's footnote. ``axes`` is always the
+    2-D ``(nrows, ncols)`` array."""
     import matplotlib.pyplot as plt
     if fig is None:
         fig, axes = plt.subplots(
             nrows, ncols, figsize=default_figsize if figsize is None else figsize,
-            squeeze=False, **subplots_kw)
+            squeeze=False, layout='constrained',
+            FigureClass=_ConstrainedFigure, **subplots_kw)
         return fig, axes, True
     if not hasattr(fig, 'subplots') or not hasattr(fig, 'add_axes'):
         raise ConfigurationError(
@@ -518,6 +587,19 @@ _AXIS_LABELS = {
 }
 
 
+#: The views of an unsigned amplitude drawn on its own (the arrivals' stems,
+#: an ambiguity surface): linear, or its level in dB.
+_MAGNITUDE_VIEWS = ('magnitude', 'dB')
+
+
+def _frame_wrapped_phase(ax) -> None:
+    """The phase panel of a transfer-function pair (``plot_frf``,
+    ``plot_transfer_function``): radians on the whole (-π, π] a wrapped phase
+    occupies, the same window for every H(f) drawn."""
+    ax.set_ylabel(_VALUE_LABELS['phase'])
+    ax.set_ylim((-np.pi, np.pi))
+
+
 # Axis / colorbar label per ``value`` view, for the views whose label is fixed.
 # ``'dB'`` is missing on purpose: its label comes from the field (see
 # :func:`_value_label`), because the dB view of a signal-excess grid is not TL.
@@ -579,6 +661,54 @@ def _checked_dynamic_range_dB(who: str, value) -> float:
     return span
 
 
+#: The envelope views of a time trace: ``plot_waveform``'s ``value=`` and a
+#: time ``Field``'s.
+_ENVELOPE_VALUES = ('envelope', 'envelope_dB')
+
+#: Default reach (dB) of an envelope dB axis below its reference (uacpy
+#: guidance).
+_ENVELOPE_DYNAMIC_RANGE_DB = 60.0
+
+
+def _envelope_view(x, value, *, who, reference=None, dynamic_range_dB=None):
+    """``(y, label, floor_dB)``: the ``value`` envelope view of the real 1-D
+    trace ``x``.
+
+    ``'envelope'`` is ``|analytic signal|``, the public transform
+    :func:`uacpy.acoustic_signal.envelope` a caller calls for the numbers;
+    ``'envelope_dB'`` is the same in dB re ``reference`` (the envelope's
+    peak when ``None``), floored ``dynamic_range_dB`` (default
+    :data:`_ENVELOPE_DYNAMIC_RANGE_DB`) below it, because ``20·log10`` of a
+    silence is minus infinity. ``label`` names the dB reference;
+    ``floor_dB`` is ``None`` for the linear view."""
+    # Deferred like every compute-side import here: at file scope it pulls
+    # scipy.signal into every ``import uacpy.visualization``.
+    from uacpy.acoustic_signal.timefreq import envelope
+    y = np.asarray(envelope(x), dtype=float)
+    if value == 'envelope':
+        return y, "|envelope|", None
+    if reference is None:
+        ref, label = y.max(), "Envelope (dB re peak)"
+    else:
+        ref = float(reference)
+        if not np.isfinite(ref) or ref <= 0.0:
+            raise ConfigurationError(
+                f"{who}: reference must be a positive, finite "
+                f"amplitude; got {reference!r}.")
+        label = f"Envelope (dB re {ref:g})"
+    floor_dB = -(_ENVELOPE_DYNAMIC_RANGE_DB if dynamic_range_dB is None
+                 else _checked_dynamic_range_dB(who, dynamic_range_dB))
+    if ref <= 0.0:
+        # An all-zero trace has no peak to refer to, and dividing by it
+        # would draw a floor-flat line that looks like silence measured
+        # rather than silence handed in.
+        raise ConfigurationError(
+            f"{who}: the signal is everywhere zero, so it has no peak to "
+            f"reference; pass reference= to state one.")
+    return (20.0 * np.log10(np.maximum(y / ref, 10.0 ** (floor_dB / 20.0))),
+            label, floor_dB)
+
+
 #: How far (dB) below its peak a dB curve of a magnitude that can reach zero
 #: is drawn before it sits on its floor, unless the plotter's
 #: ``dynamic_range_dB=`` says otherwise.
@@ -592,14 +722,16 @@ def _floored_dB(x, *, power=False, dynamic_range_dB=None, who='plot'):
 
     The null policy of the magnitude-in-dB line plotters
     (``plot_channel_response``, ``plot_subcarriers``, ``plot_convergence``,
-    ``plot_frf``, ``plot_beam_power``): ``20·log10`` of a null is ``-inf``,
+    ``plot_frf``, ``plot_beam_power``, and the magnitude panel of
+    ``plot_transfer_function``, whose no-energy samples stay gaps):
+    ``20·log10`` of a null is ``-inf``,
     which no axis can show, so a null (and anything deeper than the floor)
     is drawn ON the floor — not dropped from the line with numpy's divide
     warning, and not lifted by an added epsilon that biases every small
     value. The floor is relative to the peak, so it follows the data's own
     scale. A NaN (a value the data does not define) stays NaN and takes no
     part in the peak. Three dB views keep a rule of their own:
-    ``Arrivals.plot(dB=True)`` leaves out and counts the arrivals below its
+    ``Arrivals.plot(value='dB')`` leaves out and counts the arrivals below its
     window; ``plot_greens_function`` draws dB re its panel's peak on a
     ``dynamic_range_dB`` window its colour scale and y axis clip; and
     ``plot_mode_excitation`` leaves out a mode of zero excitation and
@@ -663,6 +795,19 @@ def _time_trace_label(field: Field) -> str:
     return f'p(t) ({unit})' if unit else 'p(t)'
 
 
+#: The unit of the spectrum ``Field.to_transfer_function`` returns for a
+#: received pressure trace: S·H, the source spectrum times the channel
+#: (``quantities.py`` registers it as 'S·H (Pa·s)').
+_SPECTRUM_PRODUCT_UNIT = 'Pa·s'
+
+
+def _is_source_spectrum_product(field: Field) -> bool:
+    """Whether ``field`` is the S·H spectrum of a received pressure trace
+    (complex pressure in Pa·s), not a transfer function H."""
+    return (field.kind == 'pressure' and field.is_complex
+            and field.unit == _SPECTRUM_PRODUCT_UNIT)
+
+
 def _value_label(field: Field, value: str, *, who: str = 'plot_field',
                  weightings=None) -> str:
     """Axis / colorbar label for the ``value`` view of ``field``.
@@ -688,6 +833,11 @@ def _value_label(field: Field, value: str, *, who: str = 'plot_field',
         if (_is_multi_source_total(field)
                 and quantity_label(field.kind, 'dB') == 'TL (dB)'):
             return 'Total propagation loss (dB re 1 source @ 1 m)'
+        if _is_source_spectrum_product(field):
+            # The transform of a received trace is S·H, the source spectrum
+            # times the channel, not H: its dB view is -20·log10|S·H|, not a
+            # transmission loss.
+            return f'−20·log10|S·H| (dB re 1 {_SPECTRUM_PRODUCT_UNIT})'
         # The reference names a non-default one on the levels that carry it
         # (an SEL or peak map at ref=20 µPa); every other kind ignores it.
         label = quantity_label(field.kind,
@@ -726,6 +876,8 @@ def _value_label(field: Field, value: str, *, who: str = 'plot_field',
             # registry both say 'Probability of detection'.
             return quantity_label(field.kind, field.unit,
                                   reference=getattr(field, 'reference', None))
+    if value == 'level' and _is_source_spectrum_product(field):
+        return f'|S·H| (dB re 1 {_SPECTRUM_PRODUCT_UNIT})'
     try:
         return _VALUE_LABELS[value]
     except KeyError:
@@ -813,6 +965,37 @@ def _no_energy_as_gap(levels_dB) -> np.ndarray:
                                    np.nan), dtype=float)
     levels[no_energy_mask(levels)] = np.nan
     return levels
+
+
+def _label_shared_x_outer(ax) -> None:
+    """Drop the x-axis label of a panel whose x axis is shared with another
+    and that has a row below it in its grid, as matplotlib's ``sharex=True``
+    hides its tick labels: only the bottom row of a shared stack is labelled,
+    so an inner label does not print into the next panel's title. A panel
+    sharing nothing keeps its label. The row is read in the caller's grid
+    (the topmost subplot spec): a colorbar beside the panel nests it in a
+    grid of its own."""
+    spec = ax.get_subplotspec()
+    if spec is None or spec.get_topmost_subplotspec().is_last_row():
+        return
+    if len(ax.get_shared_x_axes().get_siblings(ax)) > 1:
+        ax.set_xlabel('')
+
+
+def _colorbar_extend(levels, clim) -> str:
+    """The colorbar ``extend`` of a map whose drawn ``levels`` (no no-energy
+    marker in them) are mapped on ``clim``: an arrow at each end of the
+    window a level runs past, so a saturated colour reads as "at least
+    this", not as the end value."""
+    lo, hi = clim
+    finite = np.asarray(np.ma.filled(levels, np.nan), dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0 or lo is None or hi is None:
+        return 'neither'
+    below, above = bool(finite.min() < lo), bool(finite.max() > hi)
+    if below and above:
+        return 'both'
+    return 'min' if below else 'max' if above else 'neither'
 
 
 # Fixed TL colour scale used everywhere TL is drawn: ``vmin = 20 dB`` →
@@ -969,12 +1152,13 @@ def _painted_x_span(artist) -> Tuple[float, float]:
 
 
 def _overlay_seafloor(ax, env: Environment, ranges: np.ndarray, *,
-                      painted=None) -> None:
+                      painted=None, fill=True) -> None:
     """Draw the seafloor on top of a (depth, range) heatmap.
 
     Uses high z-orders (sediment + 5, line + 6) so the bathymetry sits
-    above contour lines and TL data — matches the original AT-style
-    rendering. Bathymetry is clipped to the painted span — the x-extent of
+    above contour lines and TL data, as the Acoustics Toolbox fills the
+    seabed over a TL panel (``Matlab/Plot/plotbty.m``: ``hold on`` then
+    ``fill``). Bathymetry is clipped to the painted span — the x-extent of
     the heatmap ``painted`` (its cell edges, :func:`_painted_x_span`) or,
     with no heatmap, the ``ranges`` span — plus a marker's width past each
     end (:func:`_fill_margins`), from the source range when the data start
@@ -984,7 +1168,8 @@ def _overlay_seafloor(ax, env: Environment, ranges: np.ndarray, *,
     shows every painted cell whole. The boundary stroke is sunk into the
     sediment (:func:`_sink_line_into_sediment`) so nothing in the water
     column — a ray skimming the bottom, the lowest field row — is covered by
-    it."""
+    it. ``fill=False`` draws the boundary line alone, so the values a field
+    holds below the seafloor stay visible (``plot_field(seabed='line')``)."""
     if env is None:
         return
     data_r_km = m_to_km(ranges)
@@ -1022,8 +1207,9 @@ def _overlay_seafloor(ax, env: Environment, ranges: np.ndarray, *,
                         max_seafloor * DEPTH_AXIS_HEADROOM)
         if depth_max > max(ax.get_ylim()):
             ax.set_ylim(depth_max, min(ax.get_ylim()))
-        ax.fill_between(r_km, z, depth_max,
-                        zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE_SOLID)
+        if fill:
+            ax.fill_between(r_km, z, depth_max, zorder=ZORDER_SEDIMENT + 5,
+                            **BOTTOM_FILL_STYLE_SOLID)
         (line,) = ax.plot(r_km, z, zorder=ZORDER_SEDIMENT + 6,
                           **BOTTOM_LINE_STYLE)
         _sink_line_into_sediment(line)
@@ -1031,10 +1217,11 @@ def _overlay_seafloor(ax, env: Environment, ranges: np.ndarray, *,
         depth_max = max(max(ax.get_ylim()), env.depth * DEPTH_AXIS_HEADROOM)
         if depth_max > max(ax.get_ylim()):
             ax.set_ylim(depth_max, min(ax.get_ylim()))
-        ax.fill_between(
-            [fill_lo, fill_hi], env.depth, depth_max,
-            zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE_SOLID,
-        )
+        if fill:
+            ax.fill_between(
+                [fill_lo, fill_hi], env.depth, depth_max,
+                zorder=ZORDER_SEDIMENT + 5, **BOTTOM_FILL_STYLE_SOLID,
+            )
         line = ax.axhline(env.depth, zorder=ZORDER_SEDIMENT + 6,
                           **BOTTOM_LINE_STYLE_FLAT)
         _sink_line_into_sediment(line)
@@ -1131,13 +1318,19 @@ def _credit_attributions(show_data_credit, *, carrier=None):
 def _model_attribution(result):
     """One-line model credit ``"<model> (<backend>) — <author>, <engine>"``
     from a result's :class:`~uacpy.models.provenance.ModelProvenance`, or
-    ``None`` when the result carries no model provenance. ``(<backend>)``
-    names the binary that ran (``result.backend``) when it is not the model's
-    own name: Bellhop's ``cuda`` / ``cxx`` / ``fortran``, Kraken's
-    ``krakenc``, RAM's ``mpirams`` / ``ramgeo`` / ``rams`` / ``ramsurf``. The
-    model-side counterpart of the data-source attributions resolved by
-    :func:`_credit_attributions`."""
+    ``None`` when the result carries no model provenance. A record derived
+    from a result (``ModeDispersion``, ``ExcitationPattern``) names its
+    engine by ``model_source_id`` and is credited as that result.
+    ``(<backend>)`` names the binary that ran (``result.backend``) when it is
+    not the model's own name: Bellhop's ``cuda`` / ``cxx`` / ``fortran``,
+    Kraken's ``krakenc``, RAM's ``mpirams`` / ``ramgeo`` / ``rams`` /
+    ``ramsurf``. The model-side counterpart of the data-source attributions
+    resolved by :func:`_credit_attributions`."""
     src = getattr(result, 'model_source', None)
+    source_id = getattr(result, 'model_source_id', None)
+    if src is None and source_id is not None:
+        from uacpy.models.provenance import model_provenance
+        src = model_provenance(source_id)
     if src is None:
         return None
     name = getattr(result, 'model', '') or src.name
@@ -1147,23 +1340,18 @@ def _model_attribution(result):
     return f"{name} — {src.attribution}"
 
 
-def _credit_lines(data_attributions, model_attribution):
+def _credit_lines(data_attributions, model_attributions):
     """Compose the footnote rows from data + model provenance.
 
     One citation per line, stacked, the ``Model`` group above the ``Data``
     group. Each group is labelled on its first line; further lines align
     under it. One harmonised layout for environment plots (data only),
-    result plots (model, plus data when an env is supplied) and maps.
+    result plots (model, plus data when an env is supplied), maps and
+    figures holding several models.
     """
-    groups = []
-    if model_attribution:
-        # A single attribution string, or a list of them (multi-model
-        # comparison figures).
-        lines = ([model_attribution] if isinstance(model_attribution, str)
-                 else list(model_attribution))
-        groups.append(("Model:", lines))
-    if data_attributions:
-        groups.append(("Data:", list(data_attributions)))
+    groups = [(label, list(items)) for label, items in
+              (("Model:", model_attributions), ("Data:", data_attributions))
+              if items]
     if not groups:
         return []
     width = max(len(label) for label, _ in groups)
@@ -1175,29 +1363,104 @@ def _credit_lines(data_attributions, model_attribution):
     return lines
 
 
+class _FigureCredit:
+    """The credit footnote of one figure: every model and data source drawn
+    into it, each once, in the order they arrived; the axes it is centred
+    under, if any; the text it last wrote; and ``held``, the number of
+    composite plotters drawing their panels into it (while one is, the
+    plotters it calls add nothing)."""
+
+    def __init__(self):
+        self.models, self.data = [], []
+        self.center_ax, self.text, self.held = None, '', 0
+
+
+def _figure_credit(fig):
+    """``(root, record)``: the figure ``fig`` belongs to — a SubFigure's
+    footnote is its figure's, one per figure — and the :class:`_FigureCredit`
+    it carries, made on first use. A SubFigure's ``figure`` is its root
+    figure, and a Figure's is itself."""
+    root = fig.figure
+    record = getattr(root, '_uacpy_credit', None)
+    if record is None:
+        record = root._uacpy_credit = _FigureCredit()
+    return root, record
+
+
+@contextlib.contextmanager
+def _credit_held(fig):
+    """Hold ``fig``'s credit footnote while a composite plotter draws its
+    panels with the single-panel plotters: inside the block they add
+    nothing, and the composite then credits the figure itself, by its own
+    ``show_data_credit=``."""
+    _, record = _figure_credit(fig)
+    record.held += 1
+    try:
+        yield
+    finally:
+        record.held -= 1
+
+
 def _draw_credit(fig, data_attributions=(), *, model=None,
                  center_ax=None, reserve=True):
-    """Discreet grey provenance footnote along the figure bottom.
+    """Add data sources and models to the grey provenance footnote along the
+    bottom of ``fig``'s figure, and draw it.
 
-    Draws the licence-**required attribution** for the data **and** the model
-    that produced the figure — the way a scientific figure credits its sources.
-    Centred under ``center_ax`` when given (e.g. the map panel), else
-    bottom-left. ``reserve`` raises the subplot bottom until every axes'
-    tick and axis labels clear the footnote (set ``False`` when the caller
-    already reserved space via ``tight_layout``).
+    Draws the licence-**required attribution** for the data **and** the
+    models drawn into the figure — the way a scientific figure credits its
+    sources. The credit follows the result: a plotter drawing into a
+    caller's axes or figure adds what it drew to that figure's footnote, as
+    one that opened its own figure does. The footnote is rebuilt from
+    everything drawn into the figure, each model (``model``: one attribution
+    or a list) and each data source once; several models are listed one per
+    line under ``Model:``. Centred under ``center_ax`` when one is given
+    (e.g. the map panel; later additions keep it there), else bottom-left.
+
+    The footnote is the figure's ``supxlabel``, the bottom label matplotlib's
+    layout engines lay out: a constrained figure and a later
+    ``fig.tight_layout()`` both keep the panels' labels clear of it. On a
+    figure with no layout engine, ``reserve`` raises the subplot bottom until
+    every axes' tick and axis labels clear it (``False`` when the caller lays
+    the figure out with ``tight_layout`` after drawing it). A ``supxlabel``
+    the caller wrote is not drawn over: a
+    :class:`~uacpy.core.exceptions.ProvenanceWarning` hands them the
+    footnote's text instead.
     """
-    lines = _credit_lines(data_attributions, model)
-    if not lines:
+    root, record = _figure_credit(fig)
+    if record.held:
         return
+    for attribution in ([model] if isinstance(model, str) else model or ()):
+        if attribution and attribution not in record.models:
+            record.models.append(attribution)
+    for attribution in data_attributions:
+        if attribution not in record.data:
+            record.data.append(attribution)
     if center_ax is not None:
-        pos = center_ax.get_position()
-        x, ha = pos.x0 + pos.width / 2.0, 'center'
+        record.center_ax = center_ax
+    text = "\n".join(_credit_lines(record.data, record.models))
+    if not text:
+        return
+    caller_label = root.get_supxlabel()
+    if caller_label and caller_label != record.text:
+        _plot_warn(
+            f"The figure's supxlabel {caller_label!r} is the caller's, so the "
+            f"credit footnote is not drawn over it; credit the figure "
+            f"yourself (fig.text(...)): {text}", ProvenanceWarning)
+        return
+    if record.center_ax is not None:
+        # The axes' position is a fraction of its own (Sub)Figure; the
+        # footnote's x is a fraction of the root figure.
+        pos = record.center_ax.get_position()
+        x_px = record.center_ax.figure.transSubfigure.transform(
+            (pos.x0 + pos.width / 2.0, 0.0))[0]
+        x, ha = root.transFigure.inverted().transform((x_px, 0.0))[0], 'center'
     else:
         x, ha = 0.012, 'left'
-    credit = fig.text(x, 0.012, "\n".join(lines), ha=ha, va='bottom',
-                      fontsize='x-small', color='0.45', linespacing=1.5)
-    if reserve:
-        _reserve_credit_margin(fig, credit)
+    credit = root.supxlabel(text, x=x, ha=ha, va='bottom',
+                            fontsize='x-small', color='0.45', linespacing=1.5)
+    record.text = text
+    if reserve and root.get_layout_engine() is None:
+        _reserve_credit_margin(root, credit)
 
 
 def _title_or(title, default):
@@ -1271,70 +1534,18 @@ def _fit_rotated_axis_label(ax, x, candidates, colour, *, y=0.04,
     return text
 
 
-def _fit_subplot_margins(fig, axes, *, pad_px=4.0, right_limit=1.0):
-    """Grow the subplot margins until every label of ``axes`` is on the canvas.
+def _draw_result_credit(fig, *results, env=None, show_data_credit=True,
+                        **draw_kw):
+    """Add the models that produced ``results`` and the data sources of
+    ``env`` to ``fig``'s credit footnote (:func:`_draw_credit`).
 
-    Measured, like :func:`_reserve_credit_margin`, and for the same reason: a
-    margin given as a *fraction* cannot hold a label whose width is set in
-    *points*. On ``compare_models``' own two-field figure under a fixed
-    ``subplots_adjust(left=0.05, right=0.88)`` alone, the depth label of a
-    one-column comparison starts 11 px outside the canvas at the default
-    font size and 57 px outside it at 20 pt, and at two columns the range
-    labels drop 7 px below it.
-
-    ``right_limit`` is the fraction of the width the panels may occupy, so a
-    caller can keep a strip free for a colorbar it has not drawn yet.
-    """
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-    boxes = [ax.get_tightbbox(renderer) for ax in axes if ax.get_visible()]
-    boxes = [b for b in boxes if b is not None]
-    if not boxes:
-        return
-    width, height = fig.bbox.width, fig.bbox.height
-    sp = fig.subplotpars
-    left = sp.left + max(0.0, pad_px - min(b.x0 for b in boxes)) / width
-    bottom = sp.bottom + max(0.0, pad_px - min(b.y0 for b in boxes)) / height
-    right = sp.right - max(
-        0.0, max(b.x1 for b in boxes) - (right_limit * width - pad_px)) / width
-    top = sp.top - max(
-        0.0, max(b.y1 for b in boxes) - (height - pad_px)) / height
-    # A figure too small to hold its own labels would invert the margins and
-    # matplotlib would raise; leave it alone and let it clip rather than fail.
-    if left < right and bottom < top:
-        fig.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
-
-
-def _fit_colorbar_strip(fig, cbar_ax, pad_px=4.0):
-    """Pull a right-hand colorbar and the panels left until its label fits.
-
-    The colorbar's own tick labels and axis label sit *outside* its axes, so a
-    hard ``fig.add_axes((0.905, ...))`` clips them as soon as the font grows:
-    at 20 pt, ``TL (dB)`` ends 34 px past the canvas edge.
-    """
-    fig.canvas.draw()
-    box = cbar_ax.get_tightbbox(fig.canvas.get_renderer())
-    if box is None:
-        return
-    over = box.x1 + pad_px - fig.bbox.width
-    if over <= 0:
-        return
-    dx = over / fig.bbox.width
-    pos = cbar_ax.get_position()
-    cbar_ax.set_position((pos.x0 - dx, pos.y0, pos.width, pos.height))
-    sp = fig.subplotpars
-    if sp.right - dx > sp.left:
-        fig.subplots_adjust(right=sp.right - dx)
-
-
-def _draw_result_credit(fig, result, *, env=None, show_data_credit=True, **draw_kw):
-    """Unified provenance footnote for a *result* figure: the model that
-    produced it (always, when known) plus any data sources from ``env``.
-
-    The single call every result plotter makes — keeps data + model credit
-    rendering identical across :func:`plot_field`, `plot_rays`, … ."""
-    data = _credit_attributions(show_data_credit, carrier=env)
-    _draw_credit(fig, data, model=_model_attribution(result), **draw_kw)
+    The single call every result plotter makes, on a figure it opened or a
+    caller's — keeps data + model credit rendering identical across
+    :func:`plot_field`, `plot_rays`, … . A result with no model provenance
+    (a metric of two models, a Field built from the caller's arrays) adds
+    no model."""
+    _draw_credit(fig, _credit_attributions(show_data_credit, carrier=env),
+                 model=[_model_attribution(r) for r in results], **draw_kw)
 
 
 def _draw_sea_ice(ax, sea_ice):
@@ -1388,8 +1599,7 @@ def _draw_sea_ice(ax, sea_ice):
     ax.set_ylim(lo, hi - 0.06 * (lo - hi))             # headroom for the line
     pts = np.column_stack([rngs, np.full(rngs.shape, hi)]).reshape(-1, 1, 2)
     segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-    ice_cmap = LinearSegmentedColormap.from_list('ice',
-                                                 ['#05051a', '#3a0d63', '#7a2da8'])
+    ice_cmap = LinearSegmentedColormap.from_list('ice', list(SEA_ICE_COLORS))
     lc = LineCollection(segs, cmap=ice_cmap, norm=Normalize(0.0, 1.0),
                         linewidths=4.5, capstyle='round',
                         zorder=ZORDER_SURFACE + 0.5)   # over the ice band
@@ -1397,7 +1607,8 @@ def _draw_sea_ice(ax, sea_ice):
     ax.add_collection(lc)
     # Its own label, below the ice-band's "ice", so the two never overprint.
     ax.text(0.985, 0.86, "sea-ice concentration", transform=ax.transAxes,
-            ha='right', va='top', fontsize='small', style='italic', color='#5b1a8b',
+            ha='right', va='top', fontsize='small', style='italic',
+            color=SEA_ICE_LABEL_COLOR,
             zorder=ZORDER_SOURCE)
 
 
@@ -1434,14 +1645,16 @@ def _draw_surface_boundary(ax, env):
     for r_lo, r_hi, bp in zones:
         if not _is_solid(bp):
             continue
-        ax.fill_between([r_lo, r_hi], hi, hi - band, color='#cfe6f2',
-                        hatch='xx', edgecolor='#3a6e8f', linewidth=0.5,
+        ax.fill_between([r_lo, r_hi], hi, hi - band,
+                        color=ICE_BOUNDARY_FILL_COLOR, hatch='xx',
+                        edgecolor=ICE_BOUNDARY_EDGE_COLOR, linewidth=0.5,
                         zorder=ZORDER_SURFACE)
         drew = True
     if drew:
         ax.set_ylim(lo, hi - 1.25 * band)   # headroom above the surface
         ax.text(0.985, 0.93, "ice", transform=ax.transAxes, ha='right',
-                va='top', fontsize='small', style='italic', color='#3a6e8f',
+                va='top', fontsize='small', style='italic',
+                color=ICE_BOUNDARY_EDGE_COLOR,
                 zorder=ZORDER_SOURCE)
 
 
@@ -1460,8 +1673,8 @@ def _draw_altimetry(ax, env):
     z = -np.asarray(heights, dtype=float)          # positive up → negative depth
     if not np.any(np.abs(z) > 0):
         return
-    ax.plot(r_km, z, color='#1f6f9f', lw=1.6, zorder=ZORDER_SURFACE)
-    ax.fill_between(r_km, 0.0, z, color='#1f6f9f', alpha=0.15,
+    ax.plot(r_km, z, color=ALTIMETRY_COLOR, lw=1.6, zorder=ZORDER_SURFACE)
+    ax.fill_between(r_km, 0.0, z, color=ALTIMETRY_COLOR, alpha=0.15,
                     zorder=ZORDER_SURFACE - 1)
     lo, hi = ax.get_ylim()
     if float(np.min(z)) < hi:                       # crest above z=0 → headroom

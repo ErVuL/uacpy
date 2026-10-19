@@ -168,7 +168,7 @@ a solver:
 | `models` | the submodel name chosen per component |
 | `as_psd()` | linear PSD in SI Pa²/Hz; `10·log10(as_psd() / 1e-12)` returns `total` to round-off |
 | `band_level(freq_min, freq_max, *, component='total')` | band level, dB re 1 µPa²: the spectrum integrated over the band (submodels re-evaluated at 100 points per decade, so independent of `frequencies`) — the sonar-equation `NL` for a band source level |
-| `decidecade_levels(freq_min, freq_max, *, component='total')` | `BandLevels(centers, levels)`: `band_level` of every decidecade band overlapping the range, with the band edges and `ref` = 1 µPa |
+| `decidecade_levels(freq_min, freq_max, *, component='total')` | `BandLevels(centers, levels_dB)`: `band_level` of every decidecade band overlapping the range, with the band edges and `ref` = 1 µPa |
 
 **A switched-off source is `-inf`, not zero.** `shipping_level='no'`,
 `rain_rate='no'` and `wind_speed_kn=0` all return `-inf` dB at every frequency, so
@@ -297,7 +297,7 @@ composition rather than one fused formula:
 
 | Registry | Entries | Default |
 |---|---|---|
-| `WIND_MODELS` | `merklinger`, `coates`, `knudsen` | `merklinger` |
+| `WIND_MODELS` | `merklinger`, `coates` | `merklinger` |
 | `SHIPPING_MODELS` | `wenz`, `coates` | `wenz` |
 | `RAIN_MODELS` | `torres_costa` | `torres_costa` |
 | `THERMAL_MODELS` | `mellen` | `mellen` |
@@ -318,50 +318,6 @@ is an implementation that takes shortcuts.
 `coates` is the Coates (1989) / Stojanović (2007) pair that the
 underwater-communications literature uses, so `WIND_MODELS` and
 `SHIPPING_MODELS` let you reproduce either convention from the same call.
-
-`knudsen` is the original, as one straight line in log U and log f:
-
-```
-NL = 44 + 20·log₁₀(U_kn) − 17·log₁₀(f_kHz)          dB re 1 µPa²/Hz
-```
-
-Straight parallel lines in log-log, which is the shape Knudsen, Alford and
-Emling (1948) published — their curves shift with wind by the same amount at
-every frequency. The slope and the constant are theirs; the wind term
-`20·log₁₀(U_kn)` is not — they drew one curve per wind force, not a law in U —
-and no cited source states it: it is uacpy guidance,
-checked against their figure below. `−17` dB/decade is the paper's
-stated −5 dB/octave (−16.61 dB/decade) to 0.4 dB/decade, restated by Dahl
-*et al.* (2007) as a "5 dB reduction in average pressure spectral density per
-factor of two increase in frequency". The constant 44 is the calm curve: wind
-force 0, whose overall 0.1–10 kc level of 57 dB works out at 44.8 dB re
-1 µPa²/Hz at 1 kHz.
-
-uacpy checks it against the figure rather than taking it on trust. Two details
-of that paper are easy to lose and each is worth 20-plus decibels: its levels
-are referred to **0.0002 dyne/cm² = 20 µPa**, needing +26.0 dB to become dB re
-1 µPa²/Hz, and the numbers printed beside the curves are **overall 0.1–10 kc
-levels**, not spectrum levels, sitting 38.2 dB above the 1 kHz spectrum level.
-Carry both through and the formula lands +1.6 dB biased, 2.0 dB rms against
-the six published curves from force 1 up (+0.4 dB / 3.2 dB over all seven:
-force 0, a flat calm, reads 6.9 dB low and is below this straight line's
-reach) — inside the 4–5 dB standard deviation the paper
-reports for its own observations (`KNUDSEN_UNCERTAINTY_DB`). Those curves are
-the expected side of the model's tests, cross-checked against Hildebrand
-*et al.* (2021) Table IV so a misread figure cannot be checked against itself.
-
-Two things to know when comparing it with something else. Knudsen is not truly
-a power law in wind speed — the curve spacing is non-linear in log₁₀(U), which
-Hildebrand *et al.* call "not substantiated by the present model" between
-Beaufort 2–5 — so the straight-line form trades that curvature away. And being
-a power law it keeps rising with wind past force 7, where the published curves
-stop.
-
-Not to be confused with the longer expression also called a Knudsen curve in
-parts of the literature, `44 + 28·log(1+w^0.75) + 19·log(f) − 18·log(f² +
-1/(2.78+0.14w^0.75)²)` with *w* in m/s. That one carries a spectral peak,
-which Knudsen's straight parallel lines do not — it is a Wenz-shaped fit under
-his name. Reach for `merklinger` if you want a peaked wind spectrum.
 
 ```python
 merk = WenzNoise(f, wind_speed_kn=25.0, wind_model='merklinger')
@@ -429,7 +385,7 @@ the spectrum is identical to the one you would get with water_depth='deep'.
 
 It warns only for a value you *chose* — a knob left at its default is never
 reported — and it invents nothing: a model without a depth term keeps not
-having one. `knudsen` has none either, its measurements being coastal.
+having one.
 
 ### Wind speed from a Beaufort force or a sea state
 
@@ -469,6 +425,10 @@ WenzNoise(f, wind_speed_kn=u10)
 WenzNoise(f, wind_speed_kn=beaufort_to_wind_speed(5))      # 19.0 kn (9.77 m/s)
 WenzNoise(f, wind_speed_kn=sea_state_to_wind_speed(4))     # the same curve
 ```
+
+The three conversions take an array as well (a wind record, a column of
+forces) and return one value per entry, in its shape:
+`wind_speed_to_beaufort(np.array([5.0, 12.0]))` is `array([2, 4])`.
 
 A force names a *band* of speeds, so `beaufort_to_wind_speed` returns its
 midpoint — a choice, not a conversion: at force 3 the band's ends move
@@ -708,7 +668,10 @@ unweighted.
 
 The keys are Southall et al. (2019)'s, not NMFS (2018)'s: a user thinking in
 NMFS names reads `'HF'` as the porpoise group, which is `'VHF'` here
-(References).
+(References). An NMFS name with no Southall namesake (`'MF'`, `'PW'`,
+`'OW'`) is refused by every `weighting=` argument and, looked up in
+`EXPOSURE_THRESHOLDS` or `WEIGHTING_PARAMS`, raises a `KeyError` naming the
+Southall group; `'HF'` exists in both schemes, so no lookup can catch it.
 
 ```python
 from uacpy.noise import HEARING_GROUPS, auditory_weighting
@@ -744,11 +707,11 @@ underwater spectrum.
 | Function | Takes | Returns |
 |---|---|---|
 | `auditory_weighting(frequency, group)` | frequency in **Hz** | `W(f)` in dB, peak 0 |
-| `apply_weighting(level_dB, *, frequency, weighting)` | a level **spectrum** | `L(f) + W(f)`, still a spectrum |
+| `apply_weighting(level_dB, *, frequency, weighting, axis=-1)` | a level **spectrum** | `L(f) + W(f)`, still a spectrum |
 | `weighted_level(psd_dB, *, frequency, weighting, axis=-1)` | a level **density** (one spectrum, or one per cell along `axis`) | one broadband number per spectrum |
 
 `weighting=` takes what it takes on every SEL: a hearing group name, your own
-`W(f_Hz) -> dB` function, or a `(frequencies_Hz, W_dB)` table
+`W(f) -> dB` function, or a `(frequencies, W_dB)` table
 (`uacpy.acoustics.frequency_weighting`); a DC bin (`f ≤ 0`, the first bin of
 `welch`) carries no weight, so a `welch` spectrum goes in as it comes.
 
@@ -765,7 +728,7 @@ from uacpy.acoustics import sum_levels_dB
 from uacpy.noise import WenzNoise, apply_weighting
 
 bands = WenzNoise(wind_speed_kn=15.0).decidecade_levels(100.0, 1000.0)
-band_weighted = apply_weighting(bands.levels, frequency=bands.centers, weighting='LF')
+band_weighted = apply_weighting(bands.levels_dB, frequency=bands.centers, weighting='LF')
 weighted_total = sum_levels_dB(band_weighted, axis=-1)   # one weighted level
 ```
 
@@ -807,7 +770,7 @@ The three functions above work on **spectra**. An exposure criterion is
 written on the **weighted SEL** — the integral of the squared
 frequency-weighted pressure (Southall et al. 2019) — and every SEL entry point
 takes the weighting as one argument, `weighting=`: a group name, **your own
-function** `W(frequency_Hz) -> dB`, or **your own table** `(frequencies_Hz,
+function** `W(frequency) -> dB`, or **your own table** `(frequencies,
 W_dB)`. A table carries no weight outside its span, so one typed in kHz keeps
 almost nothing; a table that leaves more than half of the energy outside its
 span warns with the share it keeps, and says so when the table in Hz would
@@ -857,7 +820,6 @@ a source model of your own, and the recipe takes them as given.
 import numpy as np
 import uacpy
 from uacpy.models import Bellhop, RunMode
-from uacpy.acoustics import sum_levels_dB
 from uacpy.noise import EXPOSURE_THRESHOLDS
 from uacpy.sonar import detection_ranges
 
@@ -873,20 +835,20 @@ env = uacpy.Environment(bathymetry=30.0, ssp=1500.0, bottom='sand',
 src = uacpy.Source(depths=15.0, frequencies=500.0)
 rcv = uacpy.Receiver(depths=np.array([5.0, 15.0, 25.0]),
                      ranges=np.linspace(50.0, 5000.0, 100))
-f = np.arange(2.0, 4000.0, 2.0)                                  # the pulse's support
+f = np.arange(2.0, fs / 2, 2.0)                                  # the pulse's weighted support
 H = Bellhop().run(env, src, rcv, run_mode=RunMode.BROADBAND, frequencies=f)
 
 sel = H.sound_exposure_level(source_waveform=waveform, sample_rate=fs,
                              weighting='VHF')                    # one strike, weighted
 peak = H.peak_sound_pressure_level(source_waveform=waveform, sample_rate=fs)
-worst_sel = np.nanmax(np.asarray(sel.data), axis=0)              # worst depth per range
-worst_peak = np.nanmax(np.asarray(peak.data), axis=0)
+worst_sel = sel.loudest_along('depth')                           # worst depth per range
+worst_peak = peak.loudest_along('depth')
 criteria = EXPOSURE_THRESHOLDS['VHF']['impulsive']               # {'TTS': ..., 'PTS': ...}
 reach = {effect: float(np.fmax(                                  # either metric is enough
-    detection_ranges(sel.ranges, signal_excess_dB=worst_sel - c['SEL']),
-    detection_ranges(peak.ranges, signal_excess_dB=worst_peak - c['peak'])))
+    detection_ranges(worst_sel.ranges, signal_excess_dB=worst_sel.data - c['SEL']),
+    detection_ranges(worst_peak.ranges, signal_excess_dB=worst_peak.data - c['peak'])))
     for effect, c in criteria.items()}                           # m; nan: never reached
-strikes = sum_levels_dB(np.repeat(worst_sel[None], 3000, axis=0), axis=0)  # 3000 strikes
+strikes = worst_sel.data + 10 * np.log10(3000)                       # 3000 identical strikes
 ```
 
 1. **The source.** The level rides on the waveform's amplitude: a waveform of
@@ -899,7 +861,11 @@ strikes = sum_levels_dB(np.repeat(worst_sel[None], 3000, axis=0), axis=0)  # 300
    ensemble mean with no speed term.
 2. **The channel.** A `RunMode.BROADBAND` run over the waveform's support;
    the `1/Δf` record must hold the pulse and the channel's spread
-   ([Results §6](results.md#6-from-hf-to-pt)). This strike's spectrum is
+   ([Results §6](results.md#6-from-hf-to-pt)). For a weighted SEL the support
+   is that of the WEIGHTED spectrum: the VHF weighting lifts this strike's
+   high-frequency tail, so a band stopping at 4 kHz holds 71 % of its
+   VHF-weighted energy, and the SEL map warns that it counts that share
+   (−1.49 dB); the band above runs to `fs/2`. This strike's spectrum is
    still −19.5 dB at 0 Hz, so its support runs down to the first bin: a band
    from 25 Hz moves the pulse's own peak 0.36 dB, and the peak map warns so,
    naming the support (0–681 Hz) and what a Hann band window would cost
@@ -911,14 +877,15 @@ strikes = sum_levels_dB(np.repeat(worst_sel[None], 3000, axis=0), axis=0)  # 300
 4. **The range a criterion is reached.** `detection_ranges` reads the level
    minus the threshold as a signal excess: the outermost range where it is
    at least 0, `inf` when the map still exceeds it at its last range, `nan`
-   when it never does. `np.nanmax(..., axis=0)` is the worst case over
-   depth, and `np.fmax` takes the farther of the SEL and peak ranges (a
+   when it never does. `loudest_along('depth')` is the worst case over
+   depth (per range, the largest level, as a Field over range), and
+   `np.fmax` takes the farther of the SEL and peak ranges (a
    `nan` "never" gives way to the other). For this strike the weighted SEL
-   never reaches the VHF TTS criterion (120 dB at worst against 140 dB),
+   never reaches the VHF TTS criterion (121 dB at worst against 140 dB),
    while the peak reaches 196 dB out to 200 m and the PTS peak, 202 dB, out
    to 70 m: reading the SEL alone would report no TTS at all.
-5. **More than one event.** `N` identical strikes add `10·log10(N)`
-   (`sum_levels_dB`); a source moving along a line is `sel.track_exposure(
+5. **More than one event.** `N` identical strikes add `10·log10(N)`;
+   distinct events sum with `sum_levels_dB`; a source moving along a line is `sel.track_exposure(
    positions, closest_approach=...)`, with a plan view
    ([Results §6b](results.md#6b-weighted-accumulated-and-moving-source-exposure),
    example 47). A **continuous** moving source is one event per interval
@@ -1018,13 +985,8 @@ submodel:
   NMFS (2018) Technical Guidance, NMFS-OPR-59, but its cetacean labels move one
   step: NMFS LF / MF / HF / PW / OW are Southall LF / HF / VHF / PCW / OCW, so a
   harbour porpoise (NMFS "HF") is `'VHF'` here.
-- Knudsen, V. O., Alford, R. S. & Emling, J. W., "Underwater ambient noise",
-  *J. Marine Research* 7, 410–429, 1948 — the `'knudsen'` wind model's curves.
 - Dahl, P. H., Miller, J. H., Cato, D. H. & Andrew, R. K., "Underwater ambient
   noise", *Acoustics Today* 3(1), 2007.
-- Hildebrand, J. A., Frasier, K. E., Baumann-Pickering, S. & Wiggins, S. M.,
-  "An empirical model for wind-generated ocean noise", *JASA* 149, 4516, 2021,
-  doi:10.1121/10.0005430 — Table IV, the cross-check of the Knudsen curves.
 - Urick, R. J., *Principles of Underwater Sound*, 3rd ed., 1983 — chapter 7 for
   ambient noise.
 - Jensen, F. B., Kuperman, W. A., Porter, M. B. & Schmidt, H., *Computational

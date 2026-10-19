@@ -87,7 +87,7 @@ class TestInPeRecordOrderMatchesPeramx:
     @staticmethod
     def _deck(tmp_path, **overrides):
         kwargs = dict(
-            fc=111.0, q_factor=22.0, record_duration=33.0, zsrc=44.0, dz=0.55, dr=66.0,
+            fc=111.0, q_factor=22.0, record_duration=33.0, zs=44.0, dz=0.55, dr=66.0,
             n_pade=7, n_stability=2, stability_range=88.0, depth_decimation=9, ssp_filename='S.ssp',
             earth_curvature=1, horizontal_interpolation=0, bathymetry_from_file=1, bth_filename='B.bth',
             sedlayer=123.0, n_sediment_points=5,

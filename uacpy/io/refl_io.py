@@ -207,10 +207,7 @@ class BeamPatternTable(ExportRecord):
 
 
 @typed_format_error
-def read_source_beam_pattern(
-    filepath: Union[str, Path],
-    verbose: Union[bool, str] = False,
-) -> BeamPatternTable:
+def read_source_beam_pattern(filepath: Union[str, Path]) -> BeamPatternTable:
     """
     Read source beam pattern from file.
 
@@ -219,8 +216,6 @@ def read_source_beam_pattern(
     filepath : str or Path
         Source beam pattern file; a root name without the ``.sbp`` extension
         also resolves.
-    verbose : bool or str, optional
-        Logging gate passed through to ``log_message``. Default False.
 
     Returns
     -------
@@ -251,8 +246,6 @@ def read_source_beam_pattern(
 
     Translated from OALIB readpat.m
     """
-    log_message('refl_io', "Reading source beam pattern file",
-                verbose=verbose)
 
     # Take the path as given when it already exists; a bare root without an
     # extension resolves to the conventional .sbp name (mirrors
@@ -273,9 +266,6 @@ def read_source_beam_pattern(
         # The count is a list-directed scalar READ (beampattern.f90:33), so
         # a comma or trailing annotation after the number is a valid record.
         NSBPPts = list_directed_int(fid.readline())
-        log_message('refl_io',
-                    f"Number of source beam pattern points = {NSBPPts}",
-                    verbose=verbose)
 
         # Each point is two numbers of at least 2 bytes each (value +
         # separator) on disk; a larger count is a malformed header rather
@@ -291,16 +281,6 @@ def read_source_beam_pattern(
             beam_pattern[i, :] = read_list_directed_values(
                 fid, 2, f"beam-pattern point {i + 1} (angle, level)",
                 sbp_file)
-        log_message(
-            'refl_io',
-            f"angle (deg): {beam_pattern[:, 0].tolist()}",
-            verbose=verbose, level='debug',
-        )
-        log_message(
-            'refl_io',
-            f"level (dB): {beam_pattern[:, 1].tolist()}",
-            verbose=verbose, level='debug',
-        )
 
     return BeamPatternTable(angles_deg=beam_pattern[:, 0],
                             levels_dB=beam_pattern[:, 1])
@@ -329,14 +309,19 @@ def write_reflection_coefficient(
         The table's other two columns, in any of three forms:
 
         - complex ``(N,)`` — ``|R|`` and ``np.angle`` (radians) are taken;
-        - real ``(N, 2)`` — ``[amplitude, phase_radians]``;
-        - real ``(N,)`` — amplitudes only, phase zero.
+        - real ``(N, 2)`` — ``[amplitude, phase_radians]``, the amplitude
+          ``>= 0`` (a sign belongs in the phase);
+        - real ``(N,)`` — the real coefficient itself: phase zero, and a
+          negative entry (``R = -1`` for a pressure-release boundary) is
+          written as ``|R|`` with phase π, the same coefficient.
 
     Raises
     ------
     ~uacpy.core.exceptions.ConfigurationError
-        The two columns disagree in length, the table is empty, the angles
-        decrease, or two distinct angles collide in the written column.
+        The two columns disagree in length, the table is empty, an angle is
+        not finite, the angles decrease, two distinct angles collide in the
+        written column, or an ``(N, 2)`` amplitude is negative — each a
+        table :func:`read_reflection_coefficient` would refuse.
 
     Notes
     -----
@@ -403,9 +388,22 @@ def write_reflection_coefficient(
     elif coefficient.ndim == 2 and coefficient.shape[1] == 2:
         amplitude = np.asarray(coefficient[:, 0], dtype=float)
         phase_rad = np.asarray(coefficient[:, 1], dtype=float)
+        negative = np.flatnonzero(amplitude < 0.0)
+        if negative.size:
+            i = int(negative[0])
+            raise ConfigurationError(
+                f"write_reflection_coefficient: coefficient[{i}, 0] = "
+                f"{amplitude[i]:g} is a negative amplitude; the file's "
+                f"magnitude column holds |R| >= 0 and "
+                f"read_reflection_coefficient refuses a negative one.",
+                remediation="Pass |R| in column 0 with π added to the phase "
+                            "where R is negative, or pass the complex R.")
     else:
-        amplitude = np.asarray(coefficient, dtype=float)
-        phase_rad = np.zeros_like(amplitude)
+        # A real R is the coefficient itself; its magnitude column holds |R|,
+        # so a negative entry is |R| at phase π, the same number.
+        real = np.asarray(coefficient, dtype=float)
+        amplitude = np.abs(real)
+        phase_rad = np.where(real < 0.0, np.pi, 0.0)
 
     # The row loop is driven by len(angles), so a longer coefficient column
     # is silently truncated into a valid-looking table that describes a
@@ -430,6 +428,13 @@ def write_reflection_coefficient(
                         "spanning the grazing angles of the run.",
         )
 
+    if not np.all(np.isfinite(angles_deg)):
+        i = int(np.flatnonzero(~np.isfinite(angles_deg))[0])
+        raise ConfigurationError(
+            f"write_reflection_coefficient: angles_deg[{i}] = "
+            f"{angles_deg[i]!r} is not a finite grazing angle; "
+            f"read_reflection_coefficient refuses such a row.",
+            remediation="Pass finite grazing angles in degrees.")
     steps = np.diff(angles_deg)
     if steps.size and steps.min() < 0.0:
         i = int(np.argmin(steps))
@@ -470,7 +475,8 @@ def write_source_beam_pattern(
     filepath: Union[str, Path], angles_deg: np.ndarray, beam_pattern: np.ndarray
 ) -> None:
     """
-    Write source beam pattern file for Bellhop.
+    Write a source beam pattern file (``.sbp``), read by Bellhop and by
+    KRAKEN's ``field.exe`` (``KrakenField/field.f90:101-102``).
 
     Parameters
     ----------
@@ -517,10 +523,10 @@ def write_source_beam_pattern(
         beam_pattern = np.asarray(beam_pattern, dtype=float)
     except (TypeError, ValueError) as exc:
         raise ConfigurationError(
-            f"write_source_beam_pattern: pattern is not a numeric array "
-            f"({exc}); the level column is written at %12.6f.",
+            f"write_source_beam_pattern: beam_pattern is not a numeric "
+            f"array ({exc}); the level column is written at %12.6f.",
             remediation="Pass beam-pattern levels in dB re peak as a real "
-                        "array of the same length as angles.",
+                        "array of the same length as angles_deg.",
         ) from exc
     # A table shorter than two rows passes every guard on both sides and then
     # gets indexed as a pair: ``bellhop.f90:270`` clamps ``IBP`` to
@@ -540,8 +546,9 @@ def write_source_beam_pattern(
     i = _collapsed_pair_index(angles_deg, min_step=SBP_ANGLE_RESOLUTION_DEG)
     if i is not None:
         raise ConfigurationError(
-            f"write_source_beam_pattern: angles[{i}]={angles_deg[i]!r} and "
-            f"angles[{i + 1}]={angles_deg[i + 1]!r} are closer than the file's "
+            f"write_source_beam_pattern: angles_deg[{i}]={angles_deg[i]!r} "
+            f"and angles_deg[{i + 1}]={angles_deg[i + 1]!r} are closer than "
+            f"the file's "
             f"{SBP_ANGLE_RESOLUTION_DEG:g}-degree angle resolution (or not "
             f"increasing). Bellhop requires strictly increasing beam-pattern "
             f"angles (misc/beampattern.f90:56) and aborts on a repeated "
@@ -557,9 +564,10 @@ def write_source_beam_pattern(
     # is what makes the written table the one the caller described.
     if beam_pattern.shape != angles_deg.shape:
         raise ConfigurationError(
-            f"write_source_beam_pattern: angles has shape {angles_deg.shape} and "
-            f"pattern has shape {beam_pattern.shape}; each angle needs exactly one "
-            f"level, so the two columns must have the same shape (N,).",
+            f"write_source_beam_pattern: angles_deg has shape "
+            f"{angles_deg.shape} and beam_pattern has shape "
+            f"{beam_pattern.shape}; each angle needs exactly one level, so "
+            f"the two columns must have the same shape (N,).",
             remediation="Pass one beam-pattern level per angle.",
         )
 
@@ -785,7 +793,7 @@ def _scale_irc_impedance(filepath: Union[str, Path], factor: float) -> None:
     place, keeping the fixed ``( 5G15.7, I5 )`` row layout.
 
     The table holds the Robin-condition pair ``(f, g)`` the consumer's
-    bottom boundary uses (``Kraken/BCImpedanceMod.f90:115-122``). For an
+    bottom boundary uses (``Kraken/BCImpedanceMod.f90:118-125``). For an
     acoustic half-space ``g`` is the seabed density itself (``:85-87``), and
     for an elastic one it scales with the shear modulus, so ``g`` carries the
     density scale of the deck it was computed from while ``f`` does not.
@@ -898,7 +906,8 @@ def _table_rows(filepath: Path):
     return triples
 
 
-def _normalise_staged_table(filepath: Path, drop_repeats: bool) -> list:
+def _normalise_staged_table(filepath: Path, drop_repeats: bool, *,
+                            rewrite: bool = False) -> list:
     """Rewrite a copied ``.brc`` / ``.trc`` with its phase column unwrapped
     and, when ``drop_repeats``, the first row of each repeated angle kept;
     return the angles (deg) of the rows dropped.
@@ -907,7 +916,8 @@ def _normalise_staged_table(filepath: Path, drop_repeats: bool) -> list:
     turns) and gives every binary the column ``misc/RefCoef.f90:119``
     assumes ("phi has been unwrapped so that it varies smoothly"). Angles
     and magnitudes keep their tokens; a table that needs neither change is
-    left byte for byte."""
+    left byte for byte unless ``rewrite``, which writes the kept rows in
+    any case (dropping tokens past the declared count)."""
     triples = _table_rows(Path(filepath))
     if triples is None:
         return []
@@ -919,9 +929,23 @@ def _normalise_staged_table(filepath: Path, drop_repeats: bool) -> list:
             last_angle = angle
         else:
             dropped.append(float(angle))
+    if not kept:
+        return dropped
+    # ``misc/RefCoef.f90:119`` states the contract for this table outright —
+    # "Assumes phi has been unwrapped so that it varies smoothly" — and
+    # ``InterpolateReflectionCoefficient`` then interpolates phi linearly
+    # between the bracketing abscissas. BOUNCE takes the principal value at
+    # ``Kraken/bounce.f90:203`` and attempts an unwrap at ``:212-223``, but the
+    # incrementing branch (``:219``) tests ``AIMAG(R1) > 0 .AND. AIMAG(R1) < 0``
+    # — a contradiction — so only the decrementing branch can fire and the
+    # result is not smooth: measured on a 10 m sediment over a 1800 m/s
+    # half-space at 500 Hz, the table jumps 298.8 deg between adjacent angles.
+    # Interpolating across such a step sweeps the phase the long way round and
+    # returns a reflection phase that is wrong through the whole interval.
     written = np.array([fortran_float(p) for _a, _r, p in kept])
     phases = np.degrees(np.unwrap(np.radians(written)))
-    if dropped or not np.allclose(phases, written, rtol=0.0, atol=1e-9):
+    if (rewrite or dropped
+            or not np.allclose(phases, written, rtol=0.0, atol=1e-9)):
         with open(filepath, 'w') as fh:
             fh.write(f"{len(kept):12d}\n")
             for (a, r, _p), phase in zip(kept, phases):
@@ -979,40 +1003,4 @@ def dedupe_reflection_file(filepath: Union[str, Path]) -> None:
     sample; ``Kraken/bounce.f90:235`` writes the angle list-directed from a
     ``REAL(KIND=8)``, so distinct wavenumbers do not normally collide there.
     """
-    filepath = Path(filepath)
-    triples = _table_rows(filepath)
-    if triples is None:
-        return
-
-    kept_rows = []  # list of (angle, mag, phase_deg) as strings
-    last_angle = -np.inf
-    for a_tok, r_tok, p_tok, angle in triples:
-        if angle > last_angle:
-            kept_rows.append((a_tok, r_tok, p_tok))
-            last_angle = angle
-
-    # If nothing survived dedup (degenerate case), leave the file alone —
-    # downstream reader will surface the real error.
-    if not kept_rows:
-        return
-
-    # ``misc/RefCoef.f90:119`` states the contract for this table outright —
-    # "Assumes phi has been unwrapped so that it varies smoothly" — and
-    # ``InterpolateReflectionCoefficient`` then interpolates phi linearly
-    # between the bracketing abscissas. BOUNCE takes the principal value at
-    # ``Kraken/bounce.f90:203`` and attempts an unwrap at ``:212-223``, but the
-    # incrementing branch (``:219``) tests ``AIMAG(R1) > 0 .AND. AIMAG(R1) < 0``
-    # — a contradiction — so only the decrementing branch can fire and the
-    # result is not smooth: measured on a 10 m sediment over a 1800 m/s
-    # half-space at 500 Hz, the table jumps 298.8 deg between adjacent angles.
-    # Interpolating across such a step sweeps the phase the long way round and
-    # returns a reflection phase that is wrong through the whole interval.
-    phases = np.degrees(np.unwrap(
-        np.radians([fortran_float(p) for _a, _r, p in kept_rows])))
-
-    with open(filepath, 'w') as fh:
-        # BOUNCE pads the count with leading whitespace; match that so any
-        # downstream tool expecting free-format reads happily.
-        fh.write(f"{len(kept_rows):12d}\n")
-        for (a, r, _p), phase in zip(kept_rows, phases):
-            fh.write(f"   {a}        {r}        {phase:.6f}\n")
+    _normalise_staged_table(Path(filepath), True, rewrite=True)

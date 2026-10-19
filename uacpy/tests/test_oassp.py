@@ -24,7 +24,9 @@ from uacpy.core.exceptions import (
     UnsupportedFeatureError, ValidityWarning,
 )
 from uacpy.models.oases._common import _reject_wavenumber_overrun
-from uacpy.models.oases._sampling import _oassp_wavenumber_count
+from uacpy.models.oases._sampling import (
+    _oassp_wavenumber_count, _oassp_wavenumber_sampling,
+)
 from uacpy.models.oases.oassp import (
     _deck_sampling, _deck_wavenumber_count, _oassp_options,
     _oassp_wavenumber_echo_scale, _reject_roughness_wavenumber_overflow,
@@ -249,15 +251,22 @@ class TestWriterGuards:
         for name in ('SKW', 'M', 'RMS', 'GAM'):
             assert name in str(exc.value)
 
-    def test_zero_correlation_length_raises(self, tmp_path):
-        with pytest.raises(ConfigurationError, match="correlation_length"):
-            _write(tmp_path, correlation_length=0.0)
+    @pytest.mark.parametrize('length', [0.0, float('nan'), float('inf')])
+    def test_a_correlation_length_that_is_no_length_raises(self, tmp_path,
+                                                          length):
+        # OASSP forms r_l = |CLEN(INTFCE)| for PV (unoassp30.f:606-614): zero
+        # is degenerate, and nan/inf would be written into the layer record.
+        with pytest.raises(ConfigurationError,
+                           match='must be a positive length'):
+            _write(tmp_path, correlation_length=length)
 
+    @pytest.mark.parametrize('exponent', [1.2, 1.5, float('inf')])
     def test_spectral_exponent_below_the_integrability_bound_raises(
-            self, tmp_path):
-        # G10: oassp.tex:356-362 — the power spectrum is not integrable.
+            self, tmp_path, exponent):
+        # G10: oassp.tex:356-362 — the power spectrum is not integrable; an
+        # infinite exponent is no exponent the deck can carry.
         with pytest.raises(ConfigurationError, match="spectral_exponent"):
-            _write(tmp_path, spectral_exponent=1.2)
+            _write(tmp_path, spectral_exponent=exponent)
 
     def test_smooth_interface_raises(self, tmp_path):
         # G3: pow = |ROUGH(INTFCE)| comes from this deck (unoassp30.f:601,
@@ -289,6 +298,17 @@ class TestWriterGuards:
         # geometry, so the deck's value never reaches the integration.
         with pytest.warns(UserWarning, match="Full Hankel"):
             _write(tmp_path, c_high=1.0e5)
+
+    def test_c_high_of_the_no_upper_limit_value_is_warned_too(self, tmp_path):
+        """1e8 writes the deck an unset ``c_high`` writes, and it is a
+        given value the cylindrical run replaces all the same
+        (unoassp30.f:205-217), so it is warned as unused."""
+        with pytest.warns(UserWarning, match=r"c_high=1e\+08 m/s has no "
+                                             r"effect without option 'P'"):
+            lines = _write(tmp_path, c_high=1.0e8)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            assert lines == _write(tmp_path)
 
     def test_c_high_with_plane_geometry_is_silent_and_reaches_the_deck(
             self, tmp_path):
@@ -436,9 +456,17 @@ class TestModelConfiguration:
                            match="correlation_length"):
             uacpy.OASSP(correlation_length=-5.0)
 
-    def test_zero_correlation_length_raises_at_construction(self):
-        with pytest.raises(ConfigurationError, match="correlation_length"):
-            uacpy.OASSP(correlation_length=0.0)
+    @pytest.mark.parametrize('length', [0.0, float('nan'), float('inf')])
+    def test_a_correlation_length_that_is_no_length_raises_at_construction(
+            self, length):
+        # Refused before the mean-field OASP runs: a nan/inf CL used to run
+        # both binaries and return an all-NaN Field.
+        with pytest.raises(ConfigurationError,
+                           match='must be a positive length'):
+            uacpy.OASSP(correlation_length=length)
+
+    def test_a_small_positive_correlation_length_is_taken(self):
+        assert uacpy.OASSP(correlation_length=1e-3).correlation_length == 1e-3
 
     def test_copy_round_trips_every_knob(self):
         m = uacpy.OASSP(correlation_length=5.0, spectral_exponent=2.5,
@@ -659,6 +687,58 @@ class TestScatteringInterfacePreflight:
         with recorded_warnings() as caught:
             m.run_settings(_env(), _source(), _receiver(n_depths=2))
         assert not [w for w in caught if 'Full Hankel' in str(w.message)]
+
+    def test_the_integration_window_reaches_the_oassp_deck(self):
+        """``OASSP(integration_window=)`` is the OASSP deck's IC1/IC2 under
+        a pinned count (oassp.tex:490-500), recorded as written."""
+        m = uacpy.OASSP(correlation_length=5.0, spectral_exponent=2.5,
+                        n_time_samples=256, freq_min=400.0, freq_max=600.0,
+                        n_wavenumbers=2048, integration_window=(5, 2000))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            engine = m.run_settings(_env(), _source(),
+                                    _receiver(n_depths=2)).engine
+        assert engine.integration_window == (5, 2000)
+        deck = io.StringIO()
+        _write_oassp_deck(deck, _env(), _source(), _receiver(n_depths=2),
+                          engine, warn=False)
+        assert deck.getvalue().splitlines()[-2].split()[:3] == [
+            '2048', '5', '2000']
+
+    def test_an_unset_c_high_is_recorded_and_its_deck_says_nothing(self):
+        """Stage 3 resolves an unset ``c_high`` to OASES' "no upper limit",
+        noting the 1e12 cylindrical geometry puts in its place; the deck the
+        launch writes from that record carries it and warns nothing."""
+        m = uacpy.OASSP(correlation_length=5.0, spectral_exponent=2.5,
+                        n_time_samples=256, freq_min=400.0, freq_max=600.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            engine = m.run_settings(_env(), _source(),
+                                    _receiver(n_depths=2)).engine
+        assert engine.c_high == 1e8
+        assert engine.c_high_origin == (
+            "1e8, OASES' no upper limit (oast.tex:487, :568); without 'P' "
+            "OASSP replaces it with 1e12 (unoassp30.f:205-217)")
+        deck = io.StringIO()
+        with recorded_warnings() as caught:
+            _write_oassp_deck(deck, _env(), _source(), _receiver(n_depths=2),
+                              engine, c_high_given=False, warn=True)
+        assert not [w for w in caught if 'c_high' in str(w.message)]
+        assert (f"{engine.c_low!r} {engine.c_high!r}"
+                in deck.getvalue().splitlines())
+
+    @pytest.mark.parametrize('c_high, told', [(None, 0), (1e8, 1)])
+    def test_a_run_tells_a_set_c_high_without_plane_geometry_once(
+            self, c_high, told):
+        """Without 'P' oassp2 replaces CMAX by 1e12 (unoassp30.f:205-217):
+        a run whose caller set ``c_high`` — the "no upper limit" 1e8
+        included — says once that it is unused, and an unset one says
+        nothing (the launch hands the writer ``None``)."""
+        kw = {} if c_high is None else {'c_high': c_high}
+        with recorded_warnings() as caught:
+            _run(**kw)
+        assert len([w for w in caught if "has no effect without option 'P'"
+                    in str(w.message)]) == told
 
     def test_two_rough_bottom_interfaces_are_refused(self):
         from uacpy.core.environment import SeabedColumn, SedimentLayer
@@ -960,7 +1040,8 @@ class TestScatteringSpectralExponent:
     also belongs on a constructor argument that cannot change in between."""
 
     @pytest.mark.parametrize('model_cls', [OASS, OASSP])
-    @pytest.mark.parametrize('exponent', [1.5, 1.0, 0.0, -1.0])
+    @pytest.mark.parametrize('exponent', [1.5, 1.0, 0.0, -1.0,
+                                          float('inf'), float('nan')])
     def test_an_unintegrable_exponent_is_refused(self, model_cls, exponent):
         with pytest.raises(ConfigurationError, match='spectral_exponent'):
             model_cls(correlation_length=10.0, spectral_exponent=exponent,
@@ -1171,8 +1252,9 @@ class TestRoughnessBranchWavenumberBound:
 
 
 class TestAnUnpinnedCLowFitsTheRoughnessBranchOverAShearSeabed:
-    """Over a shear seabed the documented ``c_low`` (0.85 × the slowest
-    speed, here the 400 m/s shear speed: 340 m/s) can make oassp2 integrate
+    """Over a shear seabed the documented ``c_low`` (0.90 × the 353.05 m/s
+    Scholte wave of the 400 m/s shear seabed: 317.748 m/s,
+    ``default_c_low``) can make oassp2 integrate
     on more than the 4096 wavenumbers its roughness branch holds. An
     unpinned ``c_low`` then takes the lowest whole m/s whose count fits,
     at most 0.90 × the slowest compressional speed (1350 m/s here), and the
@@ -1181,7 +1263,8 @@ class TestAnUnpinnedCLowFitsTheRoughnessBranchOverAShearSeabed:
 
     Case: 100 m of 1500 m/s water over a rough elastic half-space (1700 m/s,
     shear 400 m/s), source 50 m, receivers 20/50/80 m, 256 samples. Out to
-    1.8 km, 340 m/s needs 5663 wavenumbers, 500 m/s 4098 and 501 m/s 4091;
+    1.8 km, 317.748 m/s needs 6006 wavenumbers, 340 m/s 5663, 500 m/s 4098
+    and 501 m/s 4091;
     out to 4 km, 1350 m/s needs 3974; out to 5 km, 4870."""
 
     @staticmethod
@@ -1224,18 +1307,41 @@ class TestAnUnpinnedCLowFitsTheRoughnessBranchOverAShearSeabed:
         assert engine.c_low == 501.0
         assert engine.n_integrated_wavenumbers == (4091,)
         assert self._count(engine, 500.0) == 4098
-        assert '340 m/s' in engine.c_low_origin
-        assert '5663' in engine.c_low_origin
+        assert 'the documented 317.748 m/s' in engine.c_low_origin
+        assert 'needs 6006' in engine.c_low_origin
 
-    def test_the_fit_is_said_naming_the_bound_and_the_interface_wave(self):
+    def test_the_fit_is_said_naming_the_bound_and_the_scholte_wave(self):
+        """The window stops at WKMAX = 2π·FREQM/CMIN for the whole band
+        (unoassp30.f:351-352): 406.7 m/s at the 248.05 Hz band top, so the
+        353.1 m/s Scholte wave is in below 248.05 × 353.1/406.7 ≈ 215.3 Hz
+        — at the 100 Hz source frequency among them."""
         _, said = self._settings()
         fits = [str(w.message) for w in said
                 if issubclass(w.category, NumericsWarning)
                 and 'c_low = 501 m/s' in str(w.message)]
         assert len(fits) == 1
-        for token in ('4096', 'unoassp30.f:542-544', 'Scholte', '§5.10.5',
+        for token in ('4096', 'unoassp30.f:542-544',
+                      'WKMAX = 2π·FREQM/CMIN (unoassp30.f:351-352)',
+                      'at FREQM = 248.05 Hz it reaches down to 406.7 m/s',
+                      'the Scholte wave at 353.1 m/s is inside the window '
+                      'below 215.3 Hz and left out above it', 'eq. 3.4.29',
                       'n_wavenumbers=4096'):
-            assert token in fits[0]
+            assert token in fits[0], token
+        assert 'between 317.748 and 501 m/s are left out' not in fits[0]
+
+    def test_the_fitted_window_stops_where_oassp2_prints_cmin(self):
+        """oassp2 run on the fitted deck printed ``Cmin,Cmax=
+        406.675507`` (unoassp30.f:326, measured) and 4091 wavenumbers."""
+        engine, _ = self._settings()
+        deck = io.StringIO()
+        _write_oassp_deck(deck, self._env(), self.SRC, self._receiver(),
+                          engine, warn=False)
+        window = _oassp_wavenumber_sampling(
+            **_deck_sampling(deck.getvalue(), self._receiver()))
+        assert window.count == 4091
+        assert window.freq_top == pytest.approx(248.046875)
+        assert 2 * np.pi * window.freq_top / window.k_max == \
+            pytest.approx(406.675507, abs=1e-3)
 
     def test_the_mean_field_oassp_builds_takes_the_fitted_value(self):
         engine, said = self._settings()
@@ -1250,7 +1356,7 @@ class TestAnUnpinnedCLowFitsTheRoughnessBranchOverAShearSeabed:
 
     def test_a_pinned_count_keeps_the_documented_c_low(self):
         engine, said = self._settings(n_wavenumbers=4096)
-        assert engine.c_low == 340.0
+        assert engine.c_low == pytest.approx(317.748, abs=0.001)
         assert engine.n_integrated_wavenumbers == (4096,)
         assert not [w for w in said if 'past the 4096' in str(w.message)]
 

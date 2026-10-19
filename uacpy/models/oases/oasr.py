@@ -19,26 +19,18 @@ from uacpy.core.exceptions import (
     ConfigurationError, UnsupportedFeatureError, ValidityWarning,
 )
 from uacpy.io.oases_writer import (
-    REFL_TYPE_TO_OPTION, refuse_boundaries_without_deck_spelling,
-    write_oasr_input,
+    OASR_DEFAULT_ANGLES_DEG, REFL_TYPE_TO_OPTION, oases_frequency_sweep,
+    refuse_boundaries_without_deck_spelling, write_oasr_input,
 )
 from uacpy.io.oases_reader import read_oasr_reflection_coefficients
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, _host_options
+from uacpy.models.base import DEFAULT_RUN_TIMEOUT, _host_options
 from uacpy.models.oases._common import (
     _OASES_TRAITS, _SCTOUT_BARE_FORT46, _oases_binary,
 )
-from uacpy.models.oases._sampling import _oases_frequency_sweep
 from uacpy.models.oases._base import OASES
 from uacpy.core.engine_defaults import OASR_ANGLE_TYPE, OASR_REFLECTION_TYPE
 from uacpy.models._extract import attach_output_paths
 from uacpy.models._launch import require_output
-
-
-#: OASR's default grazing-angle grid as ``(first, last, count)`` in
-#: degrees: 0 to 90 in 0.5° steps, the grid of the manual's worked OASR
-#: deck (``0 90 181 0``, oasr.tex:373). A tuple, so no caller can edit
-#: the default through an array it was handed.
-OASR_DEFAULT_ANGLES_DEG = (0.0, 90.0, 181)
 
 
 def default_grazing_angles() -> np.ndarray:
@@ -247,14 +239,14 @@ def _oasr_settings(*, options, reflection_type, angles_deg, angle_type,
     The deck carries the sweep as ``(freq_min, freq_max, N)`` only, so a
     ``source.frequencies`` vector that is not equispaced — or, under
     option ``'C'``, not log-spaced — is refused
-    (:func:`_oases_frequency_sweep`).
+    (:func:`~uacpy.io.oases_writer.oases_frequency_sweep`).
     """
     reflection_type = _resolve_reflection_type(options, reflection_type)
     log_swept = _oasr_is_log_swept(options)
     source_freqs = np.atleast_1d(np.asarray(source.frequencies,
                                             dtype=float))
     if source_freqs.size > 1:
-        freq_min, freq_max, n_freq = _oases_frequency_sweep(
+        freq_min, freq_max, n_freq = oases_frequency_sweep(
             source_freqs, 'OASR', log_spaced=log_swept,
             argument='source.frequencies')
     else:
@@ -381,7 +373,7 @@ class OASR(OASES):
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         """

@@ -50,9 +50,10 @@ takes over at ``:889``, so the baked phase at ``r = n·dr`` is
 ``k₀·dr·(1 + (n-1)·rot₀)``, a fixed ``k₀·dr·(1-rot₀)`` offset (a few
 degrees at uacpy's ``dr ≤ λ/25``) that no per-range correction removes.
 
-Adding a backend amounts to one new branch here plus mapping its kind
-to the convention name in ``_domain.deck_convention`` — no other change
-in ``models/ram/`` required.
+A new backend's phase convention is one new branch here plus the mapping
+of its kind to the convention name in ``_domain.deck_convention``; the
+backend itself also needs its binary row, dispatch, writer and reader,
+array limits and depth conventions elsewhere in ``models/ram/``.
 """
 
 from __future__ import annotations

@@ -192,12 +192,12 @@ class InvalidDepthError(UACPYError):
     "resolvable depth" rather than "environment depth"."""
 
     def __init__(self, depth: float, depth_max: float, context: str):
-        message = (f"{context} depth ({depth:.1f} m) exceeds resolvable depth "
-                   f"({depth_max:.1f} m), the deepest point the model's domain "
+        message = (f"{context} depth ({depth:g} m) exceeds resolvable depth "
+                   f"({depth_max:g} m), the deepest point the model's domain "
                    f"reaches: the seafloor, or the bottom of the modelled "
                    f"sediment for a solver that computes the field in the "
                    f"sediment")
-        remediation = f"Set {context.lower()} depth to ≤ {depth_max:.1f} m"
+        remediation = f"Set {context.lower()} depth to ≤ {depth_max:g} m"
         super().__init__(message, remediation)
         self.depth = depth
         self.depth_max = depth_max
@@ -258,21 +258,23 @@ class MissingFileError(ConfigurationError, FileNotFoundError):
 class DataFetchError(UACPYError):
     """Raised when the data layer cannot supply an environment value
     (bathymetry, SSP, sediment, wind, …) for the requested location: the
-    exception of ``uacpy.data``, whatever the reason.
+    exception of ``uacpy.data`` when the answer to *can this source give a
+    value here?* is no.
 
     That covers a remote service being unreachable or returning an error
-    or malformed payload; and equally a local read that cannot answer —
-    a dataset file absent from the cache, a NetCDF missing the variable,
-    a grid cell masked or over land, a CSV without the expected column.
-    The local cases are the majority: the ``*_local.py`` readers raise it
-    without touching the network at all.
+    or malformed payload, and equally a local read that cannot answer — the
+    ``*_local.py`` readers raise it without touching the network: a point
+    with no coverage, a grid cell masked or over land, a cached dataset
+    file that is present but cannot be read. The remedy is the same for
+    each: try another source, or supply the value.
 
-    The split is deliberate. The caller asks one question — *can I get an
-    environment value here?* — and acts the same way on every no: fall
-    back to another source, or ask the user for a value. Typing the causes
-    apart would force a four-way ``except`` for that one decision.
+    A dataset that is not installed in the cache, or a source asked for
+    without an argument it needs (``date=``), is a
+    :class:`ConfigurationError` instead: the call or the install has to
+    change. The split is by who can act (``docs/guide/data.md``, "Live
+    sources fail; that is normal").
 
-    Catch via ``except DataFetchError`` or, more broadly, ``except
+    Catch via ``except DataFetchError`` or, to cover both, ``except
     UACPYError``.
     """
     pass
@@ -302,7 +304,10 @@ class UACPYWarning(UserWarning):
     subclass, so a filter or ``pytest.warns`` on ``UserWarning`` still catches
     every uacpy warning; ``warnings.filterwarnings('ignore',
     category=uacpy.FallbackWarning)`` silences one cause and keeps the
-    others."""
+    others. Inside one data fetch, the notes on where its data come from —
+    a value substituted from a neighbour included — travel in that fetch's
+    one :class:`ProvenanceWarning` (:mod:`uacpy.data`), so they follow that
+    category's filter."""
 
 
 class NumericsWarning(UACPYWarning):
@@ -329,9 +334,11 @@ class FallbackWarning(UACPYWarning):
 
 
 class ProvenanceWarning(UACPYWarning):
-    """The licence, attribution or calibration status of what was used: a
-    dataset or engine with a use restriction, a level with no absolute
-    calibration."""
+    """Where what was used came from: a fetched value's source, distance
+    and age, a value a data fetch substituted from a neighbour (listed in
+    that fetch's one summary notice); and the licence, attribution or
+    calibration status of what was used: a dataset or engine with a use
+    restriction, a level with no absolute calibration."""
 
 
 class IOWarning(UACPYWarning):

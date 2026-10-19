@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from uacpy.core.acoustics import band_level
+from uacpy.core.acoustics import band_level, no_energy_mask
 from uacpy.core.acoustics.weighting import (  # noqa: F401  (re-exported by uacpy.noise)
     EXPOSURE_THRESHOLDS,
     HEARING_GROUPS,
@@ -25,7 +25,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._validate import normalize_axis
 
 
-def apply_weighting(level_dB, *, frequency, weighting):
+def apply_weighting(level_dB, *, frequency, weighting, axis: int = -1):
     """Apply a frequency weighting to a per-frequency level spectrum:
     ``L + W(f)`` [dB].
 
@@ -37,16 +37,34 @@ def apply_weighting(level_dB, *, frequency, weighting):
     Parameters
     ----------
     level_dB : float or array_like
-        Level per frequency (dB), frequency along the last axis.
+        Level per frequency (dB), one spectrum or one per cell of the other
+        axes, frequency along ``axis``; a single level is weighted at every
+        frequency.
     frequency : float or array_like
-        Frequency (Hz).
+        Frequency (Hz): one value, or one per sample along ``axis``.
     weighting : str, callable or (array_like, array_like)
         A hearing group of :data:`HEARING_GROUPS` (Southall et al. 2019),
-        your own function ``W(frequency_Hz) -> dB``, or a
-        ``(frequencies_Hz, W_dB)`` table.
+        your own function ``W(frequency) -> dB``, or a
+        ``(frequencies, W_dB)`` table.
+    axis : int, default -1
+        The frequency axis of ``level_dB``, as on :func:`weighted_level`.
     """
-    return (np.asarray(level_dB, dtype=float)
-            + frequency_weighting(frequency, weighting))
+    level = np.asarray(level_dB, dtype=float)
+    f = np.asarray(frequency, dtype=float)
+    if f.ndim > 1:
+        raise ConfigurationError(
+            f"apply_weighting: frequency is one value or one axis of "
+            f"values; got shape {f.shape}.")
+    weight = frequency_weighting(frequency, weighting)
+    if level.ndim == 0 or f.ndim == 0:
+        return level + weight
+    axis = normalize_axis(level, axis, "apply_weighting")
+    if level.shape[axis] != f.size:
+        raise ConfigurationError(
+            f"apply_weighting: level_dB has {level.shape[axis]} samples "
+            f"along axis={axis} (shape {level.shape}) but frequency has "
+            f"{f.size}; one level per frequency along axis=.")
+    return np.moveaxis(np.moveaxis(level, axis, -1) + weight, -1, axis)
 
 
 def weighted_level(psd_dB, *, frequency, weighting, axis: int = -1):
@@ -66,7 +84,9 @@ def weighted_level(psd_dB, *, frequency, weighting, axis: int = -1):
     returns first) carries no weight, so a welch spectrum is taken as it
     comes. The integral is :func:`uacpy.core.acoustics.band_level`'s, so a
     spectrum that carries no power reads ``-inf``, the level of an empty band
-    throughout uacpy.
+    throughout uacpy, and one whose every bin is the no-energy marker
+    (-600 dB, a silent record) reads the marker: the weighting does not move
+    a marker bin.
 
     Parameters
     ----------
@@ -111,6 +131,9 @@ def weighted_level(psd_dB, *, frequency, weighting, axis: int = -1):
             f"axis={axis} (shape {psd.shape}) but frequency has {f.size}; "
             f"one level per frequency along axis=.")
     order = np.argsort(f)
-    weighted = (np.moveaxis(psd, axis, -1)[..., order]
-                + frequency_weighting(f[order], weighting))
+    density = np.moveaxis(psd, axis, -1)[..., order]
+    # A no-energy bin (-600 dB) holds no level to weight: it stays the
+    # marker, so a silent spectrum's weighted level is the marker too.
+    weighted = np.where(no_energy_mask(density), density,
+                        density + frequency_weighting(f[order], weighting))
     return band_level(weighted, f[order], axis=-1)

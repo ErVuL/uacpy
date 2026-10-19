@@ -28,7 +28,8 @@ from typing import Optional, Union
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.geo import Coordinate, as_coordinate, normalize_lon
-from uacpy.data._chain import CACHE_BACKEND, first_answer, lower_source_spec
+from uacpy.data._chain import (CACHE_BACKEND, SourceChain, SourceProvider,
+                               lower_source_spec)
 from uacpy.data._geo import checked_max_distance, checked_offset, require_source
 from uacpy.data._http import http_get
 from uacpy.data.sources import SOURCES, DataProvenance
@@ -113,13 +114,13 @@ def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None,
 #: at -90 (an untyped ``ValueError: math domain error``) and give y = 2.4e8 m
 #: at +90 -- an ordinate twelve times the world extent, which the WFS answers
 #: with an empty feature set rather than an error.
-WEB_MERCATOR_MAX_LAT_DEG = 85.05112877980659
+WEB_MERCATOR_MAX_LAT = 85.05112877980659
 
 
 def _to_web_mercator(lat: float, lon: float):
     """(lat, lon) degrees → (x, y) metres in EPSG:3857 (the EMODnet CRS).
 
-    Latitude is clamped to :data:`WEB_MERCATOR_MAX_LAT_DEG`, the projection's
+    Latitude is clamped to :data:`WEB_MERCATOR_MAX_LAT`, the projection's
     own limit. EMODnet's coverage is European seas, so no clamped request
     returns a substrate: the clamp keeps a polar point on the typed "no seabed
     substrate" path instead of a bare ``ValueError``.
@@ -128,7 +129,7 @@ def _to_web_mercator(lat: float, lon: float):
     # semi-major axis, so this single radius is the whole datum.
     radius_m = 6378137.0
     lon = normalize_lon(lon)
-    lat = max(-WEB_MERCATOR_MAX_LAT_DEG, min(WEB_MERCATOR_MAX_LAT_DEG, lat))
+    lat = max(-WEB_MERCATOR_MAX_LAT, min(WEB_MERCATOR_MAX_LAT, lat))
     return (radius_m * math.radians(lon),
             radius_m * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)))
 
@@ -201,19 +202,37 @@ def fetch_emodnet_substrate(
             "which source='local' does not read.",
             remediation="Drop them, or pass source='emodnet'.")
     limit = checked_max_distance(max_distance_km, 'fetch_emodnet_substrate')
+    request = dict(layer=layer, base_url=base_url, timeout=timeout,
+                   verbose=verbose, max_distance_km=limit)
+    return _SUBSTRATE_CHAIN.answer(
+        source,
+        lambda src, backend: _SUBSTRATE_CHAIN.fetch(
+            src, backend, (point,), request, who='fetch_emodnet_substrate',
+            keyword='source='),
+        who='fetch_emodnet_substrate', keyword='source=')[0]
 
-    def call(_source, backend):
-        if backend == CACHE_BACKEND:
-            from uacpy.data.emodnet_local import fetch_emodnet_substrate_local
-            return fetch_emodnet_substrate_local(point, max_distance_km=limit)
-        return _emodnet_substrate_live(
-            point, layer=layer, base_url=base_url, timeout=timeout,
-            verbose=verbose, max_distance_km=limit)
 
-    attempts = [('emodnet', CACHE_BACKEND)]
-    if source != 'local':
-        attempts.append(('emodnet', 'wfs'))
-    return first_answer(attempts, call)[0]
+def _emodnet_substrate_point(backend, point, *, layer, base_url, timeout,
+                             verbose, max_distance_km):
+    """A :data:`_SUBSTRATE_CHAIN` point fetch: the installed polygons'
+    record (``backend`` :data:`~uacpy.data._chain.CACHE_BACKEND`), else the
+    live WFS's."""
+    if backend == CACHE_BACKEND:
+        from uacpy.data.emodnet_local import fetch_emodnet_substrate_local
+        return fetch_emodnet_substrate_local(point,
+                                             max_distance_km=max_distance_km)
+    return _emodnet_substrate_live(
+        point, layer=layer, base_url=base_url, timeout=timeout,
+        verbose=verbose, max_distance_km=max_distance_km)
+
+
+#: The EMODnet substrate record: the installed polygons, then the live WFS
+#: (``'local'``, the cached sources alone, is the polygons).
+_SUBSTRATE_CHAIN = SourceChain(
+    'substrate',
+    providers=(SourceProvider('emodnet', (CACHE_BACKEND, 'wfs'),
+                              _emodnet_substrate_point),),
+    auto=('emodnet',))
 
 
 def _emodnet_substrate_live(point, *, layer, base_url, timeout, verbose,

@@ -9,6 +9,7 @@ resolves its executable, so even the tests that never launch a run need the
 install to be present.
 """
 
+import json
 import os
 import warnings
 
@@ -1483,7 +1484,7 @@ class TestIrregularGridBroadband:
 
     def test_the_mismatch_error_names_the_sorted_diagonal_pairing(self, tmp_path):
         """BELLHOP sorts both receiver lists before pairing them
-        (``SourceReceiverPositions.f90:224``), so the error says what an
+        (``SourceReceiverPositions.f90:224``, ``:268``), so the error says what an
         irregular grid can express instead of leaving the user to guess."""
         env = Environment(bathymetry=100.0, ssp=1500.0)
         src = Source(depths=10.0, frequencies=100.0)
@@ -1831,9 +1832,10 @@ class TestPrecalcBoundaryIsRefused:
 class TestSourceMustBeInsideTheMedium:
     """``bellhop.f90:488-492`` tests ``DistBegTop <= 0 .OR. DistBegBot <= 0``
     and terminates every ray at step 1 — *"source must be within the medium"*.
-    The run then exits 0 with an all-NaN field, zero arrivals and 1-point
-    rays, warning about none of it. Measured: 99.99 m gives a perfectly good
-    field, 100.00 m gives nanfrac 1.0000. All three backends fail identically.
+    The run then exits 0 with a field of exact zeros (the 600 dB no-energy
+    marker), zero arrivals and 1-point rays, warning about none of it.
+    Measured: 99.99 m gives a perfectly good field, 100.00 m gives no
+    energy anywhere. All three backends fail identically.
 
     The test is against the seafloor at **r = 0** (``bellhop.f90:237`` launches
     from ``xs = [0.0, sz]``), not ``env.depth`` — on a sloping bottom a source
@@ -1897,8 +1899,9 @@ class TestSourceMustBeInsideTheMedium:
 class TestSingleReceiverRangeBeamTypes:
     """``g``/``C``/``R`` clamp the receiver index to ``Pos%NRr``
     (``influence.f90:339,351``), so with one range ``irA == irB`` at every
-    step and ``:354`` skips the whole ray — the run exits 0 with an all-NaN
-    field, zero eigenrays and zero arrivals. ``G``/``B`` walk the index with a
+    step and ``:354`` skips the whole ray — the run exits 0 with a field of
+    exact zeros (the 600 dB no-energy marker), zero eigenrays and zero
+    arrivals. ``G``/``B`` walk the index with a
     bracket test and are unaffected."""
 
     @staticmethod
@@ -2364,11 +2367,6 @@ class TestAGaussianBeamBandWarnsPastHalfOfFc:
         assert self._notice('B', np.array([400.0, 1600.0]),
                             mode=RunMode.COHERENT_TL) is None
 
-    def test_a_wide_bandwidth_factor_constructs_quietly(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', UserWarning)
-            Bellhop(bandwidth_factor=1.5)
-
     @pytest.mark.requires_binary
     @pytest.mark.parametrize('beam_type, warns', [('B', True), ('G', False)])
     def test_a_run_over_a_wide_band_says_it_for_gaussian_beams_only(
@@ -2386,10 +2384,9 @@ class TestAGaussianBeamBandWarnsPastHalfOfFc:
 
 
 class TestBroadbandFrequencyGridResolution:
-    """A single centre frequency expands to ``n_frequencies`` bins spanning
-    ``fc*(1 +/- bandwidth_factor/2)``
-    (DOCUMENTATION.md §15 "Bellhop synthesizes", base.py
-    ``_band.broadband_band``); explicit ``frequencies=`` wins over
+    """A single centre frequency expands to the package's default band,
+    128 bins spanning ``fc*(1 +/- 0.25)`` (``_band.broadband_band``, as on
+    every engine); any other band is ``run(frequencies=)``, which wins over
     everything. Resolver-level — nothing runs."""
 
     def test_default_is_128_bins_over_half_fc(self):
@@ -2404,17 +2401,17 @@ class TestBroadbandFrequencyGridResolution:
         assert freqs[-1] == pytest.approx(250.0)
         assert np.allclose(np.diff(freqs), freqs[1] - freqs[0])
 
-    def test_constructor_knobs_shape_the_grid(self):
-        model = Bellhop(verbose=False, n_frequencies=16, bandwidth_factor=0.2)
-        freqs = model._requested_frequencies(
-            RunMode.BROADBAND, Source(depths=50.0, frequencies=200.0), None,
-            None).frequencies
-        assert freqs.shape == (16,)
-        assert freqs[0] == pytest.approx(180.0)
-        assert freqs[-1] == pytest.approx(220.0)
+    @pytest.mark.parametrize('knob', ['n_frequencies', 'bandwidth_factor'])
+    def test_the_band_is_not_a_constructor_knob(self, knob):
+        """The band of a BROADBAND run is ``run(frequencies=)`` on Bellhop
+        as on every engine; the constructor takes no second route."""
+        import inspect
+        assert knob not in inspect.signature(Bellhop).parameters
+        with pytest.raises(TypeError, match=knob):
+            Bellhop(**{knob: 16})
 
     def test_explicit_frequencies_win(self):
-        model = Bellhop(verbose=False, n_frequencies=16)
+        model = Bellhop(verbose=False)
         freqs = model._requested_frequencies(
             RunMode.BROADBAND, Source(depths=50.0, frequencies=200.0),
             np.array([90.0, 100.0, 110.0]), None).frequencies
@@ -2825,21 +2822,73 @@ class TestBellhopResolvesItsOwnRayStep:
     def test_an_unpinned_step_scales_with_the_water_depth(self, depth,
                                                           expected):
         assert resolve_ray_step(
-            self._env(depth), ray_step=None) == pytest.approx(expected)
+            self._env(depth), ray_step=None, r_box=12000.0,
+            backend='cuda') == pytest.approx(expected)
 
-    @pytest.mark.parametrize('pinned', [250.0, 0.0])
+    @pytest.mark.parametrize('backend, expected', [
+        ('cuda', 3.6), ('cxx', 3.6), ('fortran', 1.0), ('custom', 1.0)])
+    def test_a_long_shallow_run_takes_the_step_its_build_can_store(
+            self, backend, expected):
+        """50 m of water, ``r_box`` 180 km: depth/50 is 1 m, 180 000 steps
+        across the box — past bellhopcuda/cxx's 100 000 per ray
+        (``bhc/structs.hpp:66``), within Fortran's 1 000 000
+        (``bellhopMod.f90:4``). The unset step is ``2 × r_box / MaxN`` when
+        that is coarser; a build whose limit is not known keeps depth/50."""
+        from uacpy.models.bellhop._plan import ray_step_origin
+        step = resolve_ray_step(self._env(50.0), ray_step=None,
+                                r_box=180000.0, backend=backend)
+        assert step == pytest.approx(expected)
+        origin = ray_step_origin(step, ray_step=None, r_box=180000.0,
+                                 backend=backend)
+        if expected == 3.6:
+            assert origin.startswith('2 × r_box / MaxN: 180000 m over the '
+                                     f'{backend} build')
+        else:
+            assert origin == 'env.depth / 50'
+
+    @pytest.mark.parametrize('pinned', [250.0, 0.0, 1.0])
     def test_a_pinned_step_reaches_the_deck_unchanged(self, pinned):
         """0 included: it is BELLHOP's own "choose for me"
-        (bellhop.f90:170-174), which a caller may ask for."""
+        (bellhop.f90:170-174), which a caller may ask for. A pinned 1 m
+        over a 180 km box on bellhopcuda stays 1 m."""
         assert resolve_ray_step(
-            self._env(5000.0), ray_step=pinned) == pinned
+            self._env(5000.0), ray_step=pinned, r_box=180000.0,
+            backend='cuda') == pinned
+
+    def test_a_ray_out_of_storage_is_told_the_remedy(self):
+        """The engine's ``BHC_WARN_ONERAY_OUTOFMEMORY`` line is relayed
+        verbatim and followed by the build's limit, the steps the deck's
+        step needs and the two remedies; another diagnosis gets none."""
+        from uacpy.models.bellhop._plan import ray_storage_remedy
+        remedy = ray_storage_remedy(backend='cuda', ray_step=1.0,
+                                    r_box=180000.0)
+        assert remedy == (
+            "The cuda build stores at most 100000 steps per ray "
+            "(bhc/structs.hpp:66); the deck's 1 m step needs about 180000 "
+            "across the 180000 m ray box, so a longer ray is cut short and "
+            "the field past it misses that ray's energy. Pass "
+            "Bellhop(ray_step=…) of at least 3.6 m, or backend='fortran' "
+            "(1000000 steps per ray, bellhopMod.f90:4).")
+        oom = ("1 warning(s) thrown of the following type(s):\n"
+               "BHC_WARN_ONERAY_OUTOFMEMORY: Ran out of memory for "
+               "individual ray(s), those rays have been truncated\n")
+        for stdout, told in ((oom, True), (
+                TestCxxRunTimeWarningsReachTheUser._CAPTURED_CXX_STDOUT,
+                False)):
+            with recorded_warnings() as record:
+                warn_on_engine_stdout_warnings(
+                    stdout, model_name='Bellhop', backend='cuda',
+                    ray_storage_remedy=remedy)
+            (message,) = [str(w.message) for w in record]
+            assert (remedy in message) is told, message
 
     def test_the_default_step_is_finer_than_the_binarys_own_choice(self):
         # Unset, uacpy sends a positive step finer than the depth/10
         # bellhop.f90:170-174 substitutes for 0.
         assert Bellhop.__init__.__kwdefaults__['ray_step'] is None
         for depth in (100.0, 1000.0, 5000.0):
-            resolved = resolve_ray_step(self._env(depth), ray_step=None)
+            resolved = resolve_ray_step(self._env(depth), ray_step=None,
+                                        r_box=12000.0, backend='cuda')
             assert 0.0 < resolved < depth / 10.0
 
     @pytest.mark.requires_binary
@@ -3511,6 +3560,23 @@ class TestAPinnedExecutableIsReadLikeTheAutoPickedOne:
         monkeypatch.setattr(os, 'cpu_count', lambda: 1)
         assert _merge(model) is False
         assert _command(model, 'base')[1] == '--2D'
+
+    @pytest.mark.parametrize('name, backend, recorded', [
+        ('bellhopcxx', 'cxx', None), ('ray-solver', 'custom', 'ray-solver')])
+    def test_the_run_record_names_the_build_not_the_path(
+            self, tmp_path, name, backend, recorded):
+        """A result file is shared: its record names the build (``backend``)
+        and, for a binary that is no named build, its file name — never the
+        machine's path, which no other engine records either."""
+        model = Bellhop(executable=self._stub(tmp_path, name), verbose=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            engine = model.run_settings(
+                Environment(bathymetry=100.0, ssp=1500.0),
+                Source(depths=50.0, frequencies=100.0),
+                Receiver(depths=[20.0, 60.0], ranges=[500.0, 1000.0])).engine
+        assert (engine.backend, engine.executable) == (backend, recorded)
+        assert str(tmp_path) not in json.dumps(engine.to_dict())
 
     def test_an_unrecognised_name_stays_custom_and_warns_on_arrivals(
             self, tmp_path):
@@ -4600,79 +4666,18 @@ class TestCervenyKnobsResolveFromNone:
         assert model.run_settings(rd, _SRC, _RCV).engine.interp_ssp == 'quad'
 
 
-class TestUnusedBandKnobsAreSaidUnused:
-    """``n_frequencies`` / ``bandwidth_factor`` shape only the band a
-    BROADBAND run expands from a one-frequency Source without
-    ``frequencies=``; set on any other run, the run says it does not use
-    them."""
+class TestTheDefaultBandIsExpandedFromAOneFrequencySource:
+    """A BROADBAND run of a one-frequency Source without ``frequencies=``
+    expands the package's default band; the run records where its band came
+    from."""
 
-    @staticmethod
-    def _said(model, mode, **kw):
-        with recorded_warnings() as caught:
-            model.run_settings(_pekeris_env(), _SRC, _RCV, mode, **kw)
-        said = [str(w.message) for w in caught]
-        return [m for m in said if 'is not used' in m
-                and ('n_frequencies=' in m or 'bandwidth_factor=' in m)]
-
-    def test_both_default_to_none(self):
-        defaults = Bellhop.__init__.__kwdefaults__
-        assert defaults['n_frequencies'] is None
-        assert defaults['bandwidth_factor'] is None
-
-    @pytest.mark.parametrize('mode, kw, said', [
-        (RunMode.COHERENT_TL, {}, True),
-        (RunMode.BROADBAND, dict(frequencies=np.array([180.0, 200.0])), True),
-        (RunMode.BROADBAND, {}, False)])
-    def test_a_pin_off_its_band_is_said_unused(self, mode, kw, said):
-        model = Bellhop(backend='fortran', verbose=False, n_frequencies=16)
-        assert bool(self._said(model, mode, **kw)) is said
-
-    def test_unset_knobs_say_nothing_and_expand_the_default_band(self):
+    def test_unset_band_expands_the_default_band(self):
         model = Bellhop(backend='fortran', verbose=False)
-        assert self._said(model, RunMode.COHERENT_TL) == []
         settings = model.run_settings(_pekeris_env(), _SRC, _RCV,
                                       RunMode.BROADBAND)
         assert settings.frequencies.size == 128
         assert settings.frequencies[0] == pytest.approx(150.0)
-
-
-class TestTheBandKnobsAreCheckedAtConstruction:
-    """``n_frequencies`` and ``bandwidth_factor`` shape every BROADBAND run, so a
-    value no run could use is refused when the model is built (RA-WAVE-6)."""
-
-    @pytest.mark.parametrize('n_frequencies', [0, 1])
-    def test_fewer_than_two_bins_are_refused(self, n_frequencies):
-        with pytest.raises(ConfigurationError, match='n_frequencies'):
-            Bellhop(backend='fortran', verbose=False, n_frequencies=n_frequencies)
-
-    def test_two_bins_are_accepted(self):
-        assert Bellhop(backend='fortran', verbose=False,
-                       n_frequencies=2).n_frequencies == 2
-
-    def test_a_fractional_count_is_refused_and_a_numpy_count_taken(self):
-        """A fraction was truncated to the bins below it (2.7 -> 2)."""
-        with pytest.raises(ConfigurationError, match='whole number'):
-            Bellhop(backend='fortran', verbose=False, n_frequencies=2.7)
-        count = Bellhop(backend='fortran', verbose=False,
-                        n_frequencies=np.int64(5)).n_frequencies
-        assert count == 5 and type(count) is int
-
-    @pytest.mark.parametrize('factor', [0.0, -0.5, float('nan'), 2.0, 2.5])
-    def test_a_width_outside_0_to_2_is_refused(self, factor):
-        """From 2 up the band's lower edge fc*(1 - bw/2) reaches 0 Hz."""
-        with pytest.raises(ConfigurationError, match=r'must lie in \(0, 2\)'):
-            Bellhop(backend='fortran', verbose=False,
-                    bandwidth_factor=factor)
-
-    def test_a_width_just_below_2_is_taken(self):
-        assert Bellhop(backend='fortran', verbose=False,
-                       bandwidth_factor=1.999).bandwidth_factor == 1.999
-
-    def test_a_reassigned_knob_is_refused_by_the_run(self):
-        model = Bellhop(backend='fortran', verbose=False)
-        model.n_frequencies = 1
-        with pytest.raises(ConfigurationError, match='n_frequencies'):
-            model.validate_inputs(_pekeris_env(), _SRC, _RCV)
+        assert settings.engine.band_origin == '128 bins over fc*(1 +/- 0.5/2)'
 
 
 class TestTheBroadbandFieldCarriesTheWaterColumnsFastestSpeed:

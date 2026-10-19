@@ -1,6 +1,6 @@
 # Communications — digital modems for the underwater channel
 
-> `uacpy.comms` · 89 public names · modulation, coding, equalisation,
+> `uacpy.comms` · 90 public names · modulation, coding, equalisation,
 > synchronisation, OFDM, DSSS, Doppler, and the NATO JANUS standard
 
 `uacpy.comms` is a digital-communications toolbox built for the one channel
@@ -350,7 +350,8 @@ expect, not from the tap count.
 | `evm(*, reference, received)` | RMS error-vector magnitude (a fraction) |
 | `ber_theory(scheme, ebn0_dB)` | closed-form AWGN BER; also `'dbpsk'` (`exp(-Eb/N0)/2`) and non-coherent `'bfsk'` (`exp(-Eb/2N0)/2`) for the `dpsk_*`/`fsk_*` modems |
 | `ber_theory_curve(scheme, ebn0_dB)` | the same on a grid, as a `BerTheory` `(ebn0_dB, ber)` whose `.plot(ax=)` overlays it dashed on a measured curve |
-| `ber_sweep(scheme, ebn0_dB, n_bits, ...)` | measured BER over a list of Eb/N0, as a `BerCurve` |
+| `ber_sweep(scheme, ebn0_dB, n_bits, ...)` | measured BER over a list of Eb/N0, as a `BerCurve` (single-carrier) |
+| `ofdm_ber_sweep(tx, rx, ebn0_dB, n_bits, *, channel=, frame_bits=2048, rng=)` | the same for an `OFDMTransmitter` / `OFDMReceiver` pair: frames through the channel, AWGN and the receiver, as a `BerCurve` |
 
 ```python
 ebn0 = np.arange(0.0, 13.0, 2.0)
@@ -361,6 +362,24 @@ code = comms.ConvCode(interleave_depth=16)
 ebn0_coded = np.arange(0.0, 5.1, 1.0)
 coded = comms.ber_sweep('qpsk', ebn0_coded, 20000, code=code, rng=rng)
 ```
+
+`simulate_link` and `ber_sweep` run the single-carrier constellations; an
+OFDM link's curve is `ofdm_ber_sweep`'s, which sends frames of `frame_bits`
+information bits through `tx`, the channel (taps at the baseband rate), AWGN
+and `rx`:
+
+```python
+tx = comms.OFDMTransmitter('qpsk', 256, 32)
+rx = comms.OFDMReceiver('qpsk', 256, 32)
+curve = comms.ofdm_ber_sweep(tx, rx, ebn0_dB=np.arange(0, 21, 2), channel=h, rng=rng)
+curve.plot()
+```
+
+Eb/N0 counts the cyclic prefix as energy spent, and the noise is referred to
+the received payload power. Frames stay short (2048 bits unset, uacpy
+guidance) because the receiver corrects each block's phase on its own
+decisions: a residual CFO error loses the later blocks of a long frame
+(QPSK at 8 dB: BER 0.006 at 2048 bits, 0.20 at 32768, measured).
 
 A `BerCurve` unpacks as `ebn0_dB, ber = ...`, and carries the sweep's
 `scheme`, `n_bits`, `channel`, `equalizer`, `code` and `n_train` as
@@ -419,7 +438,7 @@ that matters most.
 
 | Equaliser | Knowledge needed | Returns |
 |---|---|---|
-| `DFE(n_ff, n_fb, step=, forget=, pll_gain=)` | training symbols | `(eq_symbols, mse)` from `.equalize` |
+| `DFE(n_ff, n_fb, step=, forget=, pll_gain=)` | training symbols | `(eq_symbols, mse)` from `.equalize`; `step` (LMS, unset 0.01) and `forget` (RLS) are refused together |
 | `lms_equalizer(received, constellation, n_taps, step, train)` | training symbols | `(eq_symbols, mse)` |
 | `rls_equalizer(received, constellation, n_taps, forget, train)` | training symbols | `(eq_symbols, mse)` |
 | `mmse_equalizer(received, h, snr_linear)` | the channel `h` | equalised signal only |
@@ -513,7 +532,7 @@ dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_gain=0.04)
 tx = comms.Transmitter('qpsk', code=code, preamble=256)
 rx = comms.CommsReceiver('qpsk', code=code, equalizer=dfe, preamble=256)
 
-passband = tx.transmit_passband(comms.pack_frame(message), fs, fc, sps=8)
+passband = tx.transmit_passband(comms.pack_frame(message), sample_rate=fs, fc=fc, sps=8)
 bits = rx.receive_passband(received, fs, fc, sps=8)
 payload, crc_ok = comms.unpack_frame(bits)
 ```
@@ -523,8 +542,10 @@ For a figure, pass `return_diagnostics=True` to `receive` or
 then a `ReceiverDiagnostics` with `bits`, the equalised payload `symbols`, the
 per-symbol squared error `mse` (the DFE's convergence curve; for OFDM the
 decision error of each data symbol), the `sync_metric` the frame search ran
-over and the detected `start` — everything a constellation, sync or
-convergence plot needs, without re-running the receiver by hand. An OFDM
+over and the detected `start`; an `OFDMReceiver` adds `channel_estimate`, the
+per-subcarrier response (complex, `n_subcarriers` values) it equalised the
+payload by — everything a constellation, sync, channel or convergence plot
+needs, without re-running the receiver by hand. An OFDM
 receiver cannot tell where the payload ends, so its `symbols` otherwise run
 through the zero padding of the last block and the guard block; pass
 `n_symbols=rx.payload_symbol_count(n_bits)` (the information-bit count the
@@ -533,7 +554,7 @@ transmitter was given) to keep only the data symbols:
 ```python
 diag = rx.receive_passband(received, fs, fc, sps=8, return_diagnostics=True)
 payload, crc_ok = comms.unpack_frame(diag.bits)
-uacpy.plot.plot_sync_metric(diag.sync_metric, threshold=0.4)
+uacpy.plot.plot_sync_metric(diag.sync_metric, threshold=comms.sync.PREAMBLE_THRESHOLD)
 uacpy.plot.plot_convergence(diag.mse)
 ```
 
@@ -568,7 +589,7 @@ tens of milliseconds, and every sample of it is throughput you do not send.
 | Call | Purpose |
 |---|---|
 | `ofdm_modulate(symbols, n_subcarriers, cp_len)` | map + IFFT + prepend CP |
-| `ofdm_demodulate(received, n_subcarriers, cp_len, channel=, snr_linear=, channel_response=)` | strip CP + FFT + optional ZF/MMSE; `channel=` takes the impulse-response **taps**, `channel_response=` a per-subcarrier `H` such as `estimate_channel`'s output |
+| `ofdm_demodulate(received, n_subcarriers, cp_len, channel=, snr_linear=, channel_response=)` | strip CP + FFT + optional ZF/MMSE; `channel=` takes the impulse-response **taps**, `channel_response=` a per-subcarrier `H` such as `estimate_channel`'s output; `snr_linear=` without either gets a `FallbackWarning` (nothing is equalized) |
 | `ofdm_symbol(subcarrier_values, n_subcarriers, cp_len)` | one CP-prefixed symbol from one length-`n_subcarriers` spectrum (another length is refused; `ofdm_modulate` pads to whole blocks) |
 | `subcarrier_response(channel, n_subcarriers)` | `H[k]` on the subcarrier grid — the equalizer's input, unshifted so `k` is the subcarrier index |
 | `equalize_subcarriers(spectra, H, snr_linear=None)` | the one-tap-per-subcarrier division on its own |
@@ -823,10 +844,15 @@ Some deliberate choices in that snippet are worth copying:
 
 For a *broadband* channel rather than a set of arrivals, `RunMode.BROADBAND`
 gives `H(d, r, f)`, `Field.to_time_trace` turns one cell of it into `h(t)`
-and `plot_impulse_response` draws that — see
-[results](results.md). The general "waveform through a modelled channel" tools
-(`impulse_response`, `simulate_reception`) live in
-[signal processing](signal.md).
+and `plot_impulse_response` draws that, and `Field.impulse_response(fs)
+.apply(source_waveform=…, sample_rate=fs)` plays a waveform through it — see
+[results](results.md). A model's arrival list goes through the arrival family,
+flat to the Nyquist frequency: `arrival_impulse_response` /
+`simulate_arrival_reception` on arrays, `Arrivals.impulse_response(fs).apply(…)`
+and `Arrivals.synthesize_time_series` on the result
+([signal processing](signal.md)); the short `impulse_response` /
+`simulate_reception` pair keeps its comms role, the static taps
+`multipath_channel` lays down (§6).
 
 ---
 
@@ -960,6 +986,13 @@ records (seeds 0-5 at 2 s and 6 s, 48 kHz) do, the other 6 decode to bits with
 `crc_ok=False` (measured). A receive loop over a stream reads both as "no
 packet" from `reception.crc_ok`, with no exception to catch.
 
+The Doppler search spans radial speeds up to `doppler_max_speed` (5 m/s
+unset): an estimate at that edge comes with a `NumericsWarning`, since the
+true speed may lie beyond it — raise `doppler_max_speed`. Passing `start=`
+skips the detector and the Doppler stage, so a `doppler_max_speed` or
+`sound_speed` given with it gets a `FallbackWarning`, as does a `sound_speed`
+under `doppler_max_speed=0`.
+
 ---
 
 ## 18. Plotting
@@ -970,7 +1003,7 @@ plotters of `uacpy.plot`. The comms family:
 
 | Plotter | Shows |
 |---|---|
-| `plot_scatter(symbols, ax, ideal=)` | a received constellation |
+| `plot_received_symbols(symbols, ax, ideal=)` | a received constellation |
 | `plot_constellation(constellation, ax)` | an ideal Gray-labelled constellation |
 | `plot_eye_diagram(signal, samples_per_symbol, ax)` | the eye |
 | `plot_ber_curve(ebn0_dB, ber_measured, ax, n_bits=)` or `plot_ber_curve(curve)` | measured BER (a `BerCurve`, or arrays), or a `BerTheory` drawn dashed; a zero-error point is marked at `1/n_bits` (▽), not drawn as a measurement |

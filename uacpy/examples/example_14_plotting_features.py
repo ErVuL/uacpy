@@ -10,11 +10,10 @@ Two visualization helpers driven by real model output:
 
 Uses: RunMode.BROADBAND · acoustic_signal.ricker_wavelet ·
 Field.synthesize_time_series · Field.at() · plot_field(stacked=) ·
-RunMode.MODES · plot_modes_heatmap(mode_numbers=, normalize=)
+RunMode.MODES · plot_modes_heatmap(mode_numbers=)
 """
 
 import os
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -27,9 +26,11 @@ OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
 OUT.mkdir(parents=True, exist_ok=True)
 
 # ── Stacked time series: Bellhop BROADBAND → Ricker source → p(t) ───────────
-env = uacpy.Environment(name='Isovelocity waveguide, rigid bottom',
-                        bathymetry=100, ssp=1500,
-                        bottom=uacpy.BoundaryProperties(acoustic_type='rigid'))
+env = uacpy.Environment(
+    name='Pekeris waveguide', bathymetry=100, ssp=1500,
+    bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                    sound_speed=1700, density=1.8,
+                                    attenuation=0.5))
 source = uacpy.Source(depths=50, frequencies=100)
 receiver = uacpy.Receiver(depths=np.array([50.0]),
                           ranges=np.linspace(500, 5000, 12))
@@ -43,14 +44,8 @@ transfer = uacpy.Bellhop(backend='fortran').run(env, source, receiver,
 fs = 1000.0
 pulse = ricker_wavelet(np.arange(int(0.04 * fs)) / fs,
                        float(source.frequencies[0]))
-# A rigid bottom loses nothing, so the guide rings past any finite record and
-# the synthesis says the 4 s record wraps: the energy past its end lands on its
-# start (the spikes ahead of each range's first arrival). That is this
-# lossless guide, not the plot, so that NumericsWarning is set aside here.
-with warnings.catch_warnings():
-    warnings.simplefilter('ignore', uacpy.NumericsWarning)
-    waveform = transfer.synthesize_time_series(source_waveform=pulse,
-                                               sample_rate=fs)
+waveform = transfer.synthesize_time_series(source_waveform=pulse,
+                                           sample_rate=fs)
 print(f"  {transfer.data.shape[-1]} frequencies at "
       f"df={frequencies[1] - frequencies[0]:.3f} Hz → p(t) "
       f"{waveform.data.shape}, {waveform.times[-1]:.3f} s")
@@ -71,14 +66,9 @@ fig.savefig(OUT / 'example_14_time_series_overlaid.png', dpi=150,
 plt.close(fig)
 
 # ── Mode shapes: the whole set, then the first four ─────────────────────────
-mode_env = uacpy.Environment(
-    name='Pekeris waveguide', bathymetry=100, ssp=1500,
-    bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
-                                    sound_speed=1700, density=1.8,
-                                    attenuation=0.5))
 modes = uacpy.Kraken(n_modes=50).run(
-    mode_env, source,
-    uacpy.Receiver(depths=np.linspace(0, mode_env.depth, 200),
+    env, source,
+    uacpy.Receiver(depths=np.linspace(0, env.depth, 200),
                    ranges=np.array([1000.0])),
     run_mode=uacpy.RunMode.MODES)
 print(f"  Kraken found {len(modes.k)} modes")

@@ -33,7 +33,7 @@ from uacpy.core.acoustics.attenuation import (
     ph_to_nbs, convert_attenuation_units, absorption_francois_garrison,
 )
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
-from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
+from uacpy.core.deck_limits import MAX_ATTENUATION
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.at_codes import volume_attenuation_code
 import math
@@ -430,7 +430,7 @@ class TestBiologicalLayerMeetsTheCrciCeiling:
 
     @staticmethod
     def _ceiling_dB_km(f0):
-        return (MAX_ATTENUATION_DB_PER_WAVELENGTH * 1000.0 * f0
+        return (MAX_ATTENUATION * 1000.0 * f0
                 / DEFAULT_SOUND_SPEED)
 
     def test_the_documented_at_threshold_is_3638_dB_per_km_at_100hz(self):
@@ -572,9 +572,13 @@ def test_the_written_out_init_takes_exactly_the_dataclass_fields(cls):
     added below still shapes ``repr`` / ``__eq__`` / ``fields()`` while the
     constructor has no way to set it, so instances carry the attribute only
     when something else assigns it. Pinned in the order the 5-tuple
-    ``io.at_codes.biological_records`` writes, which is the same order."""
+    ``io.at_codes.biological_records`` writes, which is the same order; a
+    keyword-only field (a law's ``data_sources``) comes last, where the
+    dataclass places it."""
     parameters = list(inspect.signature(cls.__init__).parameters)[1:]
-    assert parameters == [f.name for f in dataclasses.fields(cls)]
+    fields = dataclasses.fields(cls)
+    assert parameters == ([f.name for f in fields if not f.kw_only]
+                          + [f.name for f in fields if f.kw_only])
 
 
 class TestTheTwoAbsorptionRoutesDivergeByTheDocumentedAmount:
@@ -1215,9 +1219,9 @@ class TestConstantAbsorptionCeiling:
     def test_above_ceiling_warns_and_an_at_deck_refuses(self, tmp_path):
         import uacpy
         from uacpy.core.absorption import ConstantAbsorption
-        from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        from uacpy.core.deck_limits import MAX_ATTENUATION
         from uacpy.io.oalib_writer import write_scooter_env_file
-        value = MAX_ATTENUATION_DB_PER_WAVELENGTH + 1.0
+        value = MAX_ATTENUATION + 1.0
         with pytest.warns(ValidityWarning, match="dB/wavelength exceeds"):
             law = ConstantAbsorption(value=value)
         env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, absorption=law)
@@ -1232,11 +1236,11 @@ class TestConstantAbsorptionCeiling:
 
     def test_at_ceiling_constructs(self):
         from uacpy.core.absorption import ConstantAbsorption
-        from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        from uacpy.core.deck_limits import MAX_ATTENUATION
         c = ConstantAbsorption(
-            value=MAX_ATTENUATION_DB_PER_WAVELENGTH)
+            value=MAX_ATTENUATION)
         assert c.value == pytest.approx(
-            MAX_ATTENUATION_DB_PER_WAVELENGTH)
+            MAX_ATTENUATION)
 
 
 class TestConvertAttenuationUnitsNeedsAFrequency:

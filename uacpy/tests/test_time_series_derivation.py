@@ -999,6 +999,29 @@ class TestSynthesisErrorsNameTheEntryPoint:
             speeds=SoundSpeeds(surface=C_WATER),
         )
 
+    @pytest.mark.parametrize('call, who', [
+        (lambda H: H.impulse_response(1000.0), 'Field.impulse_response'),
+        (lambda H: H.to_time_trace(depth=20.0, range=1000.0,
+                                   sample_rate=1000.0),
+         'Field.to_time_trace')])
+    def test_the_taps_notices_name_the_method_called(self, call, who):
+        """A band reaching past Nyquist is said by the taps' own check,
+        under the name of the method the caller called, not of the array
+        function it delegates to."""
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 700.0, 13)
+        H = Field(data=np.ones((1, 1, freqs.size), dtype=complex),
+                  coords={'depth': np.array([20.0]),
+                          'range': np.array([1000.0]), 'frequency': freqs},
+                  phase_reference=PhaseReference.TRAVELLING_WAVE,
+                  speeds=SoundSpeeds(water_max=C_WATER, water_min=C_WATER))
+        with recorded_warnings() as record:
+            call(H)
+        said = [str(w.message) for w in record
+                if 'above the Nyquist' in str(w.message)]
+        assert said and all(m.startswith(f'{who}: frequencies reach 700 Hz')
+                            for m in said), said
+
     def test_short_window_warning_carries_the_entry_points_label(self):
         with recorded_warnings() as record:
             self._tf_c0_only_short_window().to_time_trace(
@@ -1083,6 +1106,46 @@ class TestARecordShorterThanTheWaveformIsRefused:
         with pytest.raises(ConfigurationError,
                            match=f"^{route}: .*folded onto itself"):
             calls[route]()
+
+
+@pytest.mark.requires_binary  # constructs the engines
+@pytest.mark.parametrize('engine', ['RAM', 'Kraken', 'Scooter'])
+def test_a_model_refuses_a_short_record_before_it_launches(monkeypatch,
+                                                           engine):
+    """``validate_inputs`` raises what ``run`` would raise before launching:
+    the record ``1/Δf`` of a TIME_SERIES grid and the pulse are both fixed
+    in stage 3, so an engine that synthesises its trace from the transfer
+    function on that grid refuses a record shorter than the pulse there
+    (``refuse_record_shorter_than_waveform``, the one rule), naming the
+    run, with nothing launched. 5 Hz steps hold 0.2 s; the Hann-tapered
+    tone lasts 0.498 s at 1 kHz."""
+    import uacpy.models as models
+    cls = getattr(models, engine)
+    launched = []
+    monkeypatch.setattr(cls, '_launch',
+                        lambda self, *a, **k: launched.append(1))
+    t = np.arange(500) / 1000.0
+    pulse = np.hanning(500) * np.sin(2 * np.pi * 100.0 * t)
+    env = uacpy.Environment(
+        bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                        sound_speed=1700.0, density=1.5,
+                                        attenuation=0.5))
+    call = (env, uacpy.Source(depths=30.0, frequencies=100.0),
+            uacpy.Receiver(depths=[30.0], ranges=[1000.0]))
+    kw = dict(run_mode=RunMode.TIME_SERIES, source_waveform=pulse,
+              sample_rate=1000.0, frequencies=np.arange(90.0, 111.0, 5.0))
+    for method in ('validate_inputs', 'run_settings', 'run'):
+        with pytest.raises(ConfigurationError,
+                           match=rf"^{engine}\.run: the 0\.2 s record "
+                                 rf"\(1/Δf, Δf = 5 Hz\) is shorter than the "
+                                 rf"0\.498 s source waveform"):
+            getattr(cls(verbose=False), method)(*call, **kw)
+    assert launched == []
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        cls(verbose=False).validate_inputs(
+            *call, **dict(kw, frequencies=np.arange(90.0, 111.0, 1.0)))
 
 
 class TestACircularRecordRingingAtItsEndWarns:
@@ -1531,7 +1594,7 @@ class TestSourceSpectrumAtArbitraryFrequencies:
         wf, fs = self._wf()
         grid = np.linspace(10.0, 900.0, 137)
         whole = spectrum_at.waveform_spectrum_at(wf, fs, grid)
-        monkeypatch.setattr(spectrum_at, '_SCRATCH_BLOCK_ELEMS', 1000)
+        monkeypatch.setattr(spectrum_at, '_BLOCK_ELEMENTS', 1000)
         np.testing.assert_allclose(
             spectrum_at.waveform_spectrum_at(wf, fs, grid), whole,
             rtol=1e-12, atol=1e-15)
@@ -1669,7 +1732,7 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
         assert _chirp_step(grid, wf.size, fs) is None
 
     def test_the_dense_fallback_chunks_over_frequency(self, monkeypatch):
-        # ``_SCRATCH_BLOCK_ELEMS`` bounds the phase matrix, and only the dense
+        # ``_BLOCK_ELEMENTS`` bounds the phase matrix, and only the dense
         # path builds one — so the block arithmetic is exercised on a grid the
         # contour cannot serve rather than on the uniform one above, where
         # both calls would take the chirp-z route and agree vacuously.
@@ -1677,7 +1740,7 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
         wf, fs = self._waveform(256), 2000.0
         grid = np.geomspace(20.0, 900.0, 137)
         whole = spectrum_at.waveform_spectrum_at(wf, fs, grid)
-        monkeypatch.setattr(spectrum_at, '_SCRATCH_BLOCK_ELEMS', 1000)
+        monkeypatch.setattr(spectrum_at, '_BLOCK_ELEMENTS', 1000)
         np.testing.assert_allclose(
             spectrum_at.waveform_spectrum_at(wf, fs, grid), whole,
             rtol=1e-13, atol=1e-16)
@@ -2464,6 +2527,44 @@ class TestBandEdgeRingingWarning:
         assert 'support, 0-681.152 Hz' in said
         assert "weights it by -34.5 dB at the spectrum's peak (199 Hz)" in said
 
+    @pytest.mark.parametrize('weighting, f_high, lost_dB', [
+        ('VHF', 4000.0, 1.49), ('HF', 4000.0, 0.34), (None, 4000.0, None),
+        ('LF', 4000.0, None), ('VHF', 24000.0, None)])
+    def test_a_weighted_exposure_warns_on_the_weighted_energy_it_loses(
+            self, weighting, f_high, lost_dB):
+        """The noise-impact recipe's strike, 100 m of free field: the band
+        to 4 kHz holds 99.97 % of the strike's energy but 71 % of its
+        VHF-weighted energy, which the VHF map integrates — read 1.49 dB
+        below the whole-record weighted SEL. The share a weighted map is
+        warned on is that weighted one; the unweighted and LF maps lose
+        under 0.1 dB, and the band to fs/2 loses nothing."""
+        from uacpy.acoustics import sound_exposure_level
+        fs = 48000.0
+        t = np.arange(int(0.1 * fs)) / fs
+        pulse = np.sin(2 * np.pi * 200.0 * t) * np.exp(-t / 0.015)
+        wf = pulse / np.sqrt(np.sum(pulse ** 2) / fs) * 1e-6 * 10 ** 10.75
+        f = np.arange(2.0, f_high, 2.0)
+        H = Field(data=(np.exp(-2j * np.pi * f * 100.0 / C_WATER) / 100.0
+                        ).reshape(1, 1, -1),
+                  coords={'depth': [10.0], 'range': [100.0], 'frequency': f},
+                  phase_reference=PhaseReference.TRAVELLING_WAVE,
+                  speeds=SoundSpeeds(water_max=C_WATER, water_min=C_WATER))
+        with recorded_warnings() as rec:
+            sel = H.sound_exposure_level(source_waveform=wf, sample_rate=fs,
+                                         weighting=weighting)
+        said = [str(w.message) for w in rec if 'band holds' in str(w.message)]
+        whole = float(sound_exposure_level(wf, fs, weighting=weighting)) - 40.0
+        if lost_dB is None:
+            assert said == []
+            assert float(np.ravel(sel.data)[0]) == pytest.approx(whole,
+                                                                 abs=0.1)
+        else:
+            (message,) = said
+            assert f"({-lost_dB:.2f} dB)" in message
+            assert f"{weighting}-weighted energy" in message
+            assert float(np.ravel(sel.data)[0]) == pytest.approx(
+                whole - lost_dB, abs=0.01)
+
 
 
 class TestEveryWaveformEntryPointAppliesTheOneRule:
@@ -2957,6 +3058,28 @@ class TestTheImpulseResponseOfEveryCell:
         np.testing.assert_allclose(ir.data, taps * 4000.0, rtol=0, atol=1e-12
                                    * np.max(np.abs(taps * 4000.0)))
 
+    def test_a_level_field_is_refused_by_every_synthesis(self):
+        # A dB field holds levels, not pressure: transformed, its decibels
+        # would be read as pressure. Every synthesis entry point refuses it,
+        # as broadband_loss and truncate_response do.
+        field, f, r = self._grid()
+        level = field.to_dB()
+        assert not level.is_complex and level.unit == 'dB'
+        wf = np.hanning(40)
+        calls = {
+            'impulse_response': lambda: level.impulse_response(4000.0),
+            'to_time_trace': lambda: level.to_time_trace(
+                range=1000.0, sample_rate=4000.0),
+            'synthesize_time_series': lambda: level.synthesize_time_series(
+                source_waveform=wf, sample_rate=4000.0),
+        }
+        for name, call in calls.items():
+            with pytest.raises(ConfigurationError,
+                               match=rf"^Field\.{name}: needs complex H\(f\)"):
+                call()
+        # the complex field it came from still synthesises
+        assert field.impulse_response(4000.0).data.shape == (1, 3, 2000)
+
     def test_a_band_window_tapers_H_before_the_taps(self):
         # window='hann' is the plain function on H times a Hann window over
         # the band, and not the untapered response.
@@ -3119,15 +3242,41 @@ class TestTheImpulseResponseOfEveryCell:
         with pytest.warns(UserWarning, match="slowest water speed"):
             slow.impulse_response(4000.0)
 
-    @pytest.mark.parametrize('rate, ok', [(4000.0, True), (4000.4, False)])
+    @pytest.mark.parametrize('rate, ok', [
+        (4000.0, True), (4000.0 * (1 + 0.9e-6), True),
+        (4000.0 * (1 + 1.1e-6), False), (4000.4, False)])
     def test_apply_takes_only_the_responses_own_rate(self, rate, ok):
+        # Equal rates are equal steps, to UNIFORM_STEP_RTOL (1e-6).
         field, f, r = self._grid()
         cell = field.impulse_response(4000.0).at(range=1000.0)
         if ok:
             cell.apply(source_waveform=np.hanning(10), sample_rate=rate)
         else:
-            with pytest.raises(ConfigurationError, match="one rate"):
+            with pytest.raises(ConfigurationError,
+                               match=r"sampled at 4000 Hz and the waveform at "
+                                     r".* Hz; a convolution needs both at "
+                                     r"one rate"):
                 cell.apply(source_waveform=np.hanning(10), sample_rate=rate)
+
+    @pytest.mark.parametrize('distance', [150e3, 1500e3, 5000e3])
+    def test_a_far_response_on_absolute_time_takes_its_own_rate(self,
+                                                                 distance):
+        """A response opening ~1000 s out: its first step carries the
+        rounding of the start time (1.7e-9 relative at 44.1 kHz), its span
+        does not. dt is the span's, and the rate it was built at plays."""
+        fs = 44100.0
+        f = np.arange(100.0, 201.0)
+        H = Field(data=np.exp(-2j * np.pi * f * (distance / self.C + 0.2))
+                  .reshape(1, 1, -1),
+                  coords={'depth': [50.0], 'range': [distance],
+                          'frequency': f},
+                  phase_reference=PhaseReference.TRAVELLING_WAVE,
+                  speeds=SoundSpeeds(water_max=self.C, water_min=self.C))
+        h = H.to_time_trace(sample_rate=fs)
+        assert h.times[0] > distance / self.C - 1.0
+        assert h.sample_rate == pytest.approx(fs, rel=1e-12)
+        received = h.apply(source_waveform=np.hanning(64), sample_rate=fs)
+        assert received.data.size == h.data.size + 63
 
     def test_apply_refuses_a_field_that_is_not_an_impulse_response(self):
         field, f, r = self._grid()

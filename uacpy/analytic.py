@@ -418,8 +418,8 @@ def pekeris(env, source, receiver):
                            form='hankel')
 
     return _assemble(pressure, source, receiver, backend='pekeris',
-                     extra={'sound_speed': c, 'bottom_sound_speed': c_b,
-                            'bottom_density': rho_b})
+                     extra={'sound_speed': c, 'seabed_sound_speed': c_b,
+                            'seabed_density': rho_b})
 
 
 def pekeris_modes(env, frequency, *, depths=None):

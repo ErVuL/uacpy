@@ -169,8 +169,9 @@ class TestRawOptionsVoidTypedKnobs:
     def test_oast_rejects_options_with_a_typed_flag(self):
         with pytest.raises(ConfigurationError, match="complex_contour"):
             OAST(options='N T', complex_contour=True)
-        with pytest.raises(ConfigurationError, match="compute_contour"):
-            OAST(options='N T', compute_contour=True)
+        with pytest.raises(ConfigurationError,
+                           match="compute_contour would be discarded"):
+            OAST(options='N T', compute_contour=False)
 
     @staticmethod
     def _resolved(model):
@@ -184,8 +185,7 @@ class TestRawOptionsVoidTypedKnobs:
         assert self._resolved(OAST()).options == 'K T J'
         assert self._resolved(OAST(complex_contour=False)).options == 'K T'
         assert self._resolved(OAST(
-            compute_contour=True,
-            compute_depth_average=True)).options == 'K T J C A'
+            compute_depth_average=True)).options == 'K T J A'
         assert self._resolved(OAST(options='N T')).options == 'N T'
 
     def test_oast_copy_round_trips_the_option_line(self):
@@ -529,8 +529,8 @@ class TestOASNSweepAndLevels:
                                   run_mode=RunMode.COVARIANCE):
             with recorded_warnings() as caught:
                 with pytest.raises(ConfigurationError,
-                                   match=r'source\.frequencies is not '
-                                         r'uniformly spaced'):
+                                   match=r'source\.frequencies vector is '
+                                         r'not equispaced'):
                     call()
             assert not [w for w in caught if 'resampled' in str(w.message)]
 
@@ -604,6 +604,51 @@ class TestTheDeckIsWrittenFromTheResolvedSettings:
         deck = (tmp_path / 'oast_run.dat').read_text().splitlines()
         assert f"{engine.c_low!r} {engine.c_high!r}" in deck
         assert engine.options in deck
+
+    @staticmethod
+    def _oasn_carriers():
+        return (make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
+                uacpy.Receiver(depths=[20.0, 50.0, 80.0], ranges=[0.0]))
+
+    def test_oasn_noise_blocks_are_the_settings_window_and_sheet(
+            self, tmp_path):
+        from uacpy.core.engine_defaults import default_c_low
+        model = OASN(verbose=False, surface_noise_level_dB=50.0,
+                     deep_noise_level_dB=40.0,
+                     discrete_sources=[dict(depth=30.0, x=2000.0,
+                                            level_dB=60.0)],
+                     work_dir=tmp_path)
+        carriers = self._oasn_carriers()
+        engine = _quiet_run(model.run_settings, *carriers,
+                            RunMode.COVARIANCE).engine
+        assert engine.c_low_origin == default_c_low(carriers[0])[1]
+        assert engine.c_high_origin == (
+            "1e8, OASES' no upper limit (oasn.tex:284-285, :479)")
+        assert engine.deep_source_depth == 50.0
+        _quiet_run(model.run, *carriers, RunMode.COVARIANCE)
+        deck = (tmp_path / 'oasn_run.dat').read_text().splitlines()
+        # Blocks VII (surface), VIII (deep) and IX (discrete sources).
+        assert deck.count(f"{engine.c_low!r} {engine.c_high!r}") == 3
+        assert f"{engine.deep_source_depth:.2f}" in deck
+
+    def test_oasn_replica_block_is_the_settings_grid(self, tmp_path):
+        model = OASN(verbose=False, c_high=5000.0, work_dir=tmp_path)
+        carriers = self._oasn_carriers()
+        engine = _quiet_run(model.run_settings, *carriers,
+                            RunMode.REPLICA).engine
+        assert (engine.replica_zmin, engine.replica_zmax,
+                engine.replica_xmin, engine.replica_xmax,
+                engine.replica_ymin, engine.replica_ymax) == (
+            10.0, 90.0, 100.0, 10000.0, 0.0, 0.0)
+        assert (engine.c_high, engine.c_high_origin) == (
+            5000.0, 'OASN(c_high=…)')
+        _quiet_run(model.run, *carriers, RunMode.REPLICA)
+        deck = (tmp_path / 'oasn_run.dat').read_text().splitlines()
+        assert (f"{engine.replica_zmin:.2f} {engine.replica_zmax:.2f} "
+                f"{engine.replica_nz}") in deck
+        assert (f"{engine.replica_xmin / 1e3:.9f} "
+                f"{engine.replica_xmax / 1e3:.9f} {engine.replica_nx}") in deck
+        assert f"{engine.c_low!r} {engine.c_high!r}" in deck
 
     def test_oasr_block_iv_is_the_settings_sweep(self, tmp_path):
         model = OASR(verbose=False, work_dir=tmp_path)

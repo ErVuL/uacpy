@@ -129,19 +129,24 @@ class Transmitter(SettingsRepr):
         sym = self.modulator.modulate(b)
         return np.concatenate([self.preamble, sym])
 
-    def to_passband(self, symbols, sample_rate, fc, sps=8, rolloff=0.25, span=8):
+    def to_passband(self, symbols, *, sample_rate, fc, sps=8, rolloff=0.25,
+                    span=8):
         """Pulse-shape and up-convert symbols to a real passband signal at ``fc``.
 
-        ``sps`` samples per symbol, root-raised-cosine ``rolloff`` and
+        ``sample_rate`` and ``fc`` are keyword-only, as on every function
+        that creates samples. ``sps`` samples per symbol, root-raised-cosine ``rolloff`` and
         ``span`` (symbols): defaults 8, 0.25 and 8, uacpy guidance;
         :meth:`CommsReceiver.from_passband` has the same defaults, so a pair
         left unset matches."""
         _require_passband_fits(sample_rate, fc, sps, rolloff, 'to_passband')
         return upconvert(pulse_shape(symbols, sps, rolloff, span), sample_rate, fc)
 
-    def transmit_passband(self, bits, sample_rate, fc, sps=8, rolloff=0.25, span=8):
-        """Information bits straight to real passband samples (one call)."""
-        return self.to_passband(self.transmit(bits), sample_rate, fc, sps, rolloff, span)
+    def transmit_passband(self, bits, *, sample_rate, fc, sps=8, rolloff=0.25,
+                          span=8):
+        """Information bits straight to real passband samples (one call);
+        the keywords are :meth:`to_passband`'s."""
+        return self.to_passband(self.transmit(bits), sample_rate=sample_rate,
+                                fc=fc, sps=sps, rolloff=rolloff, span=span)
 
 
 @dataclass(frozen=True, eq=False)
@@ -180,14 +185,23 @@ class ReceiverDiagnostics(ExportRecord):
         Index of the detected frame start in the record ``sync_metric``
         scores; ``None`` when no preamble was detected (decoding then ran
         from index 0, with a warning).
+    channel_estimate : ndarray or None
+        :class:`OFDMReceiver`: the channel response the payload was
+        equalised by, complex, one value per subcarrier (``n_subcarriers``,
+        indexed as :func:`~uacpy.comms.ofdm.subcarrier_response`) —
+        :func:`~uacpy.comms.ofdm.estimate_channel` of the frame's pilot
+        block after synchronisation and CFO removal. ``None`` for
+        :class:`CommsReceiver`.
     """
     bits: np.ndarray
     symbols: np.ndarray
     mse: Optional[np.ndarray]
     sync_metric: np.ndarray
     start: Optional[int]
+    channel_estimate: Optional[np.ndarray] = None
 
-    _ARRAY_FIELDS = ('bits', 'symbols', 'mse', 'sync_metric')
+    _ARRAY_FIELDS = ('bits', 'symbols', 'mse', 'sync_metric',
+                     'channel_estimate')
 
 
 class CommsReceiver(SettingsRepr):
@@ -300,12 +314,18 @@ class CommsReceiver(SettingsRepr):
         return bits
 
     def receive_passband(self, samples, sample_rate, fc, sps=8, rolloff=0.25, span=8,
-                         loop_bw=0.005, threshold=0.4, *,
+                         loop_bw=0.005, threshold=PREAMBLE_THRESHOLD, *,
                          return_diagnostics=False):
-        """Real passband samples straight to information bits (one call).
+        """Real passband samples straight to information bits (one call):
+        :meth:`from_passband`, then :meth:`receive`.
 
-        ``return_diagnostics`` is :meth:`receive`'s; the symbols it reports
-        are the timing-recovered symbols :meth:`from_passband` produced.
+        ``sps``, ``rolloff``, ``span`` and ``loop_bw`` are
+        :meth:`from_passband`'s; ``threshold`` and ``return_diagnostics``
+        are :meth:`receive`'s, with its default
+        :data:`~uacpy.comms.sync.PREAMBLE_THRESHOLD` (0.5, uacpy guidance),
+        so the one-call path detects the preamble by the same rule as the
+        two-call one. The symbols the diagnostics report are the
+        timing-recovered symbols :meth:`from_passband` produced.
         """
         syms = self.from_passband(samples, sample_rate, fc, sps, rolloff, span, loop_bw)
         return self.receive(syms, threshold=threshold,
@@ -324,7 +344,8 @@ class OFDMTransmitter(SettingsRepr):
         Subcarrier constellation (see
         :class:`~uacpy.comms.constellations.Modulator`).
     n_subcarriers, cp_len : int
-        FFT size and cyclic-prefix length.
+        FFT size and cyclic-prefix length. Default 256 and 32 (uacpy
+        guidance).
     code : ConvCode, optional
         FEC codec applied before mapping.
     """
@@ -353,10 +374,11 @@ class OFDMTransmitter(SettingsRepr):
         guard = np.zeros(nsc + self.cp_len, dtype=complex)   # protects the last block
         return np.concatenate([self.preamble, pilot] + data + [guard])
 
-    def to_passband(self, baseband, sample_rate, fc, oversample=4):
+    def to_passband(self, baseband, *, sample_rate, fc, oversample=4):
         """Up-convert a baseband OFDM frame to real passband at carrier ``fc``.
 
-        The baseband is interpolated by ``oversample`` so the OFDM band occupies
+        ``sample_rate`` and ``fc`` are keyword-only, as on every function
+        that creates samples. The baseband is interpolated by ``oversample`` so the OFDM band occupies
         ``sample_rate/oversample`` Hz around ``fc`` (leaving room in the passband and an
         image gap the receiver's decimation filter rejects).
         """
@@ -374,9 +396,11 @@ class OFDMTransmitter(SettingsRepr):
         up = resample_poly(baseband, factor, 1)
         return upconvert(up, sample_rate, fc)
 
-    def transmit_passband(self, bits, sample_rate, fc, oversample=4):
-        """Information bits straight to real passband samples (one call)."""
-        return self.to_passband(self.transmit(bits), sample_rate, fc, oversample)
+    def transmit_passband(self, bits, *, sample_rate, fc, oversample=4):
+        """Information bits straight to real passband samples (one call);
+        the keywords are :meth:`to_passband`'s."""
+        return self.to_passband(self.transmit(bits), sample_rate=sample_rate,
+                                fc=fc, oversample=oversample)
 
 
 class OFDMReceiver(SettingsRepr):
@@ -436,8 +460,9 @@ class OFDMReceiver(SettingsRepr):
         With ``return_diagnostics=True`` the return is a
         :class:`ReceiverDiagnostics` carrying the bits together with the
         equalised, phase-corrected data symbols, their squared decision
-        error, the Schmidl-Cox timing metric of ``baseband`` and the detected
-        start. The receiver does not know where the payload ends, so pass
+        error, the Schmidl-Cox timing metric of ``baseband``, the detected
+        start and the per-subcarrier channel estimate the symbols were
+        equalised by. The receiver does not know where the payload ends, so pass
         ``n_symbols`` — :meth:`payload_symbol_count` of the information bit
         count — to limit the diagnostics' ``symbols`` and ``mse`` to the data
         symbols the transmitter filled; left ``None`` they run over every
@@ -510,7 +535,7 @@ class OFDMReceiver(SettingsRepr):
                 bits=bits, symbols=syms, mse=np.abs(syms - slicer(syms, c)) ** 2,
                 sync_metric=schmidl_cox_metric(np.asarray(baseband, dtype=complex)
                                                .ravel(), nsc),
-                start=detected)
+                start=detected, channel_estimate=h)
         return bits
 
     def from_passband(self, samples, sample_rate, fc, oversample=4, doppler_scale=None,
@@ -518,11 +543,22 @@ class OFDMReceiver(SettingsRepr):
         """Resample for Doppler, down-convert, and decimate to a baseband frame.
 
         Estimates and removes the common Doppler scale by resampling the passband
-        (``doppler_scale=None`` estimates it from the known passband preamble),
+        (``doppler_scale=None`` estimates it from the known passband preamble,
+        over the ``scales`` grid of :func:`~uacpy.comms.estimate_doppler_scale`),
         then down-converts and decimates by ``oversample`` (the polyphase filter
-        rejects the image), leaving residual CFO for :meth:`receive`.
+        rejects the image), leaving residual CFO for :meth:`receive`. A given
+        ``doppler_scale`` is not estimated, so ``scales`` with it is refused.
         """
         from scipy.signal import resample_poly
+        if doppler_scale is not None and scales is not None:
+            raise ConfigurationError(
+                f"OFDMReceiver.from_passband: doppler_scale={doppler_scale!r} "
+                f"states the Doppler scale, and scales= is the grid an "
+                f"estimate of it searches; with the scale given nothing is "
+                f"estimated.",
+                remediation="Pass doppler_scale= to compensate a known scale, "
+                            "or scales= to estimate it over that grid, not "
+                            "both.")
         factor = int(oversample)
         pb = np.asarray(samples, dtype=float)
         if doppler_scale is None:

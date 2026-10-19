@@ -388,8 +388,7 @@ class TestCWT:
         t = np.arange(512) / FS
         x = (np.sin(2 * np.pi * 60 * t) * np.exp(-0.5 * ((t - 0.25) / 0.05) ** 2)
              + 0.4 * np.sin(2 * np.pi * 150 * t))
-        f, _, W = cwt(x, FS, wavelet=wavelet, n_frequencies=96)
-        xr = inverse_cwt(W, f, FS, wavelet=wavelet)
+        xr = inverse_cwt(cwt(x, FS, wavelet=wavelet, n_frequencies=96))
         # A 96-scale bank over a finite frequency span cannot resolve the
         # identity, and the cone of influence corrupts both ends of the record,
         # so 0.95 is a shape check across all three wavelets rather than a
@@ -398,10 +397,59 @@ class TestCWT:
         # interior only.
         assert np.corrcoef(x, xr)[0, 1] > 0.95
 
-    def test_icwt_bad_shape_raises(self):
+    def test_icwt_takes_the_cwt_result_whole(self):
+        """The result carries the rate and the wavelet settings the inverse
+        needs; bare coefficients are refused, and coefficients that no
+        longer match the frequencies after a ``_replace`` too."""
         with pytest.raises(ConfigurationError,
-                           match=r'W must be \(n_frequencies, n_time\)'):
-            inverse_cwt(np.zeros((3, 10)), np.array([1.0, 2.0]), FS)
+                           match=r'^inverse_cwt: takes the CWTResult cwt '
+                                 r'returned') as e:
+            inverse_cwt(np.zeros((3, 10)))
+        assert '_replace(coefficients=' in str(e.value)
+        r = cwt(np.random.default_rng(0).standard_normal(256), FS,
+                n_frequencies=8)
+        assert (r.sample_rate, r.wavelet, r.w0, r.order) == (
+            FS, 'morlet', 6.0, None)
+        with pytest.raises(ConfigurationError,
+                           match=r'coefficients must be \(\.\.\., '
+                                 r'n_frequencies, n_time\)'):
+            inverse_cwt(r._replace(coefficients=np.zeros((3, 10))))
+
+    def test_the_forward_settings_survive_every_save_form(self, tmp_path):
+        """The settings the inverse reads, including the ``None`` of the
+        shape setting the wavelet does not read, come back from dict,
+        xarray and netCDF, so a saved scalogram still inverts."""
+        xr = pytest.importorskip('xarray')
+        from uacpy.acoustic_signal import CWTResult
+        r = cwt(np.random.default_rng(0).standard_normal(256), FS,
+                wavelet='paul', n_frequencies=8)
+        r.to_netcdf(tmp_path / 'r.nc')
+        with xr.open_dataset(tmp_path / 'r.nc') as ds:
+            from_file = CWTResult.from_xarray(ds.load())
+        for back in (CWTResult.from_dict(r.to_dict()),
+                     CWTResult.from_xarray(r.to_xarray()), from_file):
+            assert (back.sample_rate, back.wavelet, back.w0, back.order) == (
+                FS, 'paul', None, 4)
+            np.testing.assert_allclose(inverse_cwt(back), inverse_cwt(r),
+                                       rtol=1e-12, atol=1e-15)
+
+    def test_icwt_reconstructs_every_channel(self):
+        """A multichannel cwt (channel axes first) goes back whole: each
+        channel is the 1-D inverse of that channel, channels first and time
+        last."""
+        rng = np.random.default_rng(3)
+        x = rng.standard_normal((2, 3, 512))
+        r = cwt(x, FS, wavelet='paul', n_frequencies=24)
+        assert r.order == 4 and r.w0 is None
+        back = inverse_cwt(r)
+        assert back.shape == (2, 3, 512)
+        for i in range(2):
+            for j in range(3):
+                np.testing.assert_allclose(
+                    back[i, j],
+                    inverse_cwt(cwt(x[i, j], FS, wavelet='paul',
+                                    n_frequencies=24)),
+                    rtol=1e-10, atol=1e-12)
 
     @pytest.mark.parametrize("wavelet,kw", [
         ("morlet", {"w0": 4.0}), ("morlet", {"w0": 6.0}), ("morlet", {"w0": 12.0}),
@@ -417,8 +465,7 @@ class TestCWT:
         t = np.arange(n) / FS
         x = (1.7 * np.sin(2 * np.pi * 450.0 * t)
              + 0.8 * np.sin(2 * np.pi * 1500.0 * t))
-        f, _, W = cwt(x, FS, wavelet=wavelet, n_frequencies=200, **kw)
-        xr = inverse_cwt(W, f, FS, wavelet=wavelet, **kw)
+        xr = inverse_cwt(cwt(x, FS, wavelet=wavelet, n_frequencies=200, **kw))
         mid = slice(n // 4, 3 * n // 4)      # outside the cone of influence
         assert np.std(xr[mid]) / np.std(x[mid]) == pytest.approx(1.0, rel=0.06)
 
@@ -449,9 +496,39 @@ class TestCWT:
     def test_icwt_odd_dog_order_raises(self, order):
         """An odd DOG is an odd function: psi0(0) = 0 and the eq.-11 inverse
         does not exist. Reject it instead of dividing by a pinned constant."""
-        f, _, W = cwt(np.zeros(512), FS, wavelet="dog", order=order, n_frequencies=16)
+        r = cwt(np.zeros(512), FS, wavelet="dog", order=order, n_frequencies=16)
         with pytest.raises(ConfigurationError, match='is an odd function'):
-            inverse_cwt(W, f, FS, wavelet="dog", order=order)
+            inverse_cwt(r)
+
+    @pytest.mark.parametrize("wavelet, unread, value", [
+        ("morlet", "order", 3), ("paul", "w0", 10.0), ("dog", "w0", 10.0)])
+    def test_a_setting_the_wavelet_does_not_read_gets_a_notice(
+            self, wavelet, unread, value):
+        """Morlet reads ``w0`` alone, Paul and DOG read ``order`` alone: a
+        given setting the wavelet does not read is named in a
+        FallbackWarning by both ``cwt`` and ``inverse_cwt``, and the
+        transform is the unset one, coefficient for coefficient. The
+        settings the wavelet reads, and unset ones, pass silently."""
+        from uacpy.core.exceptions import FallbackWarning
+        x = np.sin(2 * np.pi * 60 * np.arange(1024) / FS)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            base = cwt(x, FS, wavelet=wavelet, n_frequencies=16)
+            read = {"morlet": {"w0": 8.0}, "paul": {"order": 6},
+                    "dog": {"order": 4}}[wavelet]
+            cwt(x, FS, wavelet=wavelet, n_frequencies=16, **read)
+            x0 = inverse_cwt(base)
+        with pytest.warns(FallbackWarning,
+                          match=rf"^cwt: wavelet='{wavelet}' does not read "
+                                rf"{unread}= \(got {value!r}\)"):
+            got = cwt(x, FS, wavelet=wavelet, n_frequencies=16,
+                      **{unread: value})
+        np.testing.assert_array_equal(got.coefficients, base.coefficients)
+        with pytest.warns(FallbackWarning,
+                          match=rf"^inverse_cwt: wavelet='{wavelet}' does "
+                                rf"not read {unread}="):
+            back = inverse_cwt(base._replace(**{unread: value}))
+        np.testing.assert_array_equal(back, x0)
 
 
 class TestComplexCepstrumRemovesLinearPhase:
@@ -501,7 +578,7 @@ def test_spectrogram_matches_scipy():
     f, t, S = spectrogram(x, 48000.0)
     assert np.allclose(f, f0) and np.allclose(S, S0)
     fig, ax = plot_spectrogram(f, t, S)
-    assert ax.collections
+    assert ax.images
     plt.close(fig)
 
 
@@ -520,14 +597,16 @@ def test_timefreq_plots():
     assert ax.lines
     plt.close(fig)
 
-def test_even_array_freq_window_keeps_transform_real():
-    """An even-length array `freq_window` keeps its centre sample on-centre,
-    so acc(-tau) = conj(acc(tau)) holds and the imaginary part the transform
-    discards is pure rounding error."""
+def test_an_odd_window_keeps_the_transform_real_and_an_even_one_is_refused():
+    """An odd window centred on its middle sample keeps acc(-tau) =
+    conj(acc(tau)), so the imaginary part the transform discards is pure
+    rounding error. An even-length window has no centre sample: it is
+    refused, naming the odd lengths to pass, rather than rewritten."""
     fs = 1000.0
     x = np.sin(2 * np.pi * 100 * np.arange(256) / fs)
     even = _get_window("hann", 4, fftbins=False)
-    hv, Lh = _smoothing_window(even, "freq_window")
+    odd = np.delete(even, even.size // 2)
+    hv, Lh = _smoothing_window(odd, "freq_window")
     assert hv.size % 2 == 1
     np.testing.assert_allclose(hv, hv[::-1])
     # Measure the imaginary part wigner_ville's `.real` discards by rebuilding
@@ -545,11 +624,39 @@ def test_even_array_freq_window_keeps_transform_real():
         num += np.sum(np.imag(F) ** 2)
         den += np.sum(np.real(F) ** 2)
     assert np.sqrt(num / den) < 1e-12
-    # And the public API accepts the even array, matching the explicit
-    # centre-deleted odd window.
-    Wa = wigner_ville(x, fs, lag_smoothing=even)
-    Wb = wigner_ville(x, fs, lag_smoothing=np.delete(even, even.size // 2))
-    np.testing.assert_allclose(Wa.distribution, Wb.distribution)
+    for name in ("lag_smoothing", "time_smoothing"):
+        with pytest.raises(ConfigurationError,
+                           match=rf"^wigner_ville: {name} is 4 samples long, "
+                                 r"an even length") as caught:
+            wigner_ville(x, fs, **{name: even})
+        assert "Pass a window of 3 or 5 samples" in str(caught.value)
+        with pytest.raises(ConfigurationError,
+                           match=rf"^wigner_ville: {name} is 6 samples long"):
+            wigner_ville(x, fs, **{name: 6})
+    assert wigner_ville(x, fs, lag_smoothing=odd).distribution.shape == (256,
+                                                                         256)
+
+
+def test_analytic_on_complex_data_gets_a_notice():
+    """``analytic`` says how a REAL record is formed; on complex data it is
+    not read, so a given one is named in a FallbackWarning and the result is
+    the unset one. Unset, or on real data, the call is silent."""
+    from uacpy.core.exceptions import FallbackWarning
+    fs = 1000.0
+    x = np.sin(2 * np.pi * 100 * np.arange(128) / fs)
+    z = analytic_signal(x)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        base = wigner_ville(z, fs)
+        wigner_ville(x, fs, analytic=False)
+        assert np.array_equal(wigner_ville(x, fs, analytic=True).distribution,
+                              wigner_ville(x, fs).distribution)
+    for value in (True, False):
+        with pytest.warns(FallbackWarning,
+                          match=rf"^wigner_ville: analytic={value} chooses "
+                                r"how a REAL record is formed"):
+            got = wigner_ville(z, fs, analytic=value)
+        np.testing.assert_array_equal(got.distribution, base.distribution)
 
 
 def test_smoothed_pseudo_wvd_matches_per_lag_reference():
@@ -607,14 +714,29 @@ def test_analytic_signal_and_cepstrum_reject_complex_input():
         cepstrum(xc)
 
 
-def test_spectrogram_passes_scipy_nperseg_clamp_warning_through():
-    """A 512-sample signal against the default nperseg=8192: scipy clamps
-    nperseg to the input length, its UserWarning reaches the caller, and the
-    result is a single frame."""
+@pytest.mark.parametrize('name', ['spectrogram', 'stft'])
+def test_the_short_time_segment_is_welchs(name):
+    """``nperseg`` is resolved as on ``welch``: unset, a 512-sample record
+    shorter than the 8192-sample default is one whole-record segment with no
+    warning (scipy's clamp warning never reaches the caller); an array window
+    is the segment; a given ``nperseg`` longer than the record is refused by
+    name rather than clamped by scipy."""
+    import inspect
+    import uacpy.acoustic_signal as sig
+    transform = getattr(sig, name)
+    assert inspect.signature(transform).parameters['nperseg'].default is None
     x = np.sin(2 * np.pi * 50 * np.arange(512) / 1000.0)
-    with pytest.warns(UserWarning, match="nperseg"):
-        r = spectrogram(x, 1000.0)
-    assert r.times.size == 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        r = transform(x, 1000.0)
+        tapered = transform(x, 1000.0, window=np.hanning(128))
+    assert r.times.size == 1 and r.frequencies.size == 257
+    assert tapered.frequencies.size == 65 and tapered.times.size == 7
+    assert transform(x, 1000.0, nperseg=512).times.size == 1
+    with pytest.raises(ConfigurationError,
+                       match=rf"^{name}: nperseg=513 is longer than the "
+                             r"record \(512 samples\)"):
+        transform(x, 1000.0, nperseg=513)
 
 
 def test_two_tone_instantaneous_frequency_is_the_mean():
@@ -649,15 +771,15 @@ def test_inverse_cwt_warns_off_log2_uniform_scale_grid():
     x = np.sin(2 * np.pi * 50 * np.arange(2048) / fs)
     lin = cwt(x, fs, np.linspace(10, 400, 64))
     with pytest.warns(UserWarning, match="log2"):
-        inverse_cwt(lin.coefficients, lin.frequencies, fs)
+        inverse_cwt(lin)
     single = cwt(x, fs, np.array([50.0]))
     with pytest.warns(UserWarning, match="single scale"):
-        inverse_cwt(single.coefficients, single.frequencies, fs)
+        inverse_cwt(single)
     # cwt's default log-spaced grid reconstructs silently at the right level.
     log = cwt(x, fs)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        xr = inverse_cwt(log.coefficients, log.frequencies, fs)
+        xr = inverse_cwt(log)
     mid = slice(256, 1792)
     assert abs(np.std(xr[mid]) / np.std(x[mid]) - 1.0) < 0.05
 
@@ -678,32 +800,37 @@ class TestTheCepstrumDelayIsTheDelay:
 def test_spectrogram_overlaps_half_a_segment_by_default():
     """``noverlap=None`` is ``nperseg // 2`` — welch's overlap, so the frame
     average of a spectrogram is the welch estimate of the same record — and
-    a record shorter than ``nperseg`` clamps first and does not raise."""
+    on a record shorter than the default segment it is the overlap of the
+    whole-record segment, so the call does not raise."""
     x = np.random.default_rng(1).standard_normal(8192)
     sg = spectrogram(x, 1000.0, nperseg=1024)
     assert sg.times.size == (8192 - 1024) // 512 + 1
     from uacpy.acoustic_signal import welch
     est = welch(x, 1000.0, nperseg=1024)
     np.testing.assert_allclose(sg.power.mean(axis=-1), est.power, rtol=1e-12)
-    short = spectrogram(x[:300], 1000.0, nperseg=1024)
-    assert short.times.size == 1
+    short = spectrogram(x[:300], 1000.0)
+    assert short.times.size == 1 and short.frequencies.size == 151
 
 
 class TestWignerSmoothingWindowConstruction:
-    """Both paths return an odd, symmetric, centre-peaked window: scalar
-    even L generates hann(L-1); an even user array loses its centre
-    sample. No smoothing is ``(None, 0)``."""
+    """Both paths return an odd, symmetric, centre-peaked window: an odd
+    scalar L generates hann(L), an odd array is used as given, and an even
+    length on either path is refused. No smoothing is ``(None, 0)``."""
 
     def test_none_is_no_smoothing(self):
         from uacpy.acoustic_signal.timefreq import _smoothing_window
         assert _smoothing_window(None, "time") == (None, 0)
 
-    def test_even_scalar_generates_length_l_minus_1(self):
+    def test_an_odd_scalar_generates_that_length_and_an_even_one_is_refused(
+            self):
         from uacpy.acoustic_signal.timefreq import _smoothing_window
-        w, half = _smoothing_window(6, "time")
+        w, half = _smoothing_window(5, "time")
         assert w.size == 5 and half == 2
         np.testing.assert_allclose(w, w[::-1], rtol=0)
         assert w.argmax() == half
+        with pytest.raises(ConfigurationError,
+                           match=r"time is 6 samples long, an even length"):
+            _smoothing_window(6, "time")
 
     def test_length_one_scalar_is_legal_zero_is_not(self):
         from uacpy.acoustic_signal.timefreq import _smoothing_window
@@ -712,14 +839,18 @@ class TestWignerSmoothingWindowConstruction:
         with pytest.raises(ConfigurationError, match=">= 1"):
             _smoothing_window(0, "time")
 
-    def test_even_array_loses_its_centre_sample(self):
+    @pytest.mark.parametrize("n", [6, 8])
+    def test_an_even_array_is_refused_not_rewritten(self, n):
         import scipy.signal as _sig
         from uacpy.acoustic_signal.timefreq import _smoothing_window
-        w6 = _sig.get_window("hann", 6, fftbins=False)
-        w, half = _smoothing_window(w6, "time")
-        assert w.size == 5 and half == 2
-        np.testing.assert_allclose(w, w[::-1], rtol=0, atol=1e-15)
-        assert w.argmax() == half
+        even = _sig.get_window("hann", n, fftbins=False)
+        with pytest.raises(ConfigurationError,
+                           match=rf"time is {n} samples long, an even "
+                                 rf"length") as caught:
+            _smoothing_window(even, "time")
+        assert "np.delete(w, w.size // 2)" in str(caught.value)
+        w, half = _smoothing_window(np.delete(even, n // 2), "time")
+        assert w.size == n - 1 and half == n // 2 - 1
 
     def test_two_dimensional_array_raises(self):
         from uacpy.acoustic_signal.timefreq import _smoothing_window
@@ -804,21 +935,6 @@ class TestWignerSmoothingWindowSingleSampleArray:
         from uacpy.acoustic_signal.timefreq import _smoothing_window
         w, half = _smoothing_window(np.array([0.7]), "time")
         assert w.size == 1 and half == 0
-
-
-class TestWignerSmoothingWindowDeletesTheTrueCentre:
-    """hann(8)'s two equal middles sit at indices 3 and 4: the deletion
-    must take one of them, keeping the peak on-centre (hann(6) cannot
-    discriminate — its index 6//3 = 2 is the other equal middle)."""
-
-    def test_even_eight_array(self):
-        import scipy.signal as _sig
-        from uacpy.acoustic_signal.timefreq import _smoothing_window
-        w8 = _sig.get_window("hann", 8, fftbins=False)
-        w, half = _smoothing_window(w8, "time")
-        assert w.size == 7 and half == 3
-        np.testing.assert_allclose(w, w[::-1], rtol=0, atol=1e-15)
-        assert w.argmax() == half
 
 
 class TestTheTimeFrequencyResultsCarryTheirAxes:

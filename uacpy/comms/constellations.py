@@ -290,7 +290,8 @@ def _whole_samples_per_symbol(who, duration, sample_rate) -> int:
     return n
 
 
-def fsk_modulate(bits, frequencies, symbol_duration: float, sample_rate: float):
+def fsk_modulate(bits, frequencies, symbol_duration: float, *,
+                 sample_rate: float):
     """Binary/M-FSK waveform: each symbol is a tone from ``frequencies``.
 
     ``len(frequencies)`` must be a power of two (M-ary). Returns the real passband
@@ -304,8 +305,9 @@ def fsk_modulate(bits, frequencies, symbol_duration: float, sample_rate: float):
         The M tone frequencies (Hz), M a power of two, below Nyquist.
     symbol_duration : float
         Symbol duration (s).
-    sample_rate : float
-        Sample rate (Hz).
+    sample_rate : float, keyword-only
+        Sample rate (Hz) of the waveform made, keyword-only as on every
+        function that creates samples.
     """
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     M = f.size

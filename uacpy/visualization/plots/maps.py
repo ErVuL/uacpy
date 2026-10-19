@@ -12,19 +12,16 @@ import matplotlib.ticker as _mticker
 from typing import Optional, Sequence, Tuple
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.geo import EARTH_RADIUS
 from uacpy.core.units import km_to_m
 from uacpy.visualization.style import SOURCE_MARKER_STYLE
-from uacpy.visualization.plots._common import _cell_edge_extent, _credit_attributions, _default_value, _draw_credit, _draw_sea_ice, _model_attribution, _refuse_axes_after_carrier, _value_label, typed_plot_error, _title_or
+from uacpy.visualization.plots._common import _cell_edge_extent, _colorbar_extend, _credit_attributions, _credit_held, _default_value, _draw_credit, _draw_sea_ice, _model_attribution, _refuse_axes_after_carrier, _value_label, typed_plot_error, _title_or
 # plot_overview composes a map panel with the TL field and the environment
 # cross-section, so it reaches across to those plotters.
 from uacpy.visualization.plots.fields import (plot_field, _draw_contours,
-                                              _colorbar_extend,
                                               _drawn_levels, _value_mesh)
 from uacpy.visualization.plots.environment import plot_environment
 
-
-#: Hemispheres of the NSIDC polar-stereographic sea-ice grid.
-_SEA_ICE_HEMISPHERES = ('N', 'S')
 
 #: Sea-ice map zoom window, in grid pixels (see ``plot_sea_ice_map``).
 _ZOOM_MIN_SPAN_PX = 6.0
@@ -164,7 +161,7 @@ def plot_bathymetry_map(
     figsize: Tuple[float, float] = (9, 7.5),
     title: Optional[str] = None,
     aspect=None,
-    source=None,
+    source_point=None,
     show_data_credit=True,
     show_colorbar: bool = True,
 ):
@@ -196,10 +193,11 @@ def plot_bathymetry_map(
     equirectangular correction (``1/cos(lat)``); pass a number (e.g. ``1`` for
     equal degree-per-unit scaling) or any Matplotlib aspect value.
 
-    ``show_data_credit`` adds a licence-required data-source credit footnote for a
-    standalone figure (``ax=None``). ``True`` (the default) credits a
-    ``BathyGrid``'s own ``provenance``; bare arrays carry none, so with them
-    pass an ``Environment`` / ``Result`` / list of ``DataSource`` / strings.
+    ``show_data_credit`` adds a licence-required data-source credit to the
+    footnote of the figure the map is drawn in (its own, or the one ``ax``
+    belongs to). ``True`` (the default) credits a ``BathyGrid``'s own
+    ``provenance``; bare arrays carry none, so with them pass an
+    ``Environment`` / ``Result`` / list of ``DataSource`` / strings.
 
     Returns ``(fig, ax)``.
 
@@ -237,10 +235,10 @@ def plot_bathymetry_map(
         Axes title. ``None`` draws the default caption; ``''`` draws none.
     aspect : float or str, optional
         Axes aspect (see above); ``None`` is the equirectangular correction.
-    source : (lat, lon), optional
+    source_point : (lat, lon), optional
         Mark the source.
     show_data_credit : bool, Environment, Result or sequence, optional
-        The data-source credit footnote of a standalone figure (see above).
+        The data-source credit of the figure's footnote (see above).
     show_colorbar : bool, optional
         Draw the water-depth colorbar. Default True.
     """
@@ -358,20 +356,21 @@ def plot_bathymetry_map(
         # 'best' keeps the legend off the transect line and its end markers;
         # 'upper left' sits on the start marker of a transect from that corner.
         ax.legend(loc='best')
-    if source is not None:
-        s_lat, s_lon = source
+    if source_point is not None:
+        s_lat, s_lon = source_point
         sp = proj(s_lat, s_lon)
         ax.plot(sp[0], sp[1], zorder=7, **SOURCE_MARKER_STYLE)
 
     if show_colorbar:
-        fig.colorbar(pc, ax=ax, label="Water depth (m)")
+        _map_colorbar(fig, ax, pc, "Water depth (m)")
     ax.set_title(_title_or(title, "Bathymetry"), fontsize='large', fontweight='bold')
+    _draw_credit(fig, _credit_attributions(
+        [provenance] if show_data_credit is True and provenance is not None
+        else show_data_credit), reserve=not own_fig)
     if own_fig:
-        credit = _credit_attributions(
-            [provenance] if show_data_credit is True and provenance is not None
-            else show_data_credit)
-        fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
-        _draw_credit(fig, credit, reserve=False)
+        # The credit is the figure's supxlabel, which tight_layout lays out
+        # with the panels.
+        fig.tight_layout()
     return fig, ax
 
 
@@ -403,7 +402,7 @@ def plot_overview(
     the corresponding uacpy plotter via its ``ax=`` argument.
 
     The left map is **pluggable** via ``map_fn`` — any plotter with a
-    ``(data, ax=, transect=, source=, title=, **map_kwargs)`` interface, such
+    ``(data, ax=, transect=, source_point=, title=, **map_kwargs)`` interface, such
     as :func:`plot_sea_ice_map`; the default draws a
     :class:`~uacpy.data.BathyGrid` with :func:`plot_bathymetry_map`.
 
@@ -411,29 +410,32 @@ def plot_overview(
     ----------
     env : Environment
         The (typically range-dependent) environment for the env panel.
-    map_data : BathyGrid or ndarray
+    map_data : BathyGrid or SeaIceGrid
         The map's data, handed to ``map_fn``. The default bathymetry map takes
         the :class:`~uacpy.data.BathyGrid` :func:`uacpy.data.fetch_bathy_grid`
         returns; for arrays of your own, build ``BathyGrid(lats=..., lons=...,
-        depths=...)`` first. ``map_fn=plot_sea_ice_map`` takes the sea-ice
-        array (:func:`uacpy.data.sea_ice_grid`). A tuple or list is refused.
+        depths=...)`` first. ``map_fn=plot_sea_ice_map`` takes the
+        :class:`~uacpy.data.SeaIceGrid` :func:`uacpy.data.sea_ice_grid`
+        returns. A tuple or list is refused.
     map_fn : callable, optional
         Left-panel plotter; defaults to :func:`plot_bathymetry_map`. Map-specific
-        options (``contours``, ``aspect``, ``hemi``, …) go in ``map_kwargs``.
+        options (``contours``, ``aspect``, ``zoom``, …) go in ``map_kwargs``.
     transect : ((latA, lonA), (latB, lonB)), optional
         Drawn on the map (the env/TL transect).
     tl : Field, optional
         A transmission-loss result; if ``None`` the TL panel is left blank.
-    source, receiver : optional
-        Marked on the environment panel (and the source on the TL panel).
+    source, receiver : Source, Receiver, optional
+        The run's carriers, marked on the environment panel (and the source
+        on the TL panel). The map marks the transect start, not ``source``;
+        the map plotters' own ``source_point=`` is a ``(lat, lon)`` pair.
     map_title, tl_title, env_title : str, optional
         Per-panel titles.
     title : str, optional
         Figure-level title over all three panels.
     show_data_credit : default ``True``
         Data-source credit shown as a footnote under the map. ``True`` uses
-        ``env.data_sources`` and the provenance of a ``BathyGrid``
-        ``map_data``; ``None`` / ``False`` hides it; or pass an explicit
+        ``env.data_sources`` and the provenance of the ``BathyGrid`` or
+        ``SeaIceGrid`` ``map_data``; ``None`` / ``False`` hides it; or pass an explicit
         ``Environment`` / ``Result`` / list of ``DataSource`` / strings. See
         :func:`plot_environment` for the same argument on a single panel.
     sea_ice : optional
@@ -452,11 +454,12 @@ def plot_overview(
         Size of the new figure, ``(15.5, 5.2)`` by default.
     fig : Figure or SubFigure, optional
         Draw the three panels into this (a panel of a larger figure) instead
-        of a new figure. Its size, layout and credit line are then the
-        caller's, so ``figsize=`` alongside it is refused and no footnote is
-        drawn.
+        of a new figure. Its size and layout are then the caller's, so
+        ``figsize=`` alongside it is refused, and the credit joins that
+        figure's footnote.
 
-    Returns ``(fig, (ax_map, ax_tl, ax_env))``.
+    Returns ``fig`` and the ``(ax_map, ax_tl, ax_env)`` panels as a numpy
+    array of Axes (``fig, (ax_map, ax_tl, ax_env) = ...`` unpacks it).
     """
     owns_fig = fig is None
     if owns_fig:
@@ -470,60 +473,63 @@ def plot_overview(
     ax_tl = fig.add_subplot(gs[0, 1])
     ax_env = fig.add_subplot(gs[1, 1])
 
-    # Left panel: any map drawer with a (transect, source, title, ax) interface —
-    # e.g. plot_bathymetry_map (default) or plot_sea_ice_map. The geographic
-    # source sits at the transect start.
-    geo_source = transect[0] if transect is not None else None
-    (map_fn or plot_bathymetry_map)(
-        *_map_positional_args(map_data, map_fn), ax=ax_map,
-        transect=transect, source=geo_source,
-        title=map_title, **(map_kwargs or {}))
+    # The panels are drawn by the single-panel plotters; the figure is
+    # credited once below, by this composite's own show_data_credit.
+    with _credit_held(fig):
+        # Left panel: any map drawer with a (transect, source_point, title,
+        # ax) interface — e.g. plot_bathymetry_map (default) or
+        # plot_sea_ice_map. The geographic source sits at the transect start.
+        geo_source = transect[0] if transect is not None else None
+        (map_fn or plot_bathymetry_map)(
+            *_map_positional_args(map_data, map_fn), ax=ax_map,
+            transect=transect, source_point=geo_source,
+            title=map_title, **(map_kwargs or {}))
 
-    if tl is not None:
-        # Suppress plot_field's width-stealing fig.colorbar(fraction=) and draw
-        # the TL colorbar as an inset instead, mirroring the env panel's inset
-        # cp bars. A stealing colorbar shrinks only ax_tl, leaving the two
-        # right-column panels unequal; an inset bar steals no axes width, so
-        # both panels keep the full gridspec cell and line up.
-        tl_kw = dict(tl_kwargs or {})
-        # The TL bar is this composite's inset, so tl_kwargs' show_colorbar
-        # decides that inset rather than reaching plot_field.
-        show_tl_colorbar = tl_kw.pop('show_colorbar', None)
-        # Only the source is marked here: the TL heatmap's cells ARE the
-        # receiver grid, so receiver dots would repeat the field's own
-        # sampling over it. The environment panel below carries them.
-        plot_field(tl, ax=ax_tl, env=env, source=source,
-                   title=tl_title, show_colorbar=False, **tl_kw)
-        tl_mappable = _value_mesh(ax_tl)
-        if tl_mappable is not None and show_tl_colorbar is not False:
-            tl_cax = ax_tl.inset_axes((1.04, 0.0, 0.03, 1.0))
-            # The bar annotates whatever view tl_kwargs asked plot_field
-            # for, so it is labelled from the field and that view — a
-            # hardcoded 'TL (dB)' would caption linear |p| as a loss in dB.
-            tl_value = tl_kw.get('value') or _default_value(tl)
-            fig.colorbar(
-                tl_mappable, cax=tl_cax, label=_value_label(tl, tl_value),
-                extend=_colorbar_extend(
-                    _drawn_levels(tl, tl_value, who='plot_overview'),
-                    tl_mappable.get_clim()))
-        if sea_ice is not None:
-            _draw_sea_ice(ax_tl, sea_ice)
-    else:
-        ax_tl.text(0.5, 0.5, "no TL result", ha='center', va='center',
-                   transform=ax_tl.transAxes)
-        ax_tl.set_xticks([])
-        ax_tl.set_yticks([])
+        if tl is not None:
+            # Suppress plot_field's width-stealing fig.colorbar(fraction=) and draw
+            # the TL colorbar as an inset instead, mirroring the env panel's inset
+            # cp bars. A stealing colorbar shrinks only ax_tl, leaving the two
+            # right-column panels unequal; an inset bar steals no axes width, so
+            # both panels keep the full gridspec cell and line up.
+            tl_kw = dict(tl_kwargs or {})
+            # The TL bar is this composite's inset, so tl_kwargs' show_colorbar
+            # decides that inset rather than reaching plot_field.
+            show_tl_colorbar = tl_kw.pop('show_colorbar', None)
+            # Only the source is marked here: the TL heatmap's cells ARE the
+            # receiver grid, so receiver dots would repeat the field's own
+            # sampling over it. The environment panel below carries them.
+            plot_field(tl, ax=ax_tl, env=env, source=source,
+                       title=tl_title, show_colorbar=False, **tl_kw)
+            tl_mappable = _value_mesh(ax_tl)
+            if tl_mappable is not None and show_tl_colorbar is not False:
+                tl_cax = ax_tl.inset_axes((1.04, 0.0, 0.03, 1.0))
+                # The bar annotates whatever view tl_kwargs asked plot_field
+                # for, so it is labelled from the field and that view — a
+                # hardcoded 'TL (dB)' would caption linear |p| as a loss in dB.
+                tl_value = tl_kw.get('value') or _default_value(tl)
+                fig.colorbar(
+                    tl_mappable, cax=tl_cax, label=_value_label(tl, tl_value),
+                    extend=_colorbar_extend(
+                        _drawn_levels(tl, tl_value, who='plot_overview'),
+                        tl_mappable.get_clim()))
+            if sea_ice is not None:
+                _draw_sea_ice(ax_tl, sea_ice)
+        else:
+            ax_tl.text(0.5, 0.5, "no TL result", ha='center', va='center',
+                       transform=ax_tl.transAxes)
+            ax_tl.set_xticks([])
+            ax_tl.set_yticks([])
 
-    # The environment panel paints out to the furthest range it knows; a
-    # range-independent environment without ``receiver=`` knows none, so it
-    # is handed the TL panel's right limit — the far edge of its last painted
-    # cell — the x limit it is synced to below.
-    plot_environment(env, ax=ax_env, source=source, receiver=receiver,
-                    show_bottom_colorbar=True, sea_ice=sea_ice,
-                    x_max=(km_to_m(max(ax_tl.get_xlim()))
-                           if tl is not None and 'range' in tl.coords
-                           else None))
-    ax_env.set_title(env_title)
+        # The environment panel paints out to the furthest range it knows; a
+        # range-independent environment without ``receiver=`` knows none, so it
+        # is handed the TL panel's right limit — the far edge of its last painted
+        # cell — the x limit it is synced to below.
+        plot_environment(env, ax=ax_env, source=source, receiver=receiver,
+                        show_bottom_colorbar=True, sea_ice=sea_ice,
+                        x_max=(km_to_m(max(ax_tl.get_xlim()))
+                               if tl is not None and 'range' in tl.coords
+                               else None))
+        ax_env.set_title(env_title)
 
     # Both right-column panels keep their full gridspec cell — neither
     # colorbar steals axes width (the TL bar is the inset above; the env cp
@@ -533,19 +539,15 @@ def plot_overview(
     if tl is not None:
         ax_env.set_xlim(ax_tl.get_xlim())
 
-    if owns_fig:
-        credit = _credit_attributions(show_data_credit, carrier=env)
-        map_provenance = getattr(map_data, 'provenance', None)
-        if show_data_credit is True and map_provenance is not None:
-            credit += [a for a in _credit_attributions([map_provenance])
-                       if a not in credit]
-        _draw_credit(fig, credit,
-                     model=_model_attribution(tl) if tl is not None else None,
-                     center_ax=ax_map)
+    credit = _credit_attributions(show_data_credit, carrier=env)
+    map_provenance = getattr(map_data, 'provenance', None)
+    if show_data_credit is True and map_provenance is not None:
+        credit += _credit_attributions([map_provenance])
+    _draw_credit(fig, credit, model=_model_attribution(tl), center_ax=ax_map)
 
     if title:
         fig.suptitle(title, fontsize='large', fontweight='bold')
-    return fig, (ax_map, ax_tl, ax_env)
+    return fig, np.array([ax_map, ax_tl, ax_env], dtype=object)
 
 
 def _map_positional_args(map_data, map_fn) -> tuple:
@@ -559,8 +561,8 @@ def _map_positional_args(map_data, map_fn) -> tuple:
             f"takes a record, not loose arrays.",
             remediation="Pass the BathyGrid fetch_bathy_grid returns, or "
                         "build BathyGrid(lats=, lons=, depths=) from your "
-                        "arrays; pass the sea-ice array itself with "
-                        "map_fn=plot_sea_ice_map.")
+                        "arrays; pass the SeaIceGrid sea_ice_grid "
+                        "returns with map_fn=plot_sea_ice_map.")
     if map_fn is not None:
         return (map_data,)
     if not isinstance(map_data, BathyGrid):
@@ -574,8 +576,8 @@ def _map_positional_args(map_data, map_fn) -> tuple:
 
 
 @typed_plot_error
-def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
-                     source=None, cmap='Blues_r', graticule: float = 5.0,
+def plot_sea_ice_map(grid, ax=None, *, transect=None,
+                     source_point=None, cmap='Blues_r', graticule: float = 5.0,
                      zoom: bool = True,
                      concentration_label='Sea-ice concentration (fraction)',
                      contours: Optional[Sequence[float]] = None,
@@ -584,32 +586,36 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
                      show_data_credit=True, show_colorbar: bool = True):
     """Plot a sea-ice concentration grid (0–1, ``NaN`` = land) as a polar map.
 
-    The sibling of :func:`plot_bathymetry_map` for sea ice: ``grid`` is a 2-D
-    concentration array on the NSIDC polar-stereographic grid (e.g.
-    ``uacpy.data.sea_ice_grid(month, hemi='N')``); ice maps to white, open water
+    The sibling of :func:`plot_bathymetry_map` for sea ice: ``grid`` is the
+    :class:`~uacpy.data.SeaIceGrid` ``uacpy.data.sea_ice_grid(month, hemi=...)``
+    returns, whose hemisphere places the graticule, the overlays and the zoom
+    on its NSIDC polar-stereographic cells; ice maps to white, open water
     to blue, land (``NaN``) to a neutral fill. ``transect`` (``((latA, lonA),
-    (latB, lonB))``) and ``source`` (``(lat, lon)``) are given in **lon/lat** and
+    (latB, lonB))``) and ``source_point`` (``(lat, lon)``) are given in **lon/lat** and
     drawn with the *same* crimson A→B line and source-star notation as the depth
-    map (reprojected to the grid via ``hemi``). With ``zoom`` (default) the view
+    map (reprojected onto the grid's cells). With ``zoom`` (default) the view
     is framed to a **regional window** around the transect/source — filling the
     panel like the depth map — instead of the whole hemisphere. Pass ``ax=`` to
-    compose. ``hemi`` is ``'N'`` or ``'S'``.
+    compose.
 
-    ``show_data_credit`` adds the licence-required data-source credit footnote for
-    a standalone figure (``ax=None``), as :func:`plot_bathymetry_map` does:
-    ``True`` (default) credits the NSIDC sea-ice product the grid comes from,
-    ``None`` / ``False`` hides it, or pass an ``Environment`` / list of
-    ``DataSource`` / strings. Returns ``(fig, ax)``.
+    ``show_data_credit`` adds the licence-required data-source credit to the
+    footnote of the figure the map is drawn in, as :func:`plot_bathymetry_map`
+    does:
+    ``True`` (default) credits the grid's ``provenance`` (the NSIDC sea-ice
+    climatology for :func:`~uacpy.data.sea_ice_grid`; a grid built with
+    ``provenance=None`` carries none), ``None`` / ``False`` hides it, or pass
+    an ``Environment`` / list of ``DataSource`` / strings. Returns
+    ``(fig, ax)``.
 
     Parameters
     ----------
-    grid : ndarray
-        Concentration on the NSIDC polar grid (0-1, ``NaN`` is land).
-    hemi : {'N', 'S'}, optional
-        Hemisphere of the grid. Default ``'N'``.
+    grid : SeaIceGrid
+        The concentration grid with its hemisphere; for an array of your
+        own on an NSIDC grid, build ``SeaIceGrid(concentration=..., hemi=...,
+        month=...)`` first.
     transect : ((lat, lon), (lat, lon)), optional
         An A→B line to draw.
-    source : (lat, lon), optional
+    source_point : (lat, lon), optional
         Mark the source.
     cmap : str, optional
         Colormap. Default ``'Blues_r'``.
@@ -631,26 +637,31 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
     figsize : tuple, optional
         Size (inches) of the new figure. Default ``(6.5, 6.5)``.
     show_data_credit : bool, Environment, Result or sequence, optional
-        The data-source credit footnote of a standalone figure (see above).
+        The data-source credit of the figure's footnote (see above).
     show_colorbar : bool, optional
         Draw the concentration colorbar. Default True.
     """
-    from uacpy.data.seaice_local import sea_ice_pixel
-    if hemi not in _SEA_ICE_HEMISPHERES:
+    from uacpy.data.seaice_local import SeaIceGrid, sea_ice_pixel
+    if not isinstance(grid, SeaIceGrid):
         raise ConfigurationError(
-            f"plot_sea_ice_map: hemi={hemi!r} is not a hemisphere of the NSIDC "
-            f"grid; pass one of {_SEA_ICE_HEMISPHERES}.")
+            f"plot_sea_ice_map: the sea-ice map draws a SeaIceGrid, whose "
+            f"hemisphere places the graticule, transect and zoom; got a "
+            f"{type(grid).__name__}.",
+            remediation="Pass the SeaIceGrid sea_ice_grid(month, hemi=...) "
+                        "returns, or build SeaIceGrid(concentration=..., "
+                        "hemi=..., month=...) from your array.")
+    hemi = grid.hemi
+    concentration = np.asarray(grid.concentration, dtype=float)
     own_fig = ax is None
     if own_fig:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
     cm = plt.get_cmap(cmap).with_extremes(bad='#b8a98f')   # land / no-data
-    im = ax.imshow(np.ma.masked_invalid(grid), cmap=cm, vmin=0.0, vmax=1.0,
-                   origin='upper')
+    im = ax.imshow(np.ma.masked_invalid(concentration), cmap=cm, vmin=0.0,
+                   vmax=1.0, origin='upper')
     # On the image's own pixel coordinates (column, row), which the
     # graticule, the transect and the zoom also use.
-    concentration = np.asarray(grid, dtype=float)
     _draw_contours(ax, np.arange(concentration.shape[1]),
                    np.arange(concentration.shape[0]), concentration, contours,
                    who='plot_sea_ice_map', fmt='%g', **_SEA_ICE_CONTOUR_STYLE)
@@ -693,8 +704,8 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
             # zorder 5/6 keep the transect + A/B labels above the graticule.
             ax.plot([pa[1], pb[1]], [pa[0], pb[0]], '-', color='crimson', lw=2.5,
                     marker='o', mec='k', zorder=5, label='transect')
-    if source is not None:
-        ps = sea_ice_pixel(source, hemi=hemi)
+    if source_point is not None:
+        ps = sea_ice_pixel(source_point, hemi=hemi)
         if ps:
             ax.plot(ps[1], ps[0], zorder=7, **SOURCE_MARKER_STYLE)
 
@@ -712,7 +723,7 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
         cy, cx = 0.5 * (min(rr) + max(rr)), 0.5 * (min(cc) + max(cc))
         half = (max(max(rr) - min(rr), max(cc) - min(cc), _ZOOM_MIN_SPAN_PX)
                 * _ZOOM_SPAN_PAD + _ZOOM_MARGIN_PX)
-        ny, nx = np.shape(grid)
+        ny, nx = concentration.shape
         ax.set_xlim(max(cx - _ZOOM_WIDTH_RATIO * half, -0.5),
                     min(cx + _ZOOM_WIDTH_RATIO * half, nx - 0.5))
         ax.set_ylim(min(cy + half, ny - 0.5), max(cy - half, -0.5))  # origin='upper'
@@ -735,22 +746,8 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
         # as on the bathymetry map; a fixed corner sits on a transect that
         # starts in it.
         ax.legend(loc='best')
-    # A bar the height of the map: the image keeps square pixels, so its
-    # drawn box is shorter than the slot whenever the window is wider than
-    # the slot, and a bar sized from the slot runs about twice the map's
-    # height. The bar takes its width from the slot, as every other
-    # colorbar on this surface does, so a composite (plot_overview) keeps its
-    # spacing; it is shrunk to the height the equal-aspect map will draw at.
-    # ``fraction`` and ``pad`` are matplotlib's own defaults.
-    slot = ax.get_window_extent()
-    x0, x1 = ax.get_xlim()
-    y0, y1 = ax.get_ylim()
-    fraction, pad = 0.15, 0.05
-    drawn_h = min(slot.height, slot.width * (1.0 - fraction - pad)
-                  * abs(y1 - y0) / abs(x1 - x0))
     if show_colorbar:
-        fig.colorbar(im, ax=ax, label=concentration_label, fraction=fraction,
-                     pad=pad, shrink=drawn_h / slot.height)
+        _map_colorbar(fig, ax, im, concentration_label)
     ax.set_title(_title_or(title, "Sea-ice concentration"), fontsize='large',
                  fontweight='bold')
     ax.set_xticks([])
@@ -758,13 +755,39 @@ def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
     for spine in ax.spines.values():                   # match the depth-map frame
         spine.set_edgecolor('0.2')
         spine.set_linewidth(1.0)
+    _draw_credit(fig, _credit_attributions(
+        [grid.provenance]
+        if show_data_credit is True and grid.provenance is not None
+        else show_data_credit), reserve=not own_fig)
     if own_fig:
-        from uacpy.data.sources import SOURCES
-        credit = _credit_attributions(
-            [SOURCES['seaice']] if show_data_credit is True else show_data_credit)
-        fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
-        _draw_credit(fig, credit, reserve=False)
+        # The credit is the figure's supxlabel, which tight_layout lays out
+        # with the panels.
+        fig.tight_layout()
     return fig, ax
+
+
+def _map_colorbar(fig, ax, mappable, label):
+    """A colorbar the height of the map on ``ax``.
+
+    A map keeps its aspect (the sea-ice image's square pixels, the depth
+    map's 1/cos(latitude)), so its drawn box is shorter than its slot
+    whenever the map is wider than the slot, and a bar sized from the slot
+    overhangs it (720 px of bar beside a 295 px map). The bar takes its
+    width from the slot, as every other colorbar on this surface does, so a
+    composite (plot_overview) keeps its spacing; it is shrunk to the height
+    the map will draw at. ``fraction`` and ``pad`` are matplotlib's own
+    defaults."""
+    slot = ax.get_window_extent()
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    fraction, pad = 0.15, 0.05
+    aspect = ax.get_aspect()
+    drawn_h = slot.height
+    if not isinstance(aspect, str):
+        drawn_h = min(slot.height, slot.width * (1.0 - fraction - pad)
+                      * aspect * abs(y1 - y0) / abs(x1 - x0))
+    return fig.colorbar(mappable, ax=ax, label=label, fraction=fraction,
+                        pad=pad, shrink=drawn_h / slot.height)
 
 
 def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
@@ -788,10 +811,12 @@ def _draw_depth(ax, lons, lats, depth, cmap, relief, exag, zorder):
     base = plt.get_cmap(cmap)
     norm = _mcolors.Normalize(float(finite.min()), float(finite.max()))
     # Cell size in metres, which the hillshade needs to turn ``vert_exag`` into
-    # a real slope: n samples span n-1 intervals. 111320 m is one degree of arc
-    # at the equator (40 075 km / 360); longitude degrees shrink by cos(lat).
-    dy = (lats.max() - lats.min()) / (lats.size - 1) * 111320.0
-    dx = ((lons.max() - lons.min()) / (lons.size - 1) * 111320.0
+    # a real slope: n samples span n-1 intervals. One degree of arc on the
+    # sphere the package's geodesy uses (``EARTH_RADIUS``); longitude degrees
+    # shrink by cos(lat).
+    metres_per_degree = np.radians(1.0) * EARTH_RADIUS
+    dy = (lats.max() - lats.min()) / (lats.size - 1) * metres_per_degree
+    dx = ((lons.max() - lons.min()) / (lons.size - 1) * metres_per_degree
           * np.cos(np.radians(float(lats.mean()))))
     # Land holes take the shallowest depth, so they are the high ground of the
     # relief and the coastline does not shade as a chasm. Their colour is

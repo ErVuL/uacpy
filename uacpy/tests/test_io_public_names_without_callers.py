@@ -296,7 +296,7 @@ class TestThreeDSoundSpeedFile:
         assert np.array_equal(back.sound_speed, ssp.sound_speed)
 
     def test_a_single_point_axis_is_refused(self, tmp_path):
-        """``sspMod.f90:600-601`` ERROUTs below two points on any axis."""
+        """``Bellhop/sspMod.f90:600-601`` ERROUTs below two points on any axis."""
         with pytest.raises(FileFormatError, match='at least two'):
             read_ssp_3d(_write_lines(tmp_path / 'one.ssp',
                                      ['1', '0.0', '2', '0 1', '2', '0 1',
@@ -793,6 +793,30 @@ class TestReflectionCoefficientRoundTrip:
         assert '90.000000' in path.read_text()
         assert np.allclose(read_reflection_coefficient(path).phase,
                            [np.pi / 2, -np.pi / 2])
+
+    def test_a_negative_real_coefficient_reads_back_as_itself(self, tmp_path):
+        """R = -1 (a pressure-release boundary) is |R| = 1 at phase π on
+        disk, the form the reader takes, and not a negative magnitude,
+        which the reader refuses."""
+        path = tmp_path / 'release.brc'
+        write_reflection_coefficient(path, np.array([0.0, 90.0]),
+                                     np.array([-1.0, 0.5]))
+        table = read_reflection_coefficient(path)
+        np.testing.assert_allclose(table.coefficient, [-1.0, 0.5],
+                                   atol=1e-6)
+
+    @pytest.mark.parametrize('angles, coefficient, said', [
+        ([0.0, 90.0], [[-1.0, 0.0], [1.0, 0.0]], 'negative amplitude'),
+        ([0.0, np.nan], [0.5, 0.5], 'not a finite grazing angle'),
+    ])
+    def test_a_table_the_reader_refuses_is_not_written(self, tmp_path,
+                                                       angles, coefficient,
+                                                       said):
+        path = tmp_path / 'bad.brc'
+        with pytest.raises(ConfigurationError, match=said):
+            write_reflection_coefficient(path, np.array(angles),
+                                         np.array(coefficient))
+        assert not path.exists()
 
     def test_a_real_amplitude_column_writes_zero_phase(self, tmp_path):
         path = tmp_path / 'amp.brc'

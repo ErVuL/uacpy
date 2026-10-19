@@ -172,7 +172,7 @@ from uacpy.metrics import tl_rmse, tl_max_error, tl_bias
 | `tl_max_error(field, reference, …)` | Largest absolute TL difference, dB |
 | `tl_bias(field, reference, …)` | Mean **signed** difference `field - reference`; positive means `field` reports more loss |
 | `tl_rmse_on_shared_ranges(field, reference, *, depth=None)` | RMS dB difference at one depth over the ranges both reach, **resampling** onto the coarser axis; two Fields with `depth=`, two range cuts (`field.at(depth=z)`), or two `(ranges, tl_dB)` curves |
-| `tl_difference(field, reference)` | The difference map `field - reference` in dB as a `Field` (`kind='difference'`); a no-energy cell of either is NaN; `.plot()` draws it on a diverging ±10 dB map |
+| `tl_difference(field, reference)` | The difference map `field - reference` in dB as a `Field` (`kind='difference'`); a no-energy cell of either is NaN; `.plot()` draws it on a diverging map symmetric about zero, ±max\|Δ\| unless `vmax=` fixes it |
 | `field_statistics(fields, labels=None, *, depth)` | A `FieldStatistics` record of several fields at one depth: `mean_dB`, `std_dB` per field and the pairwise `rms_dB` table (`tl_rmse_on_shared_ranges` per pair); `.plot()` draws the bars and the table |
 | `same_grid(field, reference)` | Whether two Fields are on one grid, by the rule every metric above applies |
 
@@ -491,14 +491,15 @@ positioning, and for little else.
 | Function | Implements |
 |---|---|
 | `density(temperature, salinity)` | Fofonoff (1985), IES 80 — near-surface seawater density in **g/cm³** (the equation's kg/m³ divided by 1000), temperature ITS-90 (converted to EOS-80's IPTS-68); `Environment(water_density=density(T, S))` is how a measured value reaches the decks |
-| `reflection_coeff(grazing_deg, *, sound_speed, density, attenuation=0, water_sound_speed=1500, water_density=1.027)` | Rayleigh plane-wave `R` of a fluid half-space (Brekhovskikh & Lysanov), complex, in the package's units: grazing **degrees**, g/cm³, dB/λ |
+| `reflection_coeff(grazing_deg, *, sound_speed, density, attenuation=0, shear_speed=0, shear_attenuation=0, water_sound_speed=1500, water_density=1.027)` | Plane-wave `R` of a fluid half-space (Rayleigh, Brekhovskikh & Lysanov Eq. 3.1.12) or, with `shear_speed=`, an elastic one (Eq. 3.4.22, the coefficient BOUNCE and OASR compute), complex, in the package's units: grazing **degrees**, g/cm³, dB/λ |
 | `bottom_loss_curve(material, …)` | Preset-aware wrapper returning a `ReflectionCoefficient` (grazing angles in **degrees**, its `.dB` the loss in dB, its `critical_angle_deg`); `.plot(value='loss')` draws the loss |
 | `doppler(speed, frequency, sound_speed=None)` | Doppler-shifted frequency `f·(1 + v/c)` (not the shift), `speed ≪ sound_speed` |
 | `bubble_resonance(radius, depth=0.0, …, water_density=1.027)` | Minnaert resonance (Medwin & Clay 1998); water density in **g/cm³** |
 | `bubble_surface_loss(wind_speed_kn, frequency, grazing_deg)` | APL-UW (1994) surface loss at a grazing angle in **degrees** — returns a **linear multiplier** in `(0, 1]` |
 | `bubble_sound_speed(void_fraction, sound_speed=None, gas_sound_speed=340, gas_density_ratio=1000)` | Wood's two-phase speed (Medwin & Clay Eq. 8.3.39; low-frequency limit); the gas defaults are uacpy guidance |
+| `scholte_wave_speed(sound_speed, shear_speed, density, *, water_sound_speed=1500, water_density=1.027)` | Speed (m/s) of the Scholte wave, the interface wave a liquid carries on a solid (Jensen et al. §8.5.4; between two solids it is a Stoneley wave, not solved here): the root of Brekhovskikh & Lysanov Eq. 3.4.29, slower than the shear wave and the liquid. The solid and the water are named as on `reflection_coeff` (Jensen et al. §4.10.1: 1500 m/s water on sand of 1800/600 m/s gives `k_r` 0.24 m⁻¹ at 20 Hz). Arrays broadcast; `nan` where `shear_speed = 0` or `shear_speed ≥ (√3/2)·sound_speed`, which no solid has (Garrett §4.2.3); `water_density=0` gives the Rayleigh wave. The derived `c_low` of the wavenumber engines counts it |
 | `pekeris_root(gamma2)` | The Pekeris branch of `sqrt`, enforcing decay in the half-space |
-| `resample_depth_range(values, depths, ranges, new_depths, new_ranges, *, method='linear', axis=(-2, -1))` | A `(depth, range)` grid of any array resampled onto another (linear, nearest or cubic; complex as real and imaginary parts; `NaN` outside the grid or where a `NaN` sample enters the stencil), every other axis carried — `Field.resample_to` on plain arrays, without its quarter-wavelength check |
+| `resample_depth_range(values, depths, ranges, new_depths, new_ranges, *, method='linear', axis=(-2, -1), dB=False)` | A `(depth, range)` grid of any array resampled onto another (linear, nearest or cubic; complex as real and imaginary parts; `NaN` outside the grid or where a `NaN` sample enters the stencil), every other axis carried — `Field.resample_to` on plain arrays, without its quarter-wavelength check. `dB=True` reads the values as dB levels or losses: where the ±600 dB no-energy marker enters the stencil the energy is interpolated (the marker as zero) and a cubic interpolation is refused |
 
 Every density here is in **g/cm³**, the unit of the seabed carriers and of the
 geoacoustic file formats every model writes: `density()` returns the
@@ -516,19 +517,20 @@ number consistent with `bottom_loss_curve`, negate the log:
 
 | Function | For |
 |---|---|
-| `pressure_from_recording(x, sensitivity, gain, volt_params=None, x_scale='counts')` | Recorded volts (or ADC counts, or `read_wav`'s fractions with `x_scale='read_wav'`) → **pascals**, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
+| `pressure_from_recording(x, sensitivity_dB, gain_dB, volt_params=None, x_scale='counts')` | Recorded volts (or ADC counts, or `read_wav`'s fractions with `x_scale='read_wav'`) → **pascals**, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
+| `recording_from_pressure(p, sensitivity_dB, gain_dB, volt_params=None, x_scale='counts')` | The inverse: **pascals** → the volts the recorder reads (or ADC counts with `volt_params`, or `read_wav`/`write_wav` fractions with `x_scale='read_wav'`), unrounded and unclipped |
 | `spl(x, ref=REFERENCE_PRESSURE_WATER, *, axis=None, floor=PRESSURE_FLOOR**2, complex_record=None)` | A pressure time series in Pa → mean SPL in dB re `ref` (default 1 µPa, written in Pa as `1e-6`). `axis=-1` gives one level per record of a block |
 | `peak_level(x, ref=…, *, axis=None, floor=…, complex_record=None)` | The same record → **peak** SPL, `20·log10(max\|x\|/ref)` |
 | `sound_exposure_level(pressure, sample_rate, ref=…, *, axis=-1, floor=…, complex_record=None, weighting=None)` | A record → **SEL**, `10·log10(Σp²/fs/ref²)` in dB re 1 µPa²·s; the rate, as on `Field.sound_exposure_level` (a value below 1 Hz is refused as a sample interval). `weighting=` gives the frequency-weighted SEL — a hearing group, your own `W(f)` function or a `(f, W_dB)` table ([results §6b](results.md#6b-weighted-accumulated-and-moving-source-exposure)) |
-| `cumulative_sound_exposure_level(pressure, sample_rate, ref=…, *, step=1.0, reset=None, weighting=None, axis=-1, floor=…, complex_record=None)` | a `CumulativeExposure` `(times, levels)` (it unpacks as the two arrays; `.plot(criterion_dB=…)` draws it): the SEL accumulated at the end of every `step` seconds, restarting every `reset` seconds; its last value is `sound_exposure_level`'s. Reads a `np.memmap` one block at a time |
-| `track_exposure(sel_dB, ranges, positions, *, closest_approach, along=None, axis=-1, event_duration=None)` | The cumulative SEL of events along a straight line: the energy sum of one event's SEL at each event's distance `√(d² + (x_i − a)²)`; `along=` gives the plan view. For a continuous source, `sel_dB` is a received level and `event_duration=` the seconds each event lasts (each event's SEL is that level plus `10·log10(event_duration / 1 s)`). `Field.track_exposure` wraps it |
+| `cumulative_sound_exposure_level(pressure, sample_rate, ref=…, *, step=1.0, reset=None, weighting=None, axis=-1, floor=…, complex_record=None)` | a `CumulativeExposure` `(times, levels_dB)` (it unpacks as the two arrays; `.plot(criterion_dB=…)` draws it): the SEL accumulated at the end of every `step` seconds, restarting every `reset` seconds; its last value is `sound_exposure_level`'s. Reads a `np.memmap` one block at a time |
+| `track_exposure(sel_dB, ranges, positions, *, closest_approach, along=None, axis=-1, event_duration=None, per_event=False)` | The cumulative SEL of events along a straight line: the energy sum of one event's SEL at each event's distance `√(d² + (x_i − a)²)`; `along=` gives the plan view. For a continuous source, `sel_dB` is a received level and `event_duration=` the seconds each event lasts (each event's SEL is that level plus `10·log10(event_duration / 1 s)`). Next to a no-energy cell (−600 dB) the energy is interpolated, and the marker stays −600. `per_event=True` returns each event's SEL (the summands) on a trailing event axis. `Field.track_exposure` wraps it |
 | `weighted_pressure(pressure, sample_rate, weighting, *, axis=-1, complex_record=None)` | The frequency-weighted pressure `p_w(t)`, time-aligned (a zero-phase spectral filter) |
 | `frequency_weighting(frequency, weighting)` | `W(f)` in dB of any accepted weighting on your grid; `-inf` where it carries no weight |
 | `auditory_weighting(frequency, group)` | The Southall et al. (2019) weighting of one hearing group, the curve a group name stands for; also exported by `uacpy.noise` with the [noise guide](noise.md)'s spectrum helpers |
 | `power_to_dB(power, ref=1e-6, *, floor=PRESSURE_FLOOR**2)` | A **squared** quantity (PSD, mean-square pressure, an f-k spectrum) → dB re `ref` |
 | `sum_levels_dB(*levels_dB, axis=None)` | The **incoherent** (power) sum of dB levels — the separate arguments, or one array's levels along `axis` (`sum_levels_dB([L1, L2, L3])` without `axis` is the three levels unchanged), `10·log10(Σ10^(L/10))`, through `logaddexp` so a very loud term cannot overflow and a `-inf` term adds nothing; two equal levels give +3.01 dB. The sum of no-energy markers stays the marker, and a NaN level sums to NaN |
 | `integrate_psd(psd, frequencies, freq_min=None, freq_max=None, *, axis=-1)` | The power a one-sided PSD carries in a band, `∫ psd df` (Pa²/Hz → Pa²), with the band edges spliced into the grid; a band reaching past the spectrum is refused. An N-D `psd` (a spectrogram, a PSD per depth) gives one power per spectrum along `axis` |
-| `band_level(level_density_dB, frequencies, freq_min=None, freq_max=None, *, axis=-1)` | The band level of a level density, `10·log10 ∫ 10^(L/10) df`, one per spectrum along `axis`; an empty band is `-inf`. `WenzNoise.band_level`, `WenzNoise.decidecade_levels`, `weighted_level` and `band_levels` all integrate through it |
+| `band_level(level_density_dB, frequencies, freq_min=None, freq_max=None, *, axis=-1)` | The band level of a level density, `10·log10 ∫ 10^(L/10) df`, one per spectrum along `axis`; an empty band is `-inf`, and a band fed only by the no-energy marker (a silent record's −600 dB/Hz) is the marker. `WenzNoise.band_level`, `WenzNoise.decidecade_levels`, `weighted_level` and `band_levels` all integrate through it |
 | `received_level_dB(source_level_dB, tl_dB)` | The sonar-equation propagation term `SL - TL` (dB re 1 µPa); a no-energy cell (`\|TL\| >= 600`) stays the marker, at -600, instead of becoming a finite `SL - 600`. `Field.at_source_level` is this on a field |
 | `no_energy_mask(levels_dB)` | `True` where a dB value is the **no-energy marker** (±600 dB, `NO_ENERGY_DB`: a cell a model reached with no energy), not a level — the one test every metric and plotter excludes such cells with. A genuine deep null is kept |
 
@@ -543,7 +545,7 @@ every default reference downstream reads the same unit:
 from uacpy.acoustics import pressure_from_recording, spl
 from uacpy.acoustic_signal import welch
 
-p = pressure_from_recording(volts, sensitivity=-165.0, gain=20.0)   # Pa
+p = pressure_from_recording(volts, sensitivity_dB=-165.0, gain_dB=20.0)   # Pa
 spl(p)                                               # dB re 1 µPa
 est = welch(p, sample_rate)         # Pa²/Hz
 est.plot()                                           # dB re 1 µPa²/Hz
@@ -639,7 +641,9 @@ stack = uacpy.run_parallel(jobs, coordinate_name='dr').stack()
 `ParallelResult` holds `results` (aligned to the jobs, `None` where one
 raised), `errors` (`{job_index: exception}`), `warnings`
 (`{job_index: [(category, message), …]}`, each also re-emitted in the calling
-process under the job's label), `labels` and `coordinate_name`.
+process under the job's label), `labels` and `coordinate_name`;
+`.to_dataframe()` tabulates the batch, one row per job (`label`, `ok`,
+`error_type`, `n_warnings`).
 It iterates and indexes like a list, and `.stack()` bundles the successes
 along one new axis named by `coordinate_name` — leading, except `frequency` /
 `time`, which go last as in every producer's layout (`.stack(coordinate_name=…)`

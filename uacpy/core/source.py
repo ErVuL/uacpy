@@ -11,7 +11,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._plotting import plotter
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.deck_limits import (
-    DECK_DEPTH_RESOLUTION_M, SBP_ANGLE_RESOLUTION_DEG,
+    DECK_DEPTH_RESOLUTION, SBP_ANGLE_RESOLUTION_DEG,
 )
 from uacpy.core._validate import (
     require_positive, require_non_negative, require_real_array,
@@ -131,7 +131,10 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
       ``ARRIVALS`` / ``MODES``) require a length-1 ``frequencies``.
     * Broadband modes (``BROADBAND`` / ``TIME_SERIES``) use it as the grid:
       a multi-element array *is* the band (used as-is); a single value
-      auto-expands to a default band ``fc·(1 ± bandwidth/2)``.
+      expands to the engine's default band — on Bellhop, Kraken, Scooter
+      and RAM 128 bins over ``fc·(1 ± 0.25)`` (RAM's ``q_factor`` sets
+      another width; any other band is ``run(frequencies=…)``); each
+      model's guide states its own.
 
     ``run(..., frequencies=…)`` is an optional per-call **override** of this
     broadband grid (handy to reuse one ``Source`` while sweeping different
@@ -223,7 +226,7 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         # Strictly increasing, matching Receiver — outputs are indexed by source
         # depth, so a defined order keeps result rows unambiguous across models.
         require_strictly_increasing(self.depths, "source depths",
-                                    min_step=DECK_DEPTH_RESOLUTION_M)
+                                    min_step=DECK_DEPTH_RESOLUTION)
         require_positive(self.frequencies, "source frequencies", hint="Hz")
         # Any order is accepted — the axis indexes a result in the order the
         # caller gave it — but never the same frequency twice: a duplicated

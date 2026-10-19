@@ -48,6 +48,8 @@ Every model in the package follows that shape. The water is isovelocity: a
 profile of `(depth, speed)` pairs bends the rays into caustics, which
 Bellhop's default beams draw as thin bright streaks
 ([Bellhop §1](models/bellhop.md#1-what-it-solves)).
+[DOCUMENTATION §3](../DOCUMENTATION.md#which-call-for-which-task) lists which
+call to use for each common task.
 
 ---
 

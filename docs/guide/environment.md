@@ -456,7 +456,9 @@ uacpy.Bottom.from_columns(
 The same 120 m water column in all four panels, so the only thing that changes
 is the seabed carrier. The half-space is a single hatched fill; the layered
 column adds solid per-layer bands above it; the range-dependent half-space
-steps through three property sets, each switch midway between two range nodes; the range-dependent
+steps through three property sets, each switch midway between two range nodes,
+and a dot on the seafloor and a grey dashed vertical line mark each range node
+itself; the range-dependent
 layered case is a geological cross-section with one column per range node
 (`P1`, `P2`) and a dashed boundary between them.
 
@@ -485,7 +487,7 @@ Nine class-typical materials, keyed by name:
 The density column is Table 1.3's **ratio** `ρ_b/ρ_w`, which is what the table
 prints and what propagation depends on. The stored `density` (g/cm³) is that
 ratio times the package's one water density, 1.027 g/cm³
-(`uacpy.DEFAULT_WATER_DENSITY_G_CM3`, what every deck writes for the water) —
+(`uacpy.DEFAULT_WATER_DENSITY`, what every deck writes for the water) —
 so `get_material('sand')['density']` is 1.951, and a run in default water sees
 exactly the tabulated 1.9. With `Environment(water_density=1.0)` the ratio
 rises by 2.7 %; to reproduce a textbook curve drawn against `ρ_w = 1`, pass the
@@ -586,7 +588,7 @@ column.total_thickness()                  # 35.0
 column.layer_depths(seafloor_depth=100.0) # [(100.0, 110.0), (110.0, 135.0)]
 
 bottom.halfspace_at(range=2000.0)         # nearest column's half-space (step)
-bottom.halfspace_at(range=2000.0, interp='linear')  # opt-in blend, pure half-spaces only
+bottom.halfspace_at(range=2000.0, method='linear')  # opt-in blend, pure half-spaces only
 bottom.total_thickness_max()
 bottom.all_sound_speeds()                 # every real c_p in the seabed
 ```
@@ -597,7 +599,7 @@ materials cannot be linearly blended, so selection is always nearest.
 half-space is a step function of range whose switches sit midway between
 consecutive nodes — the same switch every engine deck is written with. When
 every column is a pure half-space, blending the properties is well defined,
-and `interp='linear'` asks for it explicitly.
+and `method='linear'` asks for it explicitly.
 
 ---
 
@@ -654,9 +656,10 @@ feeds an `Environment`: they are calculators, not carriers. Note also that
 `bubble_surface_loss` returns a per-bounce amplitude multiplier in `(0, 1]`,
 at a grazing angle in degrees (`grazing_deg`) like `bottom_loss_curve`.
 
-`uacpy.acoustics.critical_angle(bottom_sound_speed, water_sound_speed=1500.0)` is the
-companion scalar — **seabed speed first** — returning the grazing angle
-`arccos(water_sound_speed/bottom_sound_speed)` in degrees below which a faster seabed totally
+`uacpy.acoustics.critical_angle(sound_speed, water_sound_speed=1500.0)` is the
+companion scalar — **seabed speed first**, named `sound_speed` as on
+`reflection_coeff` — returning the grazing angle
+`arccos(water_sound_speed/sound_speed)` in degrees below which a faster seabed totally
 reflects, and `nan` when the seabed is the slower of the two so there is no
 critical angle to report (`critical_angle(1800, 1500)` is 33.6°;
 `critical_angle(1500, 1800)` is `nan`). It is the same ratio-of-speeds angle as
@@ -854,7 +857,10 @@ profile from the site's fetched T/S column
 (`FrancoisGarrison.from_temperature_salinity`, whose `collapse_to_depth=`
 keeps one row instead), with the cached GLODAP pH column as `(depth, pH)`
 pairs on its own levels (one value at the column's mid-depth on the
-Copernicus BGC branch).
+Copernicus BGC branch). That law records where its water came from in
+`data_sources` (a keyword-only field on every law and table, `()` for water
+typed by hand); `.table(f)` copies the records onto the table, its plot credits
+them, and `env.data_sources` lists them after the surface's.
 
 What the environment does with a table:
 
@@ -930,7 +936,7 @@ How each engine carries Francois–Garrison (one row or a profile) or a table
 
 A Francois–Garrison on the reference water (10 °C, 35 psu) assigned over an
 environment's own water — `env.absorption = FrancoisGarrison(10, 35, 8)`
-replacing a fetched profile — gives a `ProvenanceWarning` naming both waters
+replacing a fetched profile — gives a `ValidityWarning` naming both waters
 and the fix when they differ by more than 2 °C or 1 psu.
 
 Units throughout the public API are **dB/wavelength** for material attenuation
@@ -1002,7 +1008,12 @@ Scooter(collapse={'bathymetry': 'median', 'bottom_layers': 'volume_average'})
 ```
 
 Unknown keys and invalid methods raise `ConfigurationError` at construction,
-not deep inside a writer at `run()` time.
+not deep inside a writer at `run()` time. A key that reduces nothing in a run
+says so in a `FallbackWarning`, once per run: when the model reads that feature
+natively (`RAM: collapse['bathymetry']='min' reduces nothing in RAM's deck`),
+and when the environment does not have it (`Scooter: collapse['bathymetry']='min'
+reduces nothing: the environment's bathymetry is range-independent`). The key
+is kept; it applies to the next environment that has the feature.
 
 Two behaviours are not `collapse` keys because they have no meaningful choice:
 interfacial **roughness** is zeroed for models whose solver has nowhere to put
@@ -1172,7 +1183,9 @@ know what water it came from. See [results](results.md).
 **The environment keeps its own copy of every carrier.** Editing the `ssp` /
 `bottom` / `surface` object you passed does not change `env` afterwards. To
 change the environment, assign the new carrier (`env.ssp = ssp`): the
-assignment is checked as the constructor checks the same argument.
+assignment is checked as the constructor checks the same argument. A name
+that is not a setting (`env.water_densty = 1.0`) is refused, naming the field
+meant, on the environment and on every carrier.
 
 **`at` never fabricates, `eval` interpolates.** Across every uacpy carrier and
 result: `at` returns the nearest stored sample, `eval` interpolates, `isel`

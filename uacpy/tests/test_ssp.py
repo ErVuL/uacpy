@@ -53,8 +53,8 @@ class TestGenerateSeaSurfaceSynthesis:
         dx = ranges[1] - ranges[0]
         dk = 1.0 / (n * dx)
         k = np.arange(1, n // 2 + 1) * dk
-        from uacpy.core.constants import STANDARD_GRAVITY_M_S2
-        g = STANDARD_GRAVITY_M_S2
+        from uacpy.core.constants import STANDARD_GRAVITY
+        g = STANDARD_GRAVITY
         omega = np.sqrt(g * 2 * np.pi * k)
         omega_p = g / wind
         S_omega = (8.1e-3 * g ** 2 / omega ** 5) * np.exp(
@@ -236,7 +236,7 @@ class TestSoundSpeedProfileExtendTo:
 
     def test_truncation_snaps_a_sample_inside_the_readers_last_point_window(self):
         """``misc/sspMod.f90:353`` ends a medium's SSP block at the first
-        sample within ``AT_LAST_SSP_POINT_EPS_M`` (1.19e-5 m) of the declared
+        sample within ``AT_LAST_SSP_POINT_EPS`` (1.19e-5 m) of the declared
         medium depth. Truncating beside such a sample emits two rows metres
         apart in index and microns apart in depth; the reader takes the first
         as the end of the block and consumes the second as the bottom-option
@@ -507,8 +507,8 @@ class TestTheSeaSurfaceResolutionRuleIsTheWarningsBoundary:
     @staticmethod
     def _rule(rmax, wind):
         """ceil(8 * R / lambda_p) + 1, lambda_p = 2*pi*U**2/g."""
-        from uacpy.core.constants import STANDARD_GRAVITY_M_S2
-        lambda_p = 2 * np.pi * wind ** 2 / STANDARD_GRAVITY_M_S2
+        from uacpy.core.constants import STANDARD_GRAVITY
+        lambda_p = 2 * np.pi * wind ** 2 / STANDARD_GRAVITY
         return int(np.ceil(8 * rmax / lambda_p)) + 1
 
     def test_the_documented_rule_is_the_boundary(self):
@@ -526,8 +526,8 @@ class TestTheSeaSurfaceResolutionRuleIsTheWarningsBoundary:
 
     def test_the_default_grid_is_capped_at_200000_with_a_warning(self):
         from uacpy.core.altimetry import SEA_SURFACE_MAX_POINTS
-        from uacpy.core.constants import STANDARD_GRAVITY_M_S2
-        lambda_p = 2 * np.pi * 10.0 ** 2 / STANDARD_GRAVITY_M_S2
+        from uacpy.core.constants import STANDARD_GRAVITY
+        lambda_p = 2 * np.pi * 10.0 ** 2 / STANDARD_GRAVITY
         under, text = self._messages(199_998.5 * lambda_p / 8, 10.0)
         assert under.shape[0] == SEA_SURFACE_MAX_POINTS and 'cap' not in text
         over, text = self._messages(200_000.5 * lambda_p / 8, 10.0)

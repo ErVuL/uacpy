@@ -40,7 +40,7 @@ from uacpy.core._repr import FieldsRepr
 from uacpy.core.bottom import Bottom, SeabedColumn
 from uacpy.core.sediment import (
     apl_uw_density_ratio, apl_uw_sound_speed_ratio, hamilton_attenuation)
-from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY
 from uacpy.core._export import CarrierExport
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._validate import require_positive_finite_scalar
@@ -330,7 +330,7 @@ class BottomParameters(FieldsRepr, CarrierExport):
 
     @classmethod
     def from_bottom(cls, bottom, *, water_sound_speed: float,
-                    water_density: float = DEFAULT_WATER_DENSITY_G_CM3,
+                    water_density: float = DEFAULT_WATER_DENSITY,
                     range: float = 0.0, method: str = 'auto',
                     ) -> 'BottomParameters':
         """From a uacpy seabed — the bridge from ``uacpy.data`` to this model.
@@ -454,11 +454,13 @@ def _rock(speed_ratio: float, spectral_strength: float) -> BottomParameters:
 APL_UW_SEDIMENTS: Dict[str, Union[BottomParameters, float]] = {
     'rough rock': _rock(2.5, 0.20693),
     'rock': _rock(2.5, 0.01862),
-    # w2 read from the scan as 0.0186; 0.0156 reproduces the table's cobble
-    # column to 0.3 dB where 0.0186 misses by 1.7 dB at low angles.
-    'cobble': _rock(1.8, 0.0156),
-    'gravel': _rock(1.8, 0.0156),
-    'pebble': _rock(1.8, 0.0156),
+    # Table 2 prints the cobble/gravel/pebble w2 as 0.0160 and a fifth digit
+    # that is not legible; 0.0160 is used. It reproduces the report's Table 3
+    # cobble columns (10-100 kHz, every angle) within 0.1 dB, and any fifth
+    # digit within 0.15 dB.
+    'cobble': _rock(1.8, 0.0160),
+    'gravel': _rock(1.8, 0.0160),
+    'pebble': _rock(1.8, 0.0160),
     'sandy gravel': -1.0,
     'very coarse sand': -0.5,
     'muddy sandy gravel': 0.0,

@@ -35,7 +35,7 @@ from uacpy.core._export import Exportable
 from uacpy.core._plotting import plotter
 from uacpy.core._repr import axis, build, qty
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, ValidityWarning,
+    ConfigurationError, FallbackWarning,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.acoustics import band_level, sum_levels_dB
@@ -314,89 +314,6 @@ def _wind_coates(frequencies, *, wind_speed_kn, **_):
             - 40.0 * np.log10(fk + 0.4))
 
 
-#: Standard deviation of the observations about Knudsen's published curves,
-#: from the paper itself: "of the order of 4 to 5 db", smaller at high wind
-#: than at low. Any closed form through those curves sits inside this, which
-#: is what makes choosing one a matter of convention rather than accuracy.
-KNUDSEN_UNCERTAINTY_DB = 4.5
-
-
-#: Hz — the band Knudsen, Alford & Emling's curves are drawn over (their
-#: overall levels are 0.1-10 kc, and the published spectra run to about
-#: 25 kHz). The straight line keeps rising 17 dB per decade below it and
-#: falling above it, with no data behind either.
-KNUDSEN_BAND_HZ = (100.0, 25000.0)
-
-
-def _wind_knudsen(frequencies, *, wind_speed_kn, **_):
-    """Wind (Knudsen, Alford & Emling 1948), as one straight line in log U and log f.
-
-    ``NL = 44 + 20·log10(U_kn) - 17·log10(f_kHz)``, dB re 1 µPa²/Hz.
-
-    Straight parallel lines in log-log, which is the shape Knudsen published:
-    his curves shift with wind by the same amount at every frequency. The
-    slope and the constant are his; the wind term ``20·log10(U_kn)`` is not —
-    he drew one curve per wind force, not a law in U — and no cited source
-    states it: it is uacpy guidance, checked against his
-    figure below. ``-17`` dB/decade is the paper's stated
-    -5 dB/octave (-16.61 dB/decade) to 0.4 dB/decade — Dahl et al. (2007)
-    restate the same slope as a "5 dB reduction in average pressure spectral
-    density per factor of two increase in frequency". The constant 44 is his
-    calm curve: wind force 0, whose overall 0.1-10 kc level of 57 dB re
-    0.0002 dyne/cm² works out at 44.8 dB re 1 µPa²/Hz at 1 kHz.
-
-    Checked against the figure rather than assumed. Reading the Fig. 4
-    Part C curves off the page, shifting them by the +26.0 dB that the
-    paper's 0.0002 dyne/cm² (= 20 µPa) reference costs, and reducing the
-    overall band levels to 1 kHz spectrum levels puts this formula +1.6 dB
-    biased and 2.0 dB rms against the **six** curves from wind force 1
-    upward — inside the paper's own 4-5 dB scatter
-    (:data:`KNUDSEN_UNCERTAINTY_DB`), and the six Hildebrand et al. (2021)
-    Table IV also reads. Those curves are the expected side of this model's
-    tests.
-
-    Force 0 is the seventh curve and is left out of that statistic because
-    the straight line cannot follow it: at 0.5 kn the formula reads 6.9 dB
-    **low**, since ``20·log10(U)`` falls away without limit as the wind
-    drops while the published curves flatten onto a calm-sea floor. Over all
-    seven the figures are +0.4 dB bias and 3.2 dB rms. Treat a flat calm as
-    outside this model at the bottom end, as force 7 is at the top.
-
-    Two things to know when comparing it with something else. Knudsen is not
-    truly a power law in wind speed — the curve spacing is non-linear in
-    log10(U), which Hildebrand et al. (2021) note is "not substantiated by
-    the present model" between Beaufort 2-5 — so the straight-line form
-    trades that curvature away. And being a power law it keeps rising with
-    wind past force 7, where the published curves stop.
-
-    Not to be confused with the longer expression also called a Knudsen
-    curve in parts of the literature,
-    ``44 + 28·log(1+w^0.75) + 19·log(f) - 18·log(f² + 1/(2.78+0.14w^0.75)²)``
-    (w in m/s). That one carries a spectral peak, which Knudsen's straight
-    parallel lines do not; it is a Wenz-shaped fit under his name. Use
-    ``'merklinger'`` for a peaked wind spectrum.
-
-    These are coastal/shallow measurements — Hildebrand et al. list Knudsen
-    under "Shallow" — and the model carries no depth term of its own.
-    """
-    f = _as_frequency_array(frequencies, "_wind_knudsen")
-    lo, hi = KNUDSEN_BAND_HZ
-    outside = (f < lo) | (f > hi)
-    if np.any(outside):
-        warnings.warn(
-            f"wind_model='knudsen': {int(np.count_nonzero(outside))} of "
-            f"{f.size} frequencies lie outside {lo:g}-{hi:g} Hz, the band "
-            f"Knudsen's curves cover; there the straight -17 dB/decade line "
-            f"is extrapolated with no data behind it (it keeps rising toward "
-            f"low frequency). Use wind_model='merklinger' for a spectrum "
-            f"with a low-frequency roll-off.",
-            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    u = float(wind_speed_kn)     # the fit's U_kn
-    if u == 0:
-        return np.full(f.shape, -np.inf, dtype=float)
-    return 44.0 + 20.0 * np.log10(u) - 17.0 * np.log10(f / 1000.0)
-
-
 def _shipping_wenz(frequencies, *, shipping_level, water_depth, **_):
     """Shipping (Wenz 1962; DRDC §2.2 eq. 5-7)."""
     f = _as_frequency_array(frequencies, "_shipping_wenz")
@@ -506,8 +423,7 @@ def _rain_torres_costa(frequencies, *, rain_rate, **_):
 #: :func:`register_noise_model`; read through the ``*_MODELS`` views below.
 _SUBMODELS = {
     'wind': {'merklinger': _wind_merklinger,
-             'coates': _wind_coates,
-             'knudsen': _wind_knudsen},
+             'coates': _wind_coates},
     'shipping': {'wenz': _shipping_wenz, 'coates': _shipping_coates},
     'rain': {'torres_costa': _rain_torres_costa},
     'thermal': {'mellen': _thermal_mellen},

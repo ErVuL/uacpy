@@ -318,10 +318,15 @@ def reading(name: str, path):
     ``ConfigurationError`` only, so an untyped failure aborts the chain
     instead of falling through to the next source — and ``'auto'``, documented
     never to fail, never reaches its pelagic terminus.
+
+    A warning the caller's filter turned into an exception (``python -W
+    error``, ``warnings.simplefilter('error')``) says nothing about the file:
+    it leaves as raised, so it is neither reported as a damaged file nor
+    taken for a cache miss that sends the request to the live twin.
     """
     try:
         yield
-    except (ConfigurationError, DataFetchError):
+    except (ConfigurationError, DataFetchError, Warning):
         raise
     except Exception as exc:
         # The remediation names the install flag when `name` is a known

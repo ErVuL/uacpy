@@ -27,7 +27,7 @@ from uacpy.core.absorption import FrancoisGarrison, Thorp
 from uacpy.core.boundary import BoundaryProperties, SedimentLayer
 from uacpy.core.bottom import SeabedColumn
 from uacpy.core.exceptions import ValidityWarning
-from uacpy.core._validate import SPEED_UNITS_SUSPECT_M_S
+from uacpy.core._validate import SPEED_UNITS_SUSPECT
 from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.core.materials import MATERIALS
 from uacpy.tests.conftest import recorded_warnings
@@ -118,7 +118,7 @@ class TestSoundSpeedTypedInKmPerSecond:
         assert 'uacpy takes m/s (1490)' in message
 
     def test_the_first_value_under_the_bound_warns(self, build):
-        assert SPEED_UNITS_SUSPECT_M_S == 10.0
+        assert SPEED_UNITS_SUSPECT == 10.0
         _only(_recorded(lambda: build(9.999)))
 
     def test_the_bound_itself_and_everything_over_it_stay_silent(
@@ -247,8 +247,10 @@ class TestFrancoisGarrisonRowEnvelope:
     1987). The bounds here are inclusive."""
 
     @pytest.mark.parametrize('field,inside,outside,text', [
-        ('temperature', -2.0, -2.001, 'temperature=-2.001 is outside -2..30 °C'),
-        ('temperature', 30.0, 30.001, 'temperature=30.001 is outside -2..30 °C'),
+        ('temperature', -1.8, -1.801,
+         'temperature=-1.801 is outside -1.8..30 °C'),
+        ('temperature', 30.0, 30.001,
+         'temperature=30.001 is outside -1.8..30 °C'),
         ('salinity', 30.0, 29.99, 'salinity=29.99 is outside 30..41 PSU'),
         ('salinity', 41.0, 41.01, 'salinity=41.01 is outside 30..41 PSU'),
         ('pH', 7.7, 7.699, 'pH=7.699 is outside 7.7..8.3'),
@@ -395,8 +397,12 @@ class TestFrancoisGarrisonWarningsNameTheCallersLine:
 
 
 def test_the_francois_garrison_init_takes_exactly_the_dataclass_fields():
+    # A keyword-only field (``data_sources``) comes last, where the
+    # dataclass places it.
     parameters = list(inspect.signature(FrancoisGarrison.__init__).parameters)[1:]
-    assert parameters == [f.name for f in dataclasses.fields(FrancoisGarrison)]
+    fields = dataclasses.fields(FrancoisGarrison)
+    assert parameters == ([f.name for f in fields if not f.kw_only]
+                          + [f.name for f in fields if f.kw_only])
     # Positional construction, the form the docstrings use, works.
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')

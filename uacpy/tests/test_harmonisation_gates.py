@@ -247,6 +247,13 @@ _RETIRED_SPELLINGS = {
     'critical_angle': 'critical_angle_deg', 'best_angle': 'best_angle_deg',
     'bearings': 'bearings_deg', 'dip_angle': 'dip_angle_deg',
     'rams_rotation_angle': 'rams_rotation_angle_deg',
+    # One keyword picks an interpolation; a count is n_ + what it counts; a
+    # plotter's unit keyword is <axis>_unit; a seabed speed is a sound speed;
+    # the density at a source is the source's density, as on modal_field.
+    'interp': 'method', 'n_doppler': 'n_doppler_shifts',
+    'n_slowness': 'n_slownesses', 'time_units': 'time_unit',
+    'seabed_speed': 'seabed_sound_speed', 'c_bottom': 'seabed_sound_speed',
+    'rho_source': 'source_density',
 }
 
 
@@ -459,6 +466,69 @@ def test_the_dB_reference_is_always_ref():
     assert not offenders, offenders
 
 
+def _is_level_unit(node):
+    """Whether a declared unit is a level in decibels: ``'dB'``, ``'dB re
+    …'`` or a ``level_unit(...)`` call. A rate in dB (``'dB/λ'``, the
+    attenuation's plain-named unit) is not a level."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value == 'dB' or node.value.startswith('dB re')
+    return isinstance(node, ast.Call) and _name_of(node.func) == 'level_unit'
+
+
+def _declared_level_fields(trees):
+    """``'path Class.field'`` for every field a class declares a level unit
+    for — in ``_REPR_UNITS`` or the dict its ``_field_units`` returns — whose
+    name does not end in ``_dB``."""
+    out = set()
+    for rel, tree in trees:
+        for klass in ast.walk(tree):
+            if not isinstance(klass, ast.ClassDef):
+                continue
+            tables = []
+            for node in ast.walk(klass):
+                if isinstance(node, ast.Assign) and any(
+                        _name_of(t) == '_REPR_UNITS' for t in node.targets):
+                    tables.append(node.value)
+                elif (isinstance(node, ast.FunctionDef)
+                      and node.name == '_field_units'):
+                    tables += [d for d in ast.walk(node)
+                               if isinstance(d, ast.Dict)]
+            for table in tables:
+                if not isinstance(table, ast.Dict):
+                    continue
+                for key, unit in zip(table.keys, table.values):
+                    if (isinstance(key, ast.Constant) and _is_level_unit(unit)
+                            and not key.value.endswith('_dB')):
+                        out.add(f'{rel} {klass.name}.{key.value}')
+    return out
+
+
+def test_a_level_in_dB_carries_its_suffix():
+    """A result or record field whose declared unit is a level in dB is
+    named ``…_dB`` — ``BandLevels.levels_dB``,
+    ``ProbabilisticSpectralEstimate.level_edges_dB``,
+    ``OasnNoise.surface_noise_level_dB`` — as every dB input and result is
+    (DOCUMENTATION.md §15). Attenuation in dB per wavelength keeps its plain
+    name: its unit is a rate, not a level."""
+    offenders = sorted(_declared_level_fields(_package_trees()))
+    assert not offenders, offenders
+
+
+def test_the_level_sweep_reads_both_unit_tables():
+    """The far side: the sweep flags a plain-named level declared either
+    way and passes a suffixed one and a dB rate."""
+    tree = ast.parse(
+        "class A:\n"
+        "    _REPR_UNITS = {'gain': 'dB', 'gain_dB': 'dB',"
+        " 'attenuation': 'dB/λ', 'depth': 'm'}\n"
+        "class B:\n"
+        "    def _field_units(self):\n"
+        "        return {'levels': level_unit(self.ref, 'spectrum'),"
+        " 'edges': 'dB re 1 µPa²', 'centers': 'Hz'}\n")
+    assert sorted(_declared_level_fields([('m.py', tree)])) == [
+        'm.py A.gain', 'm.py B.edges', 'm.py B.levels']
+
+
 # ── rule 3: one place decides a default ───────────────────────────────────
 
 #: Writer -> the engine whose knobs it writes.
@@ -570,7 +640,7 @@ def test_a_writer_states_no_default_the_model_resolves():
 _DEFAULT_CONSTANTS = (
     (r'(^|_)(sound_speed|c0)$', 'DEFAULT_SOUND_SPEED'),
     (r'^ref$', 'REFERENCE_PRESSURE_WATER'),
-    (r'(^|_)density(_z)?$', 'DEFAULT_WATER_DENSITY_G_CM3'),
+    (r'(^|_)density(_z)?$', 'DEFAULT_WATER_DENSITY'),
 )
 
 
@@ -728,12 +798,19 @@ _COMPOSED_ERRORS = frozenset({'UnsupportedFeatureError',
 _UNSTOPPED = _RATCHET.get('unstopped_messages', frozenset())
 
 #: Refusals whose last interpolation is itself a stopped sentence: a
-#: producer's problem, hint or remediation text, or another uacpy
-#: error's message. The literal ends mid-sentence; the message a user
-#: reads ends with the stop that text carries.
+#: producer's problem, hint or remediation text, another uacpy error's
+#: message, the NMFS-group sentence (``weighting._nmfs_group_note``), or
+#: a " Did you mean 'x'?" after a stopped sentence (``_carrier``'s
+#: ``_did_you_mean``, empty when nothing is close). The literal ends
+#: mid-sentence; the message a user reads ends with the stop that text
+#: carries.
 _SENTENCE_TAILS = frozenset({
     'acoustic_signal/_synthesis.py require_source_waveform: ...{}: {}',
     'core/_beamforming.py snapshot_covariance: ...be a numeric array; got {}. {}',
+    'core/_carrier.py __init__: ...xpected keyword argument {}.{}',
+    'core/_carrier.py _carrier_init: ...xpected keyword argument {}.{}',
+    'core/_carrier.py refuse_unknown_attribute: ... change nothing the {} uses.{}',
+    'core/acoustics/weighting.py _hearing_group: ...{}: {}',
     'core/_validate.py _nyquist_check: ...{}: {} ({} Hz) is {} {}',
     'core/_validate.py _nyquist_check: ...{}: {} {} Hz are {} {}',
     'core/_validate.py require_finite_signal: ...umpy holds as dtype=object. {}',

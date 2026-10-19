@@ -127,13 +127,15 @@ class TestWarpIsUnitary:
 
     def test_oversampling_tightens_the_round_trip(self):
         """The map is expansive, so the warped grid is the limiting resolution;
-        the docstring's claim that the error halves per doubling is the contract."""
+        the docstring's claim that the linear error halves per doubling is the
+        contract."""
         x = self._signal()
         errs = []
         for k in (1, 2, 4, 8):
             _t, back = unwarp_signal(warp_signal(x, self.FS, 1000.0,
                                                  sound_speed=1500.0,
-                                                 oversample=k))
+                                                 oversample=k,
+                                                 method='linear'))
             errs.append(float(np.linalg.norm(back - x) / np.linalg.norm(x)))
         assert all(b < a for a, b in zip(errs, errs[1:])), errs
         assert errs[-1] < errs[0] / 4.0
@@ -182,7 +184,7 @@ class TestWarpSignalReturnsOneResultUnwarpTakesWhole:
     def test_the_first_field_is_the_axis_and_the_second_the_data(self):
         x = self._chirp(1024, self.FS)
         warped = warp_signal(x, self.FS, self.RANGE, sound_speed=1490.0,
-                             interpolation='linear')
+                             method='linear')
         times, data = warped
         assert isinstance(warped, Warped)
         # The axis starts at 0 (the direct arrival maps to t_w = 0) and
@@ -191,7 +193,7 @@ class TestWarpSignalReturnsOneResultUnwarpTakesWhole:
         assert np.all(np.diff(times) > 0)
         assert np.any(data < 0)
         assert (warped.sample_rate, warped.range, warped.sound_speed,
-                warped.interpolation) == (self.FS, self.RANGE, 1490.0,
+                warped.method) == (self.FS, self.RANGE, 1490.0,
                                           'linear')
 
     def test_the_result_round_trips_whole(self):
@@ -232,8 +234,10 @@ class TestWarpRoundTripErrorMatchesTheDocumentedFigures:
 
     @staticmethod
     def _roundtrip(x, fs, r, oversample, c=1500.0):
+        # The documented figures are linear interpolation's.
         _, back = unwarp_signal(warp_signal(x, fs, r, oversample=oversample,
-                                            sound_speed=c))
+                                            sound_speed=c,
+                                            method='linear'))
         n = min(back.size, x.size)
         return float(np.linalg.norm(back[:n] - x[:n])
                      / np.linalg.norm(x[:n]))
@@ -346,10 +350,10 @@ class TestSincInterpolationNeedsThePrescribedGrid:
     NOISE = np.random.default_rng(1).standard_normal(2048)
 
     @staticmethod
-    def _roundtrip(x, fs, r, oversample, interpolation, c=1500.0):
+    def _roundtrip(x, fs, r, oversample, method, c=1500.0):
         _, back = unwarp_signal(warp_signal(x, fs, r, sound_speed=c,
                                             oversample=oversample,
-                                            interpolation=interpolation))
+                                            method=method))
         n = min(back.size, x.size)
         return 100.0 * float(np.linalg.norm(back[:n] - x[:n])
                              / np.linalg.norm(x[:n]))
@@ -360,17 +364,31 @@ class TestSincInterpolationNeedsThePrescribedGrid:
                 for r in (100.0, 1000.0, 20000.0)]
         assert max(errs) < 0.01, errs
 
+    def test_the_default_is_the_papers_kernel(self):
+        """Unset, ``method`` is the Whittaker-Shannon kernel Bonnel et
+        al. (2020) App. C advise, on the prescribed grid: the default round
+        trip of broadband noise is essentially exact (linear loses ~16 %
+        here), and the result carries the kernel for ``unwarp_signal``."""
+        warped = warp_signal(self.NOISE, 10000.0, 1000.0)
+        assert warped.method == 'sinc'
+        _, back = unwarp_signal(warped)
+        err = 100.0 * float(np.linalg.norm(back - self.NOISE)
+                            / np.linalg.norm(self.NOISE))
+        assert err < 0.01, err
+        assert self._roundtrip(self.NOISE, 10000.0, 1000.0, None,
+                               'linear') > 10.0
+
     def test_on_an_undersampled_grid_it_is_worse_than_linear(self):
         args = (self.NOISE, 10000.0, 1000.0, 1)
         assert (self._roundtrip(*args, 'sinc')
                 > self._roundtrip(*args, 'linear'))
 
     def test_an_unknown_kernel_is_refused_by_name(self):
-        with pytest.raises(ConfigurationError, match="interpolation must be"):
-            warp_signal(self.NOISE, FS, 1000.0, interpolation='cubic')
-        with pytest.raises(ConfigurationError, match="interpolation must be"):
+        with pytest.raises(ConfigurationError, match="method must be"):
+            warp_signal(self.NOISE, FS, 1000.0, method='cubic')
+        with pytest.raises(ConfigurationError, match="method must be"):
             warped = warp_signal(self.NOISE, FS, 1000.0)
-            unwarp_signal(warped._replace(interpolation='cubic'))
+            unwarp_signal(warped._replace(method='cubic'))
 
     @pytest.mark.parametrize('bad, match', [
         (dict(sample_rate=0.0), 'sample_rate must be > 0'),

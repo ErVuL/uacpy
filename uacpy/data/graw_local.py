@@ -1,16 +1,28 @@
 """Offline NRL/Graw predicted seabed bulk density (Zenodo, CC-BY 4.0).
 
 ``install.sh --data graw`` downloads the Graw, Wood & Phrampus (2021) global
-machine-learning prediction of **surficial seabed bulk density (g/cm³)** — a
-5-arc-minute ``z(lat, lon)`` grid (Zenodo record 3762390, ``Dataset_S2.nc``) —
-into the cache. This module samples it locally.
+random-forest prediction of **seafloor bulk density (g/cm³)** — a 5-arc-minute
+``z(lat, lon)`` grid (Zenodo record 3762390, ``Dataset_S2.nc``) trained on
+densities measured on DSDP, ODP and IODP drill cores (gamma-ray attenuation and
+moisture-and-density measurements, the record's ``Dataset_S1``) — into the
+cache. This module samples it locally.
 
 This is the one *measured/predicted* continuous density product in the layer:
-the grain-size backends derive density from ϕ via the Hamilton table, whereas
-here the density is the data and the remaining geoacoustics (sound speed,
-attenuation) are ϕ-derived by **inverting** that same table — so
-:func:`fetch_bottom_graw` emits a half-space whose density is the measured
-grid value and whose speed/attenuation are consistent with it.
+the grain-size backends derive density from ϕ, whereas here the density is the
+data and the grain size is inferred from it. A drill-core density is a *bulk*
+value in APL-UW TR 9407's sense, one from below the top few centimetres
+(TR 9407 Introduction §C, the ``blos94`` input method 6; §IV.A.2, p. IV-5:
+"many geoacoustic measurements consist of averages covering a depth of
+several tens of centimeters"), and TR 9407 §IV.A.5 (p. IV-12 to IV-13) gives
+the route for it: the mean grain size from the inverted
+Hamilton-Bachman regression, its Eq. (12) for the bulk density ratio —
+:func:`~uacpy.core.sediment.grain_size_from_density`'s continental-terrace
+inversion — and every remaining input from that grain size (§IV.A.4).
+:func:`fetch_bottom_graw` takes the sound speed and attenuation from it, and
+the density too under ``model='apl-uw'``, whose relations describe the upper
+few centimetres. Below 1.448 g/cm³ (the relation's 9 ϕ density against the
+default water) the grain size is held at its 9 ϕ end, so there the speed and
+attenuation are the 9 ϕ values whatever the measured density.
 """
 
 from pathlib import Path
@@ -230,25 +242,30 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
     requested point and the grid node read as ``data_point`` (the offset
     rule: ``max_distance_km`` refuses a node farther than that, km).
 
-    The density returned is the grid's measured value. The grain size is the
-    one *consistent* with it — :func:`uacpy.core.sediment.grain_size_from_density`
-    inverts the same Hamilton & Bachman (T) relation that
-    :func:`~uacpy.core.sediment.grain_size_to_geoacoustics` evaluates forward,
-    so the pair cannot disagree — and the sound speed and attenuation follow
-    from that grain size. Below 1.448 g/cm³ (the relation's 9 ϕ density against
-    the default water) the grain size is held at its 9 ϕ end, which is most
-    of the deep ocean; the note at the top of this module gives the resolution
-    along the rest of the range.
+    The grain size is the one the grid's bulk density gives through
+    :func:`uacpy.core.sediment.grain_size_from_density` — the inverse of the
+    Hamilton & Bachman relation :func:`~uacpy.core.sediment.grain_size_to_geoacoustics`
+    evaluates forward, under the same ``hamilton_fit``; for the default
+    continental-terrace fit it is APL-UW TR 9407's Eq. (12), the route TR 9407
+    §IV.A.5 gives for a bulk density (see the module docstring) — and the
+    sound speed and attenuation follow from that grain size. Below
+    1.448 g/cm³ (the relation's 9 ϕ density against the default water) the
+    grain size is held at its 9 ϕ end, which is most of the deep ocean; the
+    note at the top of this module gives the resolution along the rest of
+    the range.
     ``water_sound_speed`` (m/s) scales the velocity ratio to the in-situ
     near-seabed water; ``None`` uses the Hamilton reference.
     ``water_density`` (g/cm³) is the near-seabed water the measured density
     is a ratio to in the grain-size inversion; ``None`` uses the package's
     one water (1.027). ``model`` picks
-    the relations that turn that grain size into sound speed and
-    attenuation (``'hamilton'`` or ``'apl-uw'``); the density stays the
-    grid's measured value, and the grain size is always Hamilton's
-    inversion of it, under the same ``hamilton_fit`` fit the forward step
-    uses.
+    the relations that turn that grain size into geoacoustics (``'hamilton'``
+    or ``'apl-uw'``). Under ``'hamilton'`` the density returned is the
+    grid's measured value, the bulk quantity those relations describe.
+    Under ``'apl-uw'`` it is APL-UW's density at the grain size, as TR 9407
+    §IV.A.5 takes every input from the grain size once a bulk value has
+    given it: APL-UW's ratios describe the upper few centimetres and "tend
+    to be smaller than the bulk values reported in the literature" (TR 9407
+    §IV.A.3, p. IV-5) — 1.176 g/cm³ at 9 ϕ against a measured 1.43, for one.
     """
     from uacpy.core.sediment import _canonical_grain_size_selection
     model, hamilton_fit = _canonical_grain_size_selection(
@@ -267,7 +284,9 @@ def fetch_bottom_graw(point, *, roughness=0.0, water_sound_speed=None,
     return BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=geo['sound_speed'],
-        density=rho,
+        # TR 9407 §IV.A.5: a bulk density gives the grain size, and APL-UW's
+        # surficial inputs, its density included, then follow from it.
+        density=geo['density'] if model == 'apl-uw' else rho,
         attenuation=geo['attenuation'],
         grain_size_phi=phi,
         roughness=roughness,

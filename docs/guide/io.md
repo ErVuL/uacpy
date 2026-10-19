@@ -209,7 +209,8 @@ of outputs. See [Bellhop](../models/bellhop.md), [Kraken](../models/kraken.md),
 There is no single `write_env_file`. Each model has its own entry point —
 `write_bellhop_env_file`, `write_kraken_env_file`, `write_scooter_env_file`,
 `write_sparc_env_file`, `write_bounce_input_file` — because the run-type and
-option characters diverge, but they compose the same section writers, for
+option characters diverge; each takes its options by keyword, after the file
+and the carriers. They compose the same section writers, for
 contributors in `uacpy.io.oalib_writer`: `write_header`, `write_ssp_section`, `write_layer_sections`,
 `write_bottom_section`, `write_source_depths`, `write_receiver_depths`,
 `write_receiver_ranges`, `write_phase_speed_and_rmax`.
@@ -262,7 +263,9 @@ medium itself) may differ per profile, since the record length carries no mesh t
 ### `.env` — read back
 
 `read_env(filepath)` is the inverse, and reads a deck any other tool wrote
-the way the Acoustics-Toolbox programs do. It returns
+the way the Acoustics-Toolbox programs do. Each SSP / half-space row is read
+from one line, as the Acoustics Toolbox's shipped decks write them; a row
+continued on the next line is not supported. It returns
 `(env, source, receiver, options)`, with `options` keyed by the writers' own
 keyword names (`c_low`, `c_high`, `rmax`, `n_mesh` (one per medium),
 `interp_ssp`, or Bellhop's `run_type`, `beam_type`, `n_beams`,
@@ -696,8 +699,8 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 | `ShdFile` | The record `read_shd_bin` / `read_shd_asc` return; `to_dict`, `to_xarray` |
 | `read_env` | KRAKEN-family / 2-D Bellhop `.env` (+ its `.bty`/`.ati`/`.ssp`/`.flp`) → `(Environment, Source, Receiver, options)`, read as the AT programs read it; a construct the carriers cannot hold raises `UnsupportedFeatureError` |
 | `read_shd_asc` | ASCII shade file → the `ShdFile` `read_shd_bin` returns; one frequency, bearing and source depth (more raises `UnsupportedFeatureError`) |
-| `read_arr_file` | `.arr` → `Arrivals` (ASCII RunType `'A'` or binary `'a'`) |
-| `read_ray_file` | `.ray` → `Rays` |
+| `read_arr_file` | `.arr` → `Arrivals` (ASCII RunType `'A'` or binary `'a'`); a `ResultStack` of them for several source depths |
+| `read_ray_file` | `.ray` → `Rays`; a `ResultStack` of them for several source depths |
 | `read_ssp_2d` | 2-D `.ssp` → `SspTable`: profile `ranges` (m), `sound_speed` `(n_depth, n_profiles)`; `to_ssp(depths)` builds the carrier on the deck's depths |
 | `SspTable` | The record `read_ssp_2d` returns |
 | `read_ssp_3d` | BELLHOP3D hexahedral `.ssp` → `Ssp3dFile`: `x`/`y` (m), `z` (m), `sound_speed` `(n_z, n_y, n_x)` — **3-D, retained for planned support** |
@@ -723,7 +726,7 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 | `write_sparc_source_time_series` | SPARC's `STSFIL` source time series beside that deck: the waveform zero-padded to `rows` rows, under every source depth |
 | `write_bounce_input_file` | Bounce `.env` |
 | `write_multi_profile_env(filepath, segments, source, receiver, *, c_low, c_high, n_mesh=None, rmax=None, interp_ssp=None)` | Multi-profile `.env` for range-dependent Kraken; `c_high` is one value or one per profile |
-| `write_fieldflp(filepath, option, *, source_depths, receiver_depths, receiver_ranges, receiver_range_offsets=None, title, n_modes, profile_ranges=None)` | `.flp` for FIELD/FIELDS, keyed by `read_flp`'s record fields, so `write_fieldflp(path, **dataclasses.asdict(read_flp(other)))` writes a deck back; `receiver_range_offsets` is field.exe's `Rro`, one per receiver depth (array tilt) |
+| `write_fieldflp(filepath, option, *, source_depths, receiver_depths, receiver_ranges, receiver_range_offsets=None, title, n_modes, profile_ranges=None, component=None)` | `.flp` for FIELD/FIELDS, keyed by `read_flp`'s record fields, so `write_fieldflp(path, **dataclasses.asdict(read_flp(other)))` writes a deck back; `receiver_range_offsets` is field.exe's `Rro`, one per receiver depth (array tilt) |
 | `write_field3dflp(filepath, option, *, source_x, source_y, source_depths, receiver_depths, receiver_ranges, bearings_deg, bathy, …)` | `.flp` for FIELD3D, the positions keyed by `read_flp3d`'s field names, the node and 1-based element tables from the `bathy` grid — **3-D, retained for planned support** |
 | `write_ssp` | Range-dependent `.ssp` matrix (m → km) |
 
@@ -770,7 +773,7 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 
 | Name | |
 |---|---|
-| `write_mpirams_inpe` | mpiramS `in.pe` |
+| `write_mpirams_inpe` | mpiramS `in.pe`; every value by keyword, the source depth `zs` as in `write_ram_in` |
 | `write_mpirams_ssp` | mpiramS SSP, 1-D or range-dependent (range axis m → km) |
 | `write_mpirams_bathymetry` | mpiramS bathymetry, `range(m) depth(m)` pairs |
 | `write_mpirams_ranges` | mpiramS output ranges (m) |
@@ -788,9 +791,9 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 
 | Name | |
 |---|---|
-| `write_wav(filepath, signal, sample_rate, *, encoding, normalize, metadata)` | a real signal to `.wav`; `pcm16`/`pcm24`/`pcm32` for players and recorders, `float32`/`float64` to keep a calibrated level. The samples are written as given (`normalize=False`), so a calibrated signal keeps its level; a sample past ±1 under PCM is clipped with a warning naming `normalize=True`, which scales the peak to full scale (by `-20·log10(peak)` dB) for playback. `metadata` writes a `LIST`/`INFO` chunk |
-| `read_wav(filepath, *, start=0, frames=None)` | `.wav` → `(signal, sample_rate)`, mono `(n,)` or `(n, n_channels)`. PCM 16/24/32-bit or IEEE float, in a plain or a `WAVE_FORMAT_EXTENSIBLE` header (what most 24-bit and multichannel recorders write); a malformed file raises `FileFormatError`, a data chunk shorter than its header declares warns and returns the whole frames present. An integer encoding comes back divided by its full scale, so it lands in ±1 whatever its depth; a float one comes back as written, which is the point of it. `start=` / `frames=` read only that span of frames (a span past the end is refused): the headers are walked without reading the samples and the span is decoded block by block, so a read takes its float64 output (8 bytes per sample) plus under 0.5 MiB, whatever the file's length — `read_wav(path, start=int(600 * fs), frames=int(10 * fs))` is ten seconds of an hour |
-| `read_wav_info(filepath)` | the headers alone → `WavInfo`: `encoding` (`write_wav`'s keys), `bits`, `n_channels`, `sample_rate` (Hz), `n_frames`. `bits` is what `uacpy.acoustics.pressure_from_recording(x, sensitivity, gain, volt_params=(bits, v_ref), x_scale='read_wav')` needs to take `read_wav`'s ±1 fractions straight in, exactly |
+| `write_wav(filepath, signal, sample_rate, *, encoding, normalize, metadata)` | a real signal to `.wav`; `pcm16`/`pcm24`/`pcm32` for players and recorders, `float32`/`float64` to keep a calibrated level. The samples are written as given (`normalize=False`), so a calibrated signal keeps its level; under PCM a sample above +1 or below the most negative code (`-2**(b-1)` over the symmetric full scale `2**(b-1) - 1`, −1.0000305 for `pcm16`, so a saturated recording `read_wav` returns writes back to its own codes) is clipped with a warning naming `normalize=True`, which scales the peak to full scale (by `-20·log10(peak)` dB) for playback. `metadata` writes a `LIST`/`INFO` chunk |
+| `read_wav(filepath, *, start=0, frames=None)` | `.wav` → `(signal, sample_rate)`, mono `(n,)` or `(n, n_channels)`. PCM 16/24/32-bit or IEEE float, in a plain or a `WAVE_FORMAT_EXTENSIBLE` header (what most 24-bit and multichannel recorders write); a malformed file raises `FileFormatError`, a data chunk shorter than its header declares warns and returns the whole frames present. An integer encoding comes back divided by its full scale `2**(b-1) - 1`, so it lands in ±1 whatever its depth (the most negative code just below −1); a float one comes back as written, which is the point of it. `start=` / `frames=` read only that span of frames (a span past the end is refused): the headers are walked without reading the samples and the span is decoded block by block, so a read takes its float64 output (8 bytes per sample) plus under 0.5 MiB, whatever the file's length — `read_wav(path, start=int(600 * fs), frames=int(10 * fs))` is ten seconds of an hour |
+| `read_wav_info(filepath)` | the headers alone → `WavInfo`: `encoding` (`write_wav`'s keys), `bits`, `n_channels`, `sample_rate` (Hz), `n_frames`. `bits` is what `uacpy.acoustics.pressure_from_recording(x, sensitivity_dB, gain_dB, volt_params=(bits, v_ref), x_scale='read_wav')` needs to take `read_wav`'s ±1 fractions straight in, exactly |
 | `WavInfo` | The record `read_wav_info` returns; `to_dict` |
 | `read_wav_metadata(filepath)` | the `LIST`/`INFO` block as `write_wav`'s own keys, or `{}` — most recorders write none, so empty is the common case and not an error |
 

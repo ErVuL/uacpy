@@ -225,9 +225,9 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         int, "Number of time samples in the snapshot FFT."
     ),
     ('SPARC', 'normalize'): (
-        str, "Source-spectrum deconvolution applied to the snapshot: "
-        "'source' (divide by the spectrum of the source_waveform passed) or "
-        "'none' (raw field)."
+        "str or None", "Source-spectrum deconvolution applied to the "
+        "snapshot: 'source' (divide by the spectrum of the source_waveform "
+        "passed) or None (raw field)."
     ),
     ('SPARC', 'absolute_tl_calibrated'): (
         bool, "True when the snapshot was deconvolved by the source "
@@ -485,9 +485,12 @@ class Result(DeepCopyMixin, Exportable):
         default. ``None`` on a result no weighted multi-depth run
         produced.
     metadata : dict, optional
-        Model-specific extras (Q, T, dr, dz, n_modes, …). It never carries
-        an identity field: a ``metadata`` holding ``source_level_dB`` or
-        ``source_weights`` is refused.
+        Model-specific extras no setting states: reader outputs (Bounce's
+        ``n_points``, OAST's ``oast_grid_shape``) and the output-file paths
+        a pinned ``work_dir`` keeps; the settings a run resolved (RAM's
+        grid, Kraken's phase-speed window) are in :attr:`run_settings`. It
+        never carries an identity field: a ``metadata`` holding
+        ``source_level_dB`` or ``source_weights`` is refused.
     run_settings : RunSettings, optional
         The settings the run that produced this result actually used
         (:class:`uacpy.core.run_settings.RunSettings`), stamped by
@@ -499,10 +502,11 @@ class Result(DeepCopyMixin, Exportable):
         right, by name (:data:`COMPONENT_NAMES`): ``'arrivals'``, the
         :class:`Arrivals` a broadband or time-series field was synthesised
         from; ``'bounce'``, the :class:`ReflectionCoefficient` table a
-        routed seabed used; ``'mean_field'``, the OASES mean field a
-        reverberation run scattered; ``'native'``, the field on the
-        engine's own grid when the result is resampled onto the receiver's
-        (OAST's FFT range grid). Read back as the read-only
+        routed seabed used; ``'depth_average'``, the depth-averaged TL an
+        OAST run computes under option ``'A'``; ``'mean_field'``, the OASES
+        mean field a reverberation run scattered; ``'native'``, the field on
+        the engine's own grid when the result is resampled onto the
+        receiver's (OAST's FFT range grid). Read back as the read-only
         :attr:`components`; a derived result does not inherit them, except
         through :meth:`Field.replace` on the same quantity.
     """
@@ -614,7 +618,8 @@ class Result(DeepCopyMixin, Exportable):
             self._components = dict(components)
 
     #: The names :attr:`components` may carry.
-    COMPONENT_NAMES = ('arrivals', 'bounce', 'mean_field', 'native')
+    COMPONENT_NAMES = ('arrivals', 'bounce', 'depth_average', 'mean_field',
+                       'native')
 
     @property
     def components(self) -> Mapping[str, 'Result']:
@@ -1102,7 +1107,7 @@ class Result(DeepCopyMixin, Exportable):
         Dispatches on result type; concrete subclasses may override. ``kwargs``
         are forwarded to the selected plotter: the keywords each result type
         takes (``value='loss'`` on a :class:`ReflectionCoefficient`,
-        ``dB=True`` on :class:`Arrivals` …) are listed per type in the
+        ``value='dB'`` on :class:`Arrivals` …) are listed per type in the
         plotting guide (``docs/guide/plotting.md``, section 1 "Results"). A
         refusal names this call (e.g. ``ReflectionCoefficient.plot``), the
         one the user made.

@@ -1553,8 +1553,25 @@ class TestDetectionThresholdLargeMEnvelope:
         pd, pf, m = 0.5, 1e-9, 1e-6
         assert sonar.detection_index(pd, pf) > 0
         assert not np.isfinite(_exact_detection_threshold_dB(pd, pf, m))
-        with pytest.warns(UserWarning, match='fitted fallback bound'):
+        with pytest.warns(UserWarning, match=r'below the 100 at which Abraham'):
             detection_threshold_energy(pd, pf, m, 1.0, exact=False)
+
+    @pytest.mark.parametrize('m, warns', [(99.0, True), (100.0, False),
+                                          (150.0, False)])
+    def test_where_the_exact_threshold_fails_m_100_is_the_bound(
+            self, m, warns, monkeypatch):
+        """Abraham (sect. 2.3.5.1) puts the large-M form's error near
+        0.5 dB at M = 100 and over 1 dB at M = 10: an unresolvable operating
+        point is reported below M = 100 and not from it on (d = 36 here,
+        so a bound scaling with d would still report M = 150)."""
+        from uacpy.sonar import detection
+        monkeypatch.setattr(detection, '_exact_detection_threshold_dB',
+                            lambda pd, pf, m: float('nan'))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            detection_threshold_energy(0.5, 1e-9, m, 1.0, exact=False)
+        reported = [w for w in caught if 'Abraham' in str(w.message)]
+        assert bool(reported) == warns
 
     @pytest.mark.parametrize('pd, pf, m', [
         (0.9, 1e-6, 1.0), (0.9, 1e-6, 10.0), (0.5, 1e-4, 500.0)])
@@ -2931,6 +2948,18 @@ class TestBottomBackscatterReproducesTable3:
         bound = 0.4 if 'sand' in name and 'gravel' not in name else 0.6
         assert d.max() < bound, (
             f"{name} at {freq/1e3:g} kHz: {np.round(d, 2)}")
+
+    def test_the_cobble_row_is_table_2s_printed_spectral_strength(self):
+        """Table 2 prints the cobble/gravel/pebble w2 as 0.0160x (the fifth
+        digit illegible); 0.0160 reproduces the Table 3 cobble column to
+        0.05 dB, where 0.0156 misses by 0.27 dB."""
+        for name in ('cobble', 'gravel', 'pebble'):
+            assert BottomParameters.from_sediment(
+                name).spectral_strength == 0.0160
+        got = apl_uw_bottom_backscatter(
+            ANGLES, 30e3, BottomParameters.from_sediment('cobble'),
+            water_sound_speed=TABLE_WATER_SOUND_SPEED)
+        assert np.abs(got - np.array(TABLE_3[('cobble', 30e3)])).max() < 0.1
 
     @pytest.mark.parametrize('sigma2', sorted(TABLE_3_SILT))
     def test_silt_columns_follow_the_volume_parameter(self, sigma2):

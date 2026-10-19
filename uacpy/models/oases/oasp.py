@@ -18,7 +18,7 @@ from uacpy.models._band import FREQUENCY_ARRAY_FIELDS, BandResolution
 from uacpy.models._spec import ModelSpec
 from uacpy.models._knobs import is_real_number, positive_finite, whole_count
 from uacpy.models._window import (
-    check_pinned_window, interface_wave_notice, refuse_inverted_window,
+    check_pinned_window, refuse_inverted_window, scholte_wave_notice,
 )
 from uacpy.core.run_settings import EngineSettings, OutputSpec, RunMode
 from uacpy.core.results import Field, PhaseReference
@@ -27,19 +27,21 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.oases_writer import (
     OASP_FREQ_MAX_PER_CENTER, oasp_centre_frequency, write_oasp_input,
-    oases_wavenumber_bounds, water_ac_anchor_frequency,
+    oases_frequency_sweep, oases_wavenumber_bounds,
+    water_ac_anchor_frequency, refuse_unusable_integration_window,
+    oases_layer_records,
 )
 from uacpy.io._parsers import oasp_trf_pressure, parse_oasp_trf
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, _host_options
+from uacpy.models.base import DEFAULT_RUN_TIMEOUT, _host_options
 from uacpy.models.oases._common import (
     _OASES_TRAITS, _SCTOUT_BARE_FORT46, _geometry_options,
     _oases_binary, _reject_plane_geometry_letter_on_a_point_source,
     _reject_wavenumber_overrun, _warn_if_water_ac_extrapolates,
-    _check_n_wavenumbers_knob, _reject_unreadable_trf_options,
-    _warn_offset_ignored_under_auto_sampling,
+    _check_n_wavenumbers_knob, _offset_ignored_notice, _pinned_count_note,
+    _reject_unreadable_trf_options, resolve_integration_window,
 )
 from uacpy.models.oases._sampling import (
-    _oases_frequency_sweep, _oasp_marched_frequencies,
+    _oasp_fft_grid, _oasp_marched_frequencies, _oasp_wavenumber_top,
     check_power_of_two_time_samples,
 )
 from uacpy.models.oases._base import OASES
@@ -189,6 +191,10 @@ class OASPSettings(EngineSettings):
         ``c_low``, OASES' "no upper limit" 1e8 for ``c_high``.
     n_wavenumbers : int or None
         Block VII's ``NW``; ``None`` is OASES' automatic sampling.
+    integration_window : tuple of (int, int) or None
+        Block VII's ``IC1 IC2``: the given window, the whole ``(1, NW)``
+        under a pinned ``n_wavenumbers``, ``None`` under automatic sampling
+        (where OASES sets them).
     integration_offset : float
         The contour offset (dB/wavelength) on the frequency line.
     integrand_plot_step : int or None
@@ -217,11 +223,20 @@ class OASPSettings(EngineSettings):
     c_high: float
     c_high_origin: str
     n_wavenumbers: Optional[int]
+    integration_window: Optional[Tuple[int, int]]
     integration_offset: float
     integrand_plot_step: Optional[int]
     dip_angle_deg: Optional[float]
 
     _ARRAY_FIELDS = FREQUENCY_ARRAY_FIELDS
+
+    def __post_init__(self):
+        # A list (the to_dict form) is stored as the tuple a frozen record
+        # holds.
+        if self.integration_window is not None:
+            object.__setattr__(self, 'integration_window',
+                               tuple(int(v) for v in self.integration_window))
+        super().__post_init__()
 
 
 def _band_named(mode, source, request) -> bool:
@@ -318,8 +333,8 @@ def _oasp_sweep(mode, source, requested, *, knob_fc,
             )
         # The (freq_min, freq_max, N) triple is OASP's internal language; a
         # non-equispaced request is refused.
-        fmin_user, freq_max, n_user = _oases_frequency_sweep(requested,
-                                                             'OASP')
+        fmin_user, freq_max, n_user = oases_frequency_sweep(
+            requested, 'OASP', argument='frequencies=')
         # Deck fc: the centre of the requested band — the same centre
         # convention the sibling broadband models use (RAM's (fc, Q, T)
         # sweep is parameterised around the band midpoint). A pinned
@@ -492,17 +507,20 @@ def _oasp_sweep(mode, source, requested, *, knob_fc,
 
 def _oasp_settings(mode, requested, *, options, c_low_pinned,
                    c_high_pinned, n_wavenumbers, integration_offset,
+                   integration_window,
                    integrand_plot_step, dip_angle_deg,
                    knob_fc, knob_freq_min,
                    knob_freq_max, knob_n_time_samples, env,
-                   source, receiver, band_named=False) -> OASPSettings:
+                   source, receiver, band_named=False,
+                   offset_notice=True, scholte_notice=True) -> OASPSettings:
     """Every value the OASP deck is written from, resolved once on the
     projected ``env`` for a call in ``mode`` asking for ``requested``:
     the option line (with ``'P'`` for a line Source), the sweep
     (:func:`_oasp_sweep`), Block VII's phase-speed window and
-    wavenumber count. A derived ``c_low`` that leaves out the seabed
-    interface wave the geometry can see at the sweep's lowest bin is
-    noticed (:func:`~uacpy.models._window.interface_wave_notice`)."""
+    wavenumber count. A window whose edge
+    (:func:`_oasp_scholte_notice`) leaves out a Scholte wave the geometry
+    can see is noticed, unless the run is the mean field OASSP builds
+    (``scholte_notice`` False), whose own fitted-``c_low`` rule speaks."""
     sweep = _oasp_sweep(mode, source, requested,
                         knob_fc=knob_fc,
                         knob_freq_min=knob_freq_min,
@@ -523,13 +541,22 @@ def _oasp_settings(mode, requested, *, options, c_low_pinned,
     c_high_origin = ('OASP(c_high=…)' if c_high_pinned is not None
                      else "1e8, OASES' no upper limit (oast.tex:487, :568)")
     notices = list(sweep.notices)
-    if c_low_pinned is None:
-        bins = np.asarray(sweep.ladder, dtype=float)
-        notices.append(interface_wave_notice(
-            env, source, receiver, float(c_low),
-            float(bins[bins > 0].min()) if np.any(bins > 0)
-            else float(np.atleast_1d(source.frequencies)[0]),
-            model_name='OASP'))
+    # OASP reads the offset token under 'J' or 'd' (unoasp22.f:126-133) and
+    # otherwise sets OFFDB = OFFDBIN = 0 at :365. The producer OASSP builds
+    # takes OASSP's offset, whose own notice says it (offset_notice False).
+    if offset_notice:
+        notices.append(_offset_ignored_notice(
+            'OASP', integration_offset, n_wavenumbers, options,
+            offset_letters='Jd'))
+    window, window_notice = resolve_integration_window(
+        'OASP', integration_window, n_wavenumbers, 'oasp.tex:677-678')
+    notices.append(window_notice)
+    if scholte_notice:
+        notices.append(_oasp_scholte_notice(
+            env, source, receiver, options=options, c_low=float(c_low),
+            c_high=float(c_high), n_wavenumbers=n_wavenumbers,
+            n_time_samples=sweep.n_time_samples, freq_min=sweep.freq_min,
+            freq_max=sweep.freq_max))
     return OASPSettings(
         options=options,
         requested_frequencies=sweep.requested,
@@ -547,11 +574,51 @@ def _oasp_settings(mode, requested, *, options, c_low_pinned,
         c_high=float(c_high),
         c_high_origin=c_high_origin,
         n_wavenumbers=n_wavenumbers,
+        integration_window=window,
         integration_offset=integration_offset,
         integrand_plot_step=integrand_plot_step,
         dip_angle_deg=dip_angle_deg,
         notices=tuple(n for n in notices if n is not None),
     )
+
+
+def _oasp_scholte_notice(env, source, receiver, *, options, c_low, c_high,
+                         n_wavenumbers, n_time_samples, freq_min,
+                         freq_max):
+    """The Scholte-wave notice of one OASP run
+    (:func:`~uacpy.models._window.scholte_wave_notice`), on the edge its
+    deck reaches at the band's top frequency FREQM
+    (:func:`~uacpy.models.oases._sampling._oasp_wavenumber_top`), one deck
+    per source depth; ``None`` when no deck leaves a wave out."""
+    grid = _oasp_fft_grid(n_time_samples, freq_min, freq_max,
+                          1.0 / (2.0 * freq_max))
+    freq_top = (grid.last_bin - 1) / (grid.time_step * grid.n_time_samples)
+    layers = oases_layer_records(env)
+    for i in range(np.atleast_1d(source.depths).size):
+        one = source.at_depth(i)
+        top = _oasp_wavenumber_top(
+            layer_speeds=layers, c_low=c_low, c_high=c_high,
+            source_depth=float(np.atleast_1d(one.depths)[0]),
+            receiver_depths=receiver.depths,
+            receiver_ranges=receiver.ranges,
+            n_time=grid.n_time_samples, dt=grid.time_step,
+            freq_top=freq_top, options=options,
+            n_wavenumbers=n_wavenumbers)
+        how = (f"c_low = {c_low:.1f} m/s with a pinned n_wavenumbers "
+               f"(unoasp22.f:394)" if n_wavenumbers is not None else
+               f"AUTSAM's CMIN for c_low = {c_low:.1f} m/s, the window "
+               f"2π·FREQM/c_low plus its taper (unoasp22.f:1125, :1136)")
+        notice = scholte_wave_notice(
+            env, one, receiver, top.edge, top.freq_top, model_name='OASP',
+            edge_text=(f"{top.edge:.1f} m/s at the {top.freq_top:.2f} Hz "
+                       f"band top: {how}"),
+            remediation="Leave c_low unset (its derived value sits under "
+                        "every Scholte wave) or pass c_low below the wave "
+                        "speed to include it.",
+            wavenumber_edge=top.k_max if top.fixed else None)
+        if notice is not None:
+            return notice
+    return None
 
 
 def _write_oasp_deck(deck: Path, inputs, name: str) -> None:
@@ -563,6 +630,7 @@ def _write_oasp_deck(deck: Path, inputs, name: str) -> None:
     writer_kwargs: dict = {
         'integration_offset': engine.integration_offset,
         'n_wavenumbers': engine.n_wavenumbers,
+        'integration_window': engine.integration_window,
         'freq_min': engine.freq_min,
         'fc': engine.fc,
         'time_step': engine.time_step,
@@ -641,6 +709,14 @@ class OASP(OASES):
     # The band edges follow run(frequencies=…) when the call passes one,
     # and fc is the centre of that band or of the Source's frequencies.
     _UNPINNED_FIELDS = frozenset({'options', 'freq_min', 'freq_max', 'fc'})
+    #: True on the mean-field producer OASSP builds itself: it carries
+    #: OASSP's ``integration_offset``, whose notice OASSP's own settings
+    #: give, so this run's settings do not repeat it.
+    _offset_said_by_owner = False
+    #: True on that producer too: OASSP's fitted-``c_low`` rule speaks for
+    #: the window its mean field carries, so this run gives no Scholte-wave
+    #: notice of its own.
+    _scholte_said_by_owner = False
 
     # A line Source runs in OASP's plane geometry, option 'P' (ICDR = 1,
     # unoasp22.f:946-948), which _resolve_engine_settings writes for it.
@@ -690,6 +766,7 @@ class OASP(OASES):
         options: Optional[str] = None,
         integration_offset: float = OASP_INTEGRATION_OFFSET,
         n_wavenumbers: Optional[int] = None,
+        integration_window: Optional[Tuple[int, int]] = None,
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         dip_angle_deg: Optional[float] = None,
@@ -697,7 +774,7 @@ class OASP(OASES):
         verbose: Union[bool, str] = False,
         work_dir: Optional[Path] = None,
         cleanup: Optional[bool] = None,
-        timeout: float = DEFAULT_RUN_TIMEOUT_S,
+        timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
         collapse: Optional[Dict[str, str]] = None,
     ):
         """
@@ -768,13 +845,27 @@ class OASP(OASES):
             in place of 60 for Bessel integration). A value above 1e-10 is used
             as given.
         n_wavenumbers : int, optional
-            Wavenumber sample count. ``None`` lets OASP auto-pick.
+            Wavenumber sample count. ``None`` lets OASP auto-pick (NW = -1,
+            the automatic sampling oasp.tex:671-674 offers "without the
+            usual convergence testing"). A pinned count is written as given,
+            with an info-level note (``verbose='info'``) that the manual
+            leaves it to the convergence test.
+        integration_window : (int, int), optional
+            ``(IC1, IC2)``, the first and last wavenumber samples
+            integrated: the transform is Hanning-windowed outside them
+            (oasp.tex:652-660). Two whole numbers with ``1 <= IC1 <= IC2 <=
+            n_wavenumbers`` (oasp.tex:123-124); it applies with a pinned
+            ``n_wavenumbers``, and under automatic sampling, where they
+            "have no effect" (oasp.tex:677-678), the run says so. ``None``
+            integrates the whole window.
         c_low, c_high : float, optional
             ``CMIN``/``CMAX`` (m/s), Block VII's phase-speed window.
-            ``None`` derives the pair as :class:`OAST` does — ``c_low`` the
-            slowest speed of every medium × 0.85 over an elastic half-space,
-            × 0.90 otherwise, ``c_high`` 1e8 — with the same interface-wave
-            notice.
+            ``None`` derives the pair as :class:`OAST` does — ``c_low``
+            0.90 × the slowest wave of the problem, shear speeds and
+            Scholte waves included; ``c_high`` 1e8. A window whose edge at
+            the band top (:func:`_oasp_scholte_notice`) lies above a
+            Scholte wave the source or a receiver is within one
+            wavelength of is noticed.
         dip_angle_deg : float, optional
             Fault dip angle (degrees) for the dip-slip moment source that
             option ``'4'`` selects (``unoasp22.f:993-995``). INSRC reads it
@@ -803,21 +894,17 @@ class OASP(OASES):
         self.options = options
         self.integration_offset = float(integration_offset)
         self.n_wavenumbers = n_wavenumbers
+        # Block VII's IC1/IC2, stored as given (checked by _check_knobs).
+        self.integration_window = integration_window
         # Block VII's CMIN/CMAX; ``None`` keeps the derivation, as on
         # OAST.
         self.c_low = float(c_low) if c_low is not None else None
         self.c_high = float(c_high) if c_high is not None else None
-        # OASP reads the offset token under 'J' or 'd' (unoasp22.f:126-133)
-        # and otherwise sets OFFDB = OFFDBIN = 0 at :365. ``options=None``
-        # takes the writer's default line.
-        _warn_offset_ignored_under_auto_sampling(
-            'OASP', self.integration_offset, self.n_wavenumbers,
-            options=(self.options if self.options is not None
-                     else _OASP_DEFAULT_OPTIONS),
-            offset_letters='Jd')
         # DA, the dip angle INSRC reads only under the '4' (dip-slip) option.
         self.dip_angle_deg = float(dip_angle_deg) if dip_angle_deg is not None else None
         self._check_knobs()
+        if self.n_wavenumbers is not None:
+            self._log(_pinned_count_note('OASP', self.n_wavenumbers))
         if n_time_samples is not None:
             self.n_time_samples = int(n_time_samples)
         if freq_min is not None:
@@ -840,6 +927,8 @@ class OASP(OASES):
         reassigned in between."""
         _check_n_wavenumbers_knob(self.n_wavenumbers)
         check_pinned_window('OASP', c_low=self.c_low, c_high=self.c_high)
+        refuse_unusable_integration_window('OASP', self.integration_window,
+                                           self.n_wavenumbers)
         _check_oasp_knobs(self.freq_min, self.freq_max, self.n_time_samples)
 
     def _validate_engine(self, env, source, receiver, run_mode, *,
@@ -900,13 +989,16 @@ class OASP(OASES):
             c_low_pinned=self.c_low, c_high_pinned=self.c_high,
             n_wavenumbers=self.n_wavenumbers,
             integration_offset=self.integration_offset,
+            integration_window=self.integration_window,
             integrand_plot_step=self.integrand_plot_step,
             dip_angle_deg=self.dip_angle_deg,
             knob_fc=self.fc,
             knob_freq_min=self.freq_min, knob_freq_max=self.freq_max,
             knob_n_time_samples=self.n_time_samples,
             env=env, source=source, receiver=receiver,
-            band_named=_band_named(settings.mode, source, request))
+            band_named=_band_named(settings.mode, source, request),
+            offset_notice=not self._offset_said_by_owner,
+            scholte_notice=not self._scholte_said_by_owner)
 
     def _write_input(self, inputs) -> Path:
         """Stage 4: the OASP deck (:func:`_write_oasp_deck`)."""

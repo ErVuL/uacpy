@@ -1418,12 +1418,12 @@ class TestTheDocumentedNumbersAreTheComputedOnes:
         assert f"+{gap:.1f} %" in doc
 
     def test_the_terrace_floor_is_quoted_at_its_9_phi_end(self):
-        from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+        from uacpy.core.constants import DEFAULT_WATER_DENSITY
         from uacpy.core.sediment import (GRAIN_SIZE_ENVIRONMENTS, _density_span,
                                          grain_size_from_density)
         import uacpy.data.graw_local as graw_local
         fit = GRAIN_SIZE_ENVIRONMENTS['continental-terrace']
-        floor = min(_density_span(fit, DEFAULT_WATER_DENSITY_G_CM3))
+        floor = min(_density_span(fit, DEFAULT_WATER_DENSITY))
         text = f"{floor:.3f} g/cm³"
         assert text in grain_size_from_density.__doc__
         assert text in graw_local.__doc__ or text in inspect.getsource(graw_local)
@@ -1596,6 +1596,29 @@ class TestBottomFromSamples:
         speeds = [c.halfspace.sound_speed for c in bottom.columns]
         assert speeds[0] / 1480.0 == pytest.approx(speeds[-1] / 1500.0)
         assert speeds[0] < speeds[1] < speeds[2]
+
+    def test_a_column_carries_its_density_ratio_against_the_water_given(
+            self):
+        """As every other grain-size converter: the published density ratio
+        times the water density given, here the site's 1.025 rather than the
+        package's 1.027."""
+        bottom = self._three_grabs(n_points=5, max_distance_km=25.0,
+                                   water_density=1.025)
+        want = BoundaryProperties.from_grain_size(7.5, water_density=1.025)
+        default = BoundaryProperties.from_grain_size(7.5)
+        got = bottom.columns[-1].halfspace
+        assert got.density == want.density
+        assert got.density != pytest.approx(default.density, rel=1e-6)
+
+    def test_a_water_density_callable_is_read_at_each_waypoint(self):
+        from uacpy.data import bottom_from_samples
+        bottom = bottom_from_samples(
+            [45.0], [-5.5], [3.0], self.START, self.END, n_points=3,
+            max_distance_km=50.0,
+            water_density=lambda lat, lon: 1.020 + 0.010 * (lon + 6.0))
+        densities = [c.halfspace.density for c in bottom.columns]
+        assert densities[0] / 1.020 == pytest.approx(densities[-1] / 1.030)
+        assert densities[0] < densities[1] < densities[2]
 
     @pytest.mark.parametrize('limit, gaps', [(78.7, 0), (40.0, 2)])
     def test_a_waypoint_past_max_distance_is_a_filled_gap(self, limit, gaps):

@@ -657,3 +657,25 @@ def test_a_download_drops_the_memos_of_every_backend(tmp_path, monkeypatch):
     finally:
         for memo in memos:
             memo.pop('sentinel-root', None)
+
+
+# ── the suite's outbound-connection guard (conftest) ────────────────────────
+
+def test_a_connection_to_another_machine_fails_the_test():
+    """conftest's guard: an unmarked test that reaches past this machine
+    fails, through a fetcher too — the failure is no ``Exception``, so the
+    fetcher's own error handling cannot turn it into a fallback."""
+    with pytest.raises(pytest.fail.Exception, match='opened a connection'):
+        socket.create_connection(('192.0.2.1', 80), timeout=1)
+    with pytest.raises(pytest.fail.Exception, match='opened a connection'):
+        _http.http_get('http://192.0.2.1/x', timeout=1)
+
+
+def test_a_connection_to_this_machine_is_allowed():
+    server = socket.socket()
+    server.bind(('127.0.0.1', 0))
+    server.listen(1)
+    try:
+        socket.create_connection(server.getsockname(), timeout=1).close()
+    finally:
+        server.close()

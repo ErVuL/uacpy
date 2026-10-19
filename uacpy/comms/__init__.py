@@ -104,6 +104,7 @@ from .link import (
     simulate_link,
     BerCurve,
     ber_sweep,
+    ofdm_ber_sweep,
     LinkResult,
 )
 from .metrics import (
@@ -157,7 +158,8 @@ __all__ = [
     # sync
     "matched_filter_metric", "detect_preamble", "detect_frames",
     # link
-    "simulate_link", "ber_sweep", "BerCurve", "LinkResult", "ChannelTaps",
+    "simulate_link", "ber_sweep", "ofdm_ber_sweep", "BerCurve", "LinkResult",
+    "ChannelTaps",
     # framing (real payloads)
     "bytes_to_bits", "bits_to_bytes", "pack_frame", "unpack_frame",
     # passband PHY

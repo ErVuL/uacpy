@@ -5,7 +5,7 @@ either longitude sign convention within one full wrap) and a lookup wraps the
 longitude with :func:`normalize_lon`. :func:`great_circle_km`,
 :func:`central_angle`, :func:`geodesic_waypoints` and
 :func:`great_circle_midpoint` measure along the sphere of radius
-:data:`EARTH_RADIUS_M`; :func:`parse_date` turns every date form the data layer
+:data:`EARTH_RADIUS`; :func:`parse_date` turns every date form the data layer
 and :class:`~uacpy.core.environment.Environment` accept into a UTC calendar
 date.
 """
@@ -19,7 +19,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._validate import real_scalar_or_none
 
 __all__ = [
-    'Coordinate', 'EARTH_RADIUS_M', 'EARTH_RADIUS_KM', 'as_coordinate',
+    'Coordinate', 'EARTH_RADIUS', 'EARTH_RADIUS_KM', 'as_coordinate',
     'normalize_lon', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
     'great_circle_midpoint', 'parse_date',
 ]
@@ -29,10 +29,10 @@ Coordinate = Tuple[float, float]
 
 # Mean Earth radius (IUGG R1) for spherical great-circle geodesy when
 # sampling external geographic datasets (bathymetry transects, …).
-EARTH_RADIUS_M = 6_371_008.8  # m
+EARTH_RADIUS = 6_371_008.8  # m
 
-#: :data:`EARTH_RADIUS_M` in km, the radius every haversine here uses.
-EARTH_RADIUS_KM = EARTH_RADIUS_M / 1000.0
+#: :data:`EARTH_RADIUS` in km, the radius every haversine here uses.
+EARTH_RADIUS_KM = EARTH_RADIUS / 1000.0
 
 #: How close to antipodal (radians of central angle short of π) a pair of
 #: endpoints may be before :func:`geodesic_waypoints` refuses them. The slerp
@@ -150,7 +150,7 @@ def geodesic_waypoints(
     if np.pi - ang < _ANTIPODAL_TOL_RAD:
         raise ConfigurationError(
             f"geodesic_waypoints: the endpoints are antipodal to within "
-            f"{(np.pi - ang) * EARTH_RADIUS_M:.1f} m, so no single great "
+            f"{(np.pi - ang) * EARTH_RADIUS:.1f} m, so no single great "
             f"circle joins them.",
             remediation="Split the path into two transects through an "
                         "intermediate waypoint, or move an endpoint away from "
@@ -167,7 +167,7 @@ def geodesic_waypoints(
     lats = np.degrees(np.arctan2(z, np.hypot(x, y)))
     lons = np.degrees(np.arctan2(y, x))
 
-    ranges = f * ang * EARTH_RADIUS_M
+    ranges = f * ang * EARTH_RADIUS
     return lats, lons, ranges
 
 

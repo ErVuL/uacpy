@@ -13,7 +13,6 @@ from typing import Optional
 from uacpy.acoustic_signal._results import ResultTuple
 from uacpy.core._validate import (
     require_positive_finite_scalar, require_real_signal,
-    require_strictly_increasing,
 )
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core._finite_difference import warn_if_storage_under_resolves
@@ -93,7 +92,6 @@ def modal_group_speeds(frequencies, *, k_horizontal):
         raise ConfigurationError(
             "modal_group_speeds: frequencies must be 1-D increasing; got "
             f"shape {f.shape}{detail}.")
-    require_strictly_increasing(f, "modal_group_speeds: frequencies")
     if f.size < 2:
         # np.gradient below needs two samples per axis; one reached it as
         # "Shape of array too small to calculate a numerical gradient",
@@ -221,7 +219,7 @@ def _resample_uniform(values, t0: float, dt: float, t_query, *, method: str,
     """
     if method not in _INTERPOLATIONS:
         raise ConfigurationError(
-            f"{who}: interpolation must be one of "
+            f"{who}: method must be one of "
             f"{', '.join(repr(m) for m in _INTERPOLATIONS)}; got {method!r}.")
     values = np.asarray(values, dtype=float)
     t_query = np.asarray(t_query, dtype=float)
@@ -270,19 +268,19 @@ class Warped(ResultTuple, namedtuple("Warped", "times data")):
     attributes, which :func:`unwarp_signal` reads back so the result goes
     back whole: ``sample_rate`` (Hz) of the original record, ``range`` and
     ``sound_speed`` (the trial ``t_r = range/sound_speed``) and
-    ``interpolation``. A trace filtered in the warped domain keeps them
+    ``method``. A trace filtered in the warped domain keeps them
     through ``warped._replace(data=filtered)``.
     """
 
-    _attrs = ("sample_rate", "range", "sound_speed", "interpolation")
+    _attrs = ("sample_rate", "range", "sound_speed", "method")
 
     def __new__(cls, times, data, *, sample_rate, range, sound_speed,
-                interpolation="linear"):
+                method="sinc"):
         self = super().__new__(cls, times, data)
         self.sample_rate = float(sample_rate)
         self.range = float(range)
         self.sound_speed = float(sound_speed)
-        self.interpolation = str(interpolation)
+        self.method = str(method)
         return self
 
     def _field_units(self):
@@ -294,7 +292,7 @@ class Warped(ResultTuple, namedtuple("Warped", "times data")):
 def warp_signal(data, sample_rate: float, range: float,
                 sound_speed: float = DEFAULT_SOUND_SPEED, *,
                 oversample: Optional[float] = None,
-                interpolation: str = 'linear'):
+                method: str = 'sinc'):
     """Warp an impulsive shallow-water arrival to linearise ideal-waveguide dispersion.
 
     Maps original (reduced) time ``t`` to warped time ``t_w = sqrt(t^2 - t_r^2)``
@@ -351,35 +349,38 @@ def warp_signal(data, sample_rate: float, range: float,
         the map is expansive (``dt_w/dt = t/t_w > 1``), so ``oversample=1``
         puts the warped grid **below** Eq. (C8) by exactly ``(1 + t_r/t_max)``
         for every range and rate, and the round trip ``warp -> unwarp`` loses
-        the top of the band. Measured on this implementation, relative
-        round-trip error on white noise (broadband to Nyquist, so it loses the
-        most) over sample rates 2-10 kHz and ranges 0.1-20 km: **46.5-60.5 %
-        at ``oversample=1``, 15.6-20.6 % at the prescription**, 5.8-7.9 % at a
-        fixed 8. On the band-limited transient the warp exists for — the 40 + 120 Hz
+        the top of the band. Measured on this implementation with
+        ``method='linear'``, relative round-trip error on white noise
+        (broadband to Nyquist, so it loses the most) over sample rates
+        2-10 kHz and ranges 0.1-20 km: **46.5-60.5 % at ``oversample=1``,
+        15.6-20.6 % at the prescription**, 5.8-7.9 % at a fixed 8. On the
+        band-limited transient the warp exists for — the 40 + 120 Hz
         Hann-windowed pair at 10 kHz over 500 m used by
-        ``tests/test_modal_warping.py`` — 0.067 %, 0.019 % and 0.0079 %. At a fixed
-        factor the error roughly halves with each doubling.
-    interpolation : {'linear', 'sinc'}, optional
+        ``tests/test_modal_warping.py`` — 0.067 %, 0.019 % and 0.0079 %. At a
+        fixed factor the linear error roughly halves with each doubling.
+    method : {'sinc', 'linear'}, optional
         How ``data`` is read at the off-grid times the warp asks for.
-        ``'linear'`` (the default) is :func:`numpy.interp`. ``'sinc'`` is the
-        Whittaker-Shannon interpolation of Eq. (C12),
-        ``y(t) = sum_n y[n] sinc(t f_s - n)``, which the paper advises because
-        linear interpolation "sometimes creates high frequency artifacts in
-        the warped data".
+        ``'sinc'`` (the default) is the Whittaker-Shannon interpolation of
+        Eq. (C12), ``y(t) = sum_n y[n] sinc(t f_s - n)``, which the paper
+        advises (App. C): linear interpolation "sometimes creates high
+        frequency artifacts in the warped data. Therefore, we advise using
+        the Whittaker-Shannon interpolation". ``'linear'`` is
+        :func:`numpy.interp`, the fast option. :func:`unwarp_signal` reads
+        the choice off the result, so both directions use it.
 
-        Two things make it an opt-in rather than the default. It is **only**
-        an improvement on a grid that satisfies Eq. (C8): at ``oversample=1``
-        it makes the white-noise round trip *worse* — 65 % against linear's
-        58 % at 10 kHz over 1 km — because an exact reconstruction faithfully
-        reproduces the aliased content that linear interpolation was
-        accidentally smoothing away. And it is an O(N·K) dense kernel,
-        quadratic in record length: of order 1500-1700x
+        Paired with the default grid, ``'sinc'`` makes the round trip
+        essentially exact — 0.0036-0.0067 % on the white-noise grid above,
+        and numerically exact on the band-limited transient — where
+        ``'linear'`` loses 15.6-20.6 % and 0.019 %. It costs an O(N·K) dense
+        kernel, quadratic in record length: of order 1500-1700x
         :func:`numpy.interp`'s cost, measured at 380-430 ms against 0.24-0.26
-        ms for ``n=2048``, ``K=7227`` over two runs. Paired with the default
-        grid it makes the round trip essentially exact — 0.0036-0.0067 % on
-        the same white-noise grid, and numerically exact on the band-limited
-        transient — and :func:`unwarp_signal` reads it off the result, so
-        both directions use it.
+        ms for ``n=2048``, ``K=7227`` over two runs, and 3.1 s at
+        ``n=8192``; pass ``'linear'`` when that time matters more than the
+        error. It is an improvement **only** on a grid that satisfies
+        Eq. (C8): at ``oversample=1`` it makes the white-noise round trip
+        *worse* — 65 % against linear's 58 % at 10 kHz over 1 km — because an
+        exact reconstruction faithfully reproduces the aliased content that
+        linear interpolation smooths away.
 
     Returns
     -------
@@ -389,7 +390,7 @@ def warp_signal(data, sample_rate: float, range: float,
         ``K`` of Eq. (14) when ``oversample`` is ``None`` — and the data
         resampled onto it, Jacobian-weighted so the warp is
         energy-preserving; with the forward call's ``sample_rate``,
-        ``range``, ``sound_speed`` and ``interpolation`` as attributes, for
+        ``range``, ``sound_speed`` and ``method`` as attributes, for
         :func:`unwarp_signal`.
 
     Notes
@@ -450,7 +451,7 @@ def warp_signal(data, sample_rate: float, range: float,
     tw_axis = np.linspace(t_w[0], t_w[-1], n_w)
     t_orig = np.sqrt(tw_axis ** 2 + t_r ** 2)
     warped = _resample_uniform(x, t[0], 1.0 / fs, t_orig,
-                               method=interpolation, who='warp_signal')
+                               method=method, who='warp_signal')
     # Unitary Jacobian weighting — ``sqrt(|h'|)``, Bonnel et al. (2020)
     # Eq. (7). App. C 2.d works it through to the form used here: "Because
     # h'(t) = t/h(t), this factor is given as sqrt(|h'[k/f_s^h]|) =
@@ -463,7 +464,7 @@ def warp_signal(data, sample_rate: float, range: float,
     # the numerator is floored at one sample.
     warped = warped * np.sqrt(np.maximum(tw_axis, 1.0 / fs) / t_orig)
     return Warped(tw_axis, warped, sample_rate=fs, range=range,
-                  sound_speed=sound_speed, interpolation=interpolation)
+                  sound_speed=sound_speed, method=method)
 
 
 def unwarp_signal(warped):
@@ -499,7 +500,7 @@ def unwarp_signal(warped):
                         "sample_rate=, range=, sound_speed=).")
     w = np.asarray(warped.data, dtype=float)
     tw = np.asarray(warped.times, dtype=float)
-    interpolation = warped.interpolation
+    method = warped.method
     fs = require_positive_finite_scalar(warped.sample_rate, "unwarp_signal",
                                         "sample_rate", " Hz")
     range = require_positive_finite_scalar(warped.range, "unwarp_signal",
@@ -524,5 +525,5 @@ def unwarp_signal(warped):
                                / np.sqrt(tw ** 2 + t_r ** 2))
     dt_w = (tw[-1] - tw[0]) / max(tw.size - 1, 1)
     signal = _resample_uniform(w_unweighted, tw[0], dt_w, t_w_of_t,
-                               method=interpolation, who='unwarp_signal')
+                               method=method, who='unwarp_signal')
     return t, signal

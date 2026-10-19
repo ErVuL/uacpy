@@ -44,7 +44,7 @@ def _no_rate_limit(monkeypatch):
 
     The throttle itself is exercised explicitly in ``test_rate_limit_*``.
     """
-    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL_S', 0.0)
+    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL', 0.0)
 
 
 @pytest.fixture
@@ -190,10 +190,18 @@ def test_the_local_preset_matches_in_any_case(tmp_path, monkeypatch):
 _MIRROR = 'https://topo.example.org/v1'
 
 
-@pytest.mark.parametrize('source', ['gmrt', 'emodnet_dtm', 'local',
-                                    ('gmrt', 'emodnet_dtm')])
-def test_a_base_url_that_no_attempt_reads_is_refused(source):
-    with pytest.raises(ConfigurationError, match="only 'gebco' reads"):
+@pytest.mark.parametrize('source, reads', [
+    ('local', 'no live service'),
+    ('auto', '3 live services'),
+    (('gmrt', 'emodnet_dtm'), '2 live services'),
+    (('gebco', 'gmrt'), '2 live services')])
+def test_a_base_url_without_one_live_service_to_read_is_refused(source,
+                                                                reads):
+    """``base_url=`` is one service's address: a source reading none or
+    several is refused rather than sent to the wrong host."""
+    with pytest.raises(ConfigurationError,
+                       match=f"base_url= is the address of the one live "
+                             f"service the source reads; .* reads {reads}"):
         bathymetry.fetch_bathy((40.0, 7.0), source=source, base_url=_MIRROR)
 
 
@@ -298,7 +306,7 @@ def test_fetch_grid_too_many_requests_raises():
 
 def test_rate_limit_spaces_public_host_chunks(monkeypatch):
     # Two chunks against the public host must be spaced by the throttle.
-    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL_S', 1.0)
+    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL', 1.0)
     monkeypatch.setattr(bathymetry, '_last_request_monotonic', 0.0)
     sleeps = []
     monkeypatch.setattr(bathymetry.time, 'sleep', lambda s: sleeps.append(s))
@@ -311,7 +319,7 @@ def test_rate_limit_spaces_public_host_chunks(monkeypatch):
 
 def test_rate_limit_skipped_for_self_hosted(monkeypatch):
     # A self-hosted base_url lifts the limit → no throttle sleep.
-    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL_S', 1.0)
+    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL', 1.0)
     monkeypatch.setattr(bathymetry, '_last_request_monotonic', 0.0)
     sleeps = []
     monkeypatch.setattr(bathymetry.time, 'sleep', lambda s: sleeps.append(s))
@@ -336,7 +344,7 @@ def test_the_rate_limiter_serializes_concurrent_callers(monkeypatch):
     """Unguarded, every thread read the same stale timestamp and fired at once:
     eight calls at a 0.2 s interval left 0.2 ms between them."""
     from uacpy.data import bathymetry
-    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL_S', 0.05)
+    monkeypatch.setattr(bathymetry, 'OPENTOPODATA_MIN_INTERVAL', 0.05)
     monkeypatch.setattr(bathymetry, '_last_request_monotonic', 0.0)
     stamps, guard = [], threading.Lock()
 

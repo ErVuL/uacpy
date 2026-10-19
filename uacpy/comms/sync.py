@@ -38,7 +38,9 @@ def _interp(x, idx):
 def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
     """Gardner timing recovery: resolve one symbol-rate sample per symbol.
 
-    A non-data-aided Gardner timing-error detector drives a PI loop filter that
+    A non-data-aided Gardner timing-error detector (Gardner, F. M., "A
+    BPSK/QPSK timing-error detector for sampled receivers", IEEE Trans.
+    Commun. COM-34(5), 423-429, 1986) drives a PI loop filter that
     steers a linear interpolator. The integer stride is pinned at ``sps`` (only
     the fractional delay is adjusted, with anti-windup clamps), which avoids the
     half-rate false lock that a free-running accumulator falls into. Returns the
@@ -52,8 +54,10 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
         Samples per symbol (must be >= 2).
     loop_bw : float
         Normalized loop bandwidth (smaller = slower but steadier lock).
+        Default 0.005, uacpy guidance (its measured pull-in is in the Notes).
     damping : float
-        Loop damping factor (~1.0 critically damped).
+        Loop damping factor (~1.0 critically damped). Default 1.0 (uacpy
+        guidance).
     start : int
         Initial sample index — pass the matched-filter group delay
         (``span*sps``) so the loop starts on the symbol grid.
@@ -107,12 +111,13 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
     ki = 4 * theta * theta / denom
     # Normalize the TED gain to the signal level: the detector's numerator
     # scales as amplitude**2, and dividing by the record's own mean power puts
-    # the error back at O(1) whatever the record is scaled to. Adding an
-    # absolute floor here made the loop gain a function of that scale instead:
-    # once mean|x|**2 fell to the floor (~1e-6 amplitude) the error shrank with
-    # amplitude**2, the correction went to zero, and the loop stopped adapting
-    # and decimated at a fixed stride — measured, the recovered symbols drifted
-    # 7.2e-3 from the unit-amplitude answer at 1e-6 and 1.4e-2 by 1e-8. An
+    # the error back at O(1) whatever the record is scaled to. An absolute
+    # floor here would make the loop gain a function of that scale instead:
+    # once mean|x|**2 fell to the floor (~1e-6 amplitude) the error would
+    # shrink with amplitude**2, the correction go to zero, and the loop stop
+    # adapting and decimate at a fixed stride — measured with such a floor,
+    # the recovered symbols drift 7.2e-3 from the unit-amplitude answer at
+    # 1e-6 and 1.4e-2 by 1e-8. An
     # all-zero record carries no timing information and has a zero numerator
     # too, so the 1.0 below keeps its error at 0 rather than 0/0.
     power = float(np.mean(np.abs(x) ** 2)) if x.size else 1.0
@@ -142,10 +147,10 @@ def symbol_sync(samples, sps, loop_bw=0.005, damping=1.0, start=0):
         prev_on = y_on
         # ``adj`` is in SYMBOLS — the loop constants are normalised to the
         # symbol period — and ``mu`` is in samples, so the correction scales
-        # by ``sps``. Applied unscaled it was ``sps`` times too small (the
-        # TED slope, ~0.7 per symbol, made the effective bandwidth
-        # loop_bw/11): pull-in from a quarter-symbol offset took ~380
-        # symbols instead of ~50, well past a 64-symbol preamble.
+        # by ``sps``. Applied unscaled it would be ``sps`` times too small
+        # (the TED slope, ~0.7 per symbol, would make the effective bandwidth
+        # loop_bw/11): measured, pull-in from a quarter-symbol offset then
+        # takes ~380 symbols instead of ~50, well past a 64-symbol preamble.
         mu += adj * sps
         idx += sps + int(np.floor(mu))
         mu -= np.floor(mu)
@@ -232,9 +237,10 @@ def _matched_filter_core(r, p, pe):
 
 
 #: Default lowest matched-filter metric taken as a preamble detection, for
-#: :func:`detect_preamble`, :func:`detect_frames` and
-#: :meth:`~uacpy.comms.CommsReceiver.receive` (uacpy guidance; no source sets
-#: it). Measured on the default 64-symbol QPSK preamble with 256 payload
+#: :func:`detect_preamble`, :func:`detect_frames`,
+#: :meth:`~uacpy.comms.CommsReceiver.receive` and
+#: :meth:`~uacpy.comms.CommsReceiver.receive_passband` (uacpy guidance; no
+#: source sets it). Measured on the default 64-symbol QPSK preamble with 256 payload
 #: symbols, 2000 trials each: 0.5 finds the start with probability 0.93 at
 #: -3 dB per-symbol SNR, 0.24 at -6 dB and 1.0 from 0 dB, and no 370-symbol
 #: noise-only record of 2000 reached it (their peak metric: median 0.30,
@@ -463,7 +469,7 @@ def estimate_doppler_scale(received, template, scales=None):
     1.67e-5, i.e. 0.025 m/s at c = 1500) is searched in two stages — every
     ``stride``-th candidate first, then the ``2*stride - 1`` grid candidates
     within +/-(``stride`` - 1) steps of the coarse peak — so only the
-    evaluated candidates come back in ``scales``/``peak``.
+    evaluated candidates come back in ``scales``/``peak_metric``.
 
     ``stride`` is set from the record length ``N``: the coarse candidates
     sit at most ``1/(4N)`` apart in ``a`` (``stride <= 1/(4 N grid_step)``,
@@ -486,7 +492,7 @@ def estimate_doppler_scale(received, template, scales=None):
     template : array_like
         The known transmitted waveform.
     scales : array_like, optional
-        Candidate scales; ``None`` is the default grid described below.
+        Candidate scales; ``None`` is the default grid described above.
     """
     r = np.asarray(received)
     t = np.asarray(template)

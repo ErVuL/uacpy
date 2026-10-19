@@ -56,7 +56,7 @@ from uacpy.models._projection import (
 )
 from uacpy.models._spec import EngineTraits, ModelSpec
 from uacpy.models.base import (
-    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _RunCall, _host_options,
+    DEFAULT_RUN_TIMEOUT, PropagationModel, _RunCall, _host_options,
 )
 from uacpy.core.run_settings import RunMode
 from uacpy.models import _launch as launch_module
@@ -501,74 +501,31 @@ class TestTheWaveguideCMaxIsThePhysicalMaximum:
         assert self._waveguide(env).c_max == 1520.0
 
 
-@pytest.mark.requires_binary
-class TestBroadbandNFreqsGuard:
-    """``_band.broadband_band`` refuses an expansion that cannot
-    span the band: ``np.linspace`` with one point returns the lower band
-    edge alone and with zero an empty grid."""
+class TestBroadbandBandExpansion:
+    """``_band.broadband_band`` expands a one-frequency Source to the
+    package's default band, 128 bins over ``fc·(1 ± 0.25)``, built as
+    given; a multi-frequency Source is the band, and ``frequencies=`` wins
+    over both."""
 
-    _SRC = Source(depths=50.0, frequencies=100.0)
-
-    def test_n_frequencies_one_is_a_configuration_error(self):
-        model = Bellhop(verbose=False)
-        with pytest.raises(ConfigurationError, match=r'n_frequencies = 1'):
-            broadband_band(self._SRC, 1, model.bandwidth_factor,
-                           model_name='Bellhop')
-
-    def test_n_frequencies_zero_is_a_configuration_error(self):
-        model = Bellhop(verbose=False)
-        with pytest.raises(ConfigurationError, match=r'n_frequencies = 0'):
-            broadband_band(self._SRC, 0, model.bandwidth_factor,
-                           model_name='Bellhop')
-
-    def test_an_explicit_grid_bypasses_the_guard(self):
-        got = resolve_band(RunMode.BROADBAND, self._SRC, [90.0, 100.0],
-                           None, model_name='Bellhop', n_frequencies=0)
-        np.testing.assert_allclose(got.frequencies, [90.0, 100.0])
-
-
-@pytest.mark.requires_binary
-class TestBroadbandBandwidthFactorGuard:
-    """``_band.broadband_band`` builds the band ``fc·(1 ± bf/2)`` as given
-    and names the cause of one it cannot build: a non-positive
-    ``bandwidth_factor`` inverts or collapses it at any fc, and from 2 up
-    its lower edge reaches 0 Hz."""
-
-    _SRC = Source(depths=50.0, frequencies=1000.0)
-
-    def _resolve(self, source, bandwidth_factor):
-        return broadband_band(source, 8, bandwidth_factor,
-                              model_name='Bellhop').frequencies
-
-    @pytest.mark.parametrize('bandwidth_factor', [-0.5, 0.0])
-    def test_a_non_positive_factor_is_named_as_the_cause(self, bandwidth_factor):
-        with pytest.raises(ConfigurationError,
-                           match='bandwidth_factor must be positive') as exc:
-            self._resolve(self._SRC, bandwidth_factor)
-        text = str(exc.value)
-        assert 'bandwidth_factor must be positive' in text, text
-        assert 'below 2' not in text, text
-
-    def test_the_smallest_positive_factor_expands_the_band(self):
-        got = self._resolve(self._SRC, 1e-3)
-        assert got.size == 8 and got[0] < got[-1]
-
-    @pytest.mark.parametrize('bandwidth_factor', [2.0, 2.5])
-    def test_a_factor_that_reaches_0_hz_is_refused(self, bandwidth_factor):
-        with pytest.raises(ConfigurationError,
-                           match='bandwidth_factor must be below 2'):
-            self._resolve(self._SRC, bandwidth_factor)
-
-    def test_a_factor_just_below_2_keeps_its_lower_edge(self):
-        """1.999 puts the lower edge at 0.5 Hz; the band is built as
-        given, with no floor."""
-        got = broadband_band(self._SRC, 8, 1.999, model_name='Bellhop')
-        assert got.frequencies[0] == pytest.approx(0.5)
+    def test_a_centre_frequency_expands_to_the_default_band(self):
+        got = broadband_band(Source(depths=50.0, frequencies=1000.0))
+        assert got.frequencies.size == 128
+        np.testing.assert_allclose(got.frequencies[[0, -1]], [750.0, 1250.0])
         assert got.notice is None
 
     def test_a_sub_1_hz_band_is_built_as_given(self):
-        got = self._resolve(Source(depths=50.0, frequencies=0.5), 0.5)
-        np.testing.assert_allclose(got[[0, -1]], [0.375, 0.625])
+        got = broadband_band(Source(depths=50.0, frequencies=0.5))
+        np.testing.assert_allclose(got.frequencies[[0, -1]], [0.375, 0.625])
+
+    def test_a_multi_frequency_source_is_the_band(self):
+        got = broadband_band(Source(depths=50.0, frequencies=[90.0, 100.0]))
+        np.testing.assert_allclose(got.frequencies, [90.0, 100.0])
+
+    def test_an_explicit_grid_wins(self):
+        got = resolve_band(RunMode.BROADBAND,
+                           Source(depths=50.0, frequencies=100.0),
+                           [90.0, 100.0], None, model_name='Bellhop')
+        np.testing.assert_allclose(got.frequencies, [90.0, 100.0])
 
 
 @pytest.mark.requires_binary
@@ -999,7 +956,8 @@ _RESULT_STACK_ENTRY_POINTS = [
 
 #: The rest of ``compute_*``: the non-field modes. Every model that declares
 #: these **refuses** a multi-depth ``Source`` with a ``ConfigurationError``
-#: ("<model> takes a single source depth per <MODE> run"), so their
+#: ("<model> takes a single source depth per <MODE> run"), or, for
+#: REFLECTION, reads no source depth and returns one table, so their
 #: ``-> Result`` is total. Pinned so widening one needs the measurement
 #: repeated rather than assumed.
 _SINGLE_RESULT_ENTRY_POINTS = [
@@ -1503,7 +1461,7 @@ class _FieldStub(PropagationModel):
                  verbose: Union[bool, str] = False,
                  work_dir: Optional[Path] = None,
                  cleanup: Optional[bool] = None,
-                 timeout: float = DEFAULT_RUN_TIMEOUT_S,
+                 timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
                  collapse: Optional[Dict[str, str]] = None):
         super().__init__(**_host_options(locals()))
         self.calls = []
@@ -1858,7 +1816,7 @@ class _StagedFieldStub(PropagationModel):
                  verbose: Union[bool, str] = False,
                  work_dir: Optional[Path] = None,
                  cleanup: Optional[bool] = None,
-                 timeout: float = DEFAULT_RUN_TIMEOUT_S,
+                 timeout: Optional[float] = DEFAULT_RUN_TIMEOUT,
                  collapse: Optional[Dict[str, str]] = None):
         super().__init__(**_host_options(locals()))
         self.calls = []
@@ -2073,18 +2031,18 @@ class TestTheStagedPath:
         ('def __init__(self, *, use_tmpfs: bool = False, '
          'verbose: Union[bool, str] = False, work_dir: Optional[Path] = None, '
          'cleanup: Optional[bool] = None, '
-         'timeout: float = DEFAULT_RUN_TIMEOUT_S): pass',
+         'timeout: Optional[float] = DEFAULT_RUN_TIMEOUT): pass',
          "lacks the host option 'collapse'"),
         ('def __init__(self, use_tmpfs: bool = False, *, '
          'verbose: Union[bool, str] = False, work_dir: Optional[Path] = None, '
          'cleanup: Optional[bool] = None, '
-         'timeout: float = DEFAULT_RUN_TIMEOUT_S, '
+         'timeout: Optional[float] = DEFAULT_RUN_TIMEOUT, '
          'collapse: Optional[Dict[str, str]] = None): pass',
          "parameter 'use_tmpfs' must be keyword-only"),
         ('def __init__(self, *, use_tmpfs: int = 0, '
          'verbose: Union[bool, str] = False, work_dir: Optional[Path] = None, '
          'cleanup: Optional[bool] = None, '
-         'timeout: float = DEFAULT_RUN_TIMEOUT_S, '
+         'timeout: Optional[float] = DEFAULT_RUN_TIMEOUT, '
          'collapse: Optional[Dict[str, str]] = None): pass',
          "parameter 'use_tmpfs' differs"),
         ('def __init__(self, **kw): pass', 'must not use \\*\\*kwargs'),
@@ -2098,7 +2056,7 @@ class TestTheStagedPath:
         ``TypeError`` naming the class and the parameter when the class is
         defined."""
         namespace = dict(Union=Union, Optional=Optional, Path=Path,
-                         Dict=Dict, DEFAULT_RUN_TIMEOUT_S=DEFAULT_RUN_TIMEOUT_S)
+                         Dict=Dict, DEFAULT_RUN_TIMEOUT=DEFAULT_RUN_TIMEOUT)
         exec(init, namespace)
         with pytest.raises(TypeError, match=refusal) as err:
             type('_Planted', (PropagationModel,),
@@ -2225,7 +2183,7 @@ class TestTheStagedTimeSeriesStage:
             settings = _StagedTimeSeriesStub().run_settings(
                 env, src, rcv, RunMode.BROADBAND)
         assert settings.frequencies[0] == pytest.approx(0.75)
-        assert not _said(caught, 'bandwidth_factor')
+        assert not _said(caught, 'band')
 
     def test_the_engine_announces_through_run_settings_only(self):
         env, src, rcv = _stub_triple(1)
