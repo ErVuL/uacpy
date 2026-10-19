@@ -521,6 +521,14 @@ sampling the integral, not from how the sum is evaluated: uacpy's transform is
 a direct summation, not an FFT.) Asking for receivers out to 20 km when you
 care about 5 km quadruples the wavenumber count for nothing.
 
+**Check convergence over a seabed slower in shear than the water.** On the
+`chalk` preset (`cs` 1000 m/s under 1500 m/s water; 30 m deep, 30 Hz, source
+and receiver at 15 m, `c_low` 434 m/s), TL at 2 km moves with the multiplier
+until about 16: 87.5, 95.1, 98.4, 99.9 and 100.6 dB for `rmax_factor` 1, 2 (the
+default), 4, 8 and 16, where OAST with 65 536 wavenumbers gives 101.5 dB. The
+default is 5 dB short there. Raise `rmax_factor` until the ranges you care
+about stop moving; each doubling doubles the wavenumber count.
+
 **Cost scales as `frequency × max range`.** The number of wavenumbers is set by
 the k-window width (`∝ f`) divided by `Δk` (`∝ 1/RMax`), so doubling either
 doubles the work: with the default window, 200 Hz out to 5 km gives 5965

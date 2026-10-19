@@ -738,6 +738,16 @@ takes 0.01-0.05 s per frequency.
 
 ## 11. Gotchas
 
+**Check convergence over a seabed slower in shear than the water.** OASES's
+automatic sampling (`n_wavenumbers` unset) can stop well short of a converged
+field there. On the `chalk` preset (`cs` 1000 m/s under 1500 m/s water; 30 m
+deep, 30 Hz, source and receiver at 15 m), OAST gives 118.3 dB at 2 km by
+default and 100.7, 101.1, 101.4 and 101.5 dB with `n_wavenumbers` 8192, 16 384,
+32 768 and 65 536 (`c_low` 434 m/s); Scooter converges to the same level
+(100.6 dB at `rmax_factor=16`). Pin `n_wavenumbers` and raise it until the
+ranges you care about stop moving; 65 536 is OASES' array bound
+(`oases/src/compar.f:37-38`).
+
 **OAST's native range grid.** OAST evaluates its Hankel transform on an FFT
 grid of its own choosing, and writes only real TL in dB. If your
 `receiver.ranges` do not land on that grid, uacpy interpolates **in dB** and
