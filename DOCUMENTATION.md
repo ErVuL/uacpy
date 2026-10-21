@@ -2108,7 +2108,7 @@ helpers, geographic maps, animation, and the raw-array DSP/comms plotters.
 | `animate_field(field)` / `save_animation(field, path)` / `plot_time_snapshots(fields, times)` | time-domain animation and its still-frame grid |
 
 **Credits follow the result.** A plotter writes the model that produced what
-it draws (`Model: Bellhop (fortran) — Michael B. Porter, Acoustics Toolbox`)
+it draws (`Model: Bellhop (fortran) — Michael B. Porter`)
 and the data sources of a fetched `env` it draws into the grey footnote of the
 figure it draws in — its own, or yours when you pass `ax=` / `fig=`. The
 footnote holds everything drawn into the figure, each model and source once;

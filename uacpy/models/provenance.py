@@ -60,15 +60,15 @@ class ModelProvenance(FieldsRepr):
 
     @property
     def attribution(self) -> str:
-        """Short credit ``"<primary author>, <name>"`` — the model-side
-        counterpart of :attr:`uacpy.data.sources.DataSource.attribution`, so a
-        single credit path can render either kind. The primary author is the
-        first author group (before any ``';'``) with its parenthetical
-        affiliation stripped.
+        """Short credit: the primary author — the model-side counterpart of
+        :attr:`uacpy.data.sources.DataSource.attribution`, so a single credit
+        path can render either kind. The primary author is the first author
+        group (before any ``';'``) with its parenthetical affiliation
+        stripped. The figure credit names the model and its backend beside
+        it; ``name`` and ``citation`` give the package and the reference.
         """
         primary = self.authors.split(';')[0]
-        primary = re.sub(r'\([^)]*\)', '', primary).strip().rstrip(',').strip()
-        return f"{primary}, {self.name}"
+        return re.sub(r'\([^)]*\)', '', primary).strip().rstrip(',').strip()
 
 
 MODEL_PROVENANCE: Dict[str, ModelProvenance] = {

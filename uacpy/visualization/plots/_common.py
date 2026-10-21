@@ -1316,7 +1316,7 @@ def _credit_attributions(show_data_credit, *, carrier=None):
 
 
 def _model_attribution(result):
-    """One-line model credit ``"<model> (<backend>) — <author>, <engine>"``
+    """One-line model credit ``"<model> (<backend>) — <author>"``
     from a result's :class:`~uacpy.models.provenance.ModelProvenance`, or
     ``None`` when the result carries no model provenance. A record derived
     from a result (``ModeDispersion``, ``ExcitationPattern``) names its

@@ -559,7 +559,7 @@ safe in any order and any number of times.
 yourself in `plt.subplots(figsize=…)` or `plt.figure(figsize=…)`.
 
 **Credits follow the result into any figure.** The grey provenance footnote —
-`Model: Bellhop (fortran) — Michael B. Porter, Acoustics Toolbox`, naming the
+`Model: Bellhop (fortran) — Michael B. Porter`, naming the
 backend that ran (`result.backend`) beside the model, plus a `Data:` block
 listing the sources of a fetched `env` or carrier the plotter draws — is written on the
 figure the result is drawn in: the one the plotter creates, or yours when you

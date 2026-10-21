@@ -237,7 +237,7 @@ def test_the_surface_carries_the_engine_of_its_replicas(processor):
     fig, _ = surf.plot()
     try:
         assert fig.get_supxlabel() == (
-            'Model: Kraken (krakenc) — Michael B. Porter, Acoustics Toolbox')
+            'Model: Kraken (krakenc) — Michael B. Porter')
     finally:
         plt.close(fig)
 

@@ -256,8 +256,7 @@ def test_the_snapshot_grid_credits_each_rows_model():
         times=(0.2, 0.5))
     try:
         lines = fig.get_supxlabel().splitlines()
-        assert lines[0] == ('Model: SPARC — Michael B. Porter, '
-                            'Acoustics Toolbox')
+        assert lines[0] == 'Model: SPARC — Michael B. Porter'
         assert len(lines) == 2 and lines[1].split()[0] == 'RAM', lines
     finally:
         plt.close(fig)
@@ -271,8 +270,7 @@ def test_the_animation_credits_its_model():
     fig, ax = plt.subplots()
     try:
         animate_field(field, ax=ax)
-        assert fig.get_supxlabel() == ('Model: SPARC — Michael B. Porter, '
-                                       'Acoustics Toolbox')
+        assert fig.get_supxlabel() == 'Model: SPARC — Michael B. Porter'
     finally:
         plt.close(fig)
 

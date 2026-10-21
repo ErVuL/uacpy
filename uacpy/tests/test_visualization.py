@@ -2517,7 +2517,7 @@ def test_a_grid_figure_lays_out_its_bar_title_and_credit(n, ncols):
 
 # ── credits follow the result into any figure ───────────────────────────────
 
-_BELLHOP_CREDIT = 'Model: Bellhop — Michael B. Porter, Acoustics Toolbox'
+_BELLHOP_CREDIT = 'Model: Bellhop — Michael B. Porter'
 
 
 def _ram_field():
@@ -7886,7 +7886,7 @@ class TestAmbiguityIsARegisteredQuantity:
         fig, _ = plots.plot_matched_field(surface)
         try:
             assert fig.get_supxlabel() == (
-                'Model: OASN — Henrik Schmidt, OASES')
+                'Model: OASN — Henrik Schmidt')
         finally:
             plt.close(fig)
 
@@ -8535,7 +8535,7 @@ class TestGreensFunctionPlot:
         fig, _ = plots.plot_greens_function(self._grn(), modes=modes)
         try:
             assert fig.get_supxlabel() == (
-                'Model: Kraken — Michael B. Porter, Acoustics Toolbox')
+                'Model: Kraken — Michael B. Porter')
         finally:
             plt.close(fig)
 
@@ -10688,7 +10688,7 @@ def test_compare_models_draws_into_a_subfigure_and_forwards_style(
                   if isinstance(c, mcoll.QuadMesh)]
         assert len(meshes) == 2 and all(m.get_rasterized() for m in meshes)
         assert parent.get_supxlabel() == (
-            'Model: Bellhop — Michael B. Porter, Acoustics Toolbox')
+            'Model: Bellhop — Michael B. Porter')
         assert not top.texts
     finally:
         plt.close(parent)
@@ -10820,7 +10820,7 @@ def test_the_credit_footnote_lists_the_model_above_the_data():
     fig = plt.figure()
     fig.add_subplot()
     _draw_credit(fig, ['GEBCO 2024 Grid', 'World Ocean Atlas 2023'],
-                 model='Bellhop — Michael B. Porter, Acoustics Toolbox')
+                 model='Bellhop — Michael B. Porter')
     (note,) = [t for t in fig.texts if 'Model:' in t.get_text()]
     lines = note.get_text().splitlines()
     assert lines[0].startswith('Model:'), lines
