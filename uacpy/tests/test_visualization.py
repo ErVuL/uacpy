@@ -2638,6 +2638,69 @@ def test_a_contour_of_another_model_joins_the_footnote():
         plt.close(fig)
 
 
+def test_every_credit_in_the_footnote_starts_in_one_column(env):
+    """``Model:``, ``Data:`` and the padding of the further lines render
+    the same width, so every model and source starts under the first one
+    (padding spaces in a proportional font left the second model 30 px
+    left of the first)."""
+    from uacpy.data.sources import SOURCES, DataProvenance
+    env.extra_data_sources = (DataProvenance(source=SOURCES['gebco']),)
+    fig, axes = plt.subplots(1, 2)
+    try:
+        plot_field(_credited_field(), ax=axes[0], env=env)
+        plot_field(_ram_field(), ax=axes[1])
+        fig.canvas.draw()
+        credit = next(t for t in fig.texts
+                      if t.get_text().startswith('Model:'))
+        lines = credit.get_text().splitlines()
+        assert [line[:5] for line in lines] == ['Model', '     ', 'Data:']
+        # The width up to an 'I' set where the credits start.
+        widths = [fig.canvas.get_renderer().get_text_width_height_descent(
+            line[:len('Model: ')] + 'I', credit.get_fontproperties(),
+            ismath=False)[0] for line in lines]
+        assert max(widths) - min(widths) < 0.5, widths
+    finally:
+        plt.close(fig)
+
+
+def _footnote_line_starts(fig):
+    """The leftmost ink column of each footnote line, in pixels from the
+    footnote's left edge."""
+    fig.canvas.draw()
+    credit = next(t for t in fig.texts if t.get_text().startswith('Model:'))
+    box = credit.get_window_extent(fig.canvas.get_renderer())
+    rgb = np.asarray(fig.canvas.buffer_rgba())[..., :3]
+    height = rgb.shape[0]
+    ink = (rgb[int(height - box.y1) - 1:int(height - box.y0) + 2,
+               int(box.x0) - 1:int(box.x1) + 2] < 200).any(axis=2)
+    rows = np.flatnonzero(ink.any(axis=1))
+    bands = np.split(rows, np.flatnonzero(np.diff(rows) > 1) + 1)
+    starts = np.array([np.flatnonzero(ink[b].any(axis=0))[0] for b in bands])
+    return starts - starts.min()
+
+
+def test_a_footnote_centred_under_a_panel_keeps_its_column():
+    """Centring the footnote under a panel (``plot_overview``'s map) moves
+    the block, not its lines: each line starts where it starts in the
+    bottom-left footnote (matplotlib centres every line of a multi-line
+    text on its own unless told otherwise)."""
+    from uacpy.visualization.plots._common import _draw_credit
+    models = ['BELLHOP — ONE', 'RAM — TWO']
+    data = ['GEBCO — THREE', 'WOA — FOUR']
+    starts = []
+    for centred in (False, True):
+        fig, ax = plt.subplots(dpi=200)
+        ax.set_axis_off()
+        try:
+            _draw_credit(fig, data, model=models,
+                         center_ax=ax if centred else None)
+            starts.append(_footnote_line_starts(fig))
+        finally:
+            plt.close(fig)
+    assert len(starts[0]) == 4, starts
+    np.testing.assert_allclose(starts[1], starts[0], atol=1)
+
+
 def test_the_overview_credits_by_its_own_show_data_credit():
     """plot_overview draws its panels with the single-panel plotters, then
     credits the figure by its own ``show_data_credit=``: data it hides stays

@@ -1344,10 +1344,11 @@ def _credit_lines(data_attributions, model_attributions):
     """Compose the footnote rows from data + model provenance.
 
     One citation per line, stacked, the ``Model`` group above the ``Data``
-    group. Each group is labelled on its first line; further lines align
-    under it. One harmonised layout for environment plots (data only),
-    result plots (model, plus data when an env is supplied), maps and
-    figures holding several models.
+    group. Each group is labelled on its first line; further lines are
+    padded with spaces to align under it, which holds in the fixed-pitch
+    font :func:`_draw_credit` sets. One harmonised layout for environment
+    plots (data only), result plots (model, plus data when an env is
+    supplied), maps and figures holding several models.
     """
     groups = [(label, list(items)) for label, items in
               (("Model:", model_attributions), ("Data:", data_attributions))
@@ -1456,8 +1457,12 @@ def _draw_credit(fig, data_attributions=(), *, model=None,
         x, ha = root.transFigure.inverted().transform((x_px, 0.0))[0], 'center'
     else:
         x, ha = 0.012, 'left'
-    credit = root.supxlabel(text, x=x, ha=ha, va='bottom',
-                            fontsize='x-small', color='0.45', linespacing=1.5)
+    # The column under each label is padded with spaces (_credit_lines): a
+    # fixed-pitch font sets them as wide as the label, and the lines are
+    # left-aligned inside a centred block.
+    credit = root.supxlabel(text, x=x, ha=ha, va='bottom', multialignment='left',
+                            family='monospace', fontsize='x-small',
+                            color='0.45', linespacing=1.5)
     record.text = text
     if reserve and root.get_layout_engine() is None:
         _reserve_credit_margin(root, credit)
