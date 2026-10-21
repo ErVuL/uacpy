@@ -23,7 +23,9 @@ lossy bottom); it must land outside the bound, or the bound would only show
 that the engine produces a plausible waveguide field.
 
 The models' own pages say when to reach for each one
-([model index](README.md)); this page says how close each gets.
+([model index](README.md)); this page says how close each gets. The README's
+validation table draws one plot per benchmark, the row's engines over the
+reference, from these tests' own cases (`docs/figure_scripts/validation.py`).
 
 ---
 
@@ -199,11 +201,12 @@ same grid that gave 0.069 dB at the 2 % step
 
 `test_benchmarks_published.py` scores the engines on the cases the field uses
 to judge a propagation model. The range-dependent references were computed by
-COUPLE07, a code uacpy does not wrap; Bucker's waveguide (below) is
-range-independent, and its reference is uacpy's own Scooter run, which
-wavenumber integration makes exact for that environment (*Computational Ocean
-Acoustics*, Sect. 4.10.2), checked against OAST, whose deck writer is separate
-from the one Kraken and Scooter share. The references ship as tables under
+COUPLE07, a code uacpy does not wrap; Bucker's waveguide and Problem XI of the
+Reverberation Modeling Workshop (below) are range-independent, and their
+references are uacpy's own Scooter runs, which wavenumber integration makes
+exact for those environments (*Computational Ocean Acoustics*, Sect. 4.10.2),
+checked against OAST, whose deck writer is separate from the one Kraken and
+Scooter share. The references ship as tables under
 `uacpy/tests/data/benchmarks/`, each with a header naming the problem, the run
 settings and the source. COUPLE07
 (R. B. Evans, December 2007, OALIB `Modes/couple/couple07.zip`) is the
@@ -336,13 +339,43 @@ Null control: the slope removed, 4.422-4.456 dB RMS over the slope and
 3.154-3.172 dB over the shelf
 (`test_benchmarks_published.py::test_engines_follow_pe_workshop_4c_up_the_slope_and_onto_the_shelf`).
 
+### 3.6 Reverberation Modeling Workshop Problem XI, 250 Hz – 3.5 kHz
+
+100 m of 1500 m/s water over a fine-sand half-space (1700 m/s, density ratio
+2, 0.5 dB/λ); source 30 m, receiver 50 m (Ainslie, *Principles of Sonar
+Performance Modelling*, Sect. 9.4.1.2, Table 9.4 and Fig. 9.26), at the
+workshop's 250 Hz, 1 kHz and 3.5 kHz (Etter, *Underwater Acoustic Modeling and
+Simulation*, Sect. 12.2). The water spans 17, 67 and 233 wavelengths, the
+regime a ray model is built for, which no other case on this page reaches.
+The workshop asks for reverberation; these tables are the transmission loss
+of its environment, with lossless water. Reference: Scooter with
+`c_high=1e9` through uacpy on water of density 1.0, one table per frequency,
+`benchmarks/rmw_problem_xi_250hz_scooter.txt`,
+`benchmarks/rmw_problem_xi_1000hz_scooter.txt` and
+`benchmarks/rmw_problem_xi_3500hz_scooter.txt`, checked against OAST
+(`test_benchmarks_published.py::test_the_problem_xi_reference_tables_cover_0p1_to_10_km`).
+
+| Engine | Median / p90 TL difference over the table, at 250, 1000 and 3500 Hz | Bounds | Test |
+|---|---|---|---|
+| OAST (at 3500 Hz with `n_wavenumbers=65536`, the most OASES holds) | 0.0272 / 0.1174, 0.0277 / 0.1199, 0.0381 / 0.1782 dB | 0.08 / 0.3, 0.08 / 0.3, 0.1 / 0.4 dB | `test_benchmarks_published.py::test_two_wavenumber_integration_codes_agree_on_problem_xi` |
+| Bellhop at its defaults | 0.401 / 1.5743, 0.1027 / 0.3393, 0.0302 / 0.1043 dB | 0.7 / 2.1, 0.25 / 0.7, 0.1 / 0.35 dB | `test_benchmarks_published.py::test_bellhop_follows_problem_xi_where_the_water_spans_many_wavelengths` |
+
+Bellhop's error falls as the frequency rises, and neither 5000 beams nor
+Gaussian beams move a median by 0.001 dB
+(`test_benchmarks_published.py::test_bellhop_follows_problem_xi_where_the_water_spans_many_wavelengths`).
+Null control: lossless sand, 2.2385-2.3401 dB median for Bellhop and
+2.18-2.48 dB for OAST
+(`test_benchmarks_published.py::test_bellhop_follows_problem_xi_where_the_water_spans_many_wavelengths`,
+`test_benchmarks_published.py::test_two_wavenumber_integration_codes_agree_on_problem_xi`).
+
 ---
 
 ## 4. What is not benchmarked
 
 No reference was available to ship for the elastic wedges (Jensen, Nielsen,
 Zampolli, Collins & Siegmann, 2007; the finite-element reference exists only
-as figures), for the reverberation workshops, SWAM'99 and the 2024 soundscape
+as figures), for the reverberation workshops' reverberation (Problem XI's
+waveguide is benchmarked above for transmission loss only), SWAM'99 and the 2024 soundscape
 benchmark (inter-model comparisons with no reference solution, or a capability
 uacpy lacks), or for any 3-D case (uacpy has no 3-D propagation route). An
 elastic range-dependent seabed is therefore not covered by this page.
@@ -365,6 +398,9 @@ shows up as a failing test rather than a silently better number.
   50 m (`test_benchmarks_published.py::test_bellhop_loses_the_near_bed_field_of_pe_workshop_3b`).
   On the stepped waveguide at 25 Hz its 1.233 dB median is the method's error
   (`test_benchmarks_coupled_mode.py::test_bellhop_stepped_waveguide_matches_coupled_mode_reference`).
+  Where the water spans 67 and 233 wavelengths, in Problem XI at 1 and
+  3.5 kHz, it sits 0.1027 and 0.0302 dB median from the wavenumber integral
+  (`test_benchmarks_published.py::test_bellhop_follows_problem_xi_where_the_water_spans_many_wavelengths`).
 - **The PE codes on a dense stair-step.** Over the square-wave corrugated
   seafloor above, RAM marches `p/α`, so `p/α` is continuous across the
   vertical step faces (the small-angle energy-conservation condition,

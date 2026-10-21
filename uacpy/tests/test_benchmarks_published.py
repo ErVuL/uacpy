@@ -1,8 +1,9 @@
 """Published benchmarks — uacpy's engines measured against reference solutions
 for the standard cases of the ocean-acoustics literature: COUPLE07 tables for
-the range-dependent cases, and for Bucker's range-independent waveguide a
-Scooter run through uacpy, checked against OAST (whose deck writer is separate
-from the one Kraken and Scooter share).
+the range-dependent cases, and for the range-independent ones (Bucker's
+waveguide, Problem XI of the Reverberation Modeling Workshop) a Scooter run
+through uacpy, checked against OAST (whose deck writer is separate from the
+one Kraken and Scooter share).
 
 The rest of the benchmark suite checks the engines against closed forms
 (``test_benchmarks_analytic.py``), against a mode-matching solution written in
@@ -21,14 +22,14 @@ outside this repository (gfortran ``-std=legacy`` plus stubs for the Lahey
 ``*_couple07.txt`` table under ``tests/data/benchmarks/`` holds the TL it
 printed, with a header naming the problem, the run settings and the source.
 COUPLE carries no licence, so only those generated tables are shipped — never
-its source or its figures. ``bucker_waveguide_100hz_scooter.txt`` holds
-Scooter's TL, its header naming the run.
+its source or its figures. Each ``*_scooter.txt`` table holds Scooter's TL,
+its header naming the problem and the run.
 
 Every reference here was computed with water of density 1.0 g/cm^3 (COUPLE's
-RHOW, the OASES Bucker deck), so every environment below is built with
-``water_density=RHO_WATER`` (1.0) rather than uacpy's default sea water
-(1.027): the engines then solve the problem the reference solved, and the
-bottom density contrasts are the published ones.
+RHOW, the OASES Bucker deck, the density ratio of Problem XI), so every
+environment below is built with ``water_density=RHO_WATER`` (1.0) rather than
+uacpy's default sea water (1.027): the engines then solve the problem the
+reference solved, and the bottom density contrasts are the published ones.
 
 Tolerances
 ----------
@@ -711,6 +712,112 @@ def test_ram_default_domain_reaches_the_bucker_continuous_spectrum():
     assert median < 0.3, f"median |dTL| {median:.3f} dB at the automatic grid"
 
 
+# ── Reverberation Modeling Workshop Problem XI waveguide, 250 Hz - 3.5 kHz ──
+#
+# 100 m of 1500 m/s water over a fine-sand half-space (1700 m/s, density ratio
+# 2, 0.5 dB/wavelength); source 30 m, receiver 50 m (Ainslie, Principles of
+# Sonar Performance Modelling, Sect. 9.4.1.2, Table 9.4 and Fig. 9.26, RMW11),
+# at the workshop's three frequencies (Etter, Underwater Acoustic Modeling and
+# Simulation, Sect. 12.2). The water spans 17, 67 and 233 wavelengths, where a
+# ray model is meant to work, which no other case here reaches. The reference
+# is a wavenumber integral (Scooter from k = 0, cross-checked against OASES),
+# ``rmw_problem_xi_<f>hz_scooter.txt``, with lossless water. Agreement is the
+# median and p90 of |dTL| over the whole table, 0.1-10 km.
+
+PROBLEM_XI_FREQS = (250, 1000, 3500)
+
+
+def _problem_xi_env(attenuation=0.5):
+    """Problem XI; ``attenuation=0`` makes the sand lossless and is the null
+    control."""
+    return Environment(
+        water_density=RHO_WATER,
+        bathymetry=100.0,
+        ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1500.0)]),
+        bottom=BoundaryProperties(acoustic_type='half-space', sound_speed=1700.0,
+                                  density=2.0, attenuation=attenuation))
+
+
+def _problem_xi_agreement(model, frequency, attenuation=0.5):
+    """``(median, p90)`` of |dTL| between ``model`` and the reference at
+    ``frequency`` (Hz) over the table's 0.1-10 km."""
+    ranges, ref = _load_tl_table(f'rmw_problem_xi_{frequency}hz_scooter.txt')
+    tl = model.compute_field(_problem_xi_env(attenuation),
+                             Source(depths=30.0, frequencies=float(frequency)),
+                             Receiver(depths=[50.0], ranges=ranges)).dB
+    diff = np.abs(np.asarray(tl, dtype=float).ravel() - ref[0])
+    return float(np.median(diff)), float(np.percentile(diff, 90))
+
+
+@pytest.mark.parametrize('frequency', PROBLEM_XI_FREQS)
+def test_the_problem_xi_reference_tables_cover_0p1_to_10_km(frequency):
+    """Each shipped table holds the 50 m receiver every 10 m from 0.1 to
+    10 km."""
+    ranges, ref = _load_tl_table(f'rmw_problem_xi_{frequency}hz_scooter.txt')
+    assert ref.shape == (1, 991)
+    assert ranges[0] == pytest.approx(100.0) and ranges[-1] == pytest.approx(10000.0)
+    assert np.all(np.isfinite(ref))
+
+
+@pytest.mark.requires_binary
+@pytest.mark.requires_oases
+@pytest.mark.parametrize('frequency, n_wavenumbers, measured, bounds', [
+    (250, None, (0.0272, 0.1174), (0.08, 0.3)),
+    (1000, None, (0.0277, 0.1199), (0.08, 0.3)),
+    (3500, 65536, (0.0381, 0.1782), (0.1, 0.4)),
+])
+def test_two_wavenumber_integration_codes_agree_on_problem_xi(
+        frequency, n_wavenumbers, measured, bounds):
+    """OASES OAST lands on the Scooter reference at every workshop
+    frequency: median / p90 |dTL| over 0.1-10 km 0.0272 / 0.1174 dB at
+    250 Hz, 0.0277 / 0.1199 dB at 1 kHz and 0.0381 / 0.1782 dB at 3.5 kHz.
+    At 3.5 kHz OAST runs with ``n_wavenumbers=65536``, the most OASES holds
+    (NP = 2**16, compar.f:37-38): its automatic count for 10 km stops at
+    '>>> TOO MANY WAVENUMBERS <<<' (unoast31.f:459). The bounds sit 2.6-2.9x
+    the medians and 0.18-0.22 dB above the p90s.
+
+    NULL CONTROL, asserted below: OAST over lossless sand sits 2.18-2.48 dB
+    median from the reference.
+    """
+    oast = OAST(n_wavenumbers=n_wavenumbers, timeout=900)
+    median, p90 = _problem_xi_agreement(oast, frequency)
+    assert median < bounds[0], f"median |dTL| {median:.4f} dB; measured {measured[0]}"
+    assert p90 < bounds[1], f"p90 |dTL| {p90:.4f} dB; measured {measured[1]}"
+
+    null_median, _ = _problem_xi_agreement(oast, frequency, attenuation=0.0)
+    assert null_median > 1.0, f"lossless-sand run only {null_median:.2f} dB median away"
+
+
+@pytest.mark.requires_binary
+@pytest.mark.parametrize('frequency, measured, bounds', [
+    (250, (0.401, 1.5743), (0.7, 2.1)),
+    (1000, (0.1027, 0.3393), (0.25, 0.7)),
+    (3500, (0.0302, 0.1043), (0.1, 0.35)),
+])
+def test_bellhop_follows_problem_xi_where_the_water_spans_many_wavelengths(
+        frequency, measured, bounds):
+    """Bellhop at its defaults reproduces the wavenumber-integration field
+    of Problem XI, and its error falls as the frequency rises: median / p90
+    |dTL| over 0.1-10 km 0.401 / 1.5743 dB at 250 Hz, 0.1027 / 0.3393 dB at
+    1 kHz and 0.0302 / 0.1043 dB at 3.5 kHz. 5000 beams, or Gaussian beams
+    (``beam_type='B'``), move each median by under 0.001 dB, so neither the
+    fan nor the beam type is what is measured. The bounds sit
+    1.7-3.3x above the medians and 0.25-0.53 dB above the p90s.
+
+    NULL CONTROL, asserted below: the same engine over lossless sand sits
+    2.3401, 2.3207 and 2.2385 dB median from the reference.
+    """
+    median, p90 = _problem_xi_agreement(Bellhop(timeout=900), frequency)
+    assert median < bounds[0], f"median |dTL| {median:.4f} dB; measured {measured[0]}"
+    assert p90 < bounds[1], f"p90 |dTL| {p90:.4f} dB; measured {measured[1]}"
+
+    null_median, _ = _problem_xi_agreement(Bellhop(timeout=900), frequency,
+                                           attenuation=0.0)
+    assert null_median > 3.0 * bounds[0], (
+        f"the lossless-sand run is only {null_median:.2f} dB median from the "
+        f"reference: this benchmark cannot see the bottom loss")
+
+
 # ── NORDA PE Workshop I, Test Case 4c, 25 Hz ────────────────────────────────
 #
 # 150 km of 3410 m deep water, an upslope to 200 m over 50 km and a 200 m
@@ -1036,9 +1143,9 @@ def test_bellhop_follows_the_ideal_wedge_at_both_published_receivers(bottom, mea
 
 @pytest.mark.parametrize('build', [
     _wedge_env, _pe3b_env, _corrugated_env, _bucker_env, _pe4c_env,
-    lambda: _ideal_wedge_env('vacuum'),
+    lambda: _ideal_wedge_env('vacuum'), _problem_xi_env,
 ], ids=['asa_wedge', 'pe_workshop_3b', 'corrugation', 'bucker',
-        'pe_workshop_4c', 'ideal_wedge'])
+        'pe_workshop_4c', 'ideal_wedge', 'problem_xi'])
 def test_every_benchmark_environment_holds_the_references_water(build):
     """Every reference on this page was computed with water of density
     1.0 g/cm^3 (module docstring), so every builder sets it. The engine

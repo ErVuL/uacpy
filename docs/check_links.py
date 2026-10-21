@@ -39,6 +39,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # [text](target) and ![alt](target) — the target group stops at ')' or whitespace
 _LINK = re.compile(r'!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+# <a href="target"> and <img src="target"> — the HTML a page uses where
+# Markdown cannot size an image (a thumbnail in a table cell)
+_HTML_LINK = re.compile(r'<(?:a|img)\b[^>]*?\b(?:href|src)=["\']([^"\']+)["\']',
+                        re.I)
 _SKIP_SCHEME = ('http://', 'https://', 'mailto:', 'ftp://', '#')
 _HEADING = re.compile(r'^(#{1,6})\s+(.*?)\s*#*\s*$')
 _HTML_ANCHOR = re.compile(r'<a\s+(?:id|name)=["\']([^"\']+)["\']', re.I)
@@ -58,7 +62,8 @@ def markdown_files(root: Path):
 
 def link_targets(text: str):
     """Yield ``(line_no, target)`` for every relative link outside a fenced
-    code block.
+    code block: Markdown links and images, and the ``href`` / ``src`` of HTML
+    ``<a>`` and ``<img>`` tags.
 
     A fenced block is sample text, not navigation: a page showing
     ``[report](out/run.md)`` in a usage example is documenting a command, not
@@ -71,7 +76,7 @@ def link_targets(text: str):
             continue
         if in_fence:
             continue
-        for target in _LINK.findall(line):
+        for target in _LINK.findall(line) + _HTML_LINK.findall(line):
             if not target.startswith(_SKIP_SCHEME):
                 yield line_no, target
 

@@ -2263,6 +2263,27 @@ def test_the_link_checker_reads_links_and_not_code_samples(tmp_path):
 
 
 @requires_docs
+def test_the_link_checker_reads_html_image_and_anchor_targets(tmp_path):
+    """The README's validation thumbnails are HTML, the one way to size an
+    image in a table cell; read as Markdown only, a missing or untracked
+    thumbnail passed both link gates."""
+    checker = _check_links()
+    (tmp_path / "here.png").write_bytes(b"")
+    page = tmp_path / "page.md"
+    page.write_text(
+        "| a | b |\n"
+        "|---|---|\n"
+        '| x | <a href="./gone.png"><img src="./here.png" width="300" '
+        'alt="t"></a> |\n'
+        '<a id="anchor"></a> <a href="https://example.org">web</a>\n',
+        encoding="utf-8",
+    )
+    assert [t for _, t in checker.link_targets(page.read_text())] == [
+        "./gone.png", "./here.png"]
+    assert [t for _, t in checker.broken_links(page)] == ["./gone.png"]
+
+
+@requires_docs
 @pytest.mark.skipif(not (DOCS_DIR / 'guide' / 'io.md').is_file(),
                     reason='docs/ is not present (source checkout only)')
 class TestIoGuidePageMatchesTheExportSurface:

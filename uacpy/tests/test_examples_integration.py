@@ -1013,7 +1013,8 @@ FIGURE_MODULES = sorted(
 # Wall clock measured on the 2026-10-03 figure baseline: the sonar page's
 # replica banks take 246 s and the SPARC page's six transients 300 s; the
 # README's figure, a 374 km Fortran Bellhop run at 800 Hz, 126 s (measured
-# 2026-10-18); every other page takes under 60 s.
+# 2026-10-18); the validation page's eleven benchmark reruns 91 s (measured
+# 2026-10-21); every other page takes under 60 s.
 _LONG_FIGURE_MODULES = {"sonar", "sparc", "readme"}
 
 # The datasets the data page reads from the install-time cache. Each of its
