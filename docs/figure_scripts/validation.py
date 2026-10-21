@@ -1,13 +1,13 @@
-"""Thumbnails of the README's validation table, one per benchmark row.
+"""The plots under the README's validation table, one per benchmark row.
 
 Each figure reruns the case its row's tests measure, on the case builders and
 reference tables of those tests (imported from them, so the picture and the
 number cannot drift apart), and overlays every engine of the row on the
 reference. ``docs/models/validation.md`` gives the numbers, bounds and null
-controls. One engine keeps one colour in every thumbnail, and a second setting
-of the same engine has its own. The reference is solid; the engines are dashed,
-each taking its own turn along the line, so overlapping curves all stay in
-sight.
+controls. One engine keeps one colour in every plot, and a second setting of
+the same engine has its own. The reference is solid and the engines dashed,
+each engine's dashes shifted along the line from the last one's, so engines
+that overlap show through each other's gaps.
 """
 
 from __future__ import annotations
@@ -24,31 +24,32 @@ from uacpy.tests import test_benchmarks_analytic as analytic_cases
 from uacpy.tests import test_benchmarks_published as published
 from uacpy.tests import test_benchmarks_sparc as sparc_cases
 
-# A table cell shows the PNG about 280 px wide; this canvas keeps the axis and
-# legend text readable at that scale and full size one click away.
+# The README shows the plots two per row, about 400 px wide; this canvas keeps
+# the axis and legend text readable at that scale and full size one click away,
+# and 160 dpi (about 850 px) keeps it sharp on a screen of twice the pixel
+# density.
 THUMB = (5.3, 3.4)
+FIGURE_DPI = 160
 REFERENCE_STYLE = dict(color='black', linewidth=1.6)
-# Legend samples (in font sizes) long enough to hold a whole dash period of
-# four engines, so every engine's sample shows its dash.
-LEGEND_STYLE = dict(fontsize=7, handlelength=4.0)
 ENGINE_COLOURS = {'Kraken': 'C0', 'Scooter': 'C1', 'OAST': 'C2', 'OASR': 'C2',
                   'RAM': 'C3', 'Bellhop': 'C4', 'SPARC': 'C5', 'Bounce': 'C6'}
 SECOND_SETTING_COLOURS = {'Kraken coupled': 'C9', 'RAM (ramgeo)': 'C8'}
-# Dash length (in line widths). The dashes of a figure's n engines repeat every
-# n + 1 dash lengths, and each engine is offset by one more dash length than
-# the last, so along a shared curve the engines take turns and one turn in
-# n + 1 is left for the reference beneath.
-DASH = 3.0
+# matplotlib's own dash and gap (lines.dashed_pattern, in line widths). The
+# n engines of a figure start their dashes 1/n of a period apart: where they
+# share a curve, an engine drawn first shows in the gaps of those drawn over
+# it, and an engine alone leaves the reference showing in its gaps.
+DASH = 3.7
+GAP = 1.6
 
 
 def _style(label, turn, n_engines):
     """Line style of engine ``label``, the ``turn``-th of ``n_engines``
     drawn on one axes: its colour (a second setting of an engine,
     ``'Kraken coupled'`` or ``'RAM (ramgeo)'``, has its own) and dashes in
-    their own turn."""
+    their own place along the line."""
     colour = SECOND_SETTING_COLOURS.get(label, ENGINE_COLOURS[label.split()[0]])
     return dict(color=colour, linewidth=1.2,
-                linestyle=(turn * DASH, (DASH, n_engines * DASH)))
+                linestyle=(turn * (DASH + GAP) / n_engines, (DASH, GAP)))
 
 
 def _table_field(table, row=0, *, depth):
@@ -68,7 +69,7 @@ def _tl_thumbnail(reference_label, reference, engines, title):
     for turn, (label, field) in enumerate(engines):
         uacpy.plot.compare({label: field}, ax=ax, title=title,
                            **_style(label, turn, len(engines)))
-    ax.legend(**LEGEND_STYLE)
+    ax.legend(fontsize=7)
     return fig
 
 
@@ -177,7 +178,7 @@ def rayleigh():
             figsize=THUMB, label='Rayleigh', title=title, **REFERENCE_STYLE)
     for turn, (label, rc) in enumerate((('Bounce', bounce), ('OASR', oasr))):
         rc.plot(ax=ax, label=label, title=title, **_style(label, turn, 2))
-    ax.legend(**LEGEND_STYLE)
+    ax.legend(fontsize=7)
     return fig
 
 

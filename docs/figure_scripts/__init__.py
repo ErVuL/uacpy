@@ -4,5 +4,6 @@ One module per documentation page. Each exposes ``FIGURES`` (``stem ->
 callable`` returning a matplotlib ``Figure``) and, for pages under
 ``docs/guide/``, ``GUIDE = True`` so the driver writes into the right
 figure directory; a module whose figures live elsewhere (the README's)
-names that directory as ``FIGURE_DIR``.
+names that directory as ``FIGURE_DIR``, and one whose figures are shown at
+another size than a page's names its resolution as ``FIGURE_DPI``.
 """

@@ -411,24 +411,38 @@ of each one.
 The engines measured against closed forms and published benchmarks, every
 published case run on its reference's water (density 1.0 g/cm³), as the tests
 state them; [docs/models/validation.md](./docs/models/validation.md) gives the
-cases, bounds, null controls and known limits. Each plot reruns its row's case
-and draws the row's engines over the reference, at the receiver depth in its
-title (click for full size); OASP, scored on one bin of a broadband run, is not
-drawn.
+cases, bounds, null controls and known limits. The plots under the table, in
+its order, rerun each row's case and draw the row's engines over the reference,
+at the receiver depth in each title (click for full size); OASP, scored on one
+bin of a broadband run, is not drawn.
 
-| Benchmark (reference) | Metric | Measured | Plot |
-|---|---|---|---|
-| Pekeris waveguide, 50 Hz (KRAKEN manual eq. 2.19) | median \|ΔTL\| | Kraken 0.015 dB · Scooter 0.017 dB · OAST 0.02 dB (strong-field cells) · OASP 0.0068 dB · RAM 0.52 dB | <a href="./docs/models/figures/validation_pekeris.png"><img src="./docs/models/figures/validation_pekeris.png" width="400" alt="Kraken, Scooter, OAST and RAM over the Pekeris modal sum"></a> |
-| Ideal (pressure-release) waveguide | median \|ΔTL\| | Kraken 0.014 dB · RAM 0.0085 dB | <a href="./docs/models/figures/validation_ideal_waveguide.png"><img src="./docs/models/figures/validation_ideal_waveguide.png" width="400" alt="Kraken and RAM over the pressure-release modal sum"></a> |
-| Rigid-bottom waveguide | median \|ΔTL\| | SPARC 0.17 dB | <a href="./docs/models/figures/validation_rigid_waveguide.png"><img src="./docs/models/figures/validation_rigid_waveguide.png" width="400" alt="SPARC's deconvolved spectrum over the rigid-bottom modal sum"></a> |
-| Ideal wedge, 25 Hz (ASA Problem I, Buckingham & Tolstoy) | median \|ΔTL\| at 30 m / 150 m | Bellhop (line source) 0.47 / 0.384 dB | <a href="./docs/models/figures/validation_ideal_wedge.png"><img src="./docs/models/figures/validation_ideal_wedge.png" width="400" alt="Bellhop line source over the ideal-wedge series"></a> |
-| Rayleigh reflection, fluid half-space | largest \|R\| difference | Bounce 3.3e-16 · OASR about 1e-6 | <a href="./docs/models/figures/validation_rayleigh.png"><img src="./docs/models/figures/validation_rayleigh.png" width="400" alt="Bounce and OASR reflection over the Rayleigh coefficient"></a> |
-| ASA upslope wedge, 25 Hz (COUPLE07) | RMS ΔTL at 30 m / 150 m | RAM 0.110 / 0.133 dB (pinned grid) · Bellhop 1.834 / 2.141 dB · Kraken adiabatic 2.221 / 2.502 dB · Kraken coupled 2.756 / 2.392 dB | <a href="./docs/models/figures/validation_asa_wedge.png"><img src="./docs/models/figures/validation_asa_wedge.png" width="400" alt="RAM, Bellhop and Kraken over COUPLE07 in the ASA wedge"></a> |
-| NORDA PE Workshop 3b, 250 Hz (COUPLE07) | median \|ΔTL\| | Kraken 0.067 dB · RAM 0.160 dB · Scooter 0.192 dB · Bellhop 4.41 dB (loses the near-bed field) | <a href="./docs/models/figures/validation_pe_workshop_3b.png"><img src="./docs/models/figures/validation_pe_workshop_3b.png" width="400" alt="Kraken, RAM, Scooter and Bellhop over COUPLE07 in Test Case 3b"></a> |
-| Corrugated seafloor, 25 Hz (COUPLE07, two-way) | mean TL offset, 10–18.09 km | Kraken coupled +2.83 dB · RAM +4.70 dB (mpiramS) / +5.82 dB (ramgeo) — one-way engines | <a href="./docs/models/figures/validation_corrugated_seafloor.png"><img src="./docs/models/figures/validation_corrugated_seafloor.png" width="400" alt="Kraken coupled and two RAM backends over the two-way COUPLE07 field"></a> |
-| Bucker waveguide, 100 Hz (Scooter, checked against OAST) | median \|ΔTL\|, 2–20 km | OAST 0.0145 dB · Kraken `leaky_modes=True` 0.0198 dB (defaults 0.1235 dB) · RAM `zmax=2000` 0.0776 dB (defaults 0.1188 dB) | <a href="./docs/models/figures/validation_bucker_waveguide.png"><img src="./docs/models/figures/validation_bucker_waveguide.png" width="400" alt="OAST, Kraken and RAM over the Bucker wavenumber-integration table"></a> |
-| NORDA PE Workshop 4c, 25 Hz (COUPLE07) | median \|ΔTL\|, flat 5–150 km, at 150 m / 700 m | Kraken adiabatic 0.101 / 0.153 dB · RAM 0.279 / 0.413 dB · Kraken coupled fails on the shelf (mean −21.761 dB) | <a href="./docs/models/figures/validation_pe_workshop_4c.png"><img src="./docs/models/figures/validation_pe_workshop_4c.png" width="400" alt="Kraken and RAM over COUPLE07 in Test Case 4c"></a> |
-| Reverberation Modeling Workshop Problem XI, 250 Hz – 3.5 kHz (Scooter, checked against OAST) | median \|ΔTL\|, 0.1–10 km, at 250 Hz / 1 kHz / 3.5 kHz | Bellhop 0.401 / 0.1027 / 0.0302 dB · OAST 0.0272 / 0.0277 / 0.0381 dB | <a href="./docs/models/figures/validation_problem_xi.png"><img src="./docs/models/figures/validation_problem_xi.png" width="400" alt="Bellhop over the wavenumber-integration table in Problem XI at 3.5 kHz"></a> |
+| Benchmark (reference) | Metric | Measured |
+|---|---|---|
+| Pekeris waveguide, 50 Hz (KRAKEN manual eq. 2.19) | median \|ΔTL\| | Kraken 0.015 dB · Scooter 0.017 dB · OAST 0.02 dB (strong-field cells) · OASP 0.0068 dB · RAM 0.52 dB |
+| Ideal (pressure-release) waveguide | median \|ΔTL\| | Kraken 0.014 dB · RAM 0.0085 dB |
+| Rigid-bottom waveguide | median \|ΔTL\| | SPARC 0.17 dB |
+| Ideal wedge, 25 Hz (ASA Problem I, Buckingham & Tolstoy) | median \|ΔTL\| at 30 m / 150 m | Bellhop (line source) 0.47 / 0.384 dB |
+| Rayleigh reflection, fluid half-space | largest \|R\| difference | Bounce 3.3e-16 · OASR about 1e-6 |
+| ASA upslope wedge, 25 Hz (COUPLE07) | RMS ΔTL at 30 m / 150 m | RAM 0.110 / 0.133 dB (pinned grid) · Bellhop 1.834 / 2.141 dB · Kraken adiabatic 2.221 / 2.502 dB · Kraken coupled 2.756 / 2.392 dB |
+| NORDA PE Workshop 3b, 250 Hz (COUPLE07) | median \|ΔTL\| | Kraken 0.067 dB · RAM 0.160 dB · Scooter 0.192 dB · Bellhop 4.41 dB (loses the near-bed field) |
+| Corrugated seafloor, 25 Hz (COUPLE07, two-way) | mean TL offset, 10–18.09 km | Kraken coupled +2.83 dB · RAM +4.70 dB (mpiramS) / +5.82 dB (ramgeo) — one-way engines |
+| Bucker waveguide, 100 Hz (Scooter, checked against OAST) | median \|ΔTL\|, 2–20 km | OAST 0.0145 dB · Kraken `leaky_modes=True` 0.0198 dB (defaults 0.1235 dB) · RAM `zmax=2000` 0.0776 dB (defaults 0.1188 dB) |
+| NORDA PE Workshop 4c, 25 Hz (COUPLE07) | median \|ΔTL\|, flat 5–150 km, at 150 m / 700 m | Kraken adiabatic 0.101 / 0.153 dB · RAM 0.279 / 0.413 dB · Kraken coupled fails on the shelf (mean −21.761 dB) |
+| Reverberation Modeling Workshop Problem XI, 250 Hz – 3.5 kHz (Scooter, checked against OAST) | median \|ΔTL\|, 0.1–10 km, at 250 Hz / 1 kHz / 3.5 kHz | Bellhop 0.401 / 0.1027 / 0.0302 dB · OAST 0.0272 / 0.0277 / 0.0381 dB |
+
+<p>
+<a href="./docs/models/figures/validation_pekeris.png"><img src="./docs/models/figures/validation_pekeris.png" width="49%" alt="Kraken, Scooter, OAST and RAM over the Pekeris modal sum"></a>
+<a href="./docs/models/figures/validation_ideal_waveguide.png"><img src="./docs/models/figures/validation_ideal_waveguide.png" width="49%" alt="Kraken and RAM over the pressure-release modal sum"></a>
+<a href="./docs/models/figures/validation_rigid_waveguide.png"><img src="./docs/models/figures/validation_rigid_waveguide.png" width="49%" alt="SPARC's deconvolved spectrum over the rigid-bottom modal sum"></a>
+<a href="./docs/models/figures/validation_ideal_wedge.png"><img src="./docs/models/figures/validation_ideal_wedge.png" width="49%" alt="Bellhop line source over the ideal-wedge series"></a>
+<a href="./docs/models/figures/validation_rayleigh.png"><img src="./docs/models/figures/validation_rayleigh.png" width="49%" alt="Bounce and OASR reflection over the Rayleigh coefficient"></a>
+<a href="./docs/models/figures/validation_asa_wedge.png"><img src="./docs/models/figures/validation_asa_wedge.png" width="49%" alt="RAM, Bellhop and Kraken over COUPLE07 in the ASA wedge"></a>
+<a href="./docs/models/figures/validation_pe_workshop_3b.png"><img src="./docs/models/figures/validation_pe_workshop_3b.png" width="49%" alt="Kraken, RAM, Scooter and Bellhop over COUPLE07 in Test Case 3b"></a>
+<a href="./docs/models/figures/validation_corrugated_seafloor.png"><img src="./docs/models/figures/validation_corrugated_seafloor.png" width="49%" alt="Kraken coupled and two RAM backends over the two-way COUPLE07 field"></a>
+<a href="./docs/models/figures/validation_bucker_waveguide.png"><img src="./docs/models/figures/validation_bucker_waveguide.png" width="49%" alt="OAST, Kraken and RAM over the Bucker wavenumber-integration table"></a>
+<a href="./docs/models/figures/validation_pe_workshop_4c.png"><img src="./docs/models/figures/validation_pe_workshop_4c.png" width="49%" alt="Kraken and RAM over COUPLE07 in Test Case 4c"></a>
+<a href="./docs/models/figures/validation_problem_xi.png"><img src="./docs/models/figures/validation_problem_xi.png" width="49%" alt="Bellhop over the wavenumber-integration table in Problem XI at 3.5 kHz"></a>
+</p>
 
 ## 🧪 Testing
 

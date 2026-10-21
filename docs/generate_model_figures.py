@@ -5,7 +5,8 @@ Each page has one module in ``docs/figure_scripts/`` exposing a ``FIGURES``
 mapping of ``stem -> callable`` returning a matplotlib ``Figure``. This driver
 imports them all, runs them, and writes ``docs/models/figures/<stem>.png`` (or
 ``docs/guide/figures/`` for the guide pages, or the module's ``FIGURE_DIR``:
-``docs/`` for the README's figure).
+``docs/`` for the README's figure), at the module's ``FIGURE_DPI`` when it
+names one.
 
 Usage
 -----
@@ -85,6 +86,7 @@ def main(argv=None) -> int:
         figures = getattr(mod, 'FIGURES', {})
         guide = bool(getattr(mod, 'GUIDE', False))
         directory = getattr(mod, 'FIGURE_DIR', None)
+        dpi = getattr(mod, 'FIGURE_DPI', None)
         print(f'\n[{name}] {len(figures)} figure(s)')
         for stem, builder in figures.items():
             total += 1
@@ -92,7 +94,7 @@ def main(argv=None) -> int:
             try:
                 fig = builder()
                 path = _common.save(fig, stem, guide=guide,
-                                    directory=directory)
+                                    directory=directory, dpi=dpi)
                 rel = (path.relative_to(REPO_ROOT)
                        if path.is_relative_to(REPO_ROOT) else path)
                 print(f'  ok   {rel}  ({time.time() - t0:.1f}s)')

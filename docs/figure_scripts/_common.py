@@ -30,12 +30,13 @@ TALL = (7.0, 6.4)
 
 
 def save(fig, stem: str, *, guide: bool = False,
-         directory: Path | None = None) -> Path:
+         directory: Path | None = None, dpi: float | None = None) -> Path:
     """Write ``fig`` as ``<stem>.png`` and close it. Returns the path.
 
     The PNG goes to the page's figure directory (``directory``, a module's
     ``FIGURE_DIR``, when given), or to ``$UACPY_FIGURE_OUTPUT`` when it is
-    set (the test suite's run, which leaves ``docs/`` untouched).
+    set (the test suite's run, which leaves ``docs/`` untouched), at ``dpi``
+    (a module's ``FIGURE_DPI``) or :data:`DPI`.
     """
     import matplotlib.pyplot as plt
 
@@ -45,7 +46,7 @@ def save(fig, stem: str, *, guide: bool = False,
                else GUIDE_FIG_DIR if guide else FIG_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f'{stem}.png'
-    fig.savefig(path, dpi=DPI, bbox_inches='tight', facecolor='white')
+    fig.savefig(path, dpi=dpi or DPI, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     return path
 

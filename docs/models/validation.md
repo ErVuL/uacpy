@@ -23,9 +23,10 @@ lossy bottom); it must land outside the bound, or the bound would only show
 that the engine produces a plausible waveguide field.
 
 The models' own pages say when to reach for each one
-([model index](README.md)); this page says how close each gets. The README's
-validation table draws one plot per benchmark, the row's engines over the
-reference, from these tests' own cases (`docs/figure_scripts/validation.py`).
+([model index](README.md)); this page says how close each gets. Under its
+validation table, the repository README draws one plot per benchmark, the
+row's engines over the reference, from these tests' own cases
+(`docs/figure_scripts/validation.py`).
 
 ---
 
